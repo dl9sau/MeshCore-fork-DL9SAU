@@ -169,6 +169,13 @@ protected:
   virtual int getAGCResetInterval() const { return 0; }    // disabled by default
   virtual unsigned long getDutyCycleWindowMs() const { return 3600000; }
 
+  // Called just before a packet is handed to the radio for transmit. Subclasses
+  // can inspect packet->tx_flags here and temporarily adjust radio params
+  // (e.g. CR, TX power). Restore is done via restorePacketTxDefaults() after
+  // the TX completes.
+  virtual void applyPacketTxOverrides(const Packet* packet) { }
+  virtual void restorePacketTxDefaults() { }
+
 public:
   void begin();
   void loop();

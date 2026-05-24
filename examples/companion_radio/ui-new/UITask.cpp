@@ -80,6 +80,7 @@ class HomeScreen : public UIScreen {
     FIRST,
     RECENT,
     RADIO,
+    STATS,
     BLUETOOTH,
     ADVERT,
 #if ENV_INCLUDE_GPS == 1
@@ -270,6 +271,57 @@ public:
       display.setCursor(0, 53);
       sprintf(tmp, "Noise floor: %d", radio_driver.getNoiseFloor());
       display.print(tmp);
+    } else if (_page == HomePage::STATS) {
+      display.setColor(DisplayDriver::YELLOW);
+      display.setTextSize(1);
+
+      // Row 1 (y=18): BT count on the left, uptime right-aligned.
+      display.setCursor(0, 18);
+      sprintf(tmp, "BT: %lu", (unsigned long)the_mesh.getBtConnectCount());
+      display.print(tmp);
+
+      // Build uptime string. Once millis() has wrapped (~49.7 days) we just
+      // say "> 49d" to avoid looking like a silent reboot.
+      if (the_mesh.getMillisWraps() > 0) {
+        sprintf(tmp, "Up: > 49d");
+      } else {
+        uint32_t up_secs = millis() / 1000UL;
+        uint32_t days  = up_secs / 86400UL;
+        uint32_t hours = (up_secs / 3600UL) % 24UL;
+        uint32_t mins  = (up_secs / 60UL) % 60UL;
+        uint32_t secs  = up_secs % 60UL;
+        if (days > 0) {
+          sprintf(tmp, "Up: %lud %luh %lum", (unsigned long)days, (unsigned long)hours, (unsigned long)mins);
+        } else if (hours > 0) {
+          sprintf(tmp, "Up: %luh %lum", (unsigned long)hours, (unsigned long)mins);
+        } else {
+          sprintf(tmp, "Up: %lum %lus", (unsigned long)mins, (unsigned long)secs);
+        }
+      }
+      {
+        uint16_t up_w = display.getTextWidth(tmp);
+        display.setCursor(display.width() - up_w, 18);
+        display.print(tmp);
+      }
+
+      // Remaining rows: RX, TX, Adv, (Digi if repeater active).
+      display.setCursor(0, 27);
+      sprintf(tmp, "RX:  %lu", (unsigned long)radio_driver.getPacketsRecv());
+      display.print(tmp);
+
+      display.setCursor(0, 36);
+      sprintf(tmp, "TX:  %lu", (unsigned long)radio_driver.getPacketsSent());
+      display.print(tmp);
+
+      display.setCursor(0, 45);
+      sprintf(tmp, "Adv: %lu", (unsigned long)the_mesh.getTxAdvertCount());
+      display.print(tmp);
+
+      if (the_mesh.isClientRepeatOn()) {
+        display.setCursor(0, 54);
+        sprintf(tmp, "Digi:%lu", (unsigned long)the_mesh.getTxDigiCount());
+        display.print(tmp);
+      }
     } else if (_page == HomePage::BLUETOOTH) {
       display.setColor(DisplayDriver::GREEN);
       display.drawXbm((display.width() - 32) / 2, 18,

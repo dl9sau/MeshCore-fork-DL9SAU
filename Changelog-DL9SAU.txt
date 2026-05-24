@@ -1,0 +1,934 @@
+================================================================================
+Changelog DL9SAU — MeshCore Companion Firmware
+================================================================================
+Erstellt:                 2026-05-24
+Arbeits-Sessions:         2026-05-23, 2026-05-24
+Repo-Basis:               main @ c940ea5f (Stand 2026-05-23)
+Autor / Auftraggeber:     Thomas (DL9SAU)
+Co-Implementiert mit:     Claude Opus 4.7 (Claude Code)
+================================================================================
+
+Ziel der Arbeit: Companion-Firmware (examples/companion_radio) so erweitern,
+dass der Tracker zugleich als kleiner "Client-Repeater" auf der EU-Narrow-
+Frequenz arbeitet, automatisch Adverts mit Position aussendet, und dabei das
+Netz möglichst wenig belastet.
+
+Test-Target: Heltec Wireless Tracker (ESP32-S3) mit BLE.
+
+Berührte Dateien:
+  src/Packet.h, src/Packet.cpp
+  src/Dispatcher.h, src/Dispatcher.cpp
+  src/Mesh.cpp
+  examples/companion_radio/MyMesh.h
+  examples/companion_radio/MyMesh.cpp
+  examples/companion_radio/main.cpp
+
+================================================================================
+1. Frequenz-Override 869.000 MHz -> 869.618 MHz
+================================================================================
+
+Wenn die App genau 869.000 MHz vorgibt (eine der drei erlaubten Repeat-
+Frequenzen laut isValidClientRepeatFreq()), wird intern auf die echte EU-
+Narrow-Mid-Frequenz 869.618 MHz umgeschaltet. Gilt für RX und TX gleichzeitig,
+weil das Radio halbduplex ist und beide Modi durch _prefs.freq bestimmt werden.
+
+Implementierung:
+  MyMesh::applyRadioPolicy() in MyMesh.cpp.
+  Hook an beiden Stellen, die radio_set_params() rufen (Init in begin() und
+  CMD_SET_RADIO_PARAMS-Handler).
+  Toleranz: fabsf(freq - 869.000f) < 0.0005f -> 869.618f.
+
+Erwägung:
+  869.618 ist die tatsächliche Hardware-Default-Frequenz (siehe
+  platformio.ini: -D LORA_FREQ=869.618). Die App rundet auf 869.000 für die
+  UI; die Firmware kennt die echte Frequenz.
+
+================================================================================
+2. Heard-List (welche Knoten sind "lokal" für mich)
+================================================================================
+
+Struktur:
+  struct HeardEntry { uint8_t hash; uint32_t last_heard; }
+  HeardEntry heard_list[64];   // FIFO eviction
+
+Befüllung:
+  In onDiscoveredContact(): nur wenn (path_len & 63) == 0, d.h. das Advert
+  wurde DIREKT vom Sender empfangen (kein Repeater im Pfad). Dadurch ist
+  "lokal" sauber definiert als "in direkter Funkreichweite".
+
+Lookup:
+  isLocallyHeard(uint8_t hash) prüft 1-Byte-Match innerhalb 48h
+  (CR_HEARD_MAX_AGE_SECS).
+
+Erwägungen:
+  - 1-Byte-Hash statt 3-Byte: das Mesh-Protokoll selbst arbeitet sowieso nur
+    mit PATH_HASH_SIZE=1. Bei PATH/TXT/Direct-Paketen sehen wir nur dieses
+    eine Byte im Header. Größere Hashes brächten keinen Filter-Mehrwert und
+    nur RAM-Overhead.
+  - 48h als Schwellwert ist großzügig genug, dass auch ein Tag-Lücke (z.B.
+    Ferien-Wochenende) keinen Knoten "verloren" erscheinen lässt.
+  - Nur Zero-Hop in der HeardList: vermeidet, dass weit entfernte Knoten,
+    die nur über Repeater bei uns ankommen, fälschlich als "lokal" gelten.
+
+================================================================================
+3. allowPacketForward() - Regeln für "wann repeaten wir überhaupt"
+================================================================================
+
+Reihenfolge der Filter:
+  1. _prefs.client_repeat == 0           -> false (Feature komplett aus)
+  2. packet->getPathHashCount() > 16     -> false (zu lange Ketten)
+  3. PAYLOAD_TYPE_PATH                   -> nur wenn src ODER dest in
+                                            HeardList (<48h) ODER bekannter
+                                            Contact (lastmod <48h) ODER self
+  4. Alle anderen Daten-Payloads         -> nur wenn hasTransportCodes()
+                                            (also scoped)
+  5. (sonst)                             -> false
+
+Erwägungen:
+  - "Nur scoped repeaten" ist die Kernregel: unscoped Flood/Direct kommen
+    typischerweise von Knoten, mit denen wir nichts zu tun haben. Wir
+    bevorzugen, dass nur "unsere" Channel-Welt (#bebb, #ostfriesland, ...)
+    weitergeleitet wird.
+  - PATH-Pakete sind eine Ausnahme: für Path-Discovery zwischen lokalen
+    Knoten ist Forwarding nützlich, auch wenn unscoped. Daher der Local-
+    Heard-Check.
+  - Max-Pfadlänge 16 (statt der Protokollgrenze 63) ist eine pragmatische
+    Schleifen-Bremse für unsere Region.
+  - Direct-Pakete laufen ebenfalls durch allowPacketForward() (siehe
+    Mesh.cpp:88 - der Mythos "Direct geht da nicht durch" stimmt nicht!).
+    Damit erfasst unsere Regel auch unscoped Direct Messages.
+
+================================================================================
+4. Last-used-Channel-Scope (für Nightly-Flood-Advert)
+================================================================================
+
+In CMD_SEND_CHANNEL_TXT_MSG: nach erfolgreichem Versand wird der Secret-Key
+des verwendeten Channels in runtime_last_channel_scope (TransportKey, RAM-
+only, nicht persistent) gemerkt.
+
+Wird vom Nightly-Flood-Advert als bevorzugter Scope verwendet.
+
+================================================================================
+5. Geo-Fence für Scope-Fallback
+================================================================================
+
+Methode: chooseGeoFallbackScope(out_key)
+
+Boxen:
+  Berlin/Brandenburg (#bebb):
+    Lat 51.40 - 53.60, Lon 11.20 - 14.80
+  Ostfriesland (#ostfriesland):
+    Lat 53.10 - 53.80, Lon  6.50 -  8.50
+    (umfasst ostfriesische Inseln, bis hinter Oldenburg, bis unter Leer)
+
+Channel-Secret wird per SHA-256 aus dem Hashtag-Namen abgeleitet (wie
+MeshCore das für public Group-Channels macht; TransportKeyStore::
+getAutoKeyFor()).
+
+Boxes als #define überschreibbar:
+  CR_BBOX_BEBB_LAT_MIN/MAX/LON_MIN/MAX
+  CR_BBOX_OSTFR_LAT_MIN/MAX/LON_MIN/MAX
+
+Position-Quelle (getEffectiveLatLon):
+  1. GPS, wenn ENV_INCLUDE_GPS=1 und _prefs.gps_enabled und Fix vorhanden
+  2. sensors.node_lat/node_lon (konfigurierte feste Position)
+
+================================================================================
+6. Scope-Auswahl für Nightly-Flood (Priorität)
+================================================================================
+
+chooseNightFloodScope(out_key):
+  1. runtime_last_channel_scope (wenn nicht NULL, also seit Boot eine
+     App-getriggerte Channel-Nachricht passiert ist)
+  2. _prefs.default_scope_key (über CMD_SET_DEFAULT_FLOOD_SCOPE konfiguriert)
+  3. Geo-Fence-Fallback
+
+Wenn nichts greift, wird der Nightly-Flood schlicht übersprungen
+("no scope available, skipping").
+
+================================================================================
+7. Periodische Adverts
+================================================================================
+
+(A) Stündlicher Zero-Hop, unscoped, mit Position-Anteil (oder ohne, je nach
+    advert_loc_policy):
+
+    Boot-Delay: 5 Min nach setup() (Konstante CR_HOURLY_ADVERT_BOOT_DELAY_MS).
+    Begründung (User-Feedback): RTC-Sync, Channels laden, Subsysteme stabil.
+
+    Intervall wird ADAPTIV bestimmt - siehe Punkt 8.
+
+(B) Nightly Flood, scoped, mit Position:
+
+    Einmal pro Nacht zufälliger Zeitpunkt im Fenster 23:00-05:00 lokaler Zeit
+    (CR_NIGHT_FLOOD_START_HOUR_LOCAL .. CR_NIGHT_FLOOD_END_HOUR_LOCAL).
+
+    LOCAL_TZ_OFFSET_SECS (default 3600 = CET) per #define überschreibbar
+    (z.B. -DLOCAL_TZ_OFFSET_SECS=7200 für CEST).
+
+    Geplant via scheduleNextNightFlood() (rng + Modulo Tag); nach jedem
+    Versand erneut für die nächste Nacht ausgewürfelt.
+
+    Skip wenn RTC offensichtlich nicht gesetzt (Unix-Zeit < 2017).
+
+Hinweis: Adverts gehen auch durch das Per-Paket-Power/CR-Override (Punkt 10/11).
+
+================================================================================
+8. Dynamisches Auto-Advert-Intervall mit Bewegungserkennung
+================================================================================
+
+Funktion: computeNextAdvertIntervalMs()
+
+Tabelle:
+  advert_loc_policy == NONE                      -> 3h
+  GPS an, aber NIE einen Fix gehabt              -> 3h
+  GPS an, Fix verloren (aber hatte einen)        -> 1h  (publish last-known)
+  GPS aus, fixe Position konfiguriert            -> 1h
+  GPS an, Fix vorhanden, statisch                -> 1h
+  GPS an, Fix vorhanden, "moving"                -> 15 min
+
+Bewegungserkennung: updateMotionTracking()
+  Anker-Position wird alle CR_MOTION_WINDOW_MS (10 min) gegen aktuelle
+  GPS-Position verglichen. Distanz > CR_MOTION_RADIUS_M (370m) -> moving.
+  Equirectangular-Approximation, ausreichend für 370m bei mitteleuropäischen
+  Breiten (~2-3% Fehler).
+
+Edge-Case "GPS-Fix verloren":
+  _gps_had_fix_ever (RAM-only, pro Session) wird true, sobald wir einmal
+  einen Fix sahen. Bei späterem Fix-Verlust nutzen wir 1h statt 3h - denn
+  wir können weiterhin die zuletzt bekannte Position publizieren.
+
+Erwägungen:
+  - 3h "nie einen Fix": warten bis sinnvoll, Funknetz nicht mit
+    Position-losen Adverts zumüllen.
+  - 1h als Default für statische/stable Nodes: ein guter Balance zwischen
+    "ich bin noch da" und Netzlast.
+  - 15 min für moving: schnell genug für sinnvolles Tracking (bei 60 km/h
+    legt man in 15 min 15 km zurück - drauf basierend reicht das für
+    eine Bewegungsabschätzung).
+  - 370m / 10min als Schwellwert: filtert GPS-Jitter (Indoor-Drift bei
+    statischen Geräten häufig ~50-100m) zuverlässig aus, reagiert aber auf
+    Fußgänger-Geschwindigkeit (>2 km/h ist >370m in 10min).
+
+================================================================================
+9. Per-Paket TX-Override (Power und CR)
+================================================================================
+
+Motivation:
+  Wir wollen bestimmte TX-Operationen (Repeats, automatische Adverts) mit
+  reduzierter Power und/oder CR5 senden, OHNE die normale Konfiguration für
+  User-eigene Direct-Messages zu beeinflussen.
+
+Architektur:
+  src/Packet.h - neue (nicht-serialisierte) Felder:
+    #define PKT_TX_REDUCE_POWER (1 << 0)
+    #define PKT_TX_FORCE_CR5    (1 << 1)
+    uint8_t tx_flags;          // im Packet-Struct
+
+  src/Dispatcher.h - zwei neue virtuelle Hooks:
+    virtual void applyPacketTxOverrides(const Packet*) { }
+    virtual void restorePacketTxDefaults() { }
+
+  src/Dispatcher.cpp:
+    - applyPacketTxOverrides(outbound) wird direkt vor startSendRaw() gerufen
+    - restorePacketTxDefaults() wird direkt nach onSendFinished() gerufen
+      (sowohl im Success-Pfad als auch im Timeout-Pfad)
+
+  examples/companion_radio/MyMesh.cpp - Override-Implementation:
+    applyPacketTxOverrides():
+      if (PKT_TX_REDUCE_POWER) -> radio_set_tx_power(max(10, dbm-6))
+      if (PKT_TX_FORCE_CR5)    -> radio_set_params(..., CR=5)
+    restorePacketTxDefaults():
+      radio_set_tx_power(_prefs.tx_power_dbm)
+      applyRadioPolicy()  (stellt freq/cr auf User-Pref zurück)
+
+Erwägung "warum nicht globaler Schalter":
+  Eine frühe Variante hatte CR5 global gesetzt, sobald client_repeat=1.
+  Das bedeutete aber auch, dass eigene Direct-Messages mit CR5 statt der
+  konfigurierten (z.B. CR8) gingen. Der Per-Paket-Ansatz hält die Logik
+  sauber getrennt: nur die ausdrücklich markierten Pakete bekommen den
+  Override.
+
+Erwägung "warum nicht 'deferred restore' per Timer":
+  Erste Idee war: vor sendZeroHop() params ändern, 3s später per Timer
+  zurücksetzen. Risiko: andere Pakete in der TX-Queue (z.B. ein
+  spontan abgehender ACK) hätten die Override-Params mitbekommen. Per-
+  Paket-Flag schließt das aus, weil jeder TX explizit per Packet
+  identifiziert wird.
+
+================================================================================
+10. TX-Power-Reduktion: -6 dB, Floor 10 dBm
+================================================================================
+
+Konstanten:
+  CR_TX_POWER_REDUCTION_DB = 6
+  CR_TX_POWER_FLOOR_DBM    = 10
+
+Beispiele:
+  _prefs.tx_power_dbm = 22 -> 16 dBm
+  _prefs.tx_power_dbm = 16 -> 10 dBm
+  _prefs.tx_power_dbm = 12 -> 10 dBm (Floor greift)
+  _prefs.tx_power_dbm =  9 ->  9 dBm (kein Hoch-Setzen)
+
+================================================================================
+11. CR5 statt konfigurierter CR für markierte Pakete
+================================================================================
+
+LoRa kann pro TX einen anderen CR setzen; RX-seitig wird CR aus dem
+expliziten Header gelesen. Daher beeinflusst CR5-TX nicht die Empfänger -
+sie dekodieren weiterhin korrekt.
+
+Vorteil CR5 gegenüber CR8: ~30% kürzere Airtime bei gleichem Pakettyp/-länge.
+
+================================================================================
+12. Verhaltensmatrix Power/CR (Stand 24.05.2026)
+================================================================================
+
+  +-------------------------------------------+-------------------+-------+
+  | TX-Quelle                                 | TX-Power          | CR    |
+  +-------------------------------------------+-------------------+-------+
+  | Eigene Direct-Message an Kontakt          | _prefs.tx_power   | _cr   |
+  | App-getriggerter Self-Advert              | _prefs.tx_power   | _cr   |
+  | App-getriggerte Channel-Nachricht         | _prefs.tx_power   | _cr   |
+  | Direct-Repeat (wir sind Pfad-Hop)         | _prefs.tx_power   | _cr   |
+  | TRACE-Forwarding                          | _prefs.tx_power   | _cr   |
+  | Auto-Advert, statisch (3h / 1h)           | max(10, dbm-6)    |  5    |
+  | Auto-Advert, moving (15 min)              | _prefs.tx_power   |  5    |
+  | Nightly Flood Auto-Advert                 | max(10, dbm-6)    |  5    |
+  | Flood-Repeat (Digipeating)                | max(10, dbm-6)    |  5    |
+  +-------------------------------------------+-------------------+-------+
+
+Erwägungen pro Zeile:
+
+  Direct-Repeat: wenn wir explizit als Pfad-Hop gewählt wurden, sind wir
+    für die lokalen Knoten an Quelle/Ziel wichtig. Volle Power + CR
+    erhält die Pfad-Qualität, die der Sender erwartet.
+
+  TRACE-Forwarding: TRACE misst die echte Pfad-Qualität. Power/CR-Reduktion
+    würde die SNR-Werte verfälschen, daher: full.
+
+  Auto-Advert moving: wir wollen, dass uns auch entfernte Nachbarn sehen
+    (z.B. im Auto). Zero-Hop wird nie weitergeleitet, also keine Netz-Last,
+    nur lokale Frequenznutzung. Power voll, CR5 bleibt für kurze Airtime.
+
+  Auto-Advert statisch: wir sind da, der Knoten kennt uns - reduzierte Power
+    reicht. Nightly-Flood ähnlich; wird ja durchs Netz repeated, daher
+    konservativ.
+
+  Flood-Repeat (Digipeat): klassisches Repeating soll Netz-schonend sein.
+
+================================================================================
+13. WiFi-Stack-Off im setup() (Stromsparen)
+================================================================================
+
+Datei: examples/companion_radio/main.cpp
+
+#if defined(ESP32) && !defined(WIFI_SSID)
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
+  esp_wifi_deinit();
+#endif
+
+Wirkt nur auf ESP32-Targets ohne WIFI_SSID. BLE bleibt komplett funktional.
+Erwartete Ersparnis: 10-20 mA Idle (auf ESP32-S3 messbar).
+
+Anlass: 200 mA Idle auf Heltec Wireless Tracker; CPU bereits auf 80 MHz im
+Variant (ESP32_CPU_FREQ=80), Display-Backlight wird nach 15s ohnehin per
+AUTO_OFF_MILLIS=15000 abgeschaltet (TFT_LEDA via MOSFET an Pin 21).
+WiFi-Off war der nächste low-hanging fruit.
+
+GPS-Duty-Cycling (über V_EXT) wurde bewusst nicht umgesetzt - V_EXT speist
+Display UND GPS gemeinsam, separate Steuerung nicht möglich.
+
+================================================================================
+13a. Rename doHourlyZeroHopAdvert -> doPeriodicZeroHopAdvert
+================================================================================
+
+Funktion, Konstanten und Member-Variablen umbenannt - der Name passte nicht
+mehr, seit das Intervall dynamisch zwischen 3h / 1h / 15min wechselt
+(Punkt 8).
+
+  doHourlyZeroHopAdvert()         -> doPeriodicZeroHopAdvert()
+  next_hourly_advert_at           -> next_periodic_advert_at
+  CR_HOURLY_ADVERT_BOOT_DELAY_MS  -> CR_PERIODIC_ADVERT_BOOT_DELAY_MS
+
+================================================================================
+13b. delay(1) am Ende der main loop() — Yield für FreeRTOS Idle-Task
+================================================================================
+
+Datei: examples/companion_radio/main.cpp
+
+void loop() {
+  ...
+  delay(1);   // yield to FreeRTOS idle task
+}
+
+Hintergrund:
+  Auf ESP32 läuft Arduino oberhalb von FreeRTOS. Ohne expliziten Yield
+  hält die Application-Task die CPU dauerhaft. Mit delay(1) bekommt der
+  Idle-Task regelmäßig die CPU - das ist der einzige Hook, an dem
+  esp_pm light-sleep (falls aktiviert) greifen kann.
+
+Wirkung ohne esp_pm_configure():
+  Marginal (0-2 mA), da Idle nur DFS-Tricks machen kann, kein echter
+  Light-Sleep. Trotzdem kostet die eine Zeile nichts und schadet nicht.
+
+Wirkung mit esp_pm_configure({.light_sleep_enable=true, ...}):
+  Realistisch 30-80 mA Idle-Einsparung. NICHT eingebaut, weil das
+  Risiko-relevant ist (BLE/USB/LoRa-IRQ Timing) und gründlich getestet
+  werden muss.
+
+Inspiration: User-Bericht zu Heltec V4 - jemand hatte mit "sleep(0)"
+Strom gespart, der entsprechende Trick.
+
+================================================================================
+14. LBT/p-persist
+================================================================================
+
+Geprüft, NICHT geändert.
+
+Dispatcher::checkSend() (src/Dispatcher.cpp:287-303) macht CAD vor jedem TX
+(via _radio->isReceiving()). Wenn busy: Random-Backoff 120-480 ms
+(getCADFailRetryDelay), dann erneuter Check. Wenn frei: sofort senden, KEIN
+zusätzlicher Random-Wait (kein "p-persist").
+
+Pre-TX-Delay für Repeats:
+  getRetransmitDelay()       (Flood, Faktor 0.5x Airtime, randomisiert)
+  getDirectRetransmitDelay() (Direct, Faktor 0.2x Airtime, randomisiert)
+beide PRE-CAD, also vor dem Listen-Before-Talk.
+
+Echter post-CAD-p-persist hätte Reentrant-Logik im Dispatcher gebraucht
+(blocking wait = Pakete verloren; non-blocking = TX-Queue müsste pausiert
+werden können). Aufwand für realistische Mesh-Dichte zu hoch; bestehender
+Mechanismus reicht.
+
+================================================================================
+14a. Bugfix Nightly-Flood: RTC-Sprung nach Boot
+================================================================================
+
+Symptom:
+  30 s - 2 min nach Boot ging die TX-LED, Adv-Counter sprang auf 1 (oder
+  beim nächsten regulären Auto-Slot direkt auf 2). Sollte aber nichts in
+  diesem Fenster passieren — Boot-Delay ist 5 min, Nightly-Flood nur
+  zwischen 23-5 Uhr lokal.
+
+Ursachenanalyse:
+  1. Beim Boot ruft BaseChatMesh::begin() -> bootstrapRTCfromContacts()
+     (src/helpers/BaseChatMesh.cpp:58-68). Das setzt die RTC auf den
+     'lastmod' des jüngsten Contacts — kann mehrere Tage alt sein.
+  2. MyMesh::loop() ruft scheduleNextNightFlood() und berechnet daraus
+     einen Slot in der "kommenden Nacht" — die liegt nach der
+     gespeicherten alten RTC-Zeit, also möglicherweise letzte Woche.
+  3. Sobald die App per CMD_SET_DEVICE_TIME die echte Zeit setzt,
+     springt die RTC mehrere Tage in die Zukunft.
+  4. Nächste loop-Iteration:  now_rtc >> next_night_flood_unix
+     -> trigger!
+
+Fix:
+  In loop(), bevor doNightFloodAdvert() ausgelöst wird:
+    if (now_rtc - next_night_flood_unix > 12 * 3600) {
+      scheduleNextNightFlood();   // RTC offensichtlich gesprungen
+    } else {
+      doNightFloodAdvert();
+      scheduleNextNightFlood();
+    }
+  12 h Threshold ist konservativ — eine normale RTC-Korrektur (Sekunden
+  bis wenige Minuten) löst keinen Skip aus, ein Tages-Sprung schon.
+
+================================================================================
+14a-ii. Bugfix Nightly-Flood Teil 2: RTC-Sprung-Korrektur
+================================================================================
+
+Beobachtung nach Punkt 14a (12-h-Sanity-Check):
+  Trotz Sanity-Check wurde beim Boot immer noch ein Phantom-Nightly-Flood
+  ausgelöst. Serial-Debug zeigte:
+    [ADV-DBG] nightly-flood, millis=6618 rtc=1779615992
+  Also 6.6 s nach Boot, RTC stand bereits auf echter Zeit.
+
+Analyse:
+  - bootstrapRTCfromContacts() setzte RTC auf den jüngsten Contact-lastmod
+    — in dem Fall ein paar Stunden alt (NICHT mehrere Tage).
+  - scheduleNextNightFlood() pickte einen Slot in der "kommenden Nacht"
+    relativ zu diesem leicht stale RTC.
+  - App connectete sehr schnell und schickte CMD_SET_DEVICE_TIME, das die
+    RTC um ~29 h nach vorne sprang (auf echte aktuelle Zeit).
+  - Der vorher berechnete Slot lag dadurch ~11 h in der Vergangenheit der
+    neuen RTC-Zeit — der 12-h-Sanity-Check (Punkt 14a) griff knapp NICHT.
+
+Saubere Ursache-Behebung:
+  In CMD_SET_DEVICE_TIME-Handler (MyMesh.cpp):
+
+    if (secs >= curr) {
+      getRTCClock()->setCurrentTime(secs);
+      // Any RTC-driven schedule made before this point used the stale time;
+      // invalidate so the next loop tick re-picks a slot with the corrected RTC.
+      next_night_flood_unix = 0;
+      ...
+    }
+
+  Sobald die App die RTC korrigiert, wird der gespeicherte Nightly-Slot
+  invalidiert; der nächste loop()-Tick ruft scheduleNextNightFlood() mit
+  der korrigierten Zeit erneut auf.
+
+  Der 12-h-Sanity-Check aus Punkt 14a bleibt als Backup für andere RTC-
+  Sprung-Quellen erhalten (z.B. zukünftige GPS-Time-Sync), greift in der
+  Praxis aber jetzt fast nie.
+
+Verifikation (durch User-Test):
+  [ADV-DBG] CMD_SET_DEVICE_TIME: rtc 1779511892 -> 1779616608,
+            nightly slot invalidated
+  RTC-Sprung: ~29 h. Kein Phantom-Advert mehr.
+
+================================================================================
+14a-iii. Generischer RTC-Sprung-Detektor (catch-all)
+================================================================================
+
+Selbst nach 14a-ii (Invalidieren bei CMD_SET_DEVICE_TIME) bleibt ein
+zweiter RTC-Quell-Pfad: der MicroNMEALocationProvider syncronisiert die
+RTC automatisch sobald 3+ valide Time-Sätze empfangen wurden ('time_valid
+> 2'). Das passiert OHNE vollen Position-Fix (Time-Sync kommt deutlich
+früher als isValid()).
+
+Ohne speziellen Hook im LocationProvider würde das wieder einen Phantom-
+Nightly-Flood auslösen können.
+
+Lösung: generischer RTC-Sprung-Detektor in MyMesh::loop():
+
+  if (_last_observed_rtc != 0) {
+    int32_t delta = (int32_t)(now_rtc - _last_observed_rtc);
+    if (delta > 300 || delta < -300) {   // 5 min jump in either direction
+      if (next_night_flood_unix != 0) {
+        next_night_flood_unix = 0;       // re-pick with corrected RTC
+      }
+    }
+  }
+  _last_observed_rtc = now_rtc;
+
+Zwischen zwei loop()-Ticks ändert sich die echte Zeit nur um wenige
+Sekunden — alles darüber ist eine externe Korrektur. Threshold 5 min ist
+großzügig (Sleep-Periodes, lange TX-Bursts), aber klein genug um jede
+echte RTC-Korrektur (Stunden, Tage) sicher zu fangen.
+
+Damit ist 14a-i (Sanity-Check mit 12 h Threshold) nur noch Backup für
+Fälle, die der Sprung-Detektor verpasst (wenn 'delta' aufgrund eines
+Wraparound zwischen Auslesen 0 und Auslesen 1 missdetectiert wird).
+
+Test-Beobachtung:
+  [ADV-DBG] CMD_SET_DEVICE_TIME: rtc 1779511890 -> 1779617889,
+            nightly slot invalidated
+  Sprung ~29 h, Slot invalidiert. KEIN Phantom-Advert.
+
+================================================================================
+14a-iv. Bugfix First-Fix-Clamp: "5 min ab Boot", nicht "5 min ab jetzt"
+================================================================================
+
+Beobachtung:
+  Mit GPS-Fix nach 4 min wurde der erste Advert erst nach 9 min gesendet
+  statt nach 5 min:  [ADV-DBG] periodic, millis=543367 moving=0
+
+Ursache:
+  updateMotionTracking() berechnete bei erstem Fix:
+    short_target = futureMillis(CR_PERIODIC_ADVERT_BOOT_DELAY_MS);
+  Das ist "jetzt + 5 min", nicht "Boot + 5 min". Bei Fix nach 4 min
+  → Trigger nach 9 min.
+
+Fix (MyMesh.cpp, in updateMotionTracking()):
+
+    unsigned long now = millis();
+    unsigned long boot_plus_5min = CR_PERIODIC_ADVERT_BOOT_DELAY_MS;
+    unsigned long target = (boot_plus_5min > now) ? boot_plus_5min : now;
+    if ((long)(next_periodic_advert_at - target) > 0) {
+      next_periodic_advert_at = target;
+    }
+
+  millis() startet bei 0 auf Boot, daher ist die absolute Zeit "Boot+5min"
+  einfach CR_PERIODIC_ADVERT_BOOT_DELAY_MS. Wenn der Fix später kommt
+  als 5 min, fällt 'target' auf 'now' und der Advert geht sofort.
+
+Test-Beobachtung:
+  [ADV-DBG] first GPS fix at millis=21191, advert clamped to 300000
+  GPS-Fix in 21 s (Hot Start), Advert auf 5 min korrekt geclampt.
+
+================================================================================
+14b. Boot-Delay GPS-abhängig + First-Fix-Clamp
+================================================================================
+
+Anlass: Wenn GPS aktiv ist, aber noch keinen Fix hat, ist es sinnlos den
+ersten Advert zu früh zu senden — er enthielte keine Position. Auf der
+anderen Seite soll auch nicht zu lange gewartet werden.
+
+Neue Logik (MyMesh::begin()):
+  GPS aus                       -> 5 min Boot-Delay (unchanged)
+  GPS an, Fix bereits da         -> 5 min Boot-Delay
+  GPS an, kein Fix               -> 10 min Boot-Delay
+                                  (CR_PERIODIC_ADVERT_BOOT_DELAY_GPS_MS)
+
+First-Fix-Clamp (MyMesh::updateMotionTracking()):
+  Sobald der erste GPS-Fix während der 10-min-Wartezeit eintrifft UND
+  noch kein Advert gesendet wurde (_tx_advert_count == 0):
+    -> next_periodic_advert_at wird auf max(jetzt+5min, current value)
+       gezogen
+  Dadurch:
+    - Fix bei Boot+3min  -> Advert bei Boot+5min
+    - Fix bei Boot+7min  -> Advert bei Boot+7min (Clamp greift sofort,
+                            weil 5min bereits verstrichen)
+    - Kein Fix in 10min  -> Advert bei Boot+10min (ohne Position falls
+                            advert_loc_policy != NONE; bzw. mit alter
+                            Position falls Treiber cached)
+
+Konstanten:
+  CR_PERIODIC_ADVERT_BOOT_DELAY_MS      = 5 min
+  CR_PERIODIC_ADVERT_BOOT_DELAY_GPS_MS  = 10 min  (neu)
+
+================================================================================
+14d. GPS Power-Management (cyclic sleep)
+================================================================================
+
+Idee:
+  Adverts gehen frühestens alle 15 min raus (moving) bzw. seltener (static).
+  Ein GPS-Modul, das die ganze Zeit läuft, zieht aber durchgehend ~25-35 mA.
+  Solange die zuletzt bekannte Position (sensors.node_lat/lon) im Cache
+  bleibt, können wir das Modul zwischen den Adverts ausschalten und nur
+  rechtzeitig vor dem nächsten Advert wieder aufwecken — Position bleibt
+  recent genug, Modul spart Strom in der Zwischenzeit.
+
+Hardware-Aspekt Heltec Wireless Tracker:
+  V_EXT speist Display UND GPS gemeinsam → V_EXT lässt sich nicht
+  abschalten, solange das Display sichtbar bleiben soll.
+  ABER: das GPS-Modul hat einen eigenen Enable-Pin (PIN_GPS_EN=35), der
+  vom MicroNMEALocationProvider über die Treiber-Methoden begin()/stop()
+  bedient wird. stop_gps() kann den Modul-Strom daher unabhängig vom
+  Display abschalten.
+
+Konstanten (MyMesh.h, sprechend für Feintuning):
+  CR_GPS_LEAD_BEFORE_ADVERT_MS = 5 min
+    -> GPS wird so früh aufgeweckt, dass es bis zum nächsten Advert Zeit
+       für einen frischen Fix hat (typisch < 30 s im Hot-Start, bis 1-2 min
+       bei längerem Schlaf).
+  CR_GPS_MIN_AWAKE_MS = 1 min
+    -> Hysterese: nach dem Aufwecken bleibt GPS mindestens 1 Min an, auch
+       wenn der Advert "schon vorbei" wäre. Verhindert Thrashing am
+       GPS_EN-Pin und gibt dem Modul Zeit für Lock.
+
+Logik (MyMesh::manageGpsPower(), in loop()):
+  - _prefs.gps_enabled == 0  -> nichts tun (User hat GPS explizit aus)
+  - _gps_had_fix_ever == false -> GPS bleibt an (Boot-Suche)
+  - sonst:
+      until_advert = next_periodic_advert_at - millis()
+      want_gps_on  = (until_advert <= 5 min)
+                    OR (just woken up, less than 1 min ago)
+      -> sensors.setSettingValue("gps", "1"|"0") nur bei Zustandsänderung.
+
+Verhalten im moving-Modus (15-min-Slot):
+  T=0       Advert raus, GPS wird (1 min später) ausgeschaltet
+  T=0..10   GPS schläft
+  T=10      until_advert = 5 min -> [GPS-DBG] wake
+  T=10..15  GPS sucht und liefert Fix; updateMotionTracking läuft normal
+  T=15      Advert mit aktueller Position
+
+Verhalten im static-Modus (1h-Slot):
+  Analog, 55 min Schlaf + 5 min Wake. Längerer Sleep -> ggf. Warmstart
+  statt Hot-Start, immer noch < 1 min Lock-Zeit erwartet.
+
+Verhalten beim Boot:
+  GPS bleibt durchgehend an, bis _gps_had_fix_ever true wird. Erst
+  danach übernimmt das Cycling.
+
+Fix-basierte Sleep-Bedingung (NICHT nur zeitbasiert!):
+  Reines Zeit-Triggering hat einen Edge Case — wenn das GPS im Wake-
+  Fenster (5 min) keinen echten Position-Fix bekommt (Indoor, Antennen-
+  fehler), würde es trotzdem abgeschaltet und der Zyklus liefe ewig ohne
+  einen frischen Fix. Die "leichte" GPS-Zeit-Sync (NMEA time_valid > 2)
+  kommt deutlich früher als der Position-Fix (isValid()) — sie reicht uns
+  aber nicht: wir wollen eine Position publizieren.
+
+  Daher: zusätzliches Flag _gps_fix_seen_this_wake.
+    - Beim Wake (sensors.setSettingValue("gps", "1"))  -> false
+    - In updateMotionTracking(), wenn loc->isValid() == true -> true
+    - In manageGpsPower(): nach MIN_AWAKE darf nur abgeschaltet werden,
+      wenn _gps_fix_seen_this_wake == true.
+
+  Folge:
+    - Outdoor mit gutem Empfang: 1-2 min GPS-on (bis Fix), Rest off
+    - Indoor: GPS bleibt an, suche läuft weiter; Adverts tragen weiterhin
+      die letzte gecachte Position (sensors.node_lat/lon)
+
+User-Steuerung bleibt unberührt:
+  CMD_SET_CUSTOM_VAR "gps" 0/1 schaltet die persistente Einstellung
+  (_prefs.gps_enabled). Wenn 0 -> wir managen nichts; wenn 1 -> Auto-
+  Cycling wie oben.
+
+================================================================================
+14e. Bugfix GPS-Cycling: Motion-State darf bei Sleep nicht resetten
+================================================================================
+
+Symptom (User-Bericht nach Spaziergang):
+  Adverts kommen nicht alle 15 min wie für "moving" geplant, sondern
+  deutlich seltener. Die im Advert mitgesendete Position bleibt nach
+  15 min und auch nach 30 min noch die alte vom Start.
+
+Ursache:
+  Beim aktivierten GPS-Cycling (Punkt 14d) wird die GPS-Stromversorgung
+  zwischen den Adverts abgeschaltet. updateMotionTracking() prüfte aber
+  in jeder loop()-Iteration ob loc->isValid() true ist — und resettete
+  bei false:
+      _is_moving         = false
+      _pos_anchor_millis = 0
+
+  Folge-Kaskade:
+    1. Direkt nach dem ersten Advert (moving=true) schaltet das Cycling
+       das GPS ab.
+    2. updateMotionTracking sieht !isValid() -> _is_moving = false,
+       Anchor wird gelöscht.
+    3. Vor dem nächsten Advert: computeNextAdvertIntervalMs() ruft
+       loc->isValid() -> false (GPS schläft) -> returns
+       CR_ADVERT_INT_STATIC_MS (1 h) statt CR_ADVERT_INT_MOVING_MS
+       (15 min).
+    4. next_periodic_advert_at landet 1 h in der Zukunft.
+    5. GPS-Wake (5 min vor Advert) ist also erst nach 55 min.
+    6. Die Bewegungserkennung kommt nie wieder zum Tragen.
+
+Fix (zwei kleinere Änderungen, gemeinsam wirksam):
+
+  a) updateMotionTracking(): bei !isValid() KEINEN Reset mehr. Letzter
+     bekannter _is_moving und Anchor bleiben erhalten, bis ein neuer
+     Fix tatsächlich verarbeitet wird.
+
+  b) computeNextAdvertIntervalMs(): aktuellen isValid()-Check entfernt,
+     stattdessen direkt das last-known _is_moving verwenden. Begründung:
+     "GPS gerade aus" ist im Cycling der Normalfall, kein Anzeichen für
+     'kein Fix da'.
+
+Verhalten nach dem Fix:
+  - Moving-Advert sendet -> next_advert in 15 min.
+  - GPS schläft ~10 min, wacht 5 min vorher auf -> sucht/aktualisiert
+    Position.
+  - Anchor ist ca. 15 min alt; Distanz wird gegen das alte verglichen.
+    Bei weiterer Bewegung > 370 m: _is_moving bleibt true, nächster Slot
+    wieder in 15 min.
+  - Bei stationärer Position: _is_moving wird false, ab dann 1 h-Slots.
+
+Side-Effekt: _is_moving "klebt" länger an alten Werten. Das ist OK —
+beim nächsten realen Fix wird gegen Anchor verglichen und ggf. korrigiert.
+Worst case: ein zusätzlicher Advert im Moving-Tempo nach Übergang
+"static → moving" oder umgekehrt.
+
+================================================================================
+14f. GPS User-Toggle in der App: Override bis zum nächsten Advert
+================================================================================
+
+Symptom:
+  GPS wird in der App als "aus" angezeigt (weil sensors.getSettingValue
+  den aktuellen physischen Status zurückgibt, der durch Auto-Sleep auf
+  "0" steht). Wenn der User in der App auf "an" toggelt, schaltet
+  manageGpsPower() es im nächsten loop()-Tick sofort wieder aus.
+
+Ursache:
+  Beim User-Toggle wird sensors.setSettingValue("gps", "1") gerufen,
+  aber _gps_woke_at_millis bleibt 0 (das setzt nur manageGpsPower()
+  selbst). Damit greift weder die MIN_AWAKE-Hysterese noch der
+  "kein-Fix-noch"-Schutz, weil aus Sicht von manageGpsPower() das GPS
+  "aus dem Nichts" an war.
+
+Fix:
+  Neues Flag _gps_user_override_until_advert.
+  - In CMD_SET_CUSTOM_VAR "gps" "1": Flag gesetzt, _gps_woke_at_millis
+    auf jetzt, _gps_fix_seen_this_wake = false.
+  - In manageGpsPower(): wenn Flag gesetzt -> want_gps_on forciert
+    true (umgeht Sleep-Bedingungen).
+  - In doPeriodicZeroHopAdvert() nach erfolgreichem Senden: Flag
+    zurücksetzen.
+
+Resultat:
+  Der User-Toggle "GPS an" hält GPS sicher mindestens bis zum nächsten
+  Auto-Advert aktiv. Danach übernimmt das normale Cycling wieder. Wenn
+  der User GPS dauerhaft an haben will, kann er den Toggle einfach
+  nochmal drücken sobald wir wieder schlafen.
+
+================================================================================
+14g. Nightly-Flood: 3-Byte path hash (kleinere Reichweite)
+================================================================================
+
+Aktuell sendet sendFloodScoped() mit path_hash_size = _prefs.path_hash_mode + 1
+(typischerweise 1 Byte). Bei 1 Byte können bis zu 63 Hops im Path stehen
+-> der Nightly-Flood kann theoretisch sehr weit propagieren.
+
+Für die User-Intention (regionale Sichtbarkeit, nicht globaler Sturm)
+ist das zu großzügig. Mit 3 Byte Pfad-Hash sind max 64/3 = 21 Hops
+möglich.
+
+Änderung in doNightFloodAdvert():
+    uint16_t codes[2];
+    codes[0] = scope.calcTransportCode(pkt);
+    codes[1] = 0;
+    sendFlood(pkt, codes, 0, /*path_hash_size=*/3);
+
+Direkt an sendFlood() vorbei an sendFloodScoped(), weil letzteres
+_prefs.path_hash_mode forciert. Eigene Direct-Messages, App-getriggerter
+Flood-Advert etc. bleiben unverändert (1 Byte default).
+
+Debug-Output bestätigt mit "(3B path)" in der nightly-flood-Zeile.
+
+================================================================================
+14h. Uptime-Zeile in der STATS-Page
+================================================================================
+
+Stabilitäts-Indikator im Display: 5. Zeile in der STATS-Page mit der
+seit-Boot vergangenen Zeit. Hilfreich um spontan zu sehen ob die Firmware
+durchgängig läuft oder zwischendurch rebootet hat (z.B. nach OTA, Crash,
+Brownout).
+
+Layout-Anpassung:
+  Zeilen-Abstand auf STATS-Page von 11 auf 9 Pixel reduziert (Y=18, 27,
+  36, 45, 54), damit alle 5 Zeilen in 64 Pixel Höhe passen. Andere Pages
+  (RADIO etc.) behalten die 4-Zeilen-Anordnung mit 11-Pixel-Spacing.
+
+  Top-Zeile (Y=18) zweispaltig:
+    - BT-Counter links (sprintf "BT: %lu", setCursor(0, 18))
+    - Uptime rechtsbündig (setCursor(width - getTextWidth(tmp), 18))
+  Darunter RX, TX, Adv. Digi-Zeile (Y=54) nur wenn client_repeat aktiv;
+  sonst bleibt sie leer (kein Springen des Layouts).
+
+  Begründung für Top-Zeile-Verschiebung: bei einem Stabilitäts-Indikator
+  ist Uptime das, was man zuerst sieht — daher prominenter Platz oben.
+  BT-Reconnects sind ein passender Nachbar (beides "wie stabil läuft die
+  Session"), Digi/TX-Adv stehen darunter als reine Aktivitäts-Zähler.
+
+Adaptives Format:
+  < 1 h:    "Up: 5m 23s"
+  < 1 Tag:  "Up: 3h 47m"
+  >= 1 Tag: "Up: 2d 4h 15m"
+  > ~49 d:  "Up: > 49d"
+
+Datenquelle:
+  millis() / 1000. Wrap nach ~49.7 Tagen wird in MyMesh::loop() durch
+  einen Wrap-Counter (_millis_wraps) erkannt — sobald _millis_wraps > 0
+  zeigt die Uptime-Zeile "Up: > 49d" statt bei "0m 0s" anzufangen. So
+  ist ein Wrap nicht von einem stillen Reboot zu unterscheiden.
+
+================================================================================
+14d-Messung. Stromverbrauch real (Heltec Wireless Tracker)
+================================================================================
+
+Baseline vor unseren Patches:            ~200 mA
+Nach WiFi-off (Punkt 13):                ~176-186 mA   (-14 bis -24 mA)
+Nach GPS-Cycling (Punkt 14d):            ~167 mA       (-10 bis -15 mA)
+                                         -----------
+                                         Σ -33 mA / -16.5 %
+
+Anmerkungen:
+  - Beim GPS-Wake (5 min vor jedem Advert) steigt der Verbrauch
+    vorübergehend wieder auf ~190-200 mA für 1-2 min.
+  - Im Indoor-Modus ohne Fix bleibt GPS an -> permanent ~190 mA, dafür
+    werden Adverts mit der zuletzt gecachten Position gesendet.
+  - delay(1)-Yield (Punkt 13b): wie erwartet vernachlässigbarer
+    Effekt ohne esp_pm_configure().
+  - CPU bleibt bewusst bei 80 MHz (Punkt zu CPU-Takt-Frage): bei 40 MHz
+    würden SHA-256-Operationen für Channel-Decoding spürbar langsamer.
+
+================================================================================
+14c. STATS-Page im Display + RAM-Counter
+================================================================================
+
+Neue Page im HomeScreen zwischen RADIO und BLUETOOTH (Page-Dot-Reihe um
+einen Eintrag länger):
+
+  RX:  1234
+  TX:   567
+  Adv:   42
+  Digi: 18  BT: 3        <- nur wenn _prefs.client_repeat aktiv
+  BT:   3                <- wenn Repeater aus, BT solo in Zeile 4
+
+Quellen / Counter-Stellen:
+
+  RX:    radio_driver.getPacketsRecv()    (bereits vorhanden)
+  TX:    radio_driver.getPacketsSent()    (bereits vorhanden)
+  Adv:   _tx_advert_count - neu, hochgezählt in:
+           - doPeriodicZeroHopAdvert() (auto)
+           - doNightFloodAdvert() (auto)
+           - CMD_SEND_SELF_ADVERT-Handler (App)
+           - advert() (Button)
+         Sanity-Check: 5 min nach Boot Adv=1, dann je nach Intervall +1.
+  Digi:  _tx_digi_count - neu, hochgezählt in allowPacketForward()
+         bei return true (Single-Exit-Refactor der Funktion).
+  BT:    _bt_connect_count - neu, Flankendetektor _last_serial_connected
+         im loop(); zählt rising-edges _serial->isConnected() false->true.
+         Tracking, wie oft die App reconnecten musste.
+
+Alle Counter sind RAM-only - Reset bei jedem Reboot. Getter-Methoden in
+MyMesh.h (getTxAdvertCount, getTxDigiCount, getBtConnectCount,
+isClientRepeatOn) für den Display-Zugriff.
+
+Entscheidung "Digi-Zeile wann zeigen": Prüfung der Einstellung
+(_prefs.client_repeat), nicht des Zählers. Begründung: nach Boot soll
+der User sehen "Repeater an, noch nichts repeated" statt "Zeile fehlt,
+hmm, ist das überhaupt aktiv?".
+
+================================================================================
+15. Konstanten-Übersicht (in MyMesh.h)
+================================================================================
+
+  CR_HEARD_TABLE_SIZE        64
+  CR_HEARD_MAX_AGE_SECS      (48 * 3600)
+  CR_MAX_REPEAT_PATH_LEN     16
+  CR_NARROW_FREQ_TRIGGER     869.000f
+  CR_NARROW_FREQ_ACTUAL      869.618f
+  CR_REPEATER_CR             5
+  CR_TX_POWER_REDUCTION_DB   6
+  CR_TX_POWER_FLOOR_DBM      10
+
+  CR_ADVERT_INT_NO_LOC_MS    (3 * 3600 * 1000)
+  CR_ADVERT_INT_STATIC_MS    (1 * 3600 * 1000)
+  CR_ADVERT_INT_MOVING_MS    (15 * 60 * 1000)
+  CR_MOTION_WINDOW_MS        (10 * 60 * 1000)
+  CR_MOTION_RADIUS_M         370.0
+  CR_PERIODIC_ADVERT_BOOT_DELAY_MS      (5  * 60 * 1000)
+  CR_PERIODIC_ADVERT_BOOT_DELAY_GPS_MS  (10 * 60 * 1000)
+
+  CR_GPS_LEAD_BEFORE_ADVERT_MS          (5  * 60 * 1000)
+  CR_GPS_MIN_AWAKE_MS                   (60 * 1000)
+
+  LOCAL_TZ_OFFSET_SECS       3600          (CET; override per build)
+  CR_NIGHT_FLOOD_START_HOUR_LOCAL  23
+  CR_NIGHT_FLOOD_END_HOUR_LOCAL     5
+
+  CR_BBOX_BEBB_LAT_MIN/MAX        51.40 / 53.60
+  CR_BBOX_BEBB_LON_MIN/MAX        11.20 / 14.80
+  CR_BBOX_OSTFR_LAT_MIN/MAX       53.10 / 53.80
+  CR_BBOX_OSTFR_LON_MIN/MAX        6.50 /  8.50
+
+================================================================================
+16. Offene Punkte / Beobachtungen für den Test
+================================================================================
+
+- TX-LED (PIN_LORA_TX_LED=18) leuchtet bei JEDEM Sende-Vorgang, nicht nur
+  bei Repeats/Auto-Adverts. Kann als Sanity-Check für TX-Aktivität dienen.
+
+- Beim Fix-Verlust wird die "letzte bekannte Position" weiterhin im Advert
+  gesendet - das hängt davon ab, ob der GPS-Treiber sensors.node_lat/lon
+  cached behält. Beim Test bitte prüfen, was nach Fix-Verlust tatsächlich
+  rausgeht.
+
+- _is_moving ist nicht im UI sichtbar. Falls beim Test gewünscht, kann das
+  per Serial-Debug-Print oder im Display-Layout sichtbar gemacht werden.
+
+- Geo-Boxen sind grob gezeichnet - bei Bedarf per #define im Variant-Build
+  präzisieren.
+
+- Wenn _prefs.client_repeat=0 (Repeater-Feature aus) bleibt das gesamte
+  Forwarding-Verhalten unverändert; nur die Auto-Adverts und der Freq-
+  Override greifen weiterhin.
+
+================================================================================
+Build-Status
+================================================================================
+
+Verifiziert:
+  Heltec_Wireless_Tracker_companion_radio_ble  (ESP32-S3, mit GPS)
+  Heltec_ct62_companion_radio_usb              (ESP32-C3, ohne GPS)
+  Heltec_ct62_repeater                         (Cross-Check Repeater-Build)
+
+Alle Builds clean, keine Warnings im modifizierten Code.
+
+================================================================================

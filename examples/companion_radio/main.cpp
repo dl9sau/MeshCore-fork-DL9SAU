@@ -2,6 +2,11 @@
 #include <Mesh.h>
 #include "MyMesh.h"
 
+#if defined(ESP32) && !defined(WIFI_SSID)
+  #include <WiFi.h>
+  #include <esp_wifi.h>
+#endif
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -107,6 +112,15 @@ void halt() {
 
 void setup() {
   Serial.begin(115200);
+
+#if defined(ESP32) && !defined(WIFI_SSID)
+  // Power down the WiFi side of the radio when only BLE/USB is used.
+  // Saves ~10-20 mA on ESP32-S3 idle current.
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
+  esp_wifi_deinit();
+#endif
 
   board.begin();
 
@@ -229,4 +243,6 @@ void loop() {
   ui_task.loop();
 #endif
   rtc_clock.tick();
+  delay(1);   // yield to FreeRTOS idle task; lets ESP32 idle-tick run (and, if
+              // esp_pm light sleep is ever enabled, lets the CPU actually sleep)
 }

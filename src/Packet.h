@@ -36,6 +36,11 @@ namespace mesh {
 #define PAYLOAD_VER_3       0x02   // FUTURE
 #define PAYLOAD_VER_4       0x03   // FUTURE
 
+// Non-serialised per-packet TX hints. Read by Dispatcher just before transmit
+// to temporarily adjust radio params (power / CR). Stays local to this node.
+#define PKT_TX_REDUCE_POWER   (1 << 0)   // request TX power reduction (e.g. -6 dB)
+#define PKT_TX_FORCE_CR5      (1 << 1)   // request coding rate 5 for this TX
+
 /**
  * \brief  The fundamental transmission unit.
 */
@@ -49,6 +54,7 @@ public:
   uint8_t path[MAX_PATH_SIZE];
   uint8_t payload[MAX_PACKET_PAYLOAD];
   int8_t _snr;
+  uint8_t tx_flags;   // PKT_TX_* bitfield; not serialised, valid only locally pre-TX
 
   /**
    * \brief calculate the hash of payload + type

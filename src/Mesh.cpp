@@ -59,6 +59,10 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
         // append SNR (Not hash!)
         pkt->path[pkt->path_len++] = (int8_t) (pkt->getSNR()*4);
 
+        // NOTE: TRACE forwarding intentionally uses full configured TX power
+        // and CR so that the per-hop SNR readings reflect the real radio
+        // conditions a normal Direct packet would experience.
+
         uint32_t d = getDirectRetransmitDelay(pkt);
         return ACTION_RETRANSMIT_DELAYED(5, d);  // schedule with priority 5 (for now), maybe make configurable?
       }
@@ -99,8 +103,12 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       if (!_tables->hasSeen(pkt)) {
         removeSelfFromPath(pkt);
 
+        // NOTE: deliberately no tx_flags override here. Direct-routed packets
+        // mean the source/destination explicitly picked us as a hop — they are
+        // "local" to us, so we forward with full configured TX power + CR.
+
         uint32_t d = getDirectRetransmitDelay(pkt);
-        return ACTION_RETRANSMIT_DELAYED(0, d);  // Routed traffic is HIGHEST priority 
+        return ACTION_RETRANSMIT_DELAYED(0, d);  // Routed traffic is HIGHEST priority
       }
     }
     return ACTION_RELEASE;   // this node is NOT the next hop (OR this packet has already been forwarded), so discard.
@@ -334,6 +342,10 @@ DispatcherAction Mesh::routeRecvPacket(Packet* packet) {
     // append this node's hash to 'path'
     self_id.copyHashTo(&packet->path[n * packet->getPathHashSize()], packet->getPathHashSize());
     packet->setPathHashCount(n + 1);
+
+    // mark this packet as a forwarded (repeated) one so the radio can be tuned
+    // down (CR/power) for digipeat-style behaviour without touching user TX.
+    packet->tx_flags |= (PKT_TX_REDUCE_POWER | PKT_TX_FORCE_CR5);
 
     uint32_t d = getRetransmitDelay(packet);
     // as this propagates outwards, give it lower and lower priority

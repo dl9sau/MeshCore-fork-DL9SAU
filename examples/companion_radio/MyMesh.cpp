@@ -346,7 +346,41 @@ void MyMesh::onContactsFull() {
   }
 }
 
+void MyMesh::markHeardDirect(uint8_t hash) {
+  uint32_t now = getRTCClock()->getCurrentTime();
+
+  // find existing entry (1-byte match), else evict via FIFO
+  HeardEntry* slot = NULL;
+  for (int i = 0; i < CR_HEARD_TABLE_SIZE; i++) {
+    if (heard_list[i].last_heard != 0 && heard_list[i].hash == hash) {
+      slot = &heard_list[i];
+      break;
+    }
+  }
+  if (slot == NULL) {
+    slot = &heard_list[heard_next_idx];
+    heard_next_idx = (heard_next_idx + 1) % CR_HEARD_TABLE_SIZE;
+    slot->hash = hash;
+  }
+  slot->last_heard = now;
+}
+
+bool MyMesh::isLocallyHeard(uint8_t hash) const {
+  uint32_t now = getRTCClock()->getCurrentTime();
+  for (int i = 0; i < CR_HEARD_TABLE_SIZE; i++) {
+    if (heard_list[i].last_heard == 0) continue;
+    if (now - heard_list[i].last_heard > CR_HEARD_MAX_AGE_SECS) continue;
+    if (heard_list[i].hash == hash) return true;
+  }
+  return false;
+}
+
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
+  // Track only adverts received directly (zero-hop, no repeater in the path).
+  if ((path_len & 63) == 0) {
+    markHeardDirect(contact.id.pub_key[0]);
+  }
+
   if (_serial->isConnected()) {
     if (is_new) {
       writeContactRespFrame(PUSH_CODE_NEW_ADVERT, contact);
@@ -479,7 +513,48 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
-  return _prefs.client_repeat != 0;
+  if (_prefs.client_repeat == 0) return false;
+
+  // path-length cap (hop count, not byte length)
+  if (packet->getPathHashCount() > CR_MAX_REPEAT_PATH_LEN) return false;
+
+  uint8_t ptype = packet->getPayloadType();
+  bool decision = false;
+
+  // ADVERTs and ACKs: forward only if the packet is scoped (transport-coded)
+  if (ptype == PAYLOAD_TYPE_ADVERT || ptype == PAYLOAD_TYPE_ACK ||
+      ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA ||
+      ptype == PAYLOAD_TYPE_MULTIPART || ptype == PAYLOAD_TYPE_CONTROL ||
+      ptype == PAYLOAD_TYPE_RAW_CUSTOM || ptype == PAYLOAD_TYPE_TRACE ||
+      ptype == PAYLOAD_TYPE_REQ || ptype == PAYLOAD_TYPE_RESPONSE ||
+      ptype == PAYLOAD_TYPE_TXT_MSG || ptype == PAYLOAD_TYPE_ANON_REQ) {
+    decision = packet->hasTransportCodes();
+  } else if (ptype == PAYLOAD_TYPE_PATH) {
+    // PATH discovery: only repeat for local nodes (heard < 48h OR known contact < 48h)
+    if (packet->payload_len >= 2) {
+      uint8_t dest_hash = packet->payload[0];
+      uint8_t src_hash  = packet->payload[1];
+      uint32_t now = getRTCClock()->getCurrentTime();
+
+      auto matchHash = [&](uint8_t h) -> bool {
+        if (isLocallyHeard(h)) return true;
+        int num = getNumContacts();
+        for (int i = 0; i < num; i++) {
+          ContactInfo c;
+          if (!getContactByIdx(i, c)) continue;
+          if (now - c.lastmod > CR_HEARD_MAX_AGE_SECS) continue;
+          if (c.id.isHashMatch(&h)) return true;
+        }
+        return self_id.isHashMatch(&h);
+      };
+
+      decision = matchHash(dest_hash) || matchHash(src_hash);
+    }
+  }
+  // else: unknown payload types stay decision=false (do not forward)
+
+  if (decision) _tx_digi_count++;
+  return decision;
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis) {
@@ -856,6 +931,26 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   dirty_contacts_expiry = 0;
   memset(advert_paths, 0, sizeof(advert_paths));
   memset(send_scope.key, 0, sizeof(send_scope.key));
+  memset(heard_list, 0, sizeof(heard_list));
+  heard_next_idx = 0;
+  memset(runtime_last_channel_scope.key, 0, sizeof(runtime_last_channel_scope.key));
+  next_periodic_advert_at = 0;
+  next_night_flood_unix = 0;
+  _pos_anchor_lat = 0;
+  _pos_anchor_lon = 0;
+  _pos_anchor_millis = 0;
+  _is_moving = false;
+  _gps_had_fix_ever = false;
+  _gps_woke_at_millis = 0;
+  _gps_fix_seen_this_wake = false;
+  _gps_user_override_until_advert = false;
+  _tx_advert_count = 0;
+  _tx_digi_count = 0;
+  _bt_connect_count = 0;
+  _last_serial_connected = false;
+  _last_observed_rtc = 0;
+  _last_millis_seen = 0;
+  _millis_wraps = 0;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -951,9 +1046,29 @@ void MyMesh::begin(bool has_display) {
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
 
-  radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  applyRadioPolicy();
   radio_set_tx_power(_prefs.tx_power_dbm);
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
+
+  // First periodic advert:
+  //   - GPS off -> 5 min
+  //   - GPS on with valid fix already (rare so soon after boot) -> 5 min
+  //   - GPS on, still searching -> 10 min, but clamped down to 5 min once
+  //     the first fix arrives (see updateMotionTracking()).
+  unsigned long first_advert_wait = CR_PERIODIC_ADVERT_BOOT_DELAY_MS;
+#if ENV_INCLUDE_GPS == 1
+  if (_prefs.gps_enabled) {
+    LocationProvider* loc = sensors.getLocationProvider();
+    if (loc == NULL || !loc->isValid()) {
+      first_advert_wait = CR_PERIODIC_ADVERT_BOOT_DELAY_GPS_MS;
+    }
+  }
+#endif
+  next_periodic_advert_at = futureMillis(first_advert_wait);
+  next_night_flood_unix = 0;
+  Serial.printf("[ADV-DBG] begin: boot_delay_ms=%lu next_periodic_at=%lu millis=%lu rtc=%lu\n",
+                first_advert_wait, next_periodic_advert_at, millis(),
+                (unsigned long)getRTCClock()->getCurrentTime());
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
 }
@@ -977,6 +1092,44 @@ static FreqRange repeat_freq_ranges[] = {
   { 869000, 869000 },
   { 918000, 918000 }
 };
+
+void MyMesh::applyRadioPolicy() {
+  // EU narrow-band override: when app requests 869.000 MHz, switch RX and TX to 869.618 MHz.
+  // Coding rate follows _prefs.cr in this "base" mode. Repeats and our own
+  // auto-adverts switch to CR5 + reduced power per packet via the Dispatcher
+  // override hooks; that keeps user direct messages on the configured CR.
+  float freq = _prefs.freq;
+  if (fabsf(freq - CR_NARROW_FREQ_TRIGGER) < 0.0005f) {
+    freq = CR_NARROW_FREQ_ACTUAL;
+  }
+  radio_set_params(freq, _prefs.bw, _prefs.sf, _prefs.cr);
+}
+
+void MyMesh::applyPacketTxOverrides(const mesh::Packet* packet) {
+  if (packet == NULL) return;
+  uint8_t flags = packet->tx_flags;
+  if (flags == 0) return;
+
+  if (flags & PKT_TX_REDUCE_POWER) {
+    int reduced = (int)_prefs.tx_power_dbm - CR_TX_POWER_REDUCTION_DB;
+    if (reduced < CR_TX_POWER_FLOOR_DBM) reduced = CR_TX_POWER_FLOOR_DBM;
+    if (reduced > _prefs.tx_power_dbm) reduced = _prefs.tx_power_dbm;  // never *raise* power
+    radio_set_tx_power((int8_t)reduced);
+  }
+  if ((flags & PKT_TX_FORCE_CR5) && _prefs.cr != CR_REPEATER_CR) {
+    float freq = _prefs.freq;
+    if (fabsf(freq - CR_NARROW_FREQ_TRIGGER) < 0.0005f) freq = CR_NARROW_FREQ_ACTUAL;
+    radio_set_params(freq, _prefs.bw, _prefs.sf, CR_REPEATER_CR);
+  }
+}
+
+void MyMesh::restorePacketTxDefaults() {
+  // Bring radio back to the user-configured CR and full TX power. Cheap if
+  // nothing was overridden (radio_set_params and radio_set_tx_power are
+  // light register writes on SX126x).
+  applyRadioPolicy();
+  radio_set_tx_power(_prefs.tx_power_dbm);
+}
 
 bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
   for (int i = 0; i < sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]); i++) {
@@ -1115,6 +1268,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
       if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+        // Remember the channel secret as the runtime scope; reused as Nacht-Flood scope.
+        // 128-bit channel secrets map directly onto TransportKey.key.
+        memcpy(runtime_last_channel_scope.key, channel.channel.secret, sizeof(runtime_last_channel_scope.key));
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
@@ -1215,6 +1371,11 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint32_t curr = getRTCClock()->getCurrentTime();
     if (secs >= curr) {
       getRTCClock()->setCurrentTime(secs);
+      // Any RTC-driven schedule made before this point used the stale time;
+      // invalidate so the next loop tick re-picks a slot with the corrected RTC.
+      next_night_flood_unix = 0;
+      Serial.printf("[ADV-DBG] CMD_SET_DEVICE_TIME: rtc %lu -> %lu, nightly slot invalidated\n",
+                    (unsigned long)curr, (unsigned long)secs);
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
@@ -1235,6 +1396,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       } else {
         sendZeroHop(pkt);
       }
+      _tx_advert_count++;
+      Serial.printf("[ADV-DBG] app-cmd (CMD_SEND_SELF_ADVERT flood=%d), millis=%lu\n",
+                    (int)(len >= 2 && cmd_frame[1] == 1), millis());
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_TABLE_FULL);
@@ -1374,7 +1538,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       _prefs.client_repeat = repeat;
       savePrefs();
 
-      radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+      applyRadioPolicy();
       MESH_DEBUG_PRINTLN("OK: CMD_SET_RADIO_PARAMS: f=%d, bw=%d, sf=%d, cr=%d", freq, bw, (uint32_t)sf,
                          (uint32_t)cr);
 
@@ -1785,6 +1949,17 @@ void MyMesh::handleCmdFrame(size_t len) {
         if (strcmp(sp, "gps") == 0) {
           _prefs.gps_enabled = (np[0] == '1') ? 1 : 0;
           savePrefs();
+          if (_prefs.gps_enabled) {
+            // User just enabled GPS via the app. Hold GPS on until at least
+            // the next periodic advert is sent (regardless of fix status),
+            // so the user sees an obvious effect of their click.
+            _gps_woke_at_millis = millis();
+            if (_gps_woke_at_millis == 0) _gps_woke_at_millis = 1;
+            _gps_fix_seen_this_wake = false;
+            _gps_user_override_until_advert = true;
+          } else {
+            _gps_user_override_until_advert = false;
+          }
         } else if (strcmp(sp, "gps_interval") == 0) {
           uint32_t interval_seconds = atoi(np);
           _prefs.gps_interval = constrain(interval_seconds, 0, 86400);
@@ -2158,6 +2333,14 @@ void MyMesh::checkSerialInterface() {
 }
 
 void MyMesh::loop() {
+  // Track millis() wraps so a long uptime can be displayed as "> 49d"
+  // instead of silently rolling back to "0m 0s".
+  {
+    uint32_t now_ms = millis();
+    if (now_ms < _last_millis_seen) _millis_wraps++;
+    _last_millis_seen = now_ms;
+  }
+
   BaseChatMesh::loop();
 
   if (_cli_rescue) {
@@ -2172,8 +2355,366 @@ void MyMesh::loop() {
     dirty_contacts_expiry = 0;
   }
 
+  // count rising edges of serial/BLE connection (i.e. app re-connects)
+  if (_serial != NULL) {
+    bool is_connected = _serial->isConnected();
+    if (is_connected && !_last_serial_connected) {
+      _bt_connect_count++;
+    }
+    _last_serial_connected = is_connected;
+  }
+
+  // Adaptive zero-hop unscoped advert (3h / 1h / 15min depending on motion)
+  updateMotionTracking();
+  manageGpsPower();
+  if (next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
+    doPeriodicZeroHopAdvert();
+    next_periodic_advert_at = futureMillis(computeNextAdvertIntervalMs());
+  }
+
+  // Nightly scoped flood advert: random instant in 23:00-05:00 local
+  {
+    uint32_t now_rtc = getRTCClock()->getCurrentTime();
+
+    // Generic RTC-jump detector. Between two loop ticks the RTC should
+    // change by at most a few seconds (real time). Any large jump means
+    // an external correction (CMD_SET_DEVICE_TIME, GPS time sync from
+    // the location provider, or a manual set). Invalidate the slot so
+    // it is re-picked against the corrected time.
+    if (_last_observed_rtc != 0) {
+      int32_t delta = (int32_t)(now_rtc - _last_observed_rtc);
+      if (delta > 300 || delta < -300) {   // 5 min jump in either direction
+        if (next_night_flood_unix != 0) {
+          Serial.printf("[ADV-DBG] RTC jumped %ld sec, nightly slot invalidated\n", (long)delta);
+          next_night_flood_unix = 0;
+        }
+      }
+    }
+    _last_observed_rtc = now_rtc;
+
+    if (next_night_flood_unix == 0) {
+      scheduleNextNightFlood();   // no-op if RTC still unset
+    } else if (now_rtc >= next_night_flood_unix) {
+      // Backup sanity check (in case the jump detector missed an edge case)
+      if (now_rtc - next_night_flood_unix > 12UL * 3600UL) {
+        scheduleNextNightFlood();
+      } else {
+        doNightFloodAdvert();
+        scheduleNextNightFlood();
+      }
+    }
+  }
+
 #ifdef DISPLAY_CLASS
   if (_ui) _ui->setHasConnection(_serial->isConnected());
+#endif
+}
+
+bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
+#if ENV_INCLUDE_GPS == 1
+  if (_prefs.gps_enabled) {
+    LocationProvider* loc = sensors.getLocationProvider();
+    if (loc && loc->isValid()) {
+      lat = ((double)loc->getLatitude()) / 1000000.0;
+      lon = ((double)loc->getLongitude()) / 1000000.0;
+      return true;
+    }
+  }
+#endif
+  if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
+    lat = sensors.node_lat;
+    lon = sensors.node_lon;
+    return true;
+  }
+  return false;
+}
+
+// Geo bounding boxes (inclusive). Adjust per-build with #defines if needed.
+#ifndef CR_BBOX_BEBB_LAT_MIN
+#define CR_BBOX_BEBB_LAT_MIN  51.40
+#define CR_BBOX_BEBB_LAT_MAX  53.60
+#define CR_BBOX_BEBB_LON_MIN  11.20
+#define CR_BBOX_BEBB_LON_MAX  14.80
+#endif
+#ifndef CR_BBOX_OSTFR_LAT_MIN
+#define CR_BBOX_OSTFR_LAT_MIN 53.10
+#define CR_BBOX_OSTFR_LAT_MAX 53.80
+#define CR_BBOX_OSTFR_LON_MIN  6.50
+#define CR_BBOX_OSTFR_LON_MAX  8.50
+#endif
+
+bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
+  double lat, lon;
+  if (!getEffectiveLatLon(lat, lon)) return false;
+
+  const char* tag = NULL;
+  if (lat >= CR_BBOX_BEBB_LAT_MIN && lat <= CR_BBOX_BEBB_LAT_MAX &&
+      lon >= CR_BBOX_BEBB_LON_MIN && lon <= CR_BBOX_BEBB_LON_MAX) {
+    tag = "#bebb";
+  } else if (lat >= CR_BBOX_OSTFR_LAT_MIN && lat <= CR_BBOX_OSTFR_LAT_MAX &&
+             lon >= CR_BBOX_OSTFR_LON_MIN && lon <= CR_BBOX_OSTFR_LON_MAX) {
+    tag = "#ostfriesland";
+  }
+  if (tag == NULL) return false;
+
+  TransportKeyStore tmp;
+  tmp.getAutoKeyFor(0, tag, out_key);
+  return true;
+}
+
+bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
+  // 1) last App-channel send since boot
+  if (!runtime_last_channel_scope.isNull()) {
+    out_key = runtime_last_channel_scope;
+    return true;
+  }
+  // 2) configured default flood scope
+  TransportKey configured;
+  memcpy(configured.key, _prefs.default_scope_key, sizeof(configured.key));
+  if (!configured.isNull()) {
+    out_key = configured;
+    return true;
+  }
+  // 3) geo fallback
+  return chooseGeoFallbackScope(out_key);
+}
+
+void MyMesh::scheduleNextNightFlood() {
+  uint32_t now = getRTCClock()->getCurrentTime();
+  if (now < 1500000000UL) {   // RTC clearly unset (pre-2017): skip
+    next_night_flood_unix = 0;
+    return;
+  }
+  // shift into local time
+  uint32_t local_now = now + (uint32_t)LOCAL_TZ_OFFSET_SECS;
+  uint32_t day_secs = local_now % 86400UL;
+  uint32_t local_midnight_today = local_now - day_secs;
+
+  // Window: [23:00, 29:00) local on the *current* day, i.e. covers 23-24 plus 0-5 of next day.
+  uint32_t window_start = local_midnight_today + (uint32_t)(CR_NIGHT_FLOOD_START_HOUR_LOCAL * 3600UL);
+  uint32_t window_end   = local_midnight_today + (uint32_t)((24 + CR_NIGHT_FLOOD_END_HOUR_LOCAL) * 3600UL);
+
+  // If we're already past today's window, schedule for tomorrow.
+  if (local_now >= window_end) {
+    window_start += 86400UL;
+    window_end   += 86400UL;
+  } else if (local_now >= window_start) {
+    // we're inside the window now; pick any future second within remaining window
+    window_start = local_now + 1;
+  }
+
+  uint32_t span = window_end - window_start;
+  uint32_t pick_local = window_start + getRNG()->nextInt(0, span);
+  next_night_flood_unix = pick_local - (uint32_t)LOCAL_TZ_OFFSET_SECS;
+}
+
+// Adaptive zero-hop advert pacing:
+//   * 3 hours, when location is NOT configured to be sent in the advert,
+//     OR when GPS is enabled and has NEVER yet produced a valid fix in this
+//     session (cold device, indoor, antenna fault — nothing useful to share).
+//   * 1 hour, when the position is static — i.e. GPS is disabled (we publish
+//     the configured fixed location), OR GPS is enabled and the position has
+//     not moved by more than CR_MOTION_RADIUS_M (370 m) within the last
+//     CR_MOTION_WINDOW_MS (10 minutes), OR GPS HAD a fix but lost it (we
+//     keep publishing the last-known location at the static rate).
+//   * 15 minutes, when the GPS-derived position has moved beyond that radius
+//     in the last window — i.e. the node is being carried around.
+unsigned long MyMesh::computeNextAdvertIntervalMs() const {
+  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) return CR_ADVERT_INT_NO_LOC_MS;
+
+#if ENV_INCLUDE_GPS == 1
+  if (_prefs.gps_enabled) {
+    if (!_gps_had_fix_ever) {
+      // Never saw a fix this session — no point publishing a 0,0 position
+      // frequently. Long interval until something useful happens.
+      return CR_ADVERT_INT_NO_LOC_MS;
+    }
+    // Use the LAST KNOWN motion state, not the live fix status. The GPS may
+    // be sleeping by design — that's expected — and the last value of
+    // _is_moving still reflects what we knew at the previous wake cycle.
+    return _is_moving ? CR_ADVERT_INT_MOVING_MS : CR_ADVERT_INT_STATIC_MS;
+  }
+#endif
+  // GPS disabled → published location is the configured one, treated as static.
+  return CR_ADVERT_INT_STATIC_MS;
+}
+
+void MyMesh::updateMotionTracking() {
+#if ENV_INCLUDE_GPS == 1
+  if (!_prefs.gps_enabled) {
+    // GPS turned off by the user — drop tracking state entirely.
+    _is_moving = false;
+    _pos_anchor_millis = 0;
+    return;
+  }
+  LocationProvider* loc = sensors.getLocationProvider();
+  if (loc == NULL || !loc->isValid()) {
+    // No live fix right now. This is the normal case while the GPS module
+    // is power-cycled between adverts — DO NOT reset _is_moving or the
+    // motion anchor here. Resetting would collapse the dynamic interval
+    // back to STATIC (1h), and the cycling would never wake the GPS for
+    // the next 15-min moving slot. Last known motion state stays in place.
+    return;
+  }
+
+  // Mark this wake cycle as having seen a real position fix — manageGpsPower()
+  // uses this to decide if it's safe to power the module down again.
+  _gps_fix_seen_this_wake = true;
+
+  if (!_gps_had_fix_ever) {
+    _gps_had_fix_ever = true;
+    // First fix arrived during boot wait: collapse the GPS-extended boot
+    // delay (10 min) to "5 min after boot" (not "5 min from now"!). If we are
+    // already past that mark, fire as soon as possible.
+    if (_tx_advert_count == 0) {
+      unsigned long now = millis();
+      // millis() starts at 0 on boot, so the absolute "boot + 5 min" mark is
+      // just CR_PERIODIC_ADVERT_BOOT_DELAY_MS.
+      unsigned long boot_plus_5min = CR_PERIODIC_ADVERT_BOOT_DELAY_MS;
+      unsigned long target = (boot_plus_5min > now) ? boot_plus_5min : now;
+      if ((long)(next_periodic_advert_at - target) > 0) {
+        next_periodic_advert_at = target;
+        // NOTE: this is a position fix (GPRMC status 'A'), NOT just a GPS
+        // time-sync. The driver syncs the RTC earlier (time_valid > 2),
+        // independent of this code path.
+        Serial.printf("[ADV-DBG] first GPS position-fix at millis=%lu, advert clamped to %lu\n",
+                      now, target);
+      }
+    }
+  }
+
+  double cur_lat = ((double)loc->getLatitude()) / 1000000.0;
+  double cur_lon = ((double)loc->getLongitude()) / 1000000.0;
+  unsigned long now = millis();
+
+  if (_pos_anchor_millis == 0) {
+    _pos_anchor_lat = cur_lat;
+    _pos_anchor_lon = cur_lon;
+    _pos_anchor_millis = now;
+    _is_moving = false;
+    return;
+  }
+
+  if (now - _pos_anchor_millis >= CR_MOTION_WINDOW_MS) {
+    // equirectangular approximation; good enough for ~370 m at temperate latitudes
+    double dlat_m = (cur_lat - _pos_anchor_lat) * 111320.0;
+    double dlon_m = (cur_lon - _pos_anchor_lon) * 111320.0 * cos(cur_lat * DEG_TO_RAD);
+    double d_m = sqrt(dlat_m * dlat_m + dlon_m * dlon_m);
+    _is_moving = (d_m > CR_MOTION_RADIUS_M);
+    _pos_anchor_lat = cur_lat;
+    _pos_anchor_lon = cur_lon;
+    _pos_anchor_millis = now;
+  }
+#else
+  _is_moving = false;
+#endif
+}
+
+void MyMesh::doPeriodicZeroHopAdvert() {
+  mesh::Packet* pkt;
+  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
+    pkt = createSelfAdvert(_prefs.node_name);
+  } else {
+    pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
+  }
+  if (pkt) {
+    // CR5 always (short airtime). Power reduction only when we are stationary;
+    // while moving (15-min interval, e.g. driving) we want maximum reach so
+    // distant neighbours can still pick up our position. Zero-hop adverts are
+    // never repeated, so this stays a local-only burst.
+    uint8_t flags = PKT_TX_FORCE_CR5;
+    if (!_is_moving) flags |= PKT_TX_REDUCE_POWER;
+    pkt->tx_flags |= flags;
+    sendZeroHop(pkt);
+    _tx_advert_count++;
+    _gps_user_override_until_advert = false;   // user-on override expires with this advert
+    Serial.printf("[ADV-DBG] periodic, millis=%lu moving=%d\n", millis(), (int)_is_moving);
+  }
+}
+
+void MyMesh::doNightFloodAdvert() {
+  TransportKey scope;
+  if (!chooseNightFloodScope(scope)) {
+    MESH_DEBUG_PRINTLN("night-flood: no scope available, skipping");
+    return;
+  }
+  mesh::Packet* pkt;
+  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
+    pkt = createSelfAdvert(_prefs.node_name);
+  } else {
+    pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
+  }
+  if (pkt) {
+    pkt->tx_flags |= (PKT_TX_REDUCE_POWER | PKT_TX_FORCE_CR5);
+    // 3-byte path-hash for the nightly flood: caps max hop count to ~21
+    // (64-byte path / 3) instead of 64 with the default 1-byte hashes.
+    // This noticeably limits how far the advert can ripple through the mesh.
+    // We bypass sendFloodScoped() because it forces _prefs.path_hash_mode+1.
+    uint16_t codes[2];
+    codes[0] = scope.calcTransportCode(pkt);
+    codes[1] = 0;
+    sendFlood(pkt, codes, 0, /*path_hash_size=*/3);
+    _tx_advert_count++;
+    Serial.printf("[ADV-DBG] nightly-flood (3B path), millis=%lu rtc=%lu\n",
+                  millis(), (unsigned long)getRTCClock()->getCurrentTime());
+  }
+}
+
+// Cycle the GPS module on/off to save current. Stays on during the initial
+// boot search and from CR_GPS_LEAD_BEFORE_ADVERT_MS before each scheduled
+// advert until shortly after. The last known position lives in
+// sensors.node_lat/lon and is published in adverts even while the module
+// is asleep, so we keep transmitting a recent location either way.
+//
+// User-controlled GPS state (CMD_SET_CUSTOM_VAR "gps") is respected:
+// when _prefs.gps_enabled is 0, we don't touch anything.
+void MyMesh::manageGpsPower() {
+#if ENV_INCLUDE_GPS == 1
+  if (!_prefs.gps_enabled) return;   // user disabled GPS entirely
+  if (!_gps_had_fix_ever) return;    // still in initial boot search — keep GPS on
+
+  unsigned long now = millis();
+  bool gps_is_on = false;
+  const char* cur = sensors.getSettingByKey("gps");
+  if (cur != NULL) gps_is_on = (cur[0] == '1');
+
+  // distance to next advert (signed; can be negative if we're past schedule)
+  long until_advert = (long)(next_periodic_advert_at - now);
+
+  // baseline: turn GPS on shortly before each scheduled advert
+  bool want_gps_on = (until_advert <= (long)CR_GPS_LEAD_BEFORE_ADVERT_MS);
+
+  // User toggled GPS on via the app: keep it on until the next advert,
+  // regardless of fix status / hysteresis / lead time.
+  if (_gps_user_override_until_advert) {
+    want_gps_on = true;
+  }
+
+  if (gps_is_on && _gps_woke_at_millis != 0) {
+    unsigned long awake_for = now - _gps_woke_at_millis;
+    if (awake_for < CR_GPS_MIN_AWAKE_MS) {
+      // hysteresis: don't thrash the GPS_EN pin
+      want_gps_on = true;
+    } else if (!_gps_fix_seen_this_wake) {
+      // We woke GPS up but haven't seen a real position fix this cycle yet
+      // (NMEA time-sync alone is not enough). Keep trying so the next advert
+      // actually carries a fresh position.
+      want_gps_on = true;
+    }
+  }
+
+  if (want_gps_on && !gps_is_on) {
+    sensors.setSettingValue("gps", "1");
+    _gps_woke_at_millis = (now == 0 ? 1 : now);   // 0 means "never managed"
+    _gps_fix_seen_this_wake = false;              // start a fresh wake cycle
+    Serial.printf("[GPS-DBG] wake at millis=%lu (until_advert=%lds)\n", now, until_advert / 1000);
+  } else if (!want_gps_on && gps_is_on) {
+    sensors.setSettingValue("gps", "0");
+    _gps_woke_at_millis = 0;
+    _gps_fix_seen_this_wake = false;
+    Serial.printf("[GPS-DBG] sleep at millis=%lu (until_advert=%lds, fix_was_seen=1)\n",
+                  now, until_advert / 1000);
+  }
 #endif
 }
 
@@ -2186,6 +2727,8 @@ bool MyMesh::advert() {
   }
   if (pkt) {
     sendZeroHop(pkt);
+    _tx_advert_count++;
+    Serial.printf("[ADV-DBG] ui-button (advert()), millis=%lu\n", millis());
     return true;
   } else {
     return false;
