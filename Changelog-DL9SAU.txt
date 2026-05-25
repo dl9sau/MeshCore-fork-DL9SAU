@@ -808,6 +808,65 @@ Datenquelle:
   ist ein Wrap nicht von einem stillen Reboot zu unterscheiden.
 
 ================================================================================
+14j. Flood-Repeat-Power differenziert nach Quelle
+================================================================================
+
+Ursprünglich (Punkt 12): pauschal "Flood-Repeat (Digipeating) -> reduced
++ CR5". Bei genauerer Überlegung passte das nicht: wenn wir den Sender
+DIREKT hören (path_hash_count == 0, also kein anderer Repeater
+dazwischen), agieren wir effektiv als räumliche Verlängerung des Senders.
+Mit voller Leistung verhalten wir uns dann so, als säße der Sender an
+unserem Standort — gewünschtes Verhalten für lokale Nutzer.
+
+Sub-classing-Refactor:
+  Statt der Power/CR-Logik fest in src/Mesh.cpp::routeRecvPacket() zu
+  kodieren, ist dort jetzt nur noch ein virtueller Hook:
+
+    virtual bool shouldReduceFloodRetransmit(
+        const Packet* packet,
+        uint8_t original_path_count) const {
+      return original_path_count > 0;   // default: polite-when-repeated
+    }
+
+  Standard-Builds (z.B. simple_repeater) behalten so das ursprüngliche
+  Verhalten. companion_radio überschreibt die Methode mit feinerer
+  Logik.
+
+MyMesh::shouldReduceFloodRetransmit Regeln:
+
+  +-------------------------------------+--------+----+
+  | Situation                           | Power  | CR |
+  +-------------------------------------+--------+----+
+  | Bereits repeated (n > 0)            | reduc. |  5 |
+  | n==0, ADVERT von User/Sensor/Room   | full   | _  |
+  | n==0, ADVERT von REPEATER           | reduc. |  5 |
+  | n==0, TXT/REQ/RESP/ACK/...          | full   | _  |
+  | n==0, PATH (mind. 1 Hash zero-hop)  | full   | _  |
+  | n==0, PATH (nur via Contact-Cache)  | reduc. |  5 |
+  +-------------------------------------+--------+----+
+
+Erkennung "ADVERT von REPEATER":
+  Advert-Payload-Layout: pub_key(32) + timestamp(4) + signature(64)
+                         + app_data[]
+  app_data[0] = ADV_TYPE_* (lower 4 bits) | flags (upper 4 bits)
+  ADV_TYPE_REPEATER == 2.
+
+Erkennung "PATH-Endpunkt ist lokal heard":
+  PATH-Payload-Layout: dest_hash(1) + src_hash(1) + MAC(2) + enc(...)
+  Wir vergleichen dest_hash und src_hash gegen die HeardList
+  (zero-hop adverts, <48h). Wenn weder noch direkt gehört wurde, ist
+  der Endpunkt nur via Contact-lastmod bekannt (also evtl. via
+  Repeated-Advert) und nicht zwingend in unmittelbarer Funkreichweite
+  -> reduced Verbreitung ist netzschonender.
+
+Begründung "warum nur HeardList, nicht Contacts":
+  allowPacketForward() lässt PATH-Pakete bereits dann durch, wenn
+  src/dest in Contacts (lastmod <48h) — das ist absichtlich permissiv,
+  weil Path-Discovery für nicht-direkt-gehörte Nutzer auch wichtig ist.
+  Die Power-Entscheidung darf aber strenger sein: nur wenn jemand
+  WIRKLICH direkt zero-hop gehört wurde, ist er räumlich nah.
+
+================================================================================
 14i. Frequenz-Anzeige konsistent + ISM-Band-Ranges korrigiert
 ================================================================================
 

@@ -275,6 +275,45 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
   return getRNG()->nextInt(0, 5*t + 1);
 }
 
+// Differentiate flood-retransmit TX power / CR by packet source:
+//  - already repeated (n > 0): polite, reduced + CR5
+//  - heard directly (n == 0), default: act as transparent extension of
+//    the source — full power + configured CR
+//  - exception A: ADVERT directly heard from another REPEATER -> reduced
+//    (otherwise repeater-to-repeater adverts at full power would flood
+//    the network unnecessarily)
+//  - exception B: PATH discovery for endpoints that aren't in our
+//    direct-heard list (zero-hop HeardList) -> reduced. We let these
+//    through allowPacketForward via the contacts <48h check, but they
+//    are not "our" local nodes in the strict sense.
+bool MyMesh::shouldReduceFloodRetransmit(const mesh::Packet* packet, uint8_t n) const {
+  if (n > 0) return true;
+
+  uint8_t ptype = packet->getPayloadType();
+
+  // Exception A: directly-heard advert from another repeater.
+  if (ptype == PAYLOAD_TYPE_ADVERT) {
+    // payload layout: pub_key(32) + timestamp(4) + signature(64) + app_data[]
+    // app_data[0] lower 4 bits = ADV_TYPE_* (ADV_TYPE_REPEATER == 2)
+    const int ADV_APP_DATA_OFFSET = PUB_KEY_SIZE + 4 + SIGNATURE_SIZE;
+    if (packet->payload_len > ADV_APP_DATA_OFFSET) {
+      uint8_t adv_type = packet->payload[ADV_APP_DATA_OFFSET] & 0x0F;
+      if (adv_type == ADV_TYPE_REPEATER) return true;
+    }
+  }
+
+  // Exception B: PATH discovery for non-locally-heard endpoints.
+  if (ptype == PAYLOAD_TYPE_PATH && packet->payload_len >= 2) {
+    uint8_t dest_hash = packet->payload[0];
+    uint8_t src_hash  = packet->payload[1];
+    if (!isLocallyHeard(dest_hash) && !isLocallyHeard(src_hash)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 uint8_t MyMesh::getExtraAckTransmitCount() const {
   return _prefs.multi_acks;
 }

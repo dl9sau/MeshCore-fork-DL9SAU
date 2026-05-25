@@ -61,6 +61,23 @@ protected:
   virtual uint32_t getRetransmitDelay(const Packet* packet);
 
   /**
+   * \brief  Subclass hook to decide if a flood retransmit should be sent
+   *         at reduced power / forced CR5 instead of the user-configured
+   *         full power and CR.
+   * \param  packet  the packet about to be retransmitted (its path_hash_count
+   *                 has not yet been incremented for this hop)
+   * \param  original_path_count  the path_hash_count seen on reception, BEFORE
+   *                 we appended this node's hash. 0 means heard directly
+   *                 from the source.
+   * \returns  true to set PKT_TX_REDUCE_POWER | PKT_TX_FORCE_CR5 on the packet.
+   *           Default: true if already repeated by someone else (i.e. path
+   *           count > 0).
+   */
+  virtual bool shouldReduceFloodRetransmit(const Packet* packet, uint8_t original_path_count) const {
+    return original_path_count > 0;
+  }
+
+  /**
    * \returns  number of milliseconds delay to apply to retransmitting the given packet, for DIRECT mode.
    */
   virtual uint32_t getDirectRetransmitDelay(const Packet* packet);

@@ -343,9 +343,13 @@ DispatcherAction Mesh::routeRecvPacket(Packet* packet) {
     self_id.copyHashTo(&packet->path[n * packet->getPathHashSize()], packet->getPathHashSize());
     packet->setPathHashCount(n + 1);
 
-    // mark this packet as a forwarded (repeated) one so the radio can be tuned
-    // down (CR/power) for digipeat-style behaviour without touching user TX.
-    packet->tx_flags |= (PKT_TX_REDUCE_POWER | PKT_TX_FORCE_CR5);
+    // Subclass-controlled TX scaling for the upcoming retransmit. The
+    // default policy (in Mesh.h) reduces power/CR only when the packet
+    // had already been repeated (path count > 0); subclasses can refine
+    // this with per-payload-type knowledge.
+    if (shouldReduceFloodRetransmit(packet, n)) {
+      packet->tx_flags |= (PKT_TX_REDUCE_POWER | PKT_TX_FORCE_CR5);
+    }
 
     uint32_t d = getRetransmitDelay(packet);
     // as this propagates outwards, give it lower and lower priority
