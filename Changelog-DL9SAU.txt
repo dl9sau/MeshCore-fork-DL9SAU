@@ -916,6 +916,116 @@ Boot-Verhalten unverändert:
   Modul beliebig Zeit für den ersten Lock — wie gehabt.
 
 ================================================================================
+14m. Channel-Polish: Scope-Memo-Verfall + kurzer Sender-Name
+================================================================================
+
+(1) runtime_last_channel_scope verfällt nach 12 h
+    (CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS).
+    Eine kurz ausprobierte "Test"-Channel-Nachricht würde sonst den
+    Nightly-Flood-Scope tagelang an diesen Test-Channel pinnen, weil
+    chooseNightFloodScope() runtime_last_channel_scope vor
+    default_scope_key vor Geo-Fallback abfragt.
+    Neues Feld runtime_last_channel_scope_at (RTC unix) speichert
+    den Setz-Zeitpunkt; in chooseNightFloodScope() Vergleich gegen
+    aktuelle Zeit, abgelaufene Einträge werden übersprungen wie wenn
+    sie nie gesetzt worden wären.
+
+(2) Channel-Sender-Name auf erste N Wörter (CR_CHANNEL_SENDER_MAX_WORDS,
+    default 2).
+    DL9SAU's eigener node_name ist
+        "Thomas DL9SAU/p @686.618 CQ<icon>"
+    — als "sender:" Prefix in jeder Channel-Nachricht bläht das die
+    eigentliche Message auf. CMD_SEND_CHANNEL_TXT_MSG nutzt jetzt
+    copyShortSenderName() das den Namen am 2. Whitespace-Wort kappt:
+        "Thomas DL9SAU/p: ..."
+    Self-Adverts, direkter Contact-Display, etc. behalten den vollen
+    Namen unverändert — nur die Channel-Payload wird gekürzt.
+
+================================================================================
+14n. Region-Lookup für eingehende Channel-Nachrichten
+================================================================================
+
+Build-time Region-Datenbank:
+  dl9sau_regions.py (PIO pre-build) scraped die deutsche MeshCore-Wiki:
+    https://meshcore-de.fyi/meshcore:allgemeines:regions:basis
+    https://meshcore-de.fyi/meshcore:allgemeines:regions:reale-regions-in-repeatern
+  Output: generated/dl9sau_regions.h (git-ignored) mit ~196 echten
+  Region-Namen.
+
+  Cache pro Tag (.dl9sau-cache/regions-YYYY-MM-DD.json, git-ignored).
+  Fallback-Kette: heutiger Cache → veralteter Cache → hardcoded
+  [bebb, ostfriesland]. EXTRA_REGIONS-Liste im Script garantiert,
+  dass unsere Geo-Fence-Paar im Output ist, auch wenn die Wiki sie
+  löschen würde.
+
+  Validierung filtert Platzhalter (de-xx, de-yy, de-*, de-..., de-...,
+  bare wildcard tokens). Großbuchstaben-Einträge werden mit "WARN:"
+  im Build-Log gemeldet (Scope-Namen sind case-sensitive, die App
+  forciert lower-case — Großbuchstaben sind also Wiki-Typos die nie
+  funktionieren würden).
+
+Firmware-Integration:
+  MyMesh.h pulls in generated/dl9sau_regions.h via __has_include —
+  Builds ohne den Pre-Build-Script (alle Nicht-Tracker-Variants
+  aktuell) bekommen einen leeren Stub.
+
+  initRegionKeys() in begin(): pre-computed TransportKey
+  (SHA-256 über "#name") für jeden Region-Eintrag. ~3 KB RAM bei
+  196 Einträgen.
+
+  lookupRegionByTransportCode() iteriert die Tabelle und HMAC-matched
+  gegen packet->transport_codes[0]. ~200 HMAC-Ops pro Channel-
+  Nachricht — ~2 ms auf ESP32-S3, irrelevant.
+
+  onChannelMessageRecv() augmentiert den Text mit einem Scope-Tag
+  zwischen Sender-Name und Doppelpunkt:
+        Sender (#de-bw): hello world     (bekannte Region)
+        Sender (#?): hello world         (scoped, Region unbekannt)
+        Sender (#*): hello world         (unscoped — '*' analog zur
+                                          repeater "allowf *"-Notation)
+  Keine Wire-Protokoll-Änderung. Ältere Knoten/App sehen den Tag
+  einfach als Teil des Sender-Namens — funktional unkritisch.
+
+Warum bei "unbekannt" kein hex-Hash gezeigt wird:
+  Der transport_code ist HMAC(scope_key, payload_type || payload),
+  also payload-abhängig. Selbe Region + andere Nachricht = anderer
+  Code. Den hex-Code als Pseudo-Identifier zu zeigen wäre
+  irreführend (Empfänger könnte denken "diese Nachrichten kommen
+  aus verschiedenen Scopes" wo sie aus demselben kommen).
+
+================================================================================
+14o. KEINE erweiterte Geo-Box-Region-Erkennung
+================================================================================
+
+Idee, die NICHT umgesetzt wird:
+  Mit 196 bekannten Regionen, davon 16 ISO-3166-2 Bundesländer
+  (de-bw, de-by, de-be, ...), wäre eine Geo-Fence-Erweiterung um
+  diese Bundesländer naheliegend — analog zu unserer bestehenden
+  hardcoded Box für #bebb (Berlin/Brandenburg) und #ostfriesland.
+
+Warum aufgegeben:
+  - Berlin (de-be) liegt geografisch IN Brandenburg (de-bb) — wer
+    eine Box "Berlin" definiert, schließt Brandenburger Knoten aus
+    obwohl sie zur Metropolregion gehören. Hybrid-Scopes wie
+    "bebb" lösen das, aber sind eben nicht-ISO-konform.
+  - Bundesländer sind grossgebietige Konstrukte: de-ni (Niedersachsen)
+    ist riesig, Hannover-Region passt nicht zu Cuxhaven-Region.
+  - Hansestädte (Bremen de-hb liegt in Niedersachsen, Hamburg de-hh
+    gehört keinem nachbarschaftlichen Bundesland zu) sind Sonderfälle.
+  - Sub-Regionen (de-ni-h für Hannover, hansemesh, bremenmesh, ...)
+    folgen unterschiedlichen Logiken — kein einheitliches Schema.
+  - Welche Box für welche Region die "richtige" ist, ist hoch
+    interpretationsabhängig. Wir würden mehr Bug-Reports generieren
+    als Mehrwert.
+
+Stand-by-Lösung bleibt:
+  chooseGeoFallbackScope() in MyMesh.cpp behält die ursprünglichen
+  zwei hardcoded Boxes (#bebb für Berlin/Brandenburg, #ostfriesland
+  für die Nordsee-Region). Für andere Standorte: User setzt
+  CMD_SET_DEFAULT_FLOOD_SCOPE in der App, dann übernimmt der
+  Schritt 2 von chooseNightFloodScope() das Ruder.
+
+================================================================================
 14j. Flood-Repeat-Power differenziert nach Quelle
 ================================================================================
 
