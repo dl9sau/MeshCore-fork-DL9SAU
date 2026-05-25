@@ -42,6 +42,57 @@ FETCH_TIMEOUT = 10  # seconds, total per URL
 # "Flood größtenteils inaktiv, ..." that share the <pre> blocks.
 NAME_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 
+# More permissive pattern used for *detection* of name-like tokens that we
+# subsequently validate; also lets in '*' and '.' so we can recognise
+# placeholder notations like "de-*" or "de-..." and skip them explicitly
+# (rather than silently — silent skips hide wiki errors).
+LOOKS_LIKE_NAME_RE = re.compile(r"^[A-Za-z0-9.*-]{1,30}$")
+
+# Placeholder names document a generic pattern, not an actual scope. Examples
+# from the wiki:
+#   "de-xx"    — generic two-letter ISO 3166-2 region
+#   "de-*"     — wildcard
+#   "de-.."    — "any two characters"
+#   "de-..."   — "any three"
+# All such notations must be skipped.
+def _is_placeholder(name):
+    low = name.lower()
+    # Suffix patterns
+    if low.endswith("-xx") or low.endswith("-yy"):
+        return True
+    if low.endswith("-*"):
+        return True
+    if re.search(r"-\.+$", low):    # ends in -. or -.. or -...
+        return True
+    # Bare placeholder tokens
+    if low in ("xx", "yy", "xxx", "yyy", "*"):
+        return True
+    # Anywhere-wildcard chars — defensive: any '*' or '.' in a name field
+    # means it's notation, not a real scope.
+    if "*" in low or "." in low:
+        return True
+    return False
+
+
+# Collected during a parse run; printed once at the end.
+_warnings = []
+
+def _validate_name(name, source):
+    """Returns the cleaned name, or None if it should be skipped.
+    Logs validation hints (upper-case, placeholder) to _warnings."""
+    if not LOOKS_LIKE_NAME_RE.match(name):
+        return None
+    if _is_placeholder(name):
+        return None
+    if not NAME_RE.match(name):
+        # Looks name-like but has upper-case letters. Scope hashes are
+        # case-sensitive and the app forces lower-case, so this is almost
+        # certainly a typo on the wiki side.
+        _warnings.append("[{}] dropping '{}' — contains upper-case letters "
+                         "(scope hashes are case-sensitive, app forces lower-case)".format(source, name))
+        return None
+    return name
+
 # Always added to the parsed list (deduplicated). Keeps the firmware aware
 # of regions we use locally even if they aren't (or no longer) documented
 # on the wiki — e.g. our chooseGeoFallbackScope() in MyMesh.cpp uses these.
@@ -75,9 +126,17 @@ def _http_get(url):
         return resp.read().decode("utf-8", errors="replace")
 
 
-def _strip_em_u(html):
-    """Pull region names out of basis page from <em class="u">name</em>."""
-    return re.findall(r'<em class="u">([a-z0-9-]+)</em>', html)
+def _strip_em_u(html, source):
+    """Pull region names out of basis page from <em class="u">name</em>.
+    Validates each match — placeholders are dropped silently, upper-case
+    names are dropped with a warning."""
+    raw = re.findall(r'<em class="u">([A-Za-z0-9.*-]+)</em>', html)
+    out = []
+    for r in raw:
+        cleaned = _validate_name(r, source)
+        if cleaned is not None:
+            out.append(cleaned)
+    return out
 
 
 class _PreCodeExtractor(HTMLParser):
@@ -105,7 +164,7 @@ class _PreCodeExtractor(HTMLParser):
             self._buf.append(data)
 
 
-def _parse_sub_blocks(html):
+def _parse_sub_blocks(html, source):
     """Extract region names from the <pre class="code"> blocks. Each line is
     'name  // optional comment' OR free-text noise we skip."""
     p = _PreCodeExtractor()
@@ -117,16 +176,16 @@ def _parse_sub_blocks(html):
             line = raw_line.split("//", 1)[0].strip()
             if not line:
                 continue
-            if NAME_RE.match(line):
-                names.append(line)
+            cleaned = _validate_name(line, source)
+            if cleaned is not None:
+                names.append(cleaned)
     return names
 
 
-def _parse_basis(html):
-    names = list(_strip_em_u(html))
+def _parse_basis(html, source):
     # Aggregate regions are written as "Region <em class="u">de-nord</em>"
     # in strong-marker rows — _strip_em_u already grabs them.
-    return names
+    return _strip_em_u(html, source)
 
 
 def _merge(*lists):
@@ -147,8 +206,8 @@ def _fetch_and_parse():
     EXTRA_REGIONS are appended even if missing on the wiki."""
     basis_html = _http_get(URL_BASE)
     sub_html = _http_get(URL_SUB)
-    basis = _parse_basis(basis_html)
-    sub = _parse_sub_blocks(sub_html)
+    basis = _parse_basis(basis_html, "basis")
+    sub = _parse_sub_blocks(sub_html, "sub")
     merged = _merge(basis, sub, EXTRA_REGIONS)
     return merged, {"fetched_at": datetime.now().isoformat(timespec="seconds")}
 
@@ -214,3 +273,5 @@ env.Append(CPPPATH=[OUT_DIR])
 
 print("[DL9SAU regions] loaded {} regions from {}".format(len(regions), source_label))
 print("[DL9SAU regions] header: {}".format(os.path.relpath(OUT_FILE, PROJECT_DIR)))
+for w in _warnings:
+    print("[DL9SAU regions] WARN: {}".format(w))
