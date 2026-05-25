@@ -1,0 +1,38 @@
+================================================================================
+Wunschliste DL9SAU — MeshCore Companion Firmware
+================================================================================
+Zweck:  Sammelpunkt für Ideen / Verbesserungen, die wir bewusst aufgeschoben
+        haben (Aufwand, Komplexität, Risiko, oder offene Vorfrage).
+Format: jeder Eintrag erklärt KURZ den IST-Zustand, das gewünschte
+        SOLL-Verhalten und WARUM nicht jetzt umgesetzt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. CAD (Channel Activity Detection) für SX126x aktivieren
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  companion_radio macht effektiv kein Listen-Before-Talk.
+  - RSSI-Polling ist deaktiviert (MyMesh::getInterferenceThreshold() = 0,
+    Kommentar "until currentRSSI() problem is resolved").
+  - Hardware-CAD ist nur für SX1276 implementiert
+    (src/helpers/radiolib/CustomSX1276.h:76: startChannelScan()).
+  - SX1262 / SX1268 / LR1110 (mein Heltec Tracker hat SX1262) haben kein
+    LBT-Schutz außer der schwachen IRQ-Mid-Receive-Detection
+    (HEADER_VALID / PREAMBLE_DETECTED).
+
+Soll-Verhalten:
+  Hardware-CAD-Aufruf in CustomSX1262::isReceiving() (analog zu
+  CustomSX1276::isReceiving()): startChannelScan() / IRQ-Auswertung.
+  Damit würde Dispatcher::checkSend() echtes LBT machen, ohne die
+  problematische RSSI-Polling-Schiene reaktivieren zu müssen.
+
+Warum nicht jetzt:
+  - Mittlerer Aufwand, timing-kritisch.
+  - Bedarf für Test-intensive Validierung (richtiges CAD-Symbol-Count,
+    Timing-Wechselwirkung mit RX-Continuous-Mode, ggf. Latenz-Effekte).
+  - Sollte sinnvollerweise upstream in MeshCore eingebracht werden,
+    nicht nur als DL9SAU-Patch.
+
+Quelle: Diskussion in dieser Session, 2026-05-26.
