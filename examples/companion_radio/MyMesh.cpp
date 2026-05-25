@@ -2,6 +2,7 @@
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
+#include <SHA256.h>
 
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
@@ -646,6 +647,39 @@ void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uin
 
 void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
                                   const char *text) {
+  // Build an augmented text that exposes the packet's scope (region) name
+  // to the app, using a text-convention "Sender (#scope): msg". No
+  // wire-protocol change required.
+  //   scoped + known region   -> (#name)
+  //   scoped + unknown region -> (#?)  (raw transport_code is payload-
+  //                             dependent and not a stable identifier)
+  //   unscoped                -> (#*)  (borrowed from repeater allowf-*
+  //                             notation: wildcard / no scope)
+  const char* effective_text = text;
+  char augmented[MAX_TEXT_LEN + 32];
+  const char* sep = strstr(text, ": ");
+  if (sep) {
+    const char* scope_label = NULL;
+    char buf[36];
+    if (pkt->hasTransportCodes()) {
+      const char* scope_name = lookupRegionByTransportCode(pkt);
+      if (scope_name) {
+        snprintf(buf, sizeof(buf), "#%s", scope_name);
+      } else {
+        snprintf(buf, sizeof(buf), "#?");
+      }
+      scope_label = buf;
+    } else {
+      scope_label = "#*";
+    }
+    size_t prefix_len = (size_t)(sep - text);
+    int n = snprintf(augmented, sizeof(augmented), "%.*s (%s)%s",
+                     (int)prefix_len, text, scope_label, sep);
+    if (n > 0 && n < (int)sizeof(augmented)) {
+      effective_text = augmented;
+    }
+  }
+
   int i = 0;
   if (app_target_ver >= 3) {
     out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
@@ -663,11 +697,11 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   out_frame[i++] = TXT_TYPE_PLAIN;
   memcpy(&out_frame[i], &timestamp, 4);
   i += 4;
-  int tlen = strlen(text); // TODO: UTF-8 ??
+  int tlen = strlen(effective_text); // TODO: UTF-8 ??
   if (i + tlen > MAX_FRAME_SIZE) {
     tlen = MAX_FRAME_SIZE - i;
   }
-  memcpy(&out_frame[i], text, tlen);
+  memcpy(&out_frame[i], effective_text, tlen);
   i += tlen;
   addToOfflineQueue(out_frame, i);
 
@@ -687,7 +721,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   if (getChannel(channel_idx, channel_details)) {
     channel_name = channel_details.name;
   }
-  if (_ui) _ui->newMsg(path_len, channel_name, text, offline_queue_len);
+  if (_ui) _ui->newMsg(path_len, channel_name, effective_text, offline_queue_len);
 #endif
 }
 
@@ -995,6 +1029,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _last_observed_rtc = 0;
   _last_millis_seen = 0;
   _millis_wraps = 0;
+#if DL9SAU_REGIONS_AVAILABLE
+  _region_keys_ready = false;
+#endif
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -1108,6 +1145,10 @@ void MyMesh::begin(bool has_display) {
   applyRadioPolicy();
   radio_set_tx_power(_prefs.tx_power_dbm);
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
+
+  // Pre-compute scope keys for the (community-sourced) region list, so
+  // incoming scoped packets can be matched to a region name.
+  initRegionKeys();
 
   // First periodic advert:
   //   - GPS off -> 5 min
@@ -2922,6 +2963,35 @@ void MyMesh::manageGpsPower() {
                   now, until_advert / 1000);
   }
 #endif
+}
+
+void MyMesh::initRegionKeys() {
+#if DL9SAU_REGIONS_AVAILABLE
+  for (int i = 0; i < DL9SAU_REGION_COUNT; i++) {
+    char buf[40];
+    int n = snprintf(buf, sizeof(buf), "#%s", dl9sau_regions[i].name);
+    if (n <= 0) continue;
+    SHA256 sha;
+    sha.update((const uint8_t*)buf, (size_t)n);
+    sha.finalize(_region_keys[i].key, sizeof(_region_keys[i].key));
+  }
+  _region_keys_ready = true;
+#endif
+}
+
+const char* MyMesh::lookupRegionByTransportCode(const mesh::Packet* packet) const {
+#if DL9SAU_REGIONS_AVAILABLE
+  if (!_region_keys_ready || packet == NULL || !packet->hasTransportCodes()) return NULL;
+  uint16_t target = packet->transport_codes[0];
+  for (int i = 0; i < DL9SAU_REGION_COUNT; i++) {
+    if (_region_keys[i].calcTransportCode(packet) == target) {
+      return dl9sau_regions[i].name;
+    }
+  }
+#else
+  (void)packet;
+#endif
+  return NULL;
 }
 
 bool MyMesh::advert() {

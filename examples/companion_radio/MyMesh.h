@@ -70,6 +70,18 @@
 #include <helpers/BaseChatMesh.h>
 #include <helpers/TransportKeyStore.h>
 
+// Region table (community-maintained, scraped at build time by dl9sau_regions.py).
+// Only available for builds that include that pre-build script (currently the
+// Heltec Tracker variants); other builds get an empty stub.
+#if __has_include("dl9sau_regions.h")
+  #include "dl9sau_regions.h"
+  #define DL9SAU_REGIONS_AVAILABLE 1
+#else
+  #define DL9SAU_REGION_COUNT 0
+  struct dl9sau_region { const char* name; };
+  static const struct dl9sau_region dl9sau_regions[1] = { { 0 } };
+#endif
+
 /* -------------------------------------------------------------------------------------- */
 
 #define REQ_TYPE_GET_STATUS             0x01 // same as _GET_STATS
@@ -284,6 +296,11 @@ private:
   // Copies _prefs.node_name into dest, truncated to the first
   // CR_CHANNEL_SENDER_MAX_WORDS whitespace-separated words.
   void copyShortSenderName(char* dest, size_t dest_size) const;
+  // Region table support — name from dl9sau_regions[] that matches the
+  // packet's transport_codes[0], or NULL if no entry matches (unknown
+  // scope or unscoped packet).
+  void initRegionKeys();
+  const char* lookupRegionByTransportCode(const mesh::Packet* packet) const;
 
   // client-repeater + periodic advert helpers
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides
@@ -380,6 +397,15 @@ private:
   bool          _gps_user_override_until_advert;  // user toggled GPS on via app — keep on until next advert
   uint32_t      _last_millis_seen;           // for wrap detection of millis()
   uint32_t      _millis_wraps;               // how many times millis() has wrapped since boot
+
+  // Pre-computed TransportKeys for every region in dl9sau_regions[]. Built
+  // once in begin() via SHA-256 over "#name". Lookup at packet receive time
+  // costs one HMAC per entry (~10 us on ESP32-S3) — at ~200 entries that's
+  // ~2 ms per channel-message lookup, acceptable.
+#if DL9SAU_REGIONS_AVAILABLE
+  TransportKey  _region_keys[DL9SAU_REGION_COUNT];
+  bool          _region_keys_ready;
+#endif
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual
