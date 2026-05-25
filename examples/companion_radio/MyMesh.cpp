@@ -973,6 +973,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(heard_list, 0, sizeof(heard_list));
   heard_next_idx = 0;
   memset(runtime_last_channel_scope.key, 0, sizeof(runtime_last_channel_scope.key));
+  runtime_last_channel_scope_at = 0;
   next_periodic_advert_at = 0;
   next_night_flood_unix = 0;
   _pos_anchor_lat = 0;
@@ -1235,6 +1236,32 @@ bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
 // like 433.125 MHz with BW=250 kHz (would extend below the 433.05 limit)
 // or 866.300 MHz with BW=125 kHz in the 866.2-866.4 sub-band (centre too
 // close to either edge).
+void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
+  if (dest_size == 0) return;
+  const char* src = _prefs.node_name;
+  size_t out = 0;
+  int word_count = 0;
+  bool in_word = false;
+  while (src[out] != 0 && out + 1 < dest_size) {
+    if (src[out] != ' ' && src[out] != '\t') {
+      if (!in_word) {
+        if (++word_count > CR_CHANNEL_SENDER_MAX_WORDS) break;
+        in_word = true;
+      }
+    } else {
+      in_word = false;
+    }
+    dest[out] = src[out];
+    out++;
+  }
+  // trim trailing whitespace (e.g. when we stopped after the 2nd word's
+  // following space but before the 3rd word's first character)
+  while (out > 0 && (dest[out - 1] == ' ' || dest[out - 1] == '\t')) {
+    out--;
+  }
+  dest[out] = 0;
+}
+
 bool MyMesh::signalFitsInIsmBand(uint32_t freq_khz, uint32_t bw_hz) const {
   uint32_t half_khz = (bw_hz + 1999) / 2000;   // ceil(BW/2) in kHz
   if (freq_khz < half_khz) return false;       // underflow guard
@@ -1375,10 +1402,16 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
-      if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+      // Use a shortened sender name for channel messages — full node_name can
+      // be long (e.g. "Thomas DL9SAU/p @686.618 CQ<icon>") which crowds out
+      // the actual message body in the group payload.
+      char short_sender[sizeof(_prefs.node_name)];
+      copyShortSenderName(short_sender, sizeof(short_sender));
+      if (success && sendGroupMessage(msg_timestamp, channel.channel, short_sender, text, len - i)) {
         // Remember the channel secret as the runtime scope; reused as Nacht-Flood scope.
         // 128-bit channel secrets map directly onto TransportKey.key.
         memcpy(runtime_last_channel_scope.key, channel.channel.secret, sizeof(runtime_last_channel_scope.key));
+        runtime_last_channel_scope_at = getRTCClock()->getCurrentTime();
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
@@ -2587,10 +2620,17 @@ bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
 }
 
 bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
-  // 1) last App-channel send since boot
-  if (!runtime_last_channel_scope.isNull()) {
-    out_key = runtime_last_channel_scope;
-    return true;
+  // 1) last App-channel send since boot — but only if recent (<12h).
+  //    A one-off "did this test channel work?" send shouldn't pin the
+  //    nightly flood to that channel for days.
+  if (!runtime_last_channel_scope.isNull() && runtime_last_channel_scope_at != 0) {
+    uint32_t now = getRTCClock()->getCurrentTime();
+    if (now >= runtime_last_channel_scope_at &&
+        (now - runtime_last_channel_scope_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
+      out_key = runtime_last_channel_scope;
+      return true;
+    }
+    // fall through — expired, treat as if no recent channel was used
   }
   // 2) configured default flood scope
   TransportKey configured;

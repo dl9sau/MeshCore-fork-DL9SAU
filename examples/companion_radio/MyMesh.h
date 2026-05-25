@@ -148,6 +148,21 @@ struct AdvertPath {
 #define CR_NIGHT_FLOOD_START_HOUR_LOCAL 23
 #define CR_NIGHT_FLOOD_END_HOUR_LOCAL    5     // exclusive
 
+// runtime_last_channel_scope expires after this many seconds — long enough
+// to cover a normal evening of messaging, short enough that a one-off test
+// channel ("did it work? no... never mind") won't dominate the next
+// nightly flood scope for days.
+#define CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS  (12UL * 3600UL)
+
+// When sending a channel text message, truncate the sender name (prefixed
+// as "name: msg" in the group payload) to this many whitespace-separated
+// words. Long full names eat into the airtime/space available for the
+// actual message body. Self-Adverts and direct contact display still use
+// the full _prefs.node_name.
+#ifndef CR_CHANNEL_SENDER_MAX_WORDS
+#define CR_CHANNEL_SENDER_MAX_WORDS  2
+#endif
+
 struct HeardEntry {
   uint8_t  hash;         // 1-byte protocol hash (pub_key[0])
   uint32_t last_heard;   // RTC unix time; 0 = empty slot
@@ -266,6 +281,9 @@ private:
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
   bool signalFitsInIsmBand(uint32_t freq_khz, uint32_t bw_hz) const;
+  // Copies _prefs.node_name into dest, truncated to the first
+  // CR_CHANNEL_SENDER_MAX_WORDS whitespace-separated words.
+  void copyShortSenderName(char* dest, size_t dest_size) const;
 
   // client-repeater + periodic advert helpers
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides
@@ -343,6 +361,7 @@ private:
   uint8_t    heard_next_idx;    // FIFO eviction index
 
   TransportKey runtime_last_channel_scope;   // RAM-only; set on CMD_SEND_CHANNEL_TXT_MSG
+  uint32_t     runtime_last_channel_scope_at; // RTC unix when above was set; 0 = unset
   unsigned long next_periodic_advert_at;     // millis()
   uint32_t      next_night_flood_unix;       // RTC unix; 0 means not scheduled
 
