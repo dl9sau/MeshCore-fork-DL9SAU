@@ -808,6 +808,36 @@ Datenquelle:
   ist ein Wrap nicht von einem stillen Reboot zu unterscheiden.
 
 ================================================================================
+14l. Auto-Versioning via PlatformIO pre-build script
+================================================================================
+
+dl9sau_version.py wird vor jedem Build ausgeführt und ersetzt die
+defaults in MyMesh.h via -D-Flags:
+
+  FIRMWARE_VERSION    = "v1.15.0gitXX-DL9SAU"  (19 chars, fits 20-byte wire)
+    - XX = letzte 2 Zeichen des `git rev-parse --short=8 HEAD`
+    - Behält die Upstream-Versions-Referenz (v1.15.0) + Git-Marker + Fork-Tag
+    - Format passt knapp ins 20-Byte Wire-Field; gibt 1:256 Wahrscheinlichkeit
+      einer Hash-Kollision (wenn Upstream zu v1.15.1 oder v1.16.0 zieht,
+      wäre das Format anzupassen)
+
+  FIRMWARE_BUILD_DATE = "DD Mon YYYY"          (11 chars, fits 12-byte wire)
+    - via Python datetime.now()
+
+Eingebunden in heltec_tracker/platformio.ini als
+  extra_scripts = pre:dl9sau_version.py
+
+Andere Variants sind unverändert; deren Builds verwenden die statischen
+Defaults aus MyMesh.h. Die #ifndef-Guards in MyMesh.h bleiben als
+Fallback erhalten — wenn jemand den Tracker-Build OHNE PIO macht, gibt
+es trotzdem einen funktionierenden Default-String.
+
+Verifikation in App nach Flash:
+  Device Info zeigt Version "v1.15.0git<XX>-DL9SAU" und Build-Date.
+  Anhand des 2-char-Hash-Suffix lässt sich der genaue Commit-Stand
+  identifizieren (im Repo: git log --oneline | grep <XX>).
+
+================================================================================
 14k. Motion tracking responsive even at static-rate advert schedule
 ================================================================================
 
