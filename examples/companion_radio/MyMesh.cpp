@@ -979,8 +979,12 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _pos_anchor_lon = 0;
   _pos_anchor_millis = 0;
   _is_moving = false;
+  _boot_lat = 0;
+  _boot_lon = 0;
+  _boot_pos_known = false;
   _gps_had_fix_ever = false;
   _gps_woke_at_millis = 0;
+  _gps_off_at_millis = 0;
   _gps_fix_seen_this_wake = false;
   _gps_user_override_until_advert = false;
   _tx_advert_count = 0;
@@ -1048,6 +1052,13 @@ void MyMesh::begin(bool has_display) {
 
   // load persisted prefs
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+
+  // Snapshot the persisted position before GPS updates start overwriting
+  // sensors.node_lat/lon. Used by updateMotionTracking() to decide if the
+  // device has moved since the last session.
+  _boot_lat = sensors.node_lat;
+  _boot_lon = sensors.node_lon;
+  _boot_pos_known = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
 
   // One-time migration: any persisted 869.000 stands for the real EU narrow
   // 869.618 MHz. Rewrite the pref so display and app show the actual
@@ -1163,6 +1174,7 @@ static FreqRange repeat_freq_ranges[] = {
   { 866800, 867000 },
   { 867400, 867600 },
   { 868700, 869200 },   // EU 869 MHz g3 band
+  //{ 869400, 869587 },   // EU 869 MHz narrow band (max BW 250 kHz), do not repeat on EU narrow main freq 869.618
   { 869400, 869650 },   // EU 869 MHz narrow band (max BW 250 kHz)
   { 902000, 928000 }    // US 915 MHz ISM band (902.0-928.0 MHz)
   // Amateur radio 70cm (430.000 - 439.999 MHz). CAVE: MeshCore encrypts
@@ -2699,23 +2711,47 @@ void MyMesh::updateMotionTracking() {
   double cur_lon = ((double)loc->getLongitude()) / 1000000.0;
   unsigned long now = millis();
 
+  // Distance helper (equirectangular approximation; fine for the
+  // sub-kilometre scale we operate at).
+  auto distMeters = [](double lat1, double lon1, double lat2, double lon2) -> double {
+    double dlat_m = (lat1 - lat2) * 111320.0;
+    double dlon_m = (lon1 - lon2) * 111320.0 * cos(lat1 * DEG_TO_RAD);
+    return sqrt(dlat_m * dlat_m + dlon_m * dlon_m);
+  };
+
+  // Boot-time motion hint: compare against the position persisted at last
+  // shutdown (or last savePrefs). Stays true throughout the boot phase
+  // (until first advert is sent) so several consecutive fixes during the
+  // initial 5-min GPS-on window all contribute to the decision.
+  if (_boot_pos_known && _tx_advert_count == 0) {
+    double d_m = distMeters(cur_lat, cur_lon, _boot_lat, _boot_lon);
+    if (d_m > CR_BOOT_MOVE_TOLERANCE_M) {
+      _is_moving = true;   // device has moved since last session
+    }
+  }
+
   if (_pos_anchor_millis == 0) {
+    // First fix this session — seed the motion anchor.
     _pos_anchor_lat = cur_lat;
     _pos_anchor_lon = cur_lon;
     _pos_anchor_millis = now;
-    _is_moving = false;
     return;
   }
 
   if (now - _pos_anchor_millis >= CR_MOTION_WINDOW_MS) {
-    // equirectangular approximation; good enough for ~370 m at temperate latitudes
-    double dlat_m = (cur_lat - _pos_anchor_lat) * 111320.0;
-    double dlon_m = (cur_lon - _pos_anchor_lon) * 111320.0 * cos(cur_lat * DEG_TO_RAD);
-    double d_m = sqrt(dlat_m * dlat_m + dlon_m * dlon_m);
+    double d_m = distMeters(cur_lat, cur_lon, _pos_anchor_lat, _pos_anchor_lon);
+    bool was_moving = _is_moving;
     _is_moving = (d_m > CR_MOTION_RADIUS_M);
     _pos_anchor_lat = cur_lat;
     _pos_anchor_lon = cur_lon;
     _pos_anchor_millis = now;
+
+    // Movement just started — accelerate the next advert so a fresh
+    // position goes out promptly, instead of waiting out the static
+    // (1h) slot we may currently be on.
+    if (!was_moving && _is_moving) {
+      next_periodic_advert_at = millis();
+    }
   }
 #else
   _is_moving = false;
@@ -2796,6 +2832,22 @@ void MyMesh::manageGpsPower() {
   // baseline: turn GPS on shortly before each scheduled advert
   bool want_gps_on = (until_advert <= (long)CR_GPS_LEAD_BEFORE_ADVERT_MS);
 
+  // Periodic motion check / time-sync wake, independent of the advert
+  // schedule. At static-rate adverts the next slot may be 55 min away,
+  // but we still want to notice movement promptly so we can switch the
+  // advert cadence. When advert_loc_policy == NONE there's no rush —
+  // just a long-interval wake to keep RTC and last-known-position warm.
+  if (_gps_off_at_millis != 0) {
+    unsigned long off_for = now - _gps_off_at_millis;
+    unsigned long check_interval = (_prefs.advert_loc_policy == ADVERT_LOC_NONE)
+                                     ? CR_GPS_TIME_SYNC_INTERVAL_MS
+                                     : CR_GPS_MOTION_CHECK_INTERVAL_MS;
+    // wake CR_GPS_LEAD_BEFORE_ADVERT_MS earlier so a fix has time to lock
+    if (off_for + CR_GPS_LEAD_BEFORE_ADVERT_MS >= check_interval) {
+      want_gps_on = true;
+    }
+  }
+
   // User toggled GPS on via the app: keep it on until the next advert,
   // regardless of fix status / hysteresis / lead time.
   if (_gps_user_override_until_advert) {
@@ -2818,11 +2870,13 @@ void MyMesh::manageGpsPower() {
   if (want_gps_on && !gps_is_on) {
     sensors.setSettingValue("gps", "1");
     _gps_woke_at_millis = (now == 0 ? 1 : now);   // 0 means "never managed"
+    _gps_off_at_millis = 0;
     _gps_fix_seen_this_wake = false;              // start a fresh wake cycle
     Serial.printf("[GPS-DBG] wake at millis=%lu (until_advert=%lds)\n", now, until_advert / 1000);
   } else if (!want_gps_on && gps_is_on) {
     sensors.setSettingValue("gps", "0");
     _gps_woke_at_millis = 0;
+    _gps_off_at_millis = (now == 0 ? 1 : now);
     _gps_fix_seen_this_wake = false;
     Serial.printf("[GPS-DBG] sleep at millis=%lu (until_advert=%lds, fix_was_seen=1)\n",
                   now, until_advert / 1000);

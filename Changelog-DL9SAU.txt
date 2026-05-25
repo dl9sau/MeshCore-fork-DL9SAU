@@ -808,6 +808,84 @@ Datenquelle:
   ist ein Wrap nicht von einem stillen Reboot zu unterscheiden.
 
 ================================================================================
+14k. Motion tracking responsive even at static-rate advert schedule
+================================================================================
+
+Beobachtung beim Spaziergang:
+  Nach Boot, GPS-Fix, erstem Advert bei t=5 min — keine moving-Erkennung,
+  GPS schlief weiter, Position im Advert blieb 15+ min alt.
+
+Drei zusammenwirkende Ursachen:
+
+(1) Erster Auto-Advert lief mit _is_moving=false (Initialwert), weil zum
+    Zeitpunkt t=5 min das 10-min Motion-Window noch nicht geschlossen war.
+    -> computeNextAdvertIntervalMs() returnt STATIC (1h).
+(2) next_periodic_advert_at = +1h. Der GPS-Wake-Trigger (5 min vor Advert)
+    liegt damit ca. 55 min in der Zukunft — kein Wake dazwischen.
+(3) Wenn GPS aus, läuft updateMotionTracking() ohne Fix, kann das
+    Motion-Window nicht schließen — Selbst-Verstärkung des Problems.
+
+Drei Fixes, gemeinsam wirksam:
+
+(A) GPS wakeup unabhängig vom Advert-Schedule:
+    Im manageGpsPower() neues Periodic-Wake-Kriterium. Wenn das GPS
+    länger als CR_GPS_MOTION_CHECK_INTERVAL_MS (= 15 min) aus war,
+    wird es geweckt — egal ob ein Advert ansteht. Bei
+    advert_loc_policy == ADVERT_LOC_NONE wird CR_GPS_TIME_SYNC_INTERVAL_MS
+    (= 6h) genutzt: GPS-Position braucht's nicht im Advert, aber RTC-Sync
+    und last-known-position-Cache sollen aktuell bleiben.
+
+    Tracking via neues Feld _gps_off_at_millis (Zeitpunkt des letzten
+    Power-Off). Beim Wake wird es auf 0 zurückgesetzt — initialer Boot
+    (GPS dauerhaft an bis erster Fix) hat _gps_off_at_millis == 0 und
+    überspringt den Check, alles wie gehabt.
+
+(B) Boot-Vergleich gegen persistierte Position:
+    sensors.node_lat / node_lon enthalten beim Boot die zuletzt
+    gespeicherte Position. Wir snapshooten die in begin() VOR sensors
+    sie überschreibt, in _boot_lat / _boot_lon / _boot_pos_known.
+
+    In updateMotionTracking() solange noch kein Advert gesendet wurde
+    (_tx_advert_count == 0), vergleichen wir den aktuellen Fix gegen
+    diese Boot-Position. Mehr als CR_BOOT_MOVE_TOLERANCE_M (= 120 m)
+    Abstand -> _is_moving = true.
+
+    120 m statt 370 m (CR_MOTION_RADIUS_M), weil cheap-GPS-Module beim
+    Cold-Start typisch 50-100 m Position-Jitter haben.
+
+    Praktischer Effekt: User legt Gerät zu Hause -> static. User geht
+    raus, dann Boot -> aktueller Fix weit weg von gespeicherter
+    Position -> moving=true sofort, erster Advert in 5 min mit korrekter
+    moving-Bewertung, Cycle läuft mit 15-min-Slot.
+
+    Plus: während der 5-min-Wake-Phase nach Boot kommen typisch mehrere
+    Fixes. Wir vergleichen jeden gegen die Boot-Position, nicht nur den
+    ersten — falls der erste Fix noch ungenau ist (Cold-Start-Jitter),
+    fängt ein späterer Fix die Bewegung an.
+
+(C) Bewegungs-Trigger beschleunigt nächsten Advert:
+    Im 10-min-Window-Vergleich, wenn _is_moving von false nach true
+    wechselt:  next_periodic_advert_at = millis()
+    -> Advert geht im nächsten loop()-Tick raus (statt evtl. noch
+    55 Min auf den ursprünglich geplanten Static-Slot zu warten).
+
+Konstanten:
+  CR_GPS_MOTION_CHECK_INTERVAL_MS  = 15 min
+  CR_GPS_TIME_SYNC_INTERVAL_MS     =  6 h
+  CR_BOOT_MOVE_TOLERANCE_M         = 120 m
+
+Refactoring:
+  Equirectangular-Distanz-Berechnung in updateMotionTracking() in ein
+  Lambda 'distMeters(lat1,lon1,lat2,lon2)' konsolidiert. Wird sowohl
+  beim Boot-Vergleich als auch beim Motion-Window-Check verwendet.
+
+Boot-Verhalten unverändert:
+  GPS ist beim Systemstart eingeschaltet, wenn _prefs.gps_enabled == 1
+  (über applyGpsPrefs() in main.cpp). manageGpsPower() greift NICHT vor
+  dem ersten Fix (early-return auf !_gps_had_fix_ever). Damit hat das
+  Modul beliebig Zeit für den ersten Lock — wie gehabt.
+
+================================================================================
 14j. Flood-Repeat-Power differenziert nach Quelle
 ================================================================================
 

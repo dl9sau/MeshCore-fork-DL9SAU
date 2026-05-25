@@ -110,6 +110,18 @@ struct AdvertPath {
 #ifndef CR_GPS_MIN_AWAKE_MS
 #define CR_GPS_MIN_AWAKE_MS           (60UL * 1000UL)        // keep awake at least 1 min once turned on
 #endif
+// Periodic motion-check wake, independent of the advert schedule. Even in
+// static (1h-advert) mode we want to notice movement promptly so we can
+// switch the advert cadence. 15 min keeps motion tracking responsive.
+#ifndef CR_GPS_MOTION_CHECK_INTERVAL_MS
+#define CR_GPS_MOTION_CHECK_INTERVAL_MS  (15UL * 60UL * 1000UL)
+#endif
+// When the advert does NOT carry position (advert_loc_policy == NONE), we
+// still wake GPS occasionally for RTC time sync and last-known-position
+// cache refresh. Longer interval — extra energy is negligible.
+#ifndef CR_GPS_TIME_SYNC_INTERVAL_MS
+#define CR_GPS_TIME_SYNC_INTERVAL_MS     (6UL * 3600UL * 1000UL)
+#endif
 
 // periodic advert feature — dynamic interval
 // 3h: no location in advert, or GPS enabled but no fix
@@ -120,6 +132,10 @@ struct AdvertPath {
 #define CR_ADVERT_INT_MOVING_MS    (15UL * 60UL * 1000UL)
 #define CR_MOTION_WINDOW_MS        (10UL * 60UL * 1000UL)
 #define CR_MOTION_RADIUS_M         370.0
+// Tolerance for the boot-time comparison against the persisted position
+// (sensors.node_lat/lon). Wider than CR_MOTION_RADIUS_M to absorb the
+// jitter that a cheap GPS module produces on a fresh cold-start fix.
+#define CR_BOOT_MOVE_TOLERANCE_M   120.0
 // 5 min after boot when GPS is off or has already obtained a fix; if GPS is
 // enabled but still searching, wait up to 10 min so that the first advert can
 // already carry a position. When the first fix arrives during the wait, the
@@ -335,8 +351,12 @@ private:
   double        _pos_anchor_lon;
   unsigned long _pos_anchor_millis;          // 0 means no anchor yet
   bool          _is_moving;                  // result of last window evaluation
+  double        _boot_lat;                   // persisted position at boot, before GPS overwrites it
+  double        _boot_lon;
+  bool          _boot_pos_known;             // true if loadPrefs gave us a non-zero position
   bool          _gps_had_fix_ever;           // true once GPS reported a valid fix this session
   unsigned long _gps_woke_at_millis;         // when we last (re-)enabled GPS; 0 = currently off (or never managed)
+  unsigned long _gps_off_at_millis;          // when we last switched GPS off; 0 = currently on (or never managed)
   bool          _gps_fix_seen_this_wake;     // a position fix arrived since last wakeup — OK to sleep again
   bool          _gps_user_override_until_advert;  // user toggled GPS on via app — keep on until next advert
   uint32_t      _last_millis_seen;           // for wrap detection of millis()
