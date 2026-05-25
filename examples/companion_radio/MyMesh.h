@@ -248,6 +248,7 @@ private:
   void checkCLIRescueCmd();
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
+  bool signalFitsInIsmBand(uint32_t freq_khz, uint32_t bw_hz) const;
 
   // client-repeater + periodic advert helpers
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides

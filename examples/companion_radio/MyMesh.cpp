@@ -1010,6 +1010,14 @@ void MyMesh::begin(bool has_display) {
   // load persisted prefs
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
 
+  // One-time migration: any persisted 869.000 stands for the real EU narrow
+  // 869.618 MHz. Rewrite the pref so display and app show the actual
+  // operating frequency rather than the app-side shorthand.
+  if (fabsf(_prefs.freq - CR_NARROW_FREQ_TRIGGER) < 0.0005f) {
+    _prefs.freq = CR_NARROW_FREQ_ACTUAL;
+    _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  }
+
   // sanitise bad pref values
   _prefs.rx_delay_base = constrain(_prefs.rx_delay_base, 0, 20.0f);
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
@@ -1087,10 +1095,42 @@ struct FreqRange {
   uint32_t lower_freq, upper_freq;
 };
 
+// Legal ISM band centre-frequency ranges in kHz. NOTE: these are the band
+// edges of the regulatory limit; the app is responsible for keeping
+// (mid_freq +/- BW/2) inside one band, picking a BW that respects the
+// per-band maximum, AND keeping TX power within the band's ERP cap.
+// The MeshCore wire protocol currently only carries a single global
+// MAX_LORA_TX_POWER — per-band power limits below are EU regulatory
+// guidance, not enforced by firmware.
+//
+// Why no automatic clamping? The legal limit is ERP (relative to dipole)
+// or EIRP (relative to isotrope), not the chip's conducted output. The
+// actual radiated power depends on cable loss, antenna gain (dBi vs dBd)
+// and antenna efficiency. Hard-clamping the chip output would either
+// over-restrict (long feedline, no antenna gain) or under-restrict
+// (high-gain antenna right at the radio). The user has to do that math.
+//
+// EU regulatory caps:
+//   70cm SRD (433.05-434.79):     10  mW ERP, 10%   duty cycle (LPD433)
+//   865.6-867.6 MHz sub-bands:    500 mW ERP, 10%   duty (network AP) / 2.5% else
+//   868.7-869.2 MHz (g3):          25 mW ERP, 0.1%  duty cycle
+//   869.4-869.65 MHz (g4 narrow): 500 mW ERP, 10%   duty (LBT/AFA recommended)
+//   US 902-928 MHz:               1 W EIRP for spread-spectrum (FCC Part 15)
 static FreqRange repeat_freq_ranges[] = {
-  { 433000, 433000 },
-  { 869000, 869000 },
-  { 918000, 918000 }
+  { 433050, 434790 },   // 70cm SRD / ISM, EU + most regions (BW typ. <= 250 kHz)
+  // EU 865-868 MHz sub-bands (BW <= 200 kHz each):
+  { 865600, 865800 },
+  { 866200, 866400 },
+  { 866800, 867000 },
+  { 867400, 867600 },
+  { 868700, 869200 },   // EU 869 MHz g3 band
+  { 869400, 869650 },   // EU 869 MHz narrow band (max BW 250 kHz)
+  { 902000, 928000 }    // US 915 MHz ISM band (902.0-928.0 MHz)
+  // Amateur radio 70cm (430.000 - 439.999 MHz). CAVE: MeshCore encrypts
+  // payloads end-to-end, which is generally not permitted on amateur
+  // radio frequencies (open-mode requirement). Only uncomment if you are
+  // sure your local regulation allows it for your usage:
+  //, { 430000, 439999 }
 };
 
 void MyMesh::applyRadioPolicy() {
@@ -1135,6 +1175,23 @@ bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
   for (int i = 0; i < sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]); i++) {
     auto r = &repeat_freq_ranges[i];
     if (f >= r->lower_freq && f <= r->upper_freq) return true;
+  }
+  return false;
+}
+
+// Checks that the entire LoRa signal spectrum (centre freq +/- BW/2) fits
+// inside one of the listed ISM band ranges. Catches misconfigurations
+// like 433.125 MHz with BW=250 kHz (would extend below the 433.05 limit)
+// or 866.300 MHz with BW=125 kHz in the 866.2-866.4 sub-band (centre too
+// close to either edge).
+bool MyMesh::signalFitsInIsmBand(uint32_t freq_khz, uint32_t bw_hz) const {
+  uint32_t half_khz = (bw_hz + 1999) / 2000;   // ceil(BW/2) in kHz
+  if (freq_khz < half_khz) return false;       // underflow guard
+  uint32_t lo = freq_khz - half_khz;
+  uint32_t hi = freq_khz + half_khz;
+  for (size_t i = 0; i < sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]); i++) {
+    auto r = &repeat_freq_ranges[i];
+    if (lo >= r->lower_freq && hi <= r->upper_freq) return true;
   }
   return false;
 }
@@ -1527,10 +1584,26 @@ void MyMesh::handleCmdFrame(size_t len) {
       repeat = cmd_frame[i++];   // FIRMWARE_VER_CODE  9+
     }
 
+    // EU narrow band shorthand: older apps (and our own previous version)
+    // still send the label 869.000 MHz. Map to the real 869.618 BEFORE
+    // validating against the repeat-freq allow-list, otherwise repeat=1
+    // would be rejected.
+    if (freq == (uint32_t)(CR_NARROW_FREQ_TRIGGER * 1000.0f + 0.5f)) {
+      freq = (uint32_t)(CR_NARROW_FREQ_ACTUAL * 1000.0f + 0.5f);
+    }
+
     if (repeat && !isValidClientRepeatFreq(freq)) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7000 &&
         bw <= 500000) {
+      // Always enforce: full signal spectrum (freq +/- BW/2) must fit inside
+      // an ISM band, regardless of repeat=0/1. Catches edge-case configs
+      // like 433.125 MHz with BW=250 kHz (extends below 433.05 limit) or
+      // 866.300 MHz with BW=125 kHz centered close to a sub-band edge.
+      if (!signalFitsInIsmBand(freq, bw)) {
+        writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        return;
+      }
       _prefs.sf = sf;
       _prefs.cr = cr;
       _prefs.freq = (float)freq / 1000.0;

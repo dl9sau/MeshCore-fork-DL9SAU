@@ -808,6 +808,78 @@ Datenquelle:
   ist ein Wrap nicht von einem stillen Reboot zu unterscheiden.
 
 ================================================================================
+14i. Frequenz-Anzeige konsistent + ISM-Band-Ranges korrigiert
+================================================================================
+
+(1) Display und App zeigten 869.000 MHz an, obwohl die Firmware tatsächlich
+    auf 869.618 MHz sendet (EU narrow band). Display holt die Frequenz aus
+    _prefs.freq; mein bisheriger Override in applyRadioPolicy() rechnete nur
+    in einer lokalen 'float freq'-Variable, _prefs.freq selbst blieb auf
+    869.000. Verwirrend bei Frequenz-Anzeige in Display + App.
+
+    Fix (Option A — _prefs.freq wird persistent gemappt):
+      - CMD_SET_RADIO_PARAMS-Handler: nach dem Übernehmen des freq-Werts
+        wird 869.000 sofort zu 869.618. Das Mapping passiert VOR
+        isValidClientRepeatFreq(), damit alte App-Versionen weiter
+        funktionieren (Backward-Compat).
+      - begin(): nach loadPrefs() einmal-Migration für persistierte 869.000
+        nach 869.618 (Save erfolgt sofort).
+      - applyRadioPolicy() behält das Live-Mapping als Sicherheitsnetz.
+
+    Display und App zeigen jetzt konsistent 869.618.
+
+(2) repeat_freq_ranges (Liste der erlaubten Repeat-Frequenzen, an App
+    via CMD_GET_ALLOWED_REPEAT_FREQ) wurde von Einzelpunkten auf echte
+    ISM-Bandgrenzen umgestellt. Bisher:
+      { 433000, 433000 }, { 869000, 869000 }, { 918000, 918000 }
+    Probleme: 433.000 liegt unter dem 70cm-SRD-Band (legal ab 433.05),
+    869.000 war nur ein App-Shorthand für 869.618, und 918.000 war ein
+    Einzelpunkt im US 902-928 MHz Band.
+
+    Neue Liste (alle in kHz, centre frequency):
+      { 433050, 434790 }    70cm SRD/ISM, BW typ. <= 250 kHz
+      { 865600, 865800 }    EU 865-868, BW <= 200 kHz, 500 mW ERP,
+      { 866200, 866400 }      duty <= 10% (network access point) bzw.
+      { 866800, 867000 }      <= 2.5% sonst
+      { 867400, 867600 }
+      { 868700, 869200 }    EU 869 MHz g3 (25 mW ERP, 0.1% duty)
+      { 869400, 869650 }    EU 869 narrow (BW <= 250 kHz, höhere Power)
+      { 902000, 928000 }    US 915 MHz ISM Band
+
+    isValidClientRepeatFreq() funktioniert weiterhin als (lower <= f
+    <= upper) Check, jetzt sind das echte Ranges statt Punkte.
+
+(3) Neue Helper-Methode signalFitsInIsmBand(freq_khz, bw_hz):
+    Prüft, ob das volle LoRa-Signal-Spektrum (Mittenfrequenz +/- BW/2)
+    komplett innerhalb einer der Ranges liegt. Fängt Fehlkonfigurationen
+    ab wie:
+      - 433.125 MHz mit BW=250 kHz  -> Signal 433.000-433.250, unten
+                                       50 kHz außerhalb des 433.05-Limits
+      - 866.300 MHz mit BW=125 kHz  -> Mitte zu nah am Sub-Band-Rand
+                                       (Sub-Band ist nur 200 kHz breit)
+
+    Aufruf IMMER bei CMD_SET_RADIO_PARAMS (nicht nur bei repeat=1).
+    Bei Verletzung: ERR_CODE_ILLEGAL_ARG zurück an App.
+
+(4) Power-Limits per Band sind im Code dokumentiert (Kommentar bei
+    repeat_freq_ranges), werden aber NICHT automatisch geclampt:
+      70cm SRD (433.05-434.79):        10 mW ERP, 10% duty
+      865.6-867.6 sub-bands:          500 mW ERP, 10%/2.5% duty
+      868.7-869.2 (g3):                25 mW ERP, 0.1% duty
+      869.4-869.65 (g4 narrow):       500 mW ERP, 10% duty
+      US 902-928 MHz:                  1 W EIRP (FCC Part 15)
+
+    Begründung gegen auto-clamping: das legale Limit ist ERP/EIRP, nicht
+    die Chip-Output. Kabelverlust und Antennengewinn (dBi vs dBd) machen
+    die effektive radiated power kontext-abhängig — hartes Clipping
+    würde entweder über- oder unter-restriktiv sein. User-Verantwortung.
+
+(5) Amateurfunk 70cm (430-440 MHz) als auskommentierter Eintrag mit
+    Warnung. CAVE: MeshCore-Verschlüsselung ist auf Amateurfunk-
+    Frequenzen i.d.R. nicht erlaubt (Open-Mode-Vorschrift). Wer die
+    Range aktiviert, muss prüfen ob seine lokale Regulierung das hergibt.
+
+================================================================================
 14d-Messung. Stromverbrauch real (Heltec Wireless Tracker)
 ================================================================================
 
