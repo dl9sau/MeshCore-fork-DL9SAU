@@ -305,6 +305,10 @@ private:
   // PUSH_CODE_DEBUG_LOG frame (so the user can inspect logs in the app's
   // Debug-Protokolle view when no USB-Serial is attached, e.g. mobile).
   void pushDebugLog(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+  // Re-evaluate geo-based scope recommendations for the given lat/lon and
+  // push a debug-log line if the result changed since the last call.
+  // No-op if either coordinate is exactly 0.0.
+  void maybePushGeoRecommendation(double lat, double lon);
 
   // client-repeater + periodic advert helpers
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides
@@ -410,6 +414,10 @@ private:
   TransportKey  _region_keys[DL9SAU_REGION_COUNT];
   bool          _region_keys_ready;
 #endif
+
+  // Cache of the last geo-scope recommendation we logged, so we don't spam
+  // the debug log on every motion-tracking tick.
+  char          _last_geo_reco[200];
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual

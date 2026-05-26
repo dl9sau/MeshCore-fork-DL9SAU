@@ -3,6 +3,7 @@
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
 #include <SHA256.h>
+#include "dl9sau_geo_recommendations.h"
 
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
@@ -1033,6 +1034,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 #if DL9SAU_REGIONS_AVAILABLE
   _region_keys_ready = false;
 #endif
+  _last_geo_reco[0] = 0;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -1098,6 +1100,9 @@ void MyMesh::begin(bool has_display) {
   _boot_lat = sensors.node_lat;
   _boot_lon = sensors.node_lon;
   _boot_pos_known = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
+  if (_boot_pos_known) {
+    maybePushGeoRecommendation(_boot_lat, _boot_lon);
+  }
 
   // One-time migration: any persisted 869.000 stands for the real EU narrow
   // 869.618 MHz. Rewrite the pref so display and app show the actual
@@ -1538,6 +1543,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       sensors.node_lat = ((double)lat) / 1000000.0;
       sensors.node_lon = ((double)lon) / 1000000.0;
       savePrefs();
+      // User just programmed a fixed location — re-evaluate scope-recommendation
+      // so the app sees the matching #region list right away.
+      maybePushGeoRecommendation(sensors.node_lat, sensors.node_lon);
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG); // invalid geo coordinate
@@ -2793,6 +2801,11 @@ void MyMesh::updateMotionTracking() {
   double cur_lon = ((double)loc->getLongitude()) / 1000000.0;
   unsigned long now = millis();
 
+  // First fix this session OR a fresh motion-window tick (every 10 min) —
+  // re-evaluate which regions our coordinates fall into. Dedup is in
+  // maybePushGeoRecommendation(), so calling per tick is cheap.
+  maybePushGeoRecommendation(cur_lat, cur_lon);
+
   // Distance helper (equirectangular approximation; fine for the
   // sub-kilometre scale we operate at).
   auto distMeters = [](double lat1, double lon1, double lat2, double lon2) -> double {
@@ -2964,6 +2977,17 @@ void MyMesh::manageGpsPower() {
                   now, until_advert / 1000);
   }
 #endif
+}
+
+void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
+  if (lat == 0.0 && lon == 0.0) return;
+  char buf[200];
+  dl9sau_recommend_scopes(lat, lon, buf, sizeof(buf));
+  if (buf[0] == 0) return;
+  if (strcmp(buf, _last_geo_reco) == 0) return;   // unchanged, skip
+  strncpy(_last_geo_reco, buf, sizeof(_last_geo_reco) - 1);
+  _last_geo_reco[sizeof(_last_geo_reco) - 1] = 0;
+  pushDebugLog("[GEO-SCOPE] lat=%.4f lon=%.4f -> %s", lat, lon, buf);
 }
 
 void MyMesh::pushDebugLog(const char* fmt, ...) {

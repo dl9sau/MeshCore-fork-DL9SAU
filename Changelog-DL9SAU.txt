@@ -1026,6 +1026,63 @@ Stand-by-Lösung bleibt:
   Schritt 2 von chooseNightFloodScope() das Ruder.
 
 ================================================================================
+14p. Geo-Scope-Empfehlung im Debug-Log (Hint, kein Auto-Routing)
+================================================================================
+
+Komplementär zu 14o: wir routen weiterhin NICHT automatisch nach
+Geo, ABER wir geben dem User einen Hinweis welche Region-/Scope-
+Namen für seinen Standort sinnvoll wären. Damit kann er informiert
+entscheiden welchen Default-Scope er per CMD_SET_DEFAULT_FLOOD_SCOPE
+in der App setzen will.
+
+Ausgabe-Format:
+  [GEO-SCOPE] lat=52.5200 lon=13.4050 -> europe, de, de-ost, de-be, bebb
+  (Reihenfolge: breitester Scope zuerst, spezifischster zuletzt.)
+
+Trigger:
+  - Boot wenn fixe Position bekannt (_boot_pos_known)
+  - Erster GPS-Fix dieser Session
+  - Box-Wechsel beim Motion-Tracking (alle 10 min, dedup im Helper)
+  - User programmiert neue fixe Location (CMD_SET_ADVERT_LATLON)
+
+Datenbasis (Phase 1, minimum viable):
+  - 25 hartkodierte BBoxes in
+    examples/companion_radio/dl9sau_geo_recommendations.cpp:
+    * 2 Top-Level: europe, de
+    * 5 Aggregate: de-nord, de-ost, de-sued, de-west, de-mitte
+    * 16 Bundesländer (de-bw...de-th, inkl. der 3 Stadtstaaten
+      de-be, de-hb, de-hh)
+    * 2 lokale Spezialfälle: bebb, ostfriesland
+  - Boxen sind grob mit ganzen Bogenminuten gezeichnet — gut genug
+    für "welcher Scope passt zu dieser Region", NICHT für scharfe
+    Grenz-Logik.
+  - Region-Namen aus dem dl9sau_regions.py-Wiki-Scrape: unsere
+    Boxes verwenden GENAU diese Namen, so dass die Empfehlung mit
+    dem Lookup-Mechanismus (siehe 14n) konsistent ist.
+
+Stadtstaaten-Spezialregel:
+  Berliner / Hamburger / Bremer brauchen ihren umgebenden
+  Flächenstaat in der Empfehlung NICHT zu sehen — die Brandenburger
+  bleiben unter #de-bb, und zur Kommunikation Berlin <-> Brandenburg
+  wird #de-bebb verwendet. Konkret:
+    - de-be (Berlin)    -> unterdrückt de-bb
+    - de-hb (Bremen)    -> unterdrückt de-ni
+    - de-hh (Hamburg)   -> unterdrückt de-ni UND de-sh
+  Implementiert als CityStateRule[]-Tabelle in der .cpp.
+
+Dedup:
+  MyMesh::maybePushGeoRecommendation() merkt sich die zuletzt
+  gemeldete Empfehlungs-Zeichenkette in _last_geo_reco[] und logged
+  nur bei Änderung. Der 10-Minuten-Motion-Tick darf damit billig
+  aufrufen ohne den Debug-Log zu fluten.
+
+Phase 2 (deferred, KEIN aktueller Codestand):
+  Grenz-Toleranz ~5-10 km für "erweiterte Heimat" — wer 5 km
+  jenseits der Bundeslands-Grenze wohnt sieht seinen Nachbar-
+  Bundesland weiterhin in der Empfehlung. Wurde bewusst nicht
+  in Phase 1 implementiert um die Logik einfach zu halten.
+
+================================================================================
 14j. Flood-Repeat-Power differenziert nach Quelle
 ================================================================================
 
