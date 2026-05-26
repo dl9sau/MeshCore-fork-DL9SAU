@@ -3598,7 +3598,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   static const char* const TOP_CMDS[] = {
     "help", "?", "status", "stats", "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
-    "prefs",
+    "prefs", "neighbors", "tempradio",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -3704,6 +3704,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "neighbors")) {
+        pushCompanionMessage(
+          "neighbors: Liste der Contacts die in den letzten 48h via Advert "
+          "gehoert wurden. Zeigt Typ (rep/cmp/room/sns), Name, Alter, Hops."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "tempradio")) {
+        pushCompanionMessage(
+          "tempradio <freq> <sf> <bw> <cr> [<tx_dbm>]: temporaere "
+          "Funkparameter (nicht persistent, weg nach Reboot)."
+        );
+        pushCompanionMessage(
+          "Range-Tests ohne savePrefs. Caveat: andere CLI-Befehle die "
+          "savePrefs() machen wuerden die temp-Werte ins File schreiben."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "prefs")) {
         pushCompanionMessage(
           "prefs: zeigt/resettet die DL9SAU-Companion-Variablen. "
@@ -3790,8 +3808,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     pushCompanionMessage(
-      "Befehle: help [topic], status, stats, uptime, advert, autoadv, "
-      "repeater, duty, scope, gps, trace, chatname, prefs, reboot."
+      "Befehle: help [topic], status, stats, uptime, neighbors, advert, "
+      "autoadv, repeater, duty, scope, gps, trace, chatname, prefs, reboot."
     );
     return;
   }
@@ -4051,6 +4069,146 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     } else {
       pushCompanionMessage("Usage: gps [on | off | power ...]  (ohne Arg -> Status)");
     }
+    return;
+  }
+
+  // ---------- tempradio <freq> <sf> <bw> <cr> [<tx_dbm>] ----------------
+  // Temporaere Funk-Parameter (nicht persistent). Ueberschreibt _prefs
+  // OHNE savePrefs - beim Reboot werden _prefs aus File geladen und die
+  // tempradio-Werte sind weg. Caveat: andere CLI-Befehle die savePrefs()
+  // aufrufen wuerden die tempradio-Werte ins File schreiben (-> Test
+  // beenden bevor anderes geaendert wird, oder einfach rebooten).
+  if (starts_with_word(cmd, "tempradio")) {
+    // Argumente parsen: brauchen min. freq sf bw cr.
+    const char* p = strchr(cmd, ' ');
+    if (!p) { pushCompanionMessage("Usage: tempradio <freq_MHz> <sf> <bw_kHz> <cr> [<tx_dbm>]"); return; }
+    while (*p == ' ') p++;
+    // freq (float in MHz)
+    float freq = atof(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    // sf (int)
+    int sf = atoi(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    // bw (float in kHz)
+    float bw = atof(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    // cr (int)
+    int cr = atoi(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    // tx_dbm optional
+    int tx = (*p) ? atoi(p) : (int)_prefs.tx_power_dbm;
+
+    if (freq < 150.0f || freq > 2500.0f) {
+      pushCompanionMessage("freq ausserhalb 150..2500 MHz");
+      return;
+    }
+    if (sf < 5 || sf > 12) { pushCompanionMessage("sf ausserhalb 5..12"); return; }
+    if (bw < 7.0f || bw > 500.0f) { pushCompanionMessage("bw ausserhalb 7..500 kHz"); return; }
+    if (cr < 5 || cr > 8) { pushCompanionMessage("cr ausserhalb 5..8"); return; }
+    if (tx < -9 || tx > MAX_LORA_TX_POWER) {
+      char e[80]; snprintf(e, sizeof(e), "tx_dbm ausserhalb -9..%d", (int)MAX_LORA_TX_POWER);
+      pushCompanionMessage(e);
+      return;
+    }
+
+    // _prefs direkt ueberschreiben (KEIN savePrefs)
+    _prefs.freq = freq;
+    _prefs.sf = (uint8_t)sf;
+    _prefs.bw = bw;
+    _prefs.cr = (uint8_t)cr;
+    _prefs.tx_power_dbm = (int8_t)tx;
+    applyRadioPolicy();
+    radio_set_tx_power((int8_t)tx);
+
+    char line[160];
+    snprintf(line, sizeof(line),
+             "OK - tempradio: f=%.4f sf=%d bw=%.1f cr=%d tx=%d dBm "
+             "(NICHT persistent, weg nach Reboot)",
+             freq, sf, bw, cr, tx);
+    pushCompanionMessage(line);
+    return;
+  }
+
+  // ---------- neighbors -------------------------------------------------
+  // Listet alle bekannten Contacts die wir in den letzten 48h ueber einen
+  // Advert gehoert haben (direkt oder ueber Repeats). Sortierung in der
+  // Reihenfolge wie die contacts[]-Tabelle aufgebaut ist (kein Sort um
+  // Speicher/Zeit zu sparen).
+  if (starts_with_word(cmd, "neighbors")) {
+    uint32_t now = getRTCClock()->getCurrentTime();
+    int num = getNumContacts();
+    int shown = 0;
+
+    // Akkumulierender Buffer wie bei prefs (mehrzeilig pro push).
+    char buf[200];
+    size_t buf_used = 0;
+    auto flush = [&](bool force) {
+      if (buf_used == 0) return;
+      if (!force && buf_used < 130) return;
+      buf[buf_used] = 0;
+      pushCompanionMessage(buf);
+      buf_used = 0;
+    };
+    auto add_line = [&](const char* line) {
+      size_t len = strlen(line);
+      if (buf_used + len + 2 >= sizeof(buf)) flush(true);
+      if (buf_used > 0) buf[buf_used++] = '\n';
+      for (size_t i = 0; i < len && buf_used < sizeof(buf) - 1; i++) {
+        buf[buf_used++] = line[i];
+      }
+      flush(false);
+    };
+
+    add_line("neighbors (heard < 48h):");
+
+    for (int i = 0; i < num; i++) {
+      ContactInfo c;
+      if (!getContactByIdx(i, c)) continue;
+      if (c.lastmod == 0) continue;
+      if (now - c.lastmod > CR_HEARD_MAX_AGE_SECS) continue;
+
+      // Age formatieren (RTC-relativ).
+      char age[16];
+      uint32_t s = now - c.lastmod;
+      if      (s < 60)     snprintf(age, sizeof(age), "%us", (unsigned)s);
+      else if (s < 3600)   snprintf(age, sizeof(age), "%um", (unsigned)(s / 60));
+      else if (s < 86400)  snprintf(age, sizeof(age), "%uh%02um",
+                                    (unsigned)(s / 3600), (unsigned)((s % 3600) / 60));
+      else                 snprintf(age, sizeof(age), "%ud%02uh",
+                                    (unsigned)(s / 86400), (unsigned)((s % 86400) / 3600));
+
+      const char* tname;
+      switch (c.type) {
+        case ADV_TYPE_REPEATER: tname = "rep "; break;
+        case ADV_TYPE_CHAT:     tname = "cmp "; break;
+        case ADV_TYPE_ROOM:     tname = "room"; break;
+        case ADV_TYPE_SENSOR:   tname = "sns "; break;
+        default:                tname = "?   "; break;
+      }
+
+      char hop[16];
+      if (c.out_path_len == OUT_PATH_UNKNOWN) {
+        snprintf(hop, sizeof(hop), "?");
+      } else {
+        snprintf(hop, sizeof(hop), "%u", (unsigned)c.out_path_len);
+      }
+
+      char line[160];
+      snprintf(line, sizeof(line), "  %s %-18.18s %6s hops=%s",
+               tname, c.name, age, hop);
+      add_line(line);
+      shown++;
+    }
+
+    char summary[80];
+    snprintf(summary, sizeof(summary),
+             "total: %d within 48h, %d known", shown, num);
+    add_line(summary);
+    flush(true);
     return;
   }
 
