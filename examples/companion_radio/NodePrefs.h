@@ -34,4 +34,13 @@ struct NodePrefs {  // persisted to file
   uint8_t autoadd_max_hops;  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops (max 64)
   char default_scope_name[31];
   uint8_t default_scope_key[16];
+  // Konfigurierbarer Chat-Sendername (Group-Channel-Messages).
+  //   0 = erste 2 Wörter aus node_name (Default, backward-compatible)
+  //   1 = nur erstes Wort aus node_name
+  //   2 = custom (chat_name_custom wird verwendet)
+  // Werte über die NodePrefs am Ende angehängt damit alte persistierte
+  // /new_prefs-Dateien weiterhin lesbar bleiben (file.read auf EOF lässt
+  // die memset(0)-Defaults stehen, mode=0 = bisheriges Verhalten).
+  uint8_t chat_name_mode;
+  char    chat_name_custom[32];
 };

@@ -1295,6 +1295,20 @@ bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
 // close to either edge).
 void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
   if (dest_size == 0) return;
+  // Mode 2: custom override aus chat_name_custom
+  if (_prefs.chat_name_mode == 2 && _prefs.chat_name_custom[0] != 0) {
+    size_t i = 0;
+    while (i + 1 < dest_size && _prefs.chat_name_custom[i] != 0
+           && i < sizeof(_prefs.chat_name_custom)) {
+      dest[i] = _prefs.chat_name_custom[i];
+      i++;
+    }
+    dest[i] = 0;
+    return;
+  }
+  // Mode 0 (default): erste CR_CHANNEL_SENDER_MAX_WORDS Wörter aus node_name
+  // Mode 1: nur das erste Wort
+  int max_words = (_prefs.chat_name_mode == 1) ? 1 : CR_CHANNEL_SENDER_MAX_WORDS;
   const char* src = _prefs.node_name;
   size_t out = 0;
   int word_count = 0;
@@ -1302,7 +1316,7 @@ void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
   while (src[out] != 0 && out + 1 < dest_size) {
     if (src[out] != ' ' && src[out] != '\t') {
       if (!in_word) {
-        if (++word_count > CR_CHANNEL_SENDER_MAX_WORDS) break;
+        if (++word_count > max_words) break;
         in_word = true;
       }
     } else {
@@ -3169,11 +3183,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
   // Smartphone-Tastaturen capitalisieren oft das erste Zeichen automatisch
   // ("Help" statt "help"). Lokale lowercase-Kopie für case-insensitive
-  // Befehl-/Argument-Matching. Phase-2-Sub-Befehle die Original-Case
-  // brauchen (z.B. "chatname custom <text>") müssen den raw-Input separat
-  // verarbeiten — dafür nehmen sie den Offset des Argument-Tokens und
-  // greifen über den hier weitergegebenen raw_cmd ab.
-  const char* raw_cmd = cmd; (void)raw_cmd;  // reserviert für Phase 2
+  // Befehl-/Argument-Matching. Sub-Befehle die Original-Case brauchen (z.B.
+  // "chatname custom <Name>") rechnen den Offset im lowercase-Buffer aus
+  // und greifen damit in raw_cmd.
+  const char* raw_cmd = cmd;
   char lower[200];
   size_t L = strlen(cmd);
   if (L >= sizeof(lower)) L = sizeof(lower) - 1;
@@ -3214,12 +3227,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (starts_with_word(topic, "chatname")) {
+        pushCompanionMessage(
+          "chatname konfiguriert den Sendernamen in Group-Channel-Messages. "
+          "Default sind die ersten 2 Woerter aus dem konfigurierten Node-Namen. "
+          "Argumente: '1' = nur erstes Wort, '2' oder 'auto' = 2 Woerter, "
+          "'custom <Name>' = frei waehlbar (Original-Case bleibt erhalten). "
+          "Ohne Argument wird der aktuelle Stand angezeigt."
+        );
+        return;
+      }
       pushCompanionMessage("(kein Help-Eintrag fuer dieses Topic)");
       return;
     }
     pushCompanionMessage(
-      "Befehle: help [topic], status, advert, gps on, gps off, reboot. "
-      "Weitere folgen (zerohop on/off, nightly on/off, region set, scope set)."
+      "Befehle: help [topic], status, advert, gps on/off, chatname, reboot. "
+      "Weitere folgen (zerohop on/off, nightly on/off, region set, scope set, "
+      "client-repeat on/off mit ISM-Pruefung)."
     );
     return;
   }
@@ -3276,6 +3300,68 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Kurz warten damit die Push-Nachricht noch raus geht
     delay(1000);
     board.reboot();
+    return;
+  }
+
+  // ---------- chatname --------------------------------------------------
+  // Konfiguriert wie der Sender-Name in Group-Channel-Messages aussieht.
+  //   chatname                 -> aktuellen Status anzeigen
+  //   chatname 1               -> nur erstes Wort aus node_name
+  //   chatname 2  | auto       -> erste 2 Wörter aus node_name (Standard)
+  //   chatname custom <Name>   -> frei wählbarer Text (raw, mit Original-Case)
+  if (starts_with_word(cmd, "chatname")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+
+    if (!arg || *arg == 0) {
+      char line[160], preview[32];
+      copyShortSenderName(preview, sizeof(preview));
+      const char* mode_str = "?";
+      if (_prefs.chat_name_mode == 0) mode_str = "auto-2-words (default)";
+      else if (_prefs.chat_name_mode == 1) mode_str = "auto-1-word";
+      else if (_prefs.chat_name_mode == 2) mode_str = "custom";
+      snprintf(line, sizeof(line), "chatname mode=%s  preview=\"%s\"", mode_str, preview);
+      pushCompanionMessage(line);
+      return;
+    }
+    if (strcmp(arg, "1") == 0) {
+      _prefs.chat_name_mode = 1;
+      savePrefs();
+      pushCompanionMessage("OK — chatname = erstes Wort.");
+      return;
+    }
+    if (strcmp(arg, "2") == 0 || starts_with_word(arg, "auto")) {
+      _prefs.chat_name_mode = 0;
+      savePrefs();
+      pushCompanionMessage("OK — chatname = erste 2 Woerter (Standard).");
+      return;
+    }
+    if (starts_with_word(arg, "custom")) {
+      // Custom-Text muss aus raw_cmd (Original-Case) genommen werden.
+      // Offset von arg's Text-Pointer in lower[] auf raw_cmd übertragen.
+      const char* lc_text = strchr(arg, ' ');
+      if (lc_text) { while (*lc_text == ' ') lc_text++; }
+      if (!lc_text || *lc_text == 0) {
+        pushCompanionMessage("Usage: chatname custom <Name>");
+        return;
+      }
+      size_t offset = (size_t)(lc_text - lower);
+      const char* raw_text = raw_cmd + offset;
+      // Trailing-WS war bereits im Intercept-Pfad abgeschnitten.
+      size_t i = 0;
+      while (raw_text[i] != 0 && i + 1 < sizeof(_prefs.chat_name_custom)) {
+        _prefs.chat_name_custom[i] = raw_text[i];
+        i++;
+      }
+      _prefs.chat_name_custom[i] = 0;
+      _prefs.chat_name_mode = 2;
+      savePrefs();
+      char reply[80];
+      snprintf(reply, sizeof(reply), "OK — chatname custom = \"%s\".", _prefs.chat_name_custom);
+      pushCompanionMessage(reply);
+      return;
+    }
+    pushCompanionMessage("Usage: chatname [1 | 2 | auto | custom <Name>]");
     return;
   }
 
