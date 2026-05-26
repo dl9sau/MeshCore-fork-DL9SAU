@@ -36,3 +36,53 @@ Warum nicht jetzt:
     nicht nur als DL9SAU-Patch.
 
 Quelle: Diskussion in dieser Session, 2026-05-26.
+
+
+--------------------------------------------------------------------------------
+2. Brownout / Unterspannungs-Schutz (Stage 3)
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  - ESP32 Hardware-Brownout-Detector ist aktiv mit Default-Schwelle
+    (~2.5-2.7V), wird in der Firmware NICHT explizit konfiguriert.
+  - Software-Shutdown bei niedriger Spannung existiert als
+    Build-Flag-Mechanismus (AUTO_SHUTDOWN_MILLIVOLTS in
+    variants/<board>/platformio.ini). UITask.cpp:866-883 checkt
+    alle ~10s getBattMilliVolts() und triggert shutdown() wenn aktiv.
+  - Andere Heltec-Varianten haben AUTO_SHUTDOWN_MILLIVOLTS=3400
+    gesetzt (V2, V3, V4); der heltec_tracker NICHT.
+
+Problemszenario (User-Bericht):
+  Companion-Tracker startete an einer schwachen USB-Powerbank nicht.
+  Vermutlich Stromspitzen-Problem: ESP32 zieht beim Boot kurz ~500 mA,
+  Powerbank-Spannung kollabiert, HW-Brownout-Detector triggert Reset,
+  Reset-Loop.
+
+Soll-Verhalten (Variante C):
+  a) AUTO_SHUTDOWN_MILLIVOLTS=3400 fuer heltec_tracker aktivieren.
+     Hilft nicht beim Boot-Problem direkt, aber sauberes Shutdown
+     wenn Akku im Betrieb leer wird (statt HW-Reset).
+
+  b) Companion-CLI "brownout"-Befehl:
+       brownout                  -> Status (HW-Level, SW-Shutdown-mV)
+       brownout level N (0..7)   -> RTC_CNTL_BROWN_OUT_REG-Level
+                                    (0 = niedrigste Schwelle = mehr
+                                    Spielraum, hilft bei Powerbank-
+                                    Sag-Problemen). Persistent in
+                                    NodePrefs, beim Boot setzen.
+       brownout off              -> HW-Brownout-Detector deaktivieren
+                                    (RISIKO: keine Flash-Korruptions-
+                                    Schutz bei Unterspannung). User
+                                    explizit warnen.
+       brownout shutdown N       -> Software-Shutdown-Schwelle in mV
+                                    setzen (Override fuer
+                                    AUTO_SHUTDOWN_MILLIVOLTS-Default).
+
+Warum nicht jetzt:
+  - User wuenscht explizit Stage 3.
+  - Test-intensive Validierung mit verschiedener Spannungsversorgung
+    noetig.
+  - HW-Brownout-Disable ist sicherheitsrelevant; muss gut
+    dokumentiert/gewarnt werden.
+
+Quelle: User-Anfrage in dieser Session, 2026-05-26.
