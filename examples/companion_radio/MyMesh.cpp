@@ -3376,6 +3376,59 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   lower[L] = 0;
   cmd = lower;
 
+  // Top-Level-Befehl-Prefix-Expansion (z.B. "up" -> "uptime"). Bei
+  // Mehrdeutigkeit wird die Liste der Kandidaten ausgegeben und der
+  // Befehl abgebrochen. Erstes Wort des cmd (lower-buffer) wird gegen
+  // die bekannte Top-Level-Liste gematched. Der raw_cmd-Pointer bleibt
+  // unveraendert; Sub-Handler die raw-strings brauchen (chatname custom)
+  // tokenisieren raw_cmd selbst.
+  static const char* const TOP_CMDS[] = {
+    "help", "?", "status", "stats", "uptime", "advert", "auto",
+    "repeater", "gps", "trace", "chatname", "reboot", "duty",
+  };
+  static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
+  size_t fw_len = 0;
+  while (cmd[fw_len] != 0 && cmd[fw_len] != ' ' && cmd[fw_len] != '\t') fw_len++;
+  if (fw_len > 0) {
+    bool exact_found = false;
+    int prefix_matches = 0;
+    const char* prefix_canonical = NULL;
+    for (size_t k = 0; k < TOP_N; k++) {
+      size_t cl = strlen(TOP_CMDS[k]);
+      if (cl == fw_len && strncmp(TOP_CMDS[k], cmd, fw_len) == 0) {
+        exact_found = true;
+        break;
+      }
+      if (cl > fw_len && strncmp(TOP_CMDS[k], cmd, fw_len) == 0) {
+        prefix_matches++;
+        prefix_canonical = TOP_CMDS[k];
+      }
+    }
+    if (!exact_found && prefix_matches == 1) {
+      // Eindeutiger Prefix — expandiere im lower-Buffer in place.
+      size_t can_len = strlen(prefix_canonical);
+      size_t rest_len = L - fw_len;
+      if (can_len + rest_len < sizeof(lower)) {
+        memmove(lower + can_len, lower + fw_len, rest_len + 1);
+        memcpy(lower, prefix_canonical, can_len);
+        L = can_len + rest_len;
+      }
+    } else if (!exact_found && prefix_matches > 1) {
+      char msg[160];
+      int pos = snprintf(msg, sizeof(msg), "Mehrdeutig:");
+      for (size_t k = 0; k < TOP_N; k++) {
+        size_t cl = strlen(TOP_CMDS[k]);
+        if (cl > fw_len && strncmp(TOP_CMDS[k], cmd, fw_len) == 0) {
+          pos += snprintf(msg + pos, sizeof(msg) - pos, " %s", TOP_CMDS[k]);
+        }
+      }
+      pushCompanionMessage(msg);
+      return;
+    }
+    // exact_found ODER prefix_matches == 0: cmd unveraendert, weiter unten
+    // wird entweder ein Sub-Handler greifen oder die Default-Unknown-Antwort.
+  }
+
   // ---------- help / ? --------------------------------------------------
   if (starts_with_word(cmd, "help") || starts_with_word(cmd, "?")) {
     // Optionales Topic?
@@ -3967,15 +4020,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     if (starts_with_word(arg, "custom")) {
       // Custom-Text muss aus raw_cmd (Original-Case) genommen werden.
-      // Offset von arg's Text-Pointer in lower[] auf raw_cmd übertragen.
+      // Token-Walk im raw_cmd: 3. Token (nach "chatname" und "custom"),
+      // robust auch gegen Top-Level-Prefix-Expansion (lower-Buffer kann
+      // laenger sein als raw_cmd wenn User "chat custom Foo" tippte und
+      // wir intern auf "chatname" expandiert haben).
       const char* lc_text = strchr(arg, ' ');
       if (lc_text) { while (*lc_text == ' ') lc_text++; }
       if (!lc_text || *lc_text == 0) {
         pushCompanionMessage("Usage: chatname custom <Name>");
         return;
       }
-      size_t offset = (size_t)(lc_text - lower);
-      const char* raw_text = raw_cmd + offset;
+      const char* rp = raw_cmd;
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip 1st token (chatname/chat/...)
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip 2nd token (custom)
+      while (*rp == ' ' || *rp == '\t') rp++;
+      const char* raw_text = rp;
+      if (*raw_text == 0) {
+        pushCompanionMessage("Usage: chatname custom <Name>");
+        return;
+      }
       // Trailing-WS war bereits im Intercept-Pfad abgeschnitten.
       size_t i = 0;
       while (raw_text[i] != 0 && i + 1 < sizeof(_prefs.chat_name_custom)) {
