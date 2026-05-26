@@ -155,6 +155,26 @@ Quelle: User-Anfrage in dieser Session, 2026-05-26.
 
 
 --------------------------------------------------------------------------------
+4b. prefs erweitert um App-Settings (Backup/Restore-Aequivalent)
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  Companion-CLI 'prefs' zeigt/resettet NUR DL9SAU-spezifische
+  NodePrefs-Variablen (chat_name_mode, autoadv, duty, scope*, trace,
+  gps_power_*). App-konfigurierte Werte (node_name, freq, sf, bw,
+  tx_power, default_scope_*, gps_enabled etc) sind via App-Backup
+  verfuegbar.
+
+Soll-Verhalten:
+  Optional 'prefs app' Sub-Befehl der die App-Settings anzeigt
+  (read-only oder mit Konfiguration). Begruendung: einige Funkamateure
+  haben evtl. keine App und konfigurieren ausschliesslich per Companion-
+  Chat ueber USB/BLE-Serial-Bruecke.
+
+Quelle: User-Anregung in dieser Session, 2026-05-26.
+
+
+--------------------------------------------------------------------------------
 5. scope geo-prefers <on/off> - Auto-Geo statt Default-Scope wenn fern
 --------------------------------------------------------------------------------
 

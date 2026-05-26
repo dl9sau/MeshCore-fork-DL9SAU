@@ -3589,6 +3589,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   static const char* const TOP_CMDS[] = {
     "help", "?", "status", "stats", "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
+    "prefs",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -3694,6 +3695,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "prefs")) {
+        pushCompanionMessage(
+          "prefs: zeigt/resettet die DL9SAU-Companion-Variablen. "
+          "App-Settings (node_name, freq, ...) sind NICHT betroffen."
+        );
+        pushCompanionMessage(
+          "prefs        -> nur Non-Default-Werte. "
+          "prefs all    -> alle mit [default]-Markierung. "
+          "prefs reset  -> alle DL9SAU-Vars auf Default."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "duty")) {
         pushCompanionMessage(
           "duty: Duty-Cycle-Schutz (10% TX-Airtime pro rollendem 1h-Fenster). "
@@ -3769,7 +3782,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     pushCompanionMessage(
       "Befehle: help [topic], status, stats, uptime, advert, autoadv, "
-      "repeater, duty, scope, gps, trace, chatname, reboot."
+      "repeater, duty, scope, gps, trace, chatname, prefs, reboot."
     );
     return;
   }
@@ -4027,6 +4040,163 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     } else {
       pushCompanionMessage("Usage: gps [on | off | power ...]  (ohne Arg -> Status)");
     }
+    return;
+  }
+
+  // ---------- prefs [show | all | reset] -------------------------------
+  // Zeigt / resettet die DL9SAU-spezifischen Prefs (die ueber Companion-CLI
+  // konfigurierbar sind). App-Settings (node_name, freq, default_scope etc.)
+  // sind NICHT betroffen - dafuer existiert das App-eigene Backup.
+  if (starts_with_word(cmd, "prefs")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    bool show_all = (arg && strcmp(arg, "all") == 0);
+    bool do_reset = (arg && strcmp(arg, "reset") == 0);
+
+    if (do_reset) {
+      _prefs.chat_name_mode = 0;
+      memset(_prefs.chat_name_custom, 0, sizeof(_prefs.chat_name_custom));
+      _prefs.auto_advert_enabled = 0;
+      _prefs.client_repeat_force = 0;
+      _prefs.duty_soft_pct = 80;
+      _prefs.duty_hard_pct = 100;
+      memset(_prefs.bake_scope_name, 0, sizeof(_prefs.bake_scope_name));
+      memset(_prefs.bake_scope_key,  0, sizeof(_prefs.bake_scope_key));
+      memset(_prefs.override_scope_name, 0, sizeof(_prefs.override_scope_name));
+      memset(_prefs.override_scope_key,  0, sizeof(_prefs.override_scope_key));
+      _prefs.override_expiry = 0;
+      _prefs.trace_flags_persistent = 0;
+      _prefs.gps_power_mode = 0;
+      _prefs.gps_lead_min = 5;
+      _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
+      savePrefs();
+      pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.");
+      return;
+    }
+
+    // Akkumulierender Buffer der bei ~140 Zeichen autom. pusht.
+    char prefs_buf[200];
+    size_t buf_used = 0;
+    auto flush_buf = [&](bool force) {
+      if (buf_used == 0) return;
+      if (!force && buf_used < 130) return;
+      prefs_buf[buf_used] = 0;
+      pushCompanionMessage(prefs_buf);
+      buf_used = 0;
+    };
+    auto add_line = [&](const char* line) {
+      size_t len = strlen(line);
+      if (buf_used + len + 2 >= sizeof(prefs_buf)) flush_buf(true);
+      if (buf_used > 0) prefs_buf[buf_used++] = '\n';
+      for (size_t i = 0; i < len && buf_used < sizeof(prefs_buf) - 1; i++) {
+        prefs_buf[buf_used++] = line[i];
+      }
+      flush_buf(false);
+    };
+
+    // Erste Zeile = Header
+    add_line(show_all ? "prefs (all DL9SAU):" : "prefs (non-default):");
+    int non_default_count = 0;
+    char tmp[160];
+
+    // chatname
+    if (show_all || _prefs.chat_name_mode != 0) {
+      snprintf(tmp, sizeof(tmp), "  chat_name_mode = %u%s",
+               (unsigned)_prefs.chat_name_mode,
+               _prefs.chat_name_mode == 0 ? " [default]" : " (default: 0)");
+      add_line(tmp);
+      if (_prefs.chat_name_mode != 0) non_default_count++;
+    }
+    if (show_all || _prefs.chat_name_custom[0] != 0) {
+      snprintf(tmp, sizeof(tmp), "  chat_name_custom = \"%s\"%s",
+               _prefs.chat_name_custom,
+               _prefs.chat_name_custom[0] == 0 ? " [default]" : " (default: \"\")");
+      add_line(tmp);
+      if (_prefs.chat_name_custom[0] != 0) non_default_count++;
+    }
+    // autoadv
+    if (show_all || _prefs.auto_advert_enabled != 0) {
+      snprintf(tmp, sizeof(tmp), "  auto_advert_enabled = %u%s",
+               (unsigned)_prefs.auto_advert_enabled,
+               _prefs.auto_advert_enabled == 0 ? " [default]" : " (default: 0)");
+      add_line(tmp);
+      if (_prefs.auto_advert_enabled != 0) non_default_count++;
+    }
+    // client_repeat_force
+    if (show_all || _prefs.client_repeat_force != 0) {
+      snprintf(tmp, sizeof(tmp), "  client_repeat_force = %u%s",
+               (unsigned)_prefs.client_repeat_force,
+               _prefs.client_repeat_force == 0 ? " [default]" : " (default: 0)");
+      add_line(tmp);
+      if (_prefs.client_repeat_force != 0) non_default_count++;
+    }
+    // duty
+    if (show_all || _prefs.duty_soft_pct != 80) {
+      snprintf(tmp, sizeof(tmp), "  duty_soft_pct = %u%%%s",
+               (unsigned)_prefs.duty_soft_pct,
+               _prefs.duty_soft_pct == 80 ? " [default]" : " (default: 80)");
+      add_line(tmp);
+      if (_prefs.duty_soft_pct != 80) non_default_count++;
+    }
+    if (show_all || _prefs.duty_hard_pct != 100) {
+      snprintf(tmp, sizeof(tmp), "  duty_hard_pct = %u%%%s",
+               (unsigned)_prefs.duty_hard_pct,
+               _prefs.duty_hard_pct == 100 ? " [default]" : " (default: 100)");
+      add_line(tmp);
+      if (_prefs.duty_hard_pct != 100) non_default_count++;
+    }
+    // bake scope
+    bool bake_set = false;
+    for (size_t k = 0; k < sizeof(_prefs.bake_scope_key); k++)
+      if (_prefs.bake_scope_key[k] != 0) { bake_set = true; break; }
+    if (show_all || bake_set) {
+      snprintf(tmp, sizeof(tmp), "  bake_scope = %s%s",
+               bake_set ? _prefs.bake_scope_name : "(none)",
+               bake_set ? " (default: (none))" : " [default]");
+      add_line(tmp);
+      if (bake_set) non_default_count++;
+    }
+    // override scope
+    bool ovr_set = (_prefs.override_expiry != 0);
+    if (show_all || ovr_set) {
+      uint32_t now = getRTCClock()->getCurrentTime();
+      const char* tag = (ovr_set && now < _prefs.override_expiry) ? "active" : "expired";
+      snprintf(tmp, sizeof(tmp), "  override_scope = %s (%s)%s",
+               ovr_set ? _prefs.override_scope_name : "(none)",
+               ovr_set ? tag : "n/a",
+               ovr_set ? " (default: (none))" : " [default]");
+      add_line(tmp);
+      if (ovr_set) non_default_count++;
+    }
+    // trace persistent
+    if (show_all || _prefs.trace_flags_persistent != 0) {
+      snprintf(tmp, sizeof(tmp), "  trace_flags_persistent = 0x%04X%s",
+               (unsigned)_prefs.trace_flags_persistent,
+               _prefs.trace_flags_persistent == 0 ? " [default]" : " (default: 0x0000)");
+      add_line(tmp);
+      if (_prefs.trace_flags_persistent != 0) non_default_count++;
+    }
+    // gps power
+    if (show_all || _prefs.gps_power_mode != 0) {
+      snprintf(tmp, sizeof(tmp), "  gps_power_mode = %s%s",
+               _prefs.gps_power_mode == 1 ? "always-on" : "cycle",
+               _prefs.gps_power_mode == 0 ? " [default]" : " (default: cycle)");
+      add_line(tmp);
+      if (_prefs.gps_power_mode != 0) non_default_count++;
+    }
+    if (show_all || (_prefs.gps_lead_min != 0 && _prefs.gps_lead_min != 5)) {
+      uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
+      snprintf(tmp, sizeof(tmp), "  gps_lead_min = %u%s",
+               (unsigned)lead,
+               lead == 5 ? " [default]" : " (default: 5)");
+      add_line(tmp);
+      if (lead != 5) non_default_count++;
+    }
+
+    if (!show_all && non_default_count == 0) {
+      add_line("  (alle Werte auf Default)");
+    }
+    flush_buf(true);
     return;
   }
 
