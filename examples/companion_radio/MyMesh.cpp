@@ -577,6 +577,26 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
 #endif
 }
 
+// Lesbarer Pakettyp-Name fuer Trace-Output (statt nur Zahlenwert).
+static const char* ptypeName(uint8_t pt) {
+  switch (pt) {
+    case PAYLOAD_TYPE_REQ:        return "REQ";
+    case PAYLOAD_TYPE_RESPONSE:   return "RSP";
+    case PAYLOAD_TYPE_TXT_MSG:    return "TXT";
+    case PAYLOAD_TYPE_ACK:        return "ACK";
+    case PAYLOAD_TYPE_ADVERT:     return "ADV";
+    case PAYLOAD_TYPE_GRP_TXT:    return "GRP";
+    case PAYLOAD_TYPE_GRP_DATA:   return "GDATA";
+    case PAYLOAD_TYPE_ANON_REQ:   return "ANON";
+    case PAYLOAD_TYPE_PATH:       return "PATH";
+    case PAYLOAD_TYPE_TRACE:      return "TRC";
+    case PAYLOAD_TYPE_MULTIPART:  return "MPART";
+    case PAYLOAD_TYPE_CONTROL:    return "CTRL";
+    case PAYLOAD_TYPE_RAW_CUSTOM: return "RAW";
+    default:                      return "?";
+  }
+}
+
 bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
   // REVISIT: try to determine which Region (from transport_codes[1]) that Sender is indicating for replies/responses
   //    if unknown, fallback to finding Region from transport_codes[0], the 'scope' used by Sender
@@ -593,7 +613,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     _rx_flood_by_ptype[ptype_raw]++;
   }
 
-  if (_prefs.client_repeat == 0) return false;
+  if (_prefs.client_repeat == 0) {
+    // Kein Trace hier - bei deaktiviertem Repeater wuerde JEDES Paket einen
+    // filter-trace generieren, das ist nur Laerm.
+    return false;
+  }
 
   // Duty-Cycle Soft-Limit: Repeats unterdruecken bei Annaeherung an die
   // 10%/h-Grenze. Eigene Pakete (Auto-Adverts, User-Chat) laufen weiter
@@ -605,20 +629,23 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     return false;
   }
 
-  // path-length cap (hop count, not byte length)
-  if (packet->getPathHashCount() > CR_MAX_REPEAT_PATH_LEN) return false;
-
   uint8_t ptype = packet->getPayloadType();
   bool decision = false;
+  const char* reject_reason = "?";
 
+  // path-length cap (hop count, not byte length)
+  if (packet->getPathHashCount() > CR_MAX_REPEAT_PATH_LEN) {
+    reject_reason = "path-too-long";
+  }
   // ADVERTs and ACKs: forward only if the packet is scoped (transport-coded)
-  if (ptype == PAYLOAD_TYPE_ADVERT || ptype == PAYLOAD_TYPE_ACK ||
+  else if (ptype == PAYLOAD_TYPE_ADVERT || ptype == PAYLOAD_TYPE_ACK ||
       ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA ||
       ptype == PAYLOAD_TYPE_MULTIPART || ptype == PAYLOAD_TYPE_CONTROL ||
       ptype == PAYLOAD_TYPE_RAW_CUSTOM || ptype == PAYLOAD_TYPE_TRACE ||
       ptype == PAYLOAD_TYPE_REQ || ptype == PAYLOAD_TYPE_RESPONSE ||
       ptype == PAYLOAD_TYPE_TXT_MSG || ptype == PAYLOAD_TYPE_ANON_REQ) {
     decision = packet->hasTransportCodes();
+    if (!decision) reject_reason = "unscoped";
   } else if (ptype == PAYLOAD_TYPE_PATH) {
     // PATH discovery: only repeat for local nodes (heard < 48h OR known contact < 48h)
     if (packet->payload_len >= 2) {
@@ -639,9 +666,13 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       };
 
       decision = matchHash(dest_hash) || matchHash(src_hash);
+      if (!decision) reject_reason = "path-endpoint-unknown";
+    } else {
+      reject_reason = "path-payload-too-short";
     }
+  } else {
+    reject_reason = "unknown-ptype";
   }
-  // else: unknown payload types stay decision=false (do not forward)
 
   if (decision) {
     _tx_digi_count++;
@@ -652,13 +683,13 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     // anderen Stellen im Code: pathBytes + payload + 2 Header-Bytes).
     _tx_repeat_airtime_ms += _radio->getEstAirtimeFor(
         packet->getPathByteLen() + packet->payload_len + 2);
-    traceCompanion(TRACE_REPEAT, "[repeat] type=%u hops=%u scope=%s",
-                   (unsigned)ptype, (unsigned)packet->getPathHashCount(),
+    traceCompanion(TRACE_REPEAT, "[repeat] %s hops=%u scope=%s",
+                   ptypeName(ptype), (unsigned)packet->getPathHashCount(),
                    packet->hasTransportCodes() ? "yes" : "no");
   } else {
-    traceCompanion(TRACE_FILTER, "[filter] reject type=%u hops=%u scope=%s",
-                   (unsigned)ptype, (unsigned)packet->getPathHashCount(),
-                   packet->hasTransportCodes() ? "yes" : "no");
+    traceCompanion(TRACE_FILTER, "[filter] reject %s hops=%u reason=%s",
+                   ptypeName(ptype), (unsigned)packet->getPathHashCount(),
+                   reject_reason);
   }
   return decision;
 }
@@ -3498,7 +3529,7 @@ static const TraceCat trace_cats[] = {
   { "heard",   TRACE_HEARD,   "neue Direct-heard Nodes (HeardList)" },
   { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
   { "connect", TRACE_CONNECT, "BLE-App-Connect Events" },
-  { "filter",  TRACE_FILTER,  "abgelehnte Forward-Kandidaten (kann viel)" },
+  { "filter",  TRACE_FILTER,  "NICHT-repeatete Pakete + Grund (kann viele Zeilen erzeugen)" },
   { "night",   TRACE_NIGHT,   "Nightly-Flood Schedule + Scope-Auswahl" },
   { "duty",    TRACE_DUTY,    "Duty-Cycle Drops (Soft/Hard) ueber 10% TX/h" },
 };
@@ -3877,10 +3908,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 #if ENV_INCLUDE_GPS == 1
       cur = sensors.getSettingByKey("gps");
 #endif
+      // off       = laut Konfiguration deaktiviert (Pref-Schalter aus)
+      // on        = konfiguriert ein + Modul gerade aktiv
+      // sleeping  = konfiguriert ein, Modul aktuell per Power-Cycle aus
       const char* state;
       if (!_prefs.gps_enabled) state = "off";
       else if (cur && cur[0] == '1') state = "on";
-      else state = "off (sleep)";
+      else state = "sleeping";
       char line[160];
       snprintf(line, sizeof(line),
                "gps=%s  fix_ever=%d  moving=%d",
