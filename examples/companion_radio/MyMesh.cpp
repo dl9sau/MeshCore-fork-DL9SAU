@@ -1861,7 +1861,10 @@ void MyMesh::handleCmdFrame(size_t len) {
       freq = (uint32_t)(CR_NARROW_FREQ_ACTUAL * 1000.0f + 0.5f);
     }
 
-    if (repeat && !isValidClientRepeatFreq(freq)) {
+    if (repeat && !_prefs.client_repeat_force && !isValidClientRepeatFreq(freq)) {
+      // App will Repeater aktivieren auf einer Freq die ausserhalb des
+      // strict-Range liegt UND der Force-Flag wurde nicht gesetzt (siehe
+      // Companion-Befehl "repeater on force"). Ablehnen.
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7000 &&
         bw <= 500000) {
@@ -1878,6 +1881,11 @@ void MyMesh::handleCmdFrame(size_t len) {
       _prefs.freq = (float)freq / 1000.0;
       _prefs.bw = (float)bw / 1000.0;
       _prefs.client_repeat = repeat;
+      // Force-Flag wird gecleared sobald der Repeater per App deaktiviert
+      // wird. Damit muss er erneut per Companion "repeater on force"
+      // aktiviert werden — verhindert dass jemand per App ein/aus toggelt
+      // und dabei den force-Modus stillschweigend reaktiviert.
+      if (!repeat) _prefs.client_repeat_force = 0;
       savePrefs();
 
       applyRadioPolicy();
@@ -3356,7 +3364,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Führende Whitespace überspringen
   while (*cmd == ' ' || *cmd == '\t') cmd++;
   if (*cmd == 0) {
-    pushCompanionMessage("(leerer Befehl — 'help' zeigt verfügbare Kommandos)");
+    pushCompanionMessage("(leerer Befehl - 'help' zeigt verfügbare Kommandos)");
     return;
   }
 
@@ -3383,7 +3391,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // unveraendert; Sub-Handler die raw-strings brauchen (chatname custom)
   // tokenisieren raw_cmd selbst.
   static const char* const TOP_CMDS[] = {
-    "help", "?", "status", "stats", "uptime", "advert", "auto",
+    "help", "?", "status", "stats", "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
@@ -3452,24 +3460,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
-      if (topic_prefix_match(topic, "auto")) {
+      if (topic_prefix_match(topic, "autoadv")) {
         pushCompanionMessage(
-          "auto advert [on/off]: schaltet die selbstaendigen Adverts ein/aus "
-          "(zero-hop periodic UND nightly flood gemeinsam). Default nach Flash "
-          "ist OFF — der User muss explizit aktivieren."
+          "autoadv [on/off]: schaltet die periodisch wiederkehrenden Adverts "
+          "ein/aus (15min/1h/3h zero-hop + nightly flood)."
+        );
+        pushCompanionMessage(
+          "Default nach Flash ist OFF - explizit per 'autoadv on' aktivieren. "
+          "Unterschied zu 'advert': 'advert' sendet EINMAL jetzt."
         );
         return;
       }
       if (topic_prefix_match(topic, "repeater")) {
         pushCompanionMessage(
-          "repeater [on [--force] | off]: schaltet client_repeat ein/aus. "
-          "Bei 'on' wird die Frequenz gegen einen strict-Range geprueft "
-          "(compliant variant — z.B. 869.618 MHz NICHT enthalten)."
+          "repeater [on [force] | off]: schaltet client_repeat ein/aus. "
+          "'on' prueft die Freq gegen einen strict-Range (z.B. 869.618 MHz "
+          "NICHT enthalten)."
         );
         pushCompanionMessage(
-          "Mit '--force' wird der strict-Check uebersprungen; "
-          "signalFitsInIsmBand (ISM-Gate) bleibt aktiv. Ohne Arg -> Status "
-          "mit aktueller Freq und strict_ok=yes/no."
+          "'force' ueberspringt diesen Check; signalFitsInIsmBand "
+          "bleibt aktiv. Force-Flag wird persistiert und beim App-'aus' "
+          "gecleared. Ohne Arg -> Status."
         );
         return;
       }
@@ -3486,7 +3497,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "nach Node-Typ und Payload-Typ, plus /h und /d hochgerechnet."
         );
         pushCompanionMessage(
-          "Direct-Pakete sind NICHT erfasst (nur Flood — der Hauptanteil "
+          "Direct-Pakete sind NICHT erfasst (nur Flood, der Hauptanteil "
           "des Mesh-Hintergrundtraffics). Counter sind RAM-only."
         );
         return;
@@ -3520,8 +3531,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     pushCompanionMessage(
-      "Befehle: help [topic], status, stats, uptime, advert, auto advert, "
-      "repeater, gps on/off, trace, chatname, reboot. (Weitere geplant: "
+      "Befehle: help [topic], status, stats, uptime, advert, autoadv, "
+      "repeater, gps, trace, chatname, reboot. (Weitere geplant: "
       "region set, scope set.)"
     );
     return;
@@ -3562,9 +3573,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              sensors.node_lat, sensors.node_lon);
     pushCompanionMessage(line);
     snprintf(line, sizeof(line),
-             "auto-adv=%s  repeater=%s",
+             "auto-adv=%s  repeater=%s%s",
              _prefs.auto_advert_enabled ? "on" : "off",
-             _prefs.client_repeat ? "on" : "off");
+             _prefs.client_repeat ? "on" : "off",
+             _prefs.client_repeat_force ? "(force)" : "");
     pushCompanionMessage(line);
     return;
   }
@@ -3592,7 +3604,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // ---------- advert ----------------------------------------------------
   if (starts_with_word(cmd, "advert")) {
     next_periodic_advert_at = millis();  // löst im naechsten loop() einen Advert aus
-    pushCompanionMessage("OK — Advert wird im naechsten loop()-Tick gesendet.");
+    pushCompanionMessage("OK - Advert wird im naechsten loop()-Tick gesendet.");
     return;
   }
 
@@ -3600,16 +3612,41 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   if (starts_with_word(cmd, "gps")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
-    if (arg && starts_with_word(arg, "on")) {
+    if (!arg || *arg == 0) {
+      // Status:
+      //   off          = vom User per "gps off" deaktiviert
+      //   on           = enabled UND Modul gerade an
+      //   off (sleep)  = enabled, Modul gerade per Power-Cycle aus
+      const char* cur = NULL;
+#if ENV_INCLUDE_GPS == 1
+      cur = sensors.getSettingByKey("gps");
+#endif
+      const char* state;
+      if (!_prefs.gps_enabled) state = "off";
+      else if (cur && cur[0] == '1') state = "on";
+      else state = "off (sleep)";
+      char line[160];
+      snprintf(line, sizeof(line),
+               "gps=%s  fix_ever=%d  moving=%d",
+               state, (int)_gps_had_fix_ever, (int)_is_moving);
+      pushCompanionMessage(line);
+      snprintf(line, sizeof(line),
+               "pos=%.4f,%.4f  interval=%lus",
+               sensors.node_lat, sensors.node_lon,
+               (unsigned long)_prefs.gps_interval);
+      pushCompanionMessage(line);
+      return;
+    }
+    if (starts_with_word(arg, "on")) {
       _prefs.gps_enabled = 1;
       savePrefs();
-      pushCompanionMessage("OK — GPS enabled.");
-    } else if (arg && starts_with_word(arg, "off")) {
+      pushCompanionMessage("OK - GPS enabled.");
+    } else if (starts_with_word(arg, "off")) {
       _prefs.gps_enabled = 0;
       savePrefs();
-      pushCompanionMessage("OK — GPS disabled.");
+      pushCompanionMessage("OK - GPS disabled.");
     } else {
-      pushCompanionMessage("Usage: gps on  |  gps off");
+      pushCompanionMessage("Usage: gps [on | off]  (ohne Arg -> Status)");
     }
     return;
   }
@@ -3830,7 +3867,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     if (strcmp(arg, "off") == 0) {
       _trace_flags = 0;
-      pushCompanionMessage("OK — alle traces aus.");
+      pushCompanionMessage("OK - alle traces aus.");
       return;
     }
     if (starts_with_word(arg, "all")) {
@@ -3838,10 +3875,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (sub) { while (*sub == ' ') sub++; }
       if (sub && strcmp(sub, "on") == 0) {
         _trace_flags = TRACE_ALL_MASK;
-        pushCompanionMessage("OK — alle traces an.");
+        pushCompanionMessage("OK - alle traces an.");
       } else if (sub && strcmp(sub, "off") == 0) {
         _trace_flags = 0;
-        pushCompanionMessage("OK — alle traces aus.");
+        pushCompanionMessage("OK - alle traces aus.");
       } else {
         pushCompanionMessage("Usage: trace all on  |  trace all off");
       }
@@ -3854,11 +3891,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (sub) { while (*sub == ' ') sub++; }
         if (sub && strcmp(sub, "on") == 0) {
           _trace_flags |= trace_cats[k].flag;
-          char r[80]; snprintf(r, sizeof(r), "OK — trace %s an.", trace_cats[k].name);
+          char r[80]; snprintf(r, sizeof(r), "OK - trace %s an.", trace_cats[k].name);
           pushCompanionMessage(r);
         } else if (sub && strcmp(sub, "off") == 0) {
           _trace_flags &= ~trace_cats[k].flag;
-          char r[80]; snprintf(r, sizeof(r), "OK — trace %s aus.", trace_cats[k].name);
+          char r[80]; snprintf(r, sizeof(r), "OK - trace %s aus.", trace_cats[k].name);
           pushCompanionMessage(r);
         } else {
           char r[80]; snprintf(r, sizeof(r), "Usage: trace %s on|off", trace_cats[k].name);
@@ -3891,74 +3928,70 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool strict_ok = isValidClientRepeatFreq(f_khz);
       char line[160];
       snprintf(line, sizeof(line),
-               "repeater=%s  freq=%.4f MHz  strict_ok=%s",
+               "repeater=%s%s  freq=%.4f MHz  strict_ok=%s",
                _prefs.client_repeat ? "on" : "off",
+               _prefs.client_repeat_force ? " (force)" : "",
                _prefs.freq, strict_ok ? "yes" : "no");
       pushCompanionMessage(line);
       return;
     }
     if (strcmp(arg, "off") == 0) {
       _prefs.client_repeat = 0;
+      _prefs.client_repeat_force = 0;  // Force-Modus mit "off" beenden
       savePrefs();
-      pushCompanionMessage("OK — repeater off.");
+      pushCompanionMessage("OK - repeater off.");
       return;
     }
     if (starts_with_word(arg, "on")) {
-      // Force-Option erkennen (kann nach "on" oder davor stehen)
+      // "force"-Keyword erkennen (iOS-Tastatur macht aus "--force" einen
+      // em-dash — daher ein einzelnes lowercase Wort statt Doppel-Hyphen).
       bool force = false;
       const char* rest = arg + 2;  // hinter "on"
       while (*rest == ' ') rest++;
-      if (strcmp(rest, "--force") == 0) force = true;
-      // Sicherheitsgate 1: signalFitsInIsmBand (immer aktiv, auch mit --force)
+      if (starts_with_word(rest, "force")) force = true;
+      // Sicherheitsgate 1: signalFitsInIsmBand (immer aktiv, auch mit force)
       uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
       uint32_t bw_hz = (uint32_t)(_prefs.bw * 1000.0f + 0.5f);
       if (!signalFitsInIsmBand(f_khz, bw_hz)) {
         char line[160];
         snprintf(line, sizeof(line),
-                 "Fehler: Signal (freq=%.4f bw=%.1f) liegt nicht in einem "
-                 "ISM-Band. Repeater nicht aktiviert.", _prefs.freq, _prefs.bw);
+                 "Fehler: %.4f MHz / BW %.1f nicht im ISM-Band. "
+                 "Repeater nicht aktiviert.", _prefs.freq, _prefs.bw);
         pushCompanionMessage(line);
         return;
       }
-      // Sicherheitsgate 2: strict-Range (nur ohne --force)
+      // Sicherheitsgate 2: strict-Range (nur ohne force)
       if (!force && !isValidClientRepeatFreq(f_khz)) {
         char line[160];
         snprintf(line, sizeof(line),
-                 "Abgelehnt: %.4f MHz nicht im strict-Range "
-                 "(siehe 'compliant variant'). Mit 'repeater on --force' "
-                 "trotzdem aktivieren.", _prefs.freq);
+                 "Abgelehnt: %.4f MHz nicht im strict-Range. "
+                 "Mit 'repeater on force' trotzdem aktivieren.", _prefs.freq);
         pushCompanionMessage(line);
         return;
       }
       _prefs.client_repeat = 1;
+      _prefs.client_repeat_force = force ? 1 : 0;
       savePrefs();
       char line[80];
-      snprintf(line, sizeof(line), "OK — repeater on%s.", force ? " (--force)" : "");
+      snprintf(line, sizeof(line), "OK - repeater on%s.", force ? " (force)" : "");
       pushCompanionMessage(line);
       return;
     }
-    pushCompanionMessage("Usage: repeater [on [--force] | off]");
+    pushCompanionMessage("Usage: repeater [on [force] | off]");
     return;
   }
 
-  // ---------- auto advert -----------------------------------------------
-  // Schaltet die selbstaendigen Adverts (periodic zero-hop + nightly flood)
-  // gemeinsam ein/aus. Firmware-Default ist OFF — nach einem frischen Flash
-  // muss der User mit "auto advert on" explizit aktivieren. Vermeidet
-  // versehentliches Aussenden auf einer Konfiguration die noch nicht
-  // freigegeben ist.
-  if (starts_with_word(cmd, "auto")) {
-    const char* sub = strchr(cmd, ' ');
-    if (sub) { while (*sub == ' ') sub++; }
-    if (!sub || !starts_with_word(sub, "advert")) {
-      pushCompanionMessage("Usage: auto advert [on | off]");
-      return;
-    }
-    const char* arg = strchr(sub, ' ');
+  // ---------- autoadv ---------------------------------------------------
+  // Schaltet die selbst-generierten wiederkehrenden Adverts ein/aus (das
+  // sind: periodic zero-hop alle 15min/1h/3h + nightly flood). Default OFF
+  // nach Flash — User muss explizit aktivieren. Unterschied zu 'advert':
+  // 'advert' sendet EINMAL JETZT; 'autoadv' steuert den Scheduler.
+  if (starts_with_word(cmd, "autoadv")) {
+    const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
     if (!arg || *arg == 0) {
       char line[100];
-      snprintf(line, sizeof(line), "auto advert = %s",
+      snprintf(line, sizeof(line), "autoadv = %s",
                _prefs.auto_advert_enabled ? "on" : "off");
       pushCompanionMessage(line);
       return;
@@ -3966,21 +3999,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (strcmp(arg, "on") == 0) {
       _prefs.auto_advert_enabled = 1;
       savePrefs();
-      // Sofort triggern als Sanity-Test — sonst muesste der User bis zur
-      // naechsten Schedule warten (3h/1h/15min beim periodic). Nightly wird
-      // im naechsten loop-Tick durch next_night_flood_unix=0 neu geplant.
+      // Sofort triggern als Sanity-Test, statt bis zur naechsten Schedule
+      // (15min/1h/3h) zu warten. Nightly wird durch next_night_flood_unix=0
+      // im naechsten loop-Tick neu geplant.
       next_periodic_advert_at = millis();
       next_night_flood_unix = 0;
-      pushCompanionMessage("OK — auto advert on (zero-hop sofort + nightly schedule).");
+      pushCompanionMessage("OK - autoadv on (sofort + nightly schedule).");
       return;
     }
     if (strcmp(arg, "off") == 0) {
       _prefs.auto_advert_enabled = 0;
       savePrefs();
-      pushCompanionMessage("OK — auto advert off.");
+      pushCompanionMessage("OK - autoadv off.");
       return;
     }
-    pushCompanionMessage("Usage: auto advert [on | off]");
+    pushCompanionMessage("Usage: autoadv [on | off]");
     return;
   }
 
@@ -4008,14 +4041,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (strcmp(arg, "1") == 0) {
       _prefs.chat_name_mode = 1;
       savePrefs();
-      pushCompanionMessage("OK — chatname = erstes Wort.");
+      pushCompanionMessage("OK - chatname = erstes Wort.");
       return;
     }
     if (strcmp(arg, "2") == 0 || starts_with_word(arg, "auto")
         || starts_with_word(arg, "default")) {
       _prefs.chat_name_mode = 0;
       savePrefs();
-      pushCompanionMessage("OK — chatname = erste 2 Woerter (Standard).");
+      pushCompanionMessage("OK - chatname = erste 2 Woerter (Standard).");
       return;
     }
     if (starts_with_word(arg, "custom")) {
@@ -4051,7 +4084,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.chat_name_mode = 2;
       savePrefs();
       char reply[80];
-      snprintf(reply, sizeof(reply), "OK — chatname custom = \"%s\".", _prefs.chat_name_custom);
+      snprintf(reply, sizeof(reply), "OK - chatname custom = \"%s\".", _prefs.chat_name_custom);
       pushCompanionMessage(reply);
       return;
     }
@@ -4060,7 +4093,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   }
 
   // ---------- unbekannt -------------------------------------------------
-  pushCompanionMessage("(unbekannter Befehl — 'help' fuer Liste)");
+  pushCompanionMessage("(unbekannter Befehl - 'help' fuer Liste)");
 }
 
 void MyMesh::pushDebugLog(const char* fmt, ...) {

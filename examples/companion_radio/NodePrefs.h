@@ -49,4 +49,11 @@ struct NodePrefs {  // persisted to file
   // "auto advert on". Vermeidet versehentliches Aussenden bei einer
   // Konfiguration die der User noch nicht freigegeben hat.
   uint8_t auto_advert_enabled;
+  // Persistente Erinnerung dass der Repeater explizit per Companion-Chat
+  // "repeater on force" aktiviert wurde — App-Pfad CMD_SET_RADIO_PARAMS
+  // ueberspringt damit den strict-Range-Check und schreibt _prefs durch.
+  // Wird gecleared sobald der Repeater per App auf 0 gesetzt wird ODER
+  // per Companion "repeater on" (ohne force) bzw. "repeater off" — so muss
+  // der force-Modus explizit per Companion-Geste reaktiviert werden.
+  uint8_t client_repeat_force;
 };
