@@ -246,6 +246,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)_prefs.override_scope_name, sizeof(_prefs.override_scope_name));  // 221
     file.read((uint8_t *)_prefs.override_scope_key,  sizeof(_prefs.override_scope_key));   // 252
     file.read((uint8_t *)&_prefs.override_expiry, sizeof(_prefs.override_expiry));         // 268
+    file.read((uint8_t *)&_prefs.trace_flags_persistent, sizeof(_prefs.trace_flags_persistent)); // 272
 
     file.close();
   }
@@ -297,6 +298,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)_prefs.override_scope_name, sizeof(_prefs.override_scope_name));  // 221
     file.write((uint8_t *)_prefs.override_scope_key,  sizeof(_prefs.override_scope_key));   // 252
     file.write((uint8_t *)&_prefs.override_expiry, sizeof(_prefs.override_expiry));         // 268
+    file.write((uint8_t *)&_prefs.trace_flags_persistent, sizeof(_prefs.trace_flags_persistent)); // 272
 
     file.close();
   }

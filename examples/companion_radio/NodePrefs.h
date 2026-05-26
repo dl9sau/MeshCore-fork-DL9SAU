@@ -78,4 +78,10 @@ struct NodePrefs {  // persisted to file
   char     override_scope_name[31];
   uint8_t  override_scope_key[16];
   uint32_t override_expiry;
+  // Persistent gespeicherte Trace-Kategorien-Selektion. Active flags
+  // (_trace_flags im RAM) starten bei Reboot auf 0; per "trace on" wird
+  // active = trace_flags_persistent wiederhergestellt. Damit ist eine
+  // einmalige Auswahl ueber Reboots stabil ohne dass die Firmware
+  // automatisch wieder zu loggen anfaengt.
+  uint16_t trace_flags_persistent;
 };

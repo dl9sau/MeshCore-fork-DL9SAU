@@ -3686,11 +3686,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "trace")) {
         pushCompanionMessage(
           "trace: selektives Live-Logging in den Companion-Chat. "
-          "Bitmask, RAM-only (reset bei Reboot)."
+          "Active (RAM, reset bei Reboot) + Persistent (User-Selektion)."
         );
         pushCompanionMessage(
-          "Args: 'list' = Kategorien-Uebersicht, '<cat> on/off', "
-          "'all on/off', 'off'. Ohne Arg -> aktive Kategorien."
+          "list = Kategorien-Uebersicht. <cat> on/off = setzt bit in beiden. "
+          "on = active wird persistent wiederhergestellt. off = pausiert."
+        );
+        pushCompanionMessage(
+          "all on/off = beide auf alle/keine. Ohne Arg -> Status (active + ggf. persistent). "
+          "Nach Reboot: active = 0, 'trace on' aktiviert die Selektion wieder."
         );
         return;
       }
@@ -4011,7 +4015,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint32_t own_total = 0;
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
     p = snprintf(block, sizeof(block),
-                 "tx own:\n"
+                 "tx own packets:\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
                  "  total=%lu",
                  own_of(PAYLOAD_TYPE_ADVERT),
@@ -4117,24 +4121,37 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
 
+    // -- Status (kein Arg) --
     if (!arg || *arg == 0) {
-      // Status — aktive Kategorien anzeigen
-      char line[160];
-      int used = snprintf(line, sizeof(line), "trace aktiv:");
-      bool any = false;
+      // Zwei Zeilen: aktiv + persistent (wenn beide gleich, nur eine)
+      char line[160]; int used;
+      used = snprintf(line, sizeof(line), "trace active:");
+      bool any_a = false;
       for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
         if (_trace_flags & trace_cats[k].flag) {
           used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
-          any = true;
+          any_a = true;
         }
       }
-      if (!any) snprintf(line + used, sizeof(line) - used, " (keine)");
+      if (!any_a) snprintf(line + used, sizeof(line) - used, " (none)");
       pushCompanionMessage(line);
+
+      if (_prefs.trace_flags_persistent != _trace_flags) {
+        used = snprintf(line, sizeof(line), "trace persistent (-> 'trace on'):");
+        bool any_p = false;
+        for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
+          if (_prefs.trace_flags_persistent & trace_cats[k].flag) {
+            used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
+            any_p = true;
+          }
+        }
+        if (!any_p) snprintf(line + used, sizeof(line) - used, " (none)");
+        pushCompanionMessage(line);
+      }
       return;
     }
+
     if (starts_with_word(arg, "list")) {
-      // Jede Kategorie als eigene Message (Beschreibungen würden sonst
-      // den 160-Byte MAX_TEXT_LEN sprengen).
       for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
         char line[160];
         snprintf(line, sizeof(line), "  %s - %s", trace_cats[k].name, trace_cats[k].desc);
@@ -4142,36 +4159,55 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       return;
     }
-    if (strcmp(arg, "off") == 0) {
-      _trace_flags = 0;
-      pushCompanionMessage("OK - alle traces aus.");
+
+    // 'trace on' -> active = persistent (Wiederherstellen)
+    if (strcmp(arg, "on") == 0) {
+      _trace_flags = _prefs.trace_flags_persistent;
+      pushCompanionMessage("OK - trace resumed (active = persistent).");
       return;
     }
+    // 'trace off' -> active = 0, persistent BLEIBT (Pause)
+    if (strcmp(arg, "off") == 0) {
+      _trace_flags = 0;
+      pushCompanionMessage("OK - trace paused (persistent untouched).");
+      return;
+    }
+
+    // 'trace all on/off' -> active UND persistent
     if (starts_with_word(arg, "all")) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (sub && strcmp(sub, "on") == 0) {
         _trace_flags = TRACE_ALL_MASK;
-        pushCompanionMessage("OK - alle traces an.");
+        _prefs.trace_flags_persistent = TRACE_ALL_MASK;
+        savePrefs();
+        pushCompanionMessage("OK - alle traces an (active + persistent).");
       } else if (sub && strcmp(sub, "off") == 0) {
         _trace_flags = 0;
-        pushCompanionMessage("OK - alle traces aus.");
+        _prefs.trace_flags_persistent = 0;
+        savePrefs();
+        pushCompanionMessage("OK - alle traces aus (active + persistent).");
       } else {
-        pushCompanionMessage("Usage: trace all on  |  trace all off");
+        pushCompanionMessage("Usage: trace all on | trace all off");
       }
       return;
     }
-    // <cat> on/off
+
+    // 'trace <cat> on/off' -> bit in BEIDEN (User-Selektion)
     for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
       if (starts_with_word(arg, trace_cats[k].name)) {
         const char* sub = strchr(arg, ' ');
         if (sub) { while (*sub == ' ') sub++; }
         if (sub && strcmp(sub, "on") == 0) {
           _trace_flags |= trace_cats[k].flag;
+          _prefs.trace_flags_persistent |= trace_cats[k].flag;
+          savePrefs();
           char r[80]; snprintf(r, sizeof(r), "OK - trace %s an.", trace_cats[k].name);
           pushCompanionMessage(r);
         } else if (sub && strcmp(sub, "off") == 0) {
           _trace_flags &= ~trace_cats[k].flag;
+          _prefs.trace_flags_persistent &= ~trace_cats[k].flag;
+          savePrefs();
           char r[80]; snprintf(r, sizeof(r), "OK - trace %s aus.", trace_cats[k].name);
           pushCompanionMessage(r);
         } else {
