@@ -2695,7 +2695,8 @@ void MyMesh::loop() {
   // Adaptive zero-hop unscoped advert (3h / 1h / 15min depending on motion)
   updateMotionTracking();
   manageGpsPower();
-  if (next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
+  if (_prefs.auto_advert_enabled
+      && next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
     doPeriodicZeroHopAdvert();
     next_periodic_advert_at = futureMillis(computeNextAdvertIntervalMs());
   }
@@ -2721,7 +2722,11 @@ void MyMesh::loop() {
     }
     _last_observed_rtc = now_rtc;
 
-    if (next_night_flood_unix == 0) {
+    if (!_prefs.auto_advert_enabled) {
+      // Auto-Adverts deaktiviert: kein Schedule, kein Send. Beim Wieder-
+      // einschalten setzt der "auto advert on"-Befehl next_night_flood_unix=0
+      // und triggert die Neuplanung hier.
+    } else if (next_night_flood_unix == 0) {
       scheduleNextNightFlood();   // no-op if RTC still unset
     } else if (now_rtc >= next_night_flood_unix) {
       // Backup sanity check (in case the jump detector missed an edge case)
@@ -3376,6 +3381,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "auto")) {
+        pushCompanionMessage(
+          "auto advert [on/off]: schaltet die selbstaendigen Adverts ein/aus "
+          "(zero-hop periodic UND nightly flood gemeinsam). Default nach Flash "
+          "ist OFF — der User muss explizit aktivieren."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "status")) {
         pushCompanionMessage(
           "status: zeigt Firmware-Version, Uptime, GPS-Status, Position, "
@@ -3423,9 +3436,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     pushCompanionMessage(
-      "Befehle: help [topic], status, stats, uptime, advert, gps on/off, "
-      "trace, chatname, reboot. (Weitere geplant: zerohop/nightly on/off, "
-      "region set, scope set, client-repeat on/off.)"
+      "Befehle: help [topic], status, stats, uptime, advert, auto advert, "
+      "gps on/off, trace, chatname, reboot. (Weitere geplant: repeater "
+      "on/off [--force], region set, scope set.)"
     );
     return;
   }
@@ -3463,6 +3476,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              _prefs.gps_enabled ? "on" : "off",
              (int)_gps_had_fix_ever, (int)_is_moving,
              sensors.node_lat, sensors.node_lon);
+    pushCompanionMessage(line);
+    snprintf(line, sizeof(line),
+             "auto-adv=%s  repeater=%s",
+             _prefs.auto_advert_enabled ? "on" : "off",
+             _prefs.client_repeat ? "on" : "off");
     pushCompanionMessage(line);
     return;
   }
@@ -3766,6 +3784,49 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
     }
     pushCompanionMessage("Unbekannte trace-Kategorie. 'trace list' fuer Uebersicht.");
+    return;
+  }
+
+  // ---------- auto advert -----------------------------------------------
+  // Schaltet die selbstaendigen Adverts (periodic zero-hop + nightly flood)
+  // gemeinsam ein/aus. Firmware-Default ist OFF — nach einem frischen Flash
+  // muss der User mit "auto advert on" explizit aktivieren. Vermeidet
+  // versehentliches Aussenden auf einer Konfiguration die noch nicht
+  // freigegeben ist.
+  if (starts_with_word(cmd, "auto")) {
+    const char* sub = strchr(cmd, ' ');
+    if (sub) { while (*sub == ' ') sub++; }
+    if (!sub || !starts_with_word(sub, "advert")) {
+      pushCompanionMessage("Usage: auto advert [on | off]");
+      return;
+    }
+    const char* arg = strchr(sub, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    if (!arg || *arg == 0) {
+      char line[100];
+      snprintf(line, sizeof(line), "auto advert = %s",
+               _prefs.auto_advert_enabled ? "on" : "off");
+      pushCompanionMessage(line);
+      return;
+    }
+    if (strcmp(arg, "on") == 0) {
+      _prefs.auto_advert_enabled = 1;
+      savePrefs();
+      // Sofort triggern als Sanity-Test — sonst muesste der User bis zur
+      // naechsten Schedule warten (3h/1h/15min beim periodic). Nightly wird
+      // im naechsten loop-Tick durch next_night_flood_unix=0 neu geplant.
+      next_periodic_advert_at = millis();
+      next_night_flood_unix = 0;
+      pushCompanionMessage("OK — auto advert on (zero-hop sofort + nightly schedule).");
+      return;
+    }
+    if (strcmp(arg, "off") == 0) {
+      _prefs.auto_advert_enabled = 0;
+      savePrefs();
+      pushCompanionMessage("OK — auto advert off.");
+      return;
+    }
+    pushCompanionMessage("Usage: auto advert [on | off]");
     return;
   }
 

@@ -43,4 +43,10 @@ struct NodePrefs {  // persisted to file
   // die memset(0)-Defaults stehen, mode=0 = bisheriges Verhalten).
   uint8_t chat_name_mode;
   char    chat_name_custom[32];
+  // Auto-Adverts ein/aus (zerohop periodic UND nightly flood gemeinsam).
+  // Default 0 = aus: nach einem frischen Flash sendet die Firmware NICHTS
+  // von selbst. Aktivierung explizit ueber den Companion-Chat-Befehl
+  // "auto advert on". Vermeidet versehentliches Aussenden bei einer
+  // Konfiguration die der User noch nicht freigegeben hat.
+  uint8_t auto_advert_enabled;
 };
