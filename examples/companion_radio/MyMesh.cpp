@@ -1072,8 +1072,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(send_scope.key, 0, sizeof(send_scope.key));
   memset(heard_list, 0, sizeof(heard_list));
   heard_next_idx = 0;
-  memset(runtime_last_channel_scope.key, 0, sizeof(runtime_last_channel_scope.key));
-  runtime_last_channel_scope_at = 0;
+  memset(_tx_scope_override.key, 0, sizeof(_tx_scope_override.key));
+  _tx_scope_override_at = 0;
   next_periodic_advert_at = 0;
   next_night_flood_unix = 0;
   _pos_anchor_lat = 0;
@@ -1103,7 +1103,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _geo_reco_anchor_lon = 0.0;
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
-  _runtime_scope_name_hint[0] = 0;
+  _tx_scope_override_name[0] = 0;
   _pending_reboot_at = 0;
   memset(_heard_direct,       0, sizeof(_heard_direct));
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
@@ -1406,52 +1406,47 @@ void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
   //   1..253     = erste N Woerter aus node_name
   //   255        = custom Text aus _prefs.chat_name_custom
   uint8_t mode = _prefs.chat_name_mode;
+  size_t out = 0;
 
   if (mode == 255 && _prefs.chat_name_custom[0] != 0) {
-    size_t i = 0;
-    while (i + 1 < dest_size && _prefs.chat_name_custom[i] != 0
-           && i < sizeof(_prefs.chat_name_custom)) {
-      dest[i] = _prefs.chat_name_custom[i];
-      i++;
+    while (out + 1 < dest_size && _prefs.chat_name_custom[out] != 0
+           && out < sizeof(_prefs.chat_name_custom)) {
+      dest[out] = _prefs.chat_name_custom[out];
+      out++;
     }
-    dest[i] = 0;
-    return;
-  }
-
-  if (mode == 0) {
-    // Voller Name (default). Trailing-WS strippen falls der gespeicherte
-    // node_name selbst eines hat (kommt manchmal durch App-Eingaben vor).
-    size_t i = 0;
-    while (i + 1 < dest_size && _prefs.node_name[i] != 0
-           && i < sizeof(_prefs.node_name)) {
-      dest[i] = _prefs.node_name[i];
-      i++;
+  } else if (mode == 0) {
+    while (out + 1 < dest_size && _prefs.node_name[out] != 0
+           && out < sizeof(_prefs.node_name)) {
+      dest[out] = _prefs.node_name[out];
+      out++;
     }
-    while (i > 0 && (dest[i-1] == ' ' || dest[i-1] == '\t')) i--;
-    dest[i] = 0;
-    return;
-  }
-
-  // Mode N: erste N Woerter. Wenn N > vorhandene Anzahl Woerter, wird der
-  // ganze Name uebernommen (natuerliche Konsequenz der Schleife).
-  int max_words = (int)mode;
-  const char* src = _prefs.node_name;
-  size_t out = 0;
-  int word_count = 0;
-  bool in_word = false;
-  while (src[out] != 0 && out + 1 < dest_size) {
-    if (src[out] != ' ' && src[out] != '\t') {
-      if (!in_word) {
-        if (++word_count > max_words) break;
-        in_word = true;
+  } else {
+    // Mode N: erste N Woerter. Wenn N > vorhandene Anzahl Woerter, wird der
+    // ganze Name uebernommen (natuerliche Konsequenz der Schleife).
+    int max_words = (int)mode;
+    const char* src = _prefs.node_name;
+    int word_count = 0;
+    bool in_word = false;
+    while (src[out] != 0 && out + 1 < dest_size) {
+      if (src[out] != ' ' && src[out] != '\t') {
+        if (!in_word) {
+          if (++word_count > max_words) break;
+          in_word = true;
+        }
+      } else {
+        in_word = false;
       }
-    } else {
-      in_word = false;
+      dest[out] = src[out];
+      out++;
     }
-    dest[out] = src[out];
-    out++;
   }
-  while (out > 0 && (dest[out - 1] == ' ' || dest[out - 1] == '\t')) {
+
+  // Gemeinsamer Trim am Ende: trailing whitespace UND beendet sauber mit 0.
+  // Beim ersten Fix hatte Mode 0 noch keinen Trim, Mode 255 nie, Mode N nur
+  // " \t" — jetzt einheitlich auch \r \n und am Ende defensiv.
+  while (out > 0) {
+    char c = dest[out - 1];
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') break;
     out--;
   }
   dest[out] = 0;
@@ -1644,12 +1639,15 @@ void MyMesh::handleCmdFrame(size_t len) {
       char short_sender[sizeof(_prefs.node_name)];
       copyShortSenderName(short_sender, sizeof(short_sender));
       if (success && sendGroupMessage(msg_timestamp, channel.channel, short_sender, text, len - i)) {
-        // Remember the channel secret as the runtime scope; reused as Nacht-Flood scope.
-        // 128-bit channel secrets map directly onto TransportKey.key.
-        memcpy(runtime_last_channel_scope.key, channel.channel.secret, sizeof(runtime_last_channel_scope.key));
-        runtime_last_channel_scope_at = getRTCClock()->getCurrentTime();
-        StrHelper::strncpy(_runtime_scope_name_hint, channel.name, sizeof(_runtime_scope_name_hint));
-        traceCompanion(TRACE_SCOPE, "[scope] runtime_last_channel_scope=\"%s\"", channel.name);
+        // Autolearn des TX-Scope-Override aus Channel-Sends wurde entfernt:
+        // wir mischten channel.secret (= Channel-Decryption-Key) und scope-
+        // keys (= SHA-256("#name")) im selben Slot — zwei unterschiedliche
+        // Hash-Schemen, semantisch inkonsistent. Bei wechselnden Channels/
+        // Scopes konnte die Reichweite der nightly-Bake unbeabsichtigt
+        // eskalieren (Flood-Footprint im Mesh). Override jetzt NUR noch
+        // explizit per Companion-CLI:
+        //   scope override <name>   -> 12h
+        //   scope override clear
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
@@ -2905,11 +2903,11 @@ bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
   // 1) last App-channel send since boot — but only if recent (<12h).
   //    A one-off "did this test channel work?" send shouldn't pin the
   //    nightly flood to that channel for days.
-  if (!runtime_last_channel_scope.isNull() && runtime_last_channel_scope_at != 0) {
+  if (!_tx_scope_override.isNull() && _tx_scope_override_at != 0) {
     uint32_t now = getRTCClock()->getCurrentTime();
-    if (now >= runtime_last_channel_scope_at &&
-        (now - runtime_last_channel_scope_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
-      out_key = runtime_last_channel_scope;
+    if (now >= _tx_scope_override_at &&
+        (now - _tx_scope_override_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
+      out_key = _tx_scope_override;
       return true;
     }
     // fall through — expired, treat as if no recent channel was used
@@ -3485,7 +3483,7 @@ static const TraceCat trace_cats[] = {
   { "gps",     TRACE_GPS,     "GPS power on/off, first fix, fix loss" },
   { "adverts", TRACE_ADVERTS, "eigene Adverts (periodic/nightly/manual)" },
   { "repeat",  TRACE_REPEAT,  "durchgereichte Packets" },
-  { "scope",   TRACE_SCOPE,   "runtime_last_channel_scope Wechsel" },
+  { "scope",   TRACE_SCOPE,   "_tx_scope_override Wechsel" },
   { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
   { "heard",   TRACE_HEARD,   "neue Direct-heard Nodes (HeardList)" },
   { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
@@ -3802,10 +3800,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     char src_label[64] = "(none - kein scope verfuegbar)";
     bool have_scope = false;
     // 1) override (runtime, 12h)
-    if (!runtime_last_channel_scope.isNull() && runtime_last_channel_scope_at != 0) {
+    if (!_tx_scope_override.isNull() && _tx_scope_override_at != 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
-      if (now >= runtime_last_channel_scope_at &&
-          (now - runtime_last_channel_scope_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
+      if (now >= _tx_scope_override_at &&
+          (now - _tx_scope_override_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
         snprintf(src_label, sizeof(src_label), "override (runtime)");
         have_scope = true;
       }
@@ -4278,18 +4276,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Override-Status (mit Expiry)
       char ovr_line[100];
       bool override_active = false;
-      if (!runtime_last_channel_scope.isNull() && runtime_last_channel_scope_at != 0) {
+      if (!_tx_scope_override.isNull() && _tx_scope_override_at != 0) {
         uint32_t now = getRTCClock()->getCurrentTime();
-        if (now >= runtime_last_channel_scope_at &&
-            (now - runtime_last_channel_scope_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
-          uint32_t age = now - runtime_last_channel_scope_at;
+        if (now >= _tx_scope_override_at &&
+            (now - _tx_scope_override_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
+          uint32_t age = now - _tx_scope_override_at;
           uint32_t remaining = CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS - age;
           uint32_t rem_h = remaining / 3600;
           uint32_t rem_m = (remaining % 3600) / 60;
           snprintf(ovr_line, sizeof(ovr_line),
                    "override = %s%s (gueltig %luh%02lum)",
-                   _runtime_scope_name_hint[0] ? "#" : "",
-                   _runtime_scope_name_hint[0] ? _runtime_scope_name_hint : "(unbekannt)",
+                   _tx_scope_override_name[0] ? "#" : "",
+                   _tx_scope_override_name[0] ? _tx_scope_override_name : "(unbekannt)",
                    (unsigned long)rem_h, (unsigned long)rem_m);
           override_active = true;
         } else {
@@ -4359,9 +4357,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (strcmp(sub, "clear") == 0) {
-        memset(runtime_last_channel_scope.key, 0, sizeof(runtime_last_channel_scope.key));
-        runtime_last_channel_scope_at = 0;
-        _runtime_scope_name_hint[0] = 0;
+        memset(_tx_scope_override.key, 0, sizeof(_tx_scope_override.key));
+        _tx_scope_override_at = 0;
+        _tx_scope_override_name[0] = 0;
         pushCompanionMessage("OK - scope override cleared.");
         return;
       }
@@ -4376,9 +4374,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       TransportKey key;
       TransportKeyStore tmp;
       tmp.getAutoKeyFor(0, tag, key);
-      memcpy(runtime_last_channel_scope.key, key.key, sizeof(runtime_last_channel_scope.key));
-      runtime_last_channel_scope_at = getRTCClock()->getCurrentTime();
-      StrHelper::strncpy(_runtime_scope_name_hint, name, sizeof(_runtime_scope_name_hint));
+      memcpy(_tx_scope_override.key, key.key, sizeof(_tx_scope_override.key));
+      _tx_scope_override_at = getRTCClock()->getCurrentTime();
+      StrHelper::strncpy(_tx_scope_override_name, name, sizeof(_tx_scope_override_name));
       char line[100];
       snprintf(line, sizeof(line), "OK - scope override = #%s (12h)", name);
       pushCompanionMessage(line);
