@@ -1295,7 +1295,6 @@ static FreqRange repeat_freq_ranges[] = {
   { 866800, 867000 },
   { 867400, 867600 },
   { 868700, 869200 },   // EU 869 MHz g3 band
-  //{ 869400, 869587 },   // EU 869 MHz narrow band (max BW 250 kHz), do not repeat on EU narrow main freq 869.618
   { 869400, 869650 },   // EU 869 MHz narrow band (max BW 250 kHz)
   { 902000, 928000 }    // US 915 MHz ISM band (902.0-928.0 MHz)
   // Amateur radio 70cm (430.000 - 439.999 MHz). CAVE: MeshCore encrypts
@@ -1303,6 +1302,24 @@ static FreqRange repeat_freq_ranges[] = {
   // radio frequencies (open-mode requirement). Only uncomment if you are
   // sure your local regulation allows it for your usage:
   //, { 430000, 439999 }
+};
+
+// Striktere Liste fuer client_repeat=1. Im EU 869-Narrow-Band schliesst
+// dieser Range die gaengig genutzte 869.618 MHz Hauptfrequenz NICHT ein —
+// "compliant variant" gegen ungewolltes Repeaten auf der Main-Freq. Der
+// App-Pfad (CMD_SET_RADIO_PARAMS, isValidClientRepeatFreq) lehnt repeat=1
+// auf 869.618 also ab. Wer bewusst auch dort repeaten will: Companion-CLI
+// "repeater on --force" umgeht die strict-Pruefung, behaelt aber
+// signalFitsInIsmBand als Sicherheitsgate.
+static FreqRange repeat_freq_ranges_strict[] = {
+  { 433050, 434790 },   // 70cm SRD / ISM
+  { 865600, 865800 },
+  { 866200, 866400 },
+  { 866800, 867000 },
+  { 867400, 867600 },
+  { 868700, 869200 },   // EU 869 g3
+  { 869400, 869587 },   // EU 869 narrow OHNE 869.618 (compliant)
+  { 902000, 928000 }    // US 915
 };
 
 void MyMesh::applyRadioPolicy() {
@@ -1350,8 +1367,9 @@ void MyMesh::restorePacketTxDefaults() {
 }
 
 bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
-  for (int i = 0; i < sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]); i++) {
-    auto r = &repeat_freq_ranges[i];
+  // Strikte Liste — 869.618 (EU-Narrow-Main) ist hier NICHT enthalten.
+  for (int i = 0; i < (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0])); i++) {
+    auto r = &repeat_freq_ranges_strict[i];
     if (f >= r->lower_freq && f <= r->upper_freq) return true;
   }
   return false;
@@ -3389,6 +3407,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "repeater")) {
+        pushCompanionMessage(
+          "repeater [on [--force] | off]: schaltet client_repeat ein/aus. "
+          "Bei 'on' wird die Frequenz gegen einen strict-Range geprueft "
+          "(compliant variant — z.B. 869.618 MHz NICHT enthalten)."
+        );
+        pushCompanionMessage(
+          "Mit '--force' wird der strict-Check uebersprungen; "
+          "signalFitsInIsmBand (ISM-Gate) bleibt aktiv. Ohne Arg -> Status "
+          "mit aktueller Freq und strict_ok=yes/no."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "status")) {
         pushCompanionMessage(
           "status: zeigt Firmware-Version, Uptime, GPS-Status, Position, "
@@ -3437,8 +3468,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     pushCompanionMessage(
       "Befehle: help [topic], status, stats, uptime, advert, auto advert, "
-      "gps on/off, trace, chatname, reboot. (Weitere geplant: repeater "
-      "on/off [--force], region set, scope set.)"
+      "repeater, gps on/off, trace, chatname, reboot. (Weitere geplant: "
+      "region set, scope set.)"
     );
     return;
   }
@@ -3784,6 +3815,76 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
     }
     pushCompanionMessage("Unbekannte trace-Kategorie. 'trace list' fuer Uebersicht.");
+    return;
+  }
+
+  // ---------- repeater [on|off] [--force] -------------------------------
+  // Schaltet client_repeat ein/aus mit Frequenz-Sicherheitsgate.
+  //   repeater                  -> Status
+  //   repeater off              -> immer OK
+  //   repeater on               -> nur wenn die Freq im STRICT-Range liegt
+  //                                (compliant variant). Schlaegt z.B. fuer
+  //                                869.618 MHz fehl.
+  //   repeater on --force       -> ueberspringt den STRICT-Check, behaelt
+  //                                aber signalFitsInIsmBand als ISM-Gate.
+  //                                Damit kann ein User der bewusst auf
+  //                                869.618 repeaten will das so freigeben.
+  if (starts_with_word(cmd, "repeater")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+
+    if (!arg || *arg == 0) {
+      uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
+      bool strict_ok = isValidClientRepeatFreq(f_khz);
+      char line[160];
+      snprintf(line, sizeof(line),
+               "repeater=%s  freq=%.4f MHz  strict_ok=%s",
+               _prefs.client_repeat ? "on" : "off",
+               _prefs.freq, strict_ok ? "yes" : "no");
+      pushCompanionMessage(line);
+      return;
+    }
+    if (strcmp(arg, "off") == 0) {
+      _prefs.client_repeat = 0;
+      savePrefs();
+      pushCompanionMessage("OK — repeater off.");
+      return;
+    }
+    if (starts_with_word(arg, "on")) {
+      // Force-Option erkennen (kann nach "on" oder davor stehen)
+      bool force = false;
+      const char* rest = arg + 2;  // hinter "on"
+      while (*rest == ' ') rest++;
+      if (strcmp(rest, "--force") == 0) force = true;
+      // Sicherheitsgate 1: signalFitsInIsmBand (immer aktiv, auch mit --force)
+      uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
+      uint32_t bw_hz = (uint32_t)(_prefs.bw * 1000.0f + 0.5f);
+      if (!signalFitsInIsmBand(f_khz, bw_hz)) {
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "Fehler: Signal (freq=%.4f bw=%.1f) liegt nicht in einem "
+                 "ISM-Band. Repeater nicht aktiviert.", _prefs.freq, _prefs.bw);
+        pushCompanionMessage(line);
+        return;
+      }
+      // Sicherheitsgate 2: strict-Range (nur ohne --force)
+      if (!force && !isValidClientRepeatFreq(f_khz)) {
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "Abgelehnt: %.4f MHz nicht im strict-Range "
+                 "(siehe 'compliant variant'). Mit 'repeater on --force' "
+                 "trotzdem aktivieren.", _prefs.freq);
+        pushCompanionMessage(line);
+        return;
+      }
+      _prefs.client_repeat = 1;
+      savePrefs();
+      char line[80];
+      snprintf(line, sizeof(line), "OK — repeater on%s.", force ? " (--force)" : "");
+      pushCompanionMessage(line);
+      return;
+    }
+    pushCompanionMessage("Usage: repeater [on [--force] | off]");
     return;
   }
 
