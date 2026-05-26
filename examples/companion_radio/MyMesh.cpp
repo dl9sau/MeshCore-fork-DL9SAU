@@ -3578,8 +3578,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "advert")) {
         pushCompanionMessage(
-          "advert: sendet sofort einen zero-hop Advert mit der aktuellen Position "
-          "(falls advert_loc_policy != NONE)."
+          "advert [zero-hop | flood]: sendet sofort einen einmaligen Advert. "
+          "Ohne Arg = zero-hop. Aliase: z, f."
+        );
+        pushCompanionMessage(
+          "'flood' verwendet die gleiche Scope-Auswahl wie nightly: "
+          "override > default > geo-fallback. Scope-Quelle wird in der "
+          "Antwort gemeldet."
         );
         return;
       }
@@ -3734,10 +3739,72 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  // ---------- advert ----------------------------------------------------
+  // ---------- advert [zero-hop | flood] ---------------------------------
+  // Sendet sofort einen einmaligen Advert. 'advert' ohne Arg = zero-hop.
+  // 'advert flood' macht einen scoped flood mit der gleichen Scope-Auswahl
+  // wie der nightly-Job (runtime > default > geo). Triggert die jeweilige
+  // doX-Funktion direkt (umgeht den auto_advert_enabled-Gate damit man
+  // explizit per Befehl senden kann auch wenn die Scheduler aus sind).
   if (starts_with_word(cmd, "advert")) {
-    next_periodic_advert_at = millis();  // löst im naechsten loop() einen Advert aus
-    pushCompanionMessage("OK - Advert wird im naechsten loop()-Tick gesendet.");
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+
+    bool want_flood = false;
+    if (arg && *arg) {
+      if (strcmp(arg, "flood") == 0 || strcmp(arg, "f") == 0) {
+        want_flood = true;
+      } else if (strcmp(arg, "zero-hop") == 0 || strcmp(arg, "zerohop") == 0
+                 || strcmp(arg, "z") == 0) {
+        want_flood = false;
+      } else {
+        pushCompanionMessage("Usage: advert [zero-hop | flood]  (Aliase: z, f)");
+        return;
+      }
+    }
+
+    if (!want_flood) {
+      doPeriodicZeroHopAdvert();   // hat eigenen duty-hard-Check + counter
+      pushCompanionMessage("OK - zero-hop advert.");
+      return;
+    }
+
+    // Flood: Scope-Quelle vorab bestimmen fuer die Antwort, dann senden.
+    char src_label[64] = "(none - kein scope verfuegbar)";
+    bool have_scope = false;
+    // 1) override (runtime, 12h)
+    if (!runtime_last_channel_scope.isNull() && runtime_last_channel_scope_at != 0) {
+      uint32_t now = getRTCClock()->getCurrentTime();
+      if (now >= runtime_last_channel_scope_at &&
+          (now - runtime_last_channel_scope_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
+        snprintf(src_label, sizeof(src_label), "override (runtime)");
+        have_scope = true;
+      }
+    }
+    // 2) configured default
+    if (!have_scope) {
+      bool default_set = false;
+      for (size_t k = 0; k < sizeof(_prefs.default_scope_key); k++) {
+        if (_prefs.default_scope_key[k] != 0) { default_set = true; break; }
+      }
+      if (default_set) {
+        snprintf(src_label, sizeof(src_label), "default = #%s",
+                 _prefs.default_scope_name[0] ? _prefs.default_scope_name : "?");
+        have_scope = true;
+      }
+    }
+    // 3) geo fallback
+    if (!have_scope) {
+      TransportKey k;
+      if (chooseGeoFallbackScope(k)) {
+        snprintf(src_label, sizeof(src_label), "geo-fallback");
+        have_scope = true;
+      }
+    }
+
+    doNightFloodAdvert();   // hat eigenen duty-hard-Check + counter
+    char line[160];
+    snprintf(line, sizeof(line), "OK - flood advert.  scope: %s", src_label);
+    pushCompanionMessage(line);
     return;
   }
 
@@ -3786,9 +3853,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
   // ---------- reboot ----------------------------------------------------
   if (starts_with_word(cmd, "reboot")) {
-    pushCompanionMessage("Reboot in 1s...");
-    // Kurz warten damit die Push-Nachricht noch raus geht
-    delay(1000);
+    pushCompanionMessage("Reboot in 3s...");
+    // 3 Sekunden warten damit die Push-Nachricht und der OK-Frame
+    // ueber BLE/Serial sicher ankommen, bevor wir die Verbindung
+    // mit dem Reset killen. 1s war zu knapp.
+    delay(3000);
     board.reboot();
     return;
   }
