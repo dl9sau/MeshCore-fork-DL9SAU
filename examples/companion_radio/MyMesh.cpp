@@ -3915,16 +3915,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (!_prefs.gps_enabled) state = "off";
       else if (cur && cur[0] == '1') state = "on";
       else state = "sleeping";
-      char line[160];
-      snprintf(line, sizeof(line),
-               "gps=%s  fix_ever=%d  moving=%d",
-               state, (int)_gps_had_fix_ever, (int)_is_moving);
-      pushCompanionMessage(line);
-      snprintf(line, sizeof(line),
-               "pos=%.4f,%.4f  interval=%lus",
-               sensors.node_lat, sensors.node_lon,
-               (unsigned long)_prefs.gps_interval);
-      pushCompanionMessage(line);
+      // _prefs.gps_interval ist eine App-seitige Auto-Poll-Frequenz (in s),
+      // unabhaengig von unserem eigenen Power-Cycle-Management. 0 = kein
+      // automatisches Polling - wird hier als "off" angezeigt damit es
+      // nicht mit "0 Sekunden" verwechselt wird.
+      char interval_str[16];
+      if (_prefs.gps_interval == 0) {
+        snprintf(interval_str, sizeof(interval_str), "off");
+      } else {
+        snprintf(interval_str, sizeof(interval_str), "%lus",
+                 (unsigned long)_prefs.gps_interval);
+      }
+      char block[200];
+      snprintf(block, sizeof(block),
+               "gps=%s  fix_ever=%d  moving=%d  app-poll-interval=%s\n"
+               "\n"
+               "pos=%.4f,%.4f",
+               state, (int)_gps_had_fix_ever, (int)_is_moving,
+               interval_str,
+               sensors.node_lat, sensors.node_lon);
+      pushCompanionMessage(block);
       return;
     }
     if (starts_with_word(arg, "on")) {
