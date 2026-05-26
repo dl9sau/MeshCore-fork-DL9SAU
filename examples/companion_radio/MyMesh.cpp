@@ -1458,8 +1458,24 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
     } else if (channel_idx == _companion_channel_idx && _companion_channel_idx != 0xFF) {
       // Lokaler Companion-Channel: NICHT senden, sondern als Befehl parsen.
-      // Antwort kommt asynchron als pushCompanionMessage() im Chat zurück.
-      handleCompanionCommand(text);
+      // text im cmd_frame ist NICHT null-terminiert (Mesh-Protokoll arbeitet
+      // text+len getrennt). In lokalen Buffer kopieren, terminieren, trailing
+      // Whitespace/Newlines abschneiden (manche Apps senden CRLF mit).
+      char cmd_buf[200];
+      int cmd_len = (int)len - i;
+      if (cmd_len < 0) cmd_len = 0;
+      if (cmd_len >= (int)sizeof(cmd_buf)) cmd_len = sizeof(cmd_buf) - 1;
+      memcpy(cmd_buf, text, cmd_len);
+      cmd_buf[cmd_len] = 0;
+      while (cmd_len > 0) {
+        char c = cmd_buf[cmd_len - 1];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          cmd_buf[--cmd_len] = 0;
+        } else {
+          break;
+        }
+      }
+      handleCompanionCommand(cmd_buf);
       writeOKFrame();
     } else {
       ChannelDetails channel;
@@ -3018,11 +3034,30 @@ void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
   if (strcmp(buf, _last_geo_reco) == 0) return;   // unchanged, skip
   strncpy(_last_geo_reco, buf, sizeof(_last_geo_reco) - 1);
   _last_geo_reco[sizeof(_last_geo_reco) - 1] = 0;
-  pushDebugLog("[GEO-SCOPE] lat=%.4f lon=%.4f -> %s", lat, lon, buf);
+
+  // Koordinaten im nautischen DM-Format "DD-MM,M N/S DDD-MM,M E/W"
+  // (Komma als Dezimal-Trenner, Grad-Breite 2 für Lat, 3 für Lon mit
+  // führenden Nullen). Z.B. lat=54.0767 lon=6.7467 -> "54-04,6N 006-44,8E".
+  auto fmt_dm = [](char* out, size_t out_size, double v, int deg_width, char pos, char neg) {
+    char hemi = (v >= 0) ? pos : neg;
+    double a = fabs(v);
+    int deg = (int)a;
+    double rem_min = (a - deg) * 60.0;
+    int min_int = (int)rem_min;
+    int min_frac = (int)((rem_min - min_int) * 10.0 + 0.5);
+    if (min_frac >= 10) { min_frac = 0; min_int++; }
+    if (min_int >= 60)  { min_int = 0;  deg++; }
+    snprintf(out, out_size, "%0*d-%02d,%d%c", deg_width, deg, min_int, min_frac, hemi);
+  };
+  char lat_dm[16], lon_dm[16];
+  fmt_dm(lat_dm, sizeof(lat_dm), lat, 2, 'N', 'S');
+  fmt_dm(lon_dm, sizeof(lon_dm), lon, 3, 'E', 'W');
+
+  pushDebugLog("[GEO-SCOPE] %s %s -> %s", lat_dm, lon_dm, buf);
   // Zusätzlich im Companion-Channel anzeigen, damit die Info auch bei
   // verbundener App sichtbar wird (nicht nur im Debug-Protokoll-View).
   char chat[256];
-  snprintf(chat, sizeof(chat), "GEO-SCOPE @ %.4f,%.4f: %s", lat, lon, buf);
+  snprintf(chat, sizeof(chat), "GEO-SCOPE @ %s %s: %s", lat_dm, lon_dm, buf);
   pushCompanionMessage(chat);
 }
 
