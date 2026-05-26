@@ -1399,8 +1399,13 @@ bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
 // close to either edge).
 void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
   if (dest_size == 0) return;
-  // Mode 2: custom override aus chat_name_custom
-  if (_prefs.chat_name_mode == 2 && _prefs.chat_name_custom[0] != 0) {
+  // chat_name_mode-Semantik:
+  //   0          = voller _prefs.node_name (Default)
+  //   1..253     = erste N Woerter aus node_name
+  //   255        = custom Text aus _prefs.chat_name_custom
+  uint8_t mode = _prefs.chat_name_mode;
+
+  if (mode == 255 && _prefs.chat_name_custom[0] != 0) {
     size_t i = 0;
     while (i + 1 < dest_size && _prefs.chat_name_custom[i] != 0
            && i < sizeof(_prefs.chat_name_custom)) {
@@ -1410,9 +1415,22 @@ void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
     dest[i] = 0;
     return;
   }
-  // Mode 0 (default): erste CR_CHANNEL_SENDER_MAX_WORDS Wörter aus node_name
-  // Mode 1: nur das erste Wort
-  int max_words = (_prefs.chat_name_mode == 1) ? 1 : CR_CHANNEL_SENDER_MAX_WORDS;
+
+  if (mode == 0) {
+    // Voller Name (default).
+    size_t i = 0;
+    while (i + 1 < dest_size && _prefs.node_name[i] != 0
+           && i < sizeof(_prefs.node_name)) {
+      dest[i] = _prefs.node_name[i];
+      i++;
+    }
+    dest[i] = 0;
+    return;
+  }
+
+  // Mode N: erste N Woerter. Wenn N > vorhandene Anzahl Woerter, wird der
+  // ganze Name uebernommen (natuerliche Konsequenz der Schleife).
+  int max_words = (int)mode;
   const char* src = _prefs.node_name;
   size_t out = 0;
   int word_count = 0;
@@ -1429,8 +1447,6 @@ void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
     dest[out] = src[out];
     out++;
   }
-  // trim trailing whitespace (e.g. when we stopped after the 2nd word's
-  // following space but before the 3rd word's first character)
   while (out > 0 && (dest[out - 1] == ' ' || dest[out - 1] == '\t')) {
     out--;
   }
@@ -3633,15 +3649,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (topic_prefix_match(topic, "chatname")) {
-        // Nachrichten max. MAX_TEXT_LEN=160 Zeichen — daher Help in zwei
-        // Häppchen aufteilen statt zu kürzen.
         pushCompanionMessage(
           "chatname konfiguriert den Sendernamen in Group-Channel-Messages. "
-          "Default: erste 2 Woerter aus dem konfigurierten Node-Namen."
+          "Default: voller node_name."
         );
         pushCompanionMessage(
-          "Args: '1' = 1 Wort, '2'/'auto'/'default' = 2 Woerter, "
-          "'custom <Name>' = frei waehlbar (Original-Case). "
+          "Args: 'default' (voll), N (erste N Woerter, 1..253), "
+          "'custom <Name>' (frei, Original-Case, WS getrimmt). "
           "Ohne Arg -> Status."
         );
         return;
@@ -4231,35 +4245,52 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ') arg++; }
 
     if (!arg || *arg == 0) {
-      char line[160], preview[32];
+      char block[200], preview[64];
       copyShortSenderName(preview, sizeof(preview));
-      const char* mode_str = "?";
-      if (_prefs.chat_name_mode == 0) mode_str = "auto-2-words (default)";
-      else if (_prefs.chat_name_mode == 1) mode_str = "auto-1-word";
-      else if (_prefs.chat_name_mode == 2) mode_str = "custom";
-      snprintf(line, sizeof(line), "chatname mode=%s  preview=\"%s\"", mode_str, preview);
+      const char* node_full = _prefs.node_name[0] ? _prefs.node_name : "(empty)";
+      uint8_t mode = _prefs.chat_name_mode;
+      if (mode == 0) {
+        snprintf(block, sizeof(block),
+                 "chatname:\n  mode = default (full)\n  node_name = \"%s\"\n  preview = \"%s\"",
+                 node_full, preview);
+      } else if (mode == 255) {
+        snprintf(block, sizeof(block),
+                 "chatname:\n  mode = custom\n  preview = \"%s\"",
+                 preview);
+      } else {
+        snprintf(block, sizeof(block),
+                 "chatname:\n  mode = first %u word(s)\n  preview = \"%s\"",
+                 (unsigned)mode, preview);
+      }
+      pushCompanionMessage(block);
+      return;
+    }
+
+    if (strcmp(arg, "default") == 0) {
+      _prefs.chat_name_mode = 0;
+      savePrefs();
+      pushCompanionMessage("OK - chatname = default (full node_name).");
+      return;
+    }
+
+    // Numerisches Argument? chatname N (N=1..253) -> erste N Woerter
+    if (arg[0] >= '0' && arg[0] <= '9') {
+      int n = atoi(arg);
+      if (n < 1 || n > 253) {
+        pushCompanionMessage("chatname N: N muss 1..253 sein. Nutze 'chatname default' fuer den vollen Namen.");
+        return;
+      }
+      _prefs.chat_name_mode = (uint8_t)n;
+      savePrefs();
+      char line[80];
+      snprintf(line, sizeof(line), "OK - chatname = erste %d Woerter aus node_name.", n);
       pushCompanionMessage(line);
       return;
     }
-    if (strcmp(arg, "1") == 0) {
-      _prefs.chat_name_mode = 1;
-      savePrefs();
-      pushCompanionMessage("OK - chatname = erstes Wort.");
-      return;
-    }
-    if (strcmp(arg, "2") == 0 || starts_with_word(arg, "auto")
-        || starts_with_word(arg, "default")) {
-      _prefs.chat_name_mode = 0;
-      savePrefs();
-      pushCompanionMessage("OK - chatname = erste 2 Woerter (Standard).");
-      return;
-    }
+
     if (starts_with_word(arg, "custom")) {
-      // Custom-Text muss aus raw_cmd (Original-Case) genommen werden.
-      // Token-Walk im raw_cmd: 3. Token (nach "chatname" und "custom"),
-      // robust auch gegen Top-Level-Prefix-Expansion (lower-Buffer kann
-      // laenger sein als raw_cmd wenn User "chat custom Foo" tippte und
-      // wir intern auf "chatname" expandiert haben).
+      // Custom-Text aus raw_cmd (Original-Case) via Token-Walk: 3. Token
+      // nach "chatname"+"custom". Robust gegen Top-Level-Prefix-Expansion.
       const char* lc_text = strchr(arg, ' ');
       if (lc_text) { while (*lc_text == ' ') lc_text++; }
       if (!lc_text || *lc_text == 0) {
@@ -4268,30 +4299,43 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       const char* rp = raw_cmd;
       while (*rp == ' ' || *rp == '\t') rp++;
-      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip 1st token (chatname/chat/...)
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip 1st token
       while (*rp == ' ' || *rp == '\t') rp++;
-      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip 2nd token (custom)
-      while (*rp == ' ' || *rp == '\t') rp++;
-      const char* raw_text = rp;
-      if (*raw_text == 0) {
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip "custom"
+      while (*rp == ' ' || *rp == '\t') rp++;                 // skip leading ws to 3rd token
+      // rp zeigt jetzt auf den Anfang des custom-Texts (Original-Case).
+      // Sanity: leading WS bereits abgeschnitten, jetzt mehrfache interne
+      // Whitespaces zu einem Space collapsen, trailing WS abschneiden.
+      char clean[sizeof(_prefs.chat_name_custom)];
+      size_t cl = 0;
+      bool prev_space = false;
+      while (*rp != 0 && cl + 1 < sizeof(clean)) {
+        char c = *rp++;
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          if (!prev_space && cl > 0) {
+            clean[cl++] = ' ';
+            prev_space = true;
+          }
+        } else {
+          clean[cl++] = c;
+          prev_space = false;
+        }
+      }
+      while (cl > 0 && clean[cl - 1] == ' ') cl--;
+      clean[cl] = 0;
+      if (cl == 0) {
         pushCompanionMessage("Usage: chatname custom <Name>");
         return;
       }
-      // Trailing-WS war bereits im Intercept-Pfad abgeschnitten.
-      size_t i = 0;
-      while (raw_text[i] != 0 && i + 1 < sizeof(_prefs.chat_name_custom)) {
-        _prefs.chat_name_custom[i] = raw_text[i];
-        i++;
-      }
-      _prefs.chat_name_custom[i] = 0;
-      _prefs.chat_name_mode = 2;
+      memcpy(_prefs.chat_name_custom, clean, cl + 1);
+      _prefs.chat_name_mode = 255;
       savePrefs();
-      char reply[80];
+      char reply[120];
       snprintf(reply, sizeof(reply), "OK - chatname custom = \"%s\".", _prefs.chat_name_custom);
       pushCompanionMessage(reply);
       return;
     }
-    pushCompanionMessage("Usage: chatname [1 | 2 | auto | default | custom <Name>]");
+    pushCompanionMessage("Usage: chatname [default | N | custom <Name>]  (N = 1..253)");
     return;
   }
 
