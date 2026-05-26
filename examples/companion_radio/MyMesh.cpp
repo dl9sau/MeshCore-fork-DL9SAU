@@ -1417,13 +1417,15 @@ void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
   }
 
   if (mode == 0) {
-    // Voller Name (default).
+    // Voller Name (default). Trailing-WS strippen falls der gespeicherte
+    // node_name selbst eines hat (kommt manchmal durch App-Eingaben vor).
     size_t i = 0;
     while (i + 1 < dest_size && _prefs.node_name[i] != 0
            && i < sizeof(_prefs.node_name)) {
       dest[i] = _prefs.node_name[i];
       i++;
     }
+    while (i > 0 && (dest[i-1] == ' ' || dest[i-1] == '\t')) i--;
     dest[i] = 0;
     return;
   }
@@ -3853,11 +3855,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
   // ---------- reboot ----------------------------------------------------
   if (starts_with_word(cmd, "reboot")) {
-    pushCompanionMessage("Reboot in 3s...");
-    // 3 Sekunden warten damit die Push-Nachricht und der OK-Frame
-    // ueber BLE/Serial sicher ankommen, bevor wir die Verbindung
-    // mit dem Reset killen. 1s war zu knapp.
-    delay(3000);
+    pushCompanionMessage("Rebooting now..");
+    // 5 Sekunden warten damit die Push-Message und der OK-Frame ueber
+    // BLE/Serial sicher zur App durchkommen (PUSH_CODE_MSG_WAITING-Tickle
+    // + CMD_SYNC_NEXT_MSG-Round-Trip braucht ein bisschen). 1s war zu
+    // knapp, der User hat den Reboot dann gar nicht im Chat gesehen.
+    delay(5000);
     board.reboot();
     return;
   }
@@ -4314,9 +4317,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ') arg++; }
 
     if (!arg || *arg == 0) {
-      char block[200], preview[64];
+      char block[200], preview[64], node_trim[64];
       copyShortSenderName(preview, sizeof(preview));
-      const char* node_full = _prefs.node_name[0] ? _prefs.node_name : "(empty)";
+      // node_name fuer die Anzeige in lokalen Buffer und trailing-WS abschneiden
+      size_t nl = 0;
+      while (nl + 1 < sizeof(node_trim) && _prefs.node_name[nl] != 0
+             && nl < sizeof(_prefs.node_name)) {
+        node_trim[nl] = _prefs.node_name[nl];
+        nl++;
+      }
+      while (nl > 0 && (node_trim[nl-1] == ' ' || node_trim[nl-1] == '\t')) nl--;
+      node_trim[nl] = 0;
+      const char* node_full = node_trim[0] ? node_trim : "(empty)";
       uint8_t mode = _prefs.chat_name_mode;
       if (mode == 0) {
         snprintf(block, sizeof(block),
