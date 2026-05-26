@@ -3104,7 +3104,11 @@ void MyMesh::pushCompanionMessage(const char* text) {
   i += total_len;
 
   addToOfflineQueue(out_frame, i);
-  if (_serial->isConnected()) {
+  // NULL-Check: bei sehr frühen Boot-Pushes (z.B. dem ersten GEO-SCOPE in
+  // begin()) ist _serial noch nicht via startInterface() gesetzt. Die
+  // Nachricht liegt dann nur in der Offline-Queue und wird abgeholt sobald
+  // die App connected — der Tickle ist dafür nicht erforderlich.
+  if (_serial != NULL && _serial->isConnected()) {
     uint8_t frame[1] = { PUSH_CODE_MSG_WAITING };
     _serial->writeFrame(frame, 1);
   }
