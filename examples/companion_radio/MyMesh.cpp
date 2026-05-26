@@ -126,6 +126,7 @@
 #define PUSH_CODE_CONTROL_DATA          0x8E   // v8+
 #define PUSH_CODE_CONTACT_DELETED       0x8F // used to notify client app of deleted contact when overwriting oldest
 #define PUSH_CODE_CONTACTS_FULL         0x90 // used to notify client app that contacts storage is full
+#define PUSH_CODE_DEBUG_LOG             0x91 // DL9SAU: ASCII debug line for the app's Debug-Protokolle view
 
 #define ERR_CODE_UNSUPPORTED_CMD        1
 #define ERR_CODE_NOT_FOUND              2
@@ -1166,7 +1167,7 @@ void MyMesh::begin(bool has_display) {
 #endif
   next_periodic_advert_at = futureMillis(first_advert_wait);
   next_night_flood_unix = 0;
-  Serial.printf("[ADV-DBG] begin: boot_delay_ms=%lu next_periodic_at=%lu millis=%lu rtc=%lu\n",
+  pushDebugLog("[ADV-DBG] begin: boot_delay_ms=%lu next_periodic_at=%lu millis=%lu rtc=%lu\n",
                 first_advert_wait, next_periodic_advert_at, millis(),
                 (unsigned long)getRTCClock()->getCurrentTime());
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
@@ -1556,7 +1557,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       // Any RTC-driven schedule made before this point used the stale time;
       // invalidate so the next loop tick re-picks a slot with the corrected RTC.
       next_night_flood_unix = 0;
-      Serial.printf("[ADV-DBG] CMD_SET_DEVICE_TIME: rtc %lu -> %lu, nightly slot invalidated\n",
+      pushDebugLog("[ADV-DBG] CMD_SET_DEVICE_TIME: rtc %lu -> %lu, nightly slot invalidated\n",
                     (unsigned long)curr, (unsigned long)secs);
       writeOKFrame();
     } else {
@@ -1579,7 +1580,7 @@ void MyMesh::handleCmdFrame(size_t len) {
         sendZeroHop(pkt);
       }
       _tx_advert_count++;
-      Serial.printf("[ADV-DBG] app-cmd (CMD_SEND_SELF_ADVERT flood=%d), millis=%lu\n",
+      pushDebugLog("[ADV-DBG] app-cmd (CMD_SEND_SELF_ADVERT flood=%d), millis=%lu\n",
                     (int)(len >= 2 && cmd_frame[1] == 1), millis());
       writeOKFrame();
     } else {
@@ -2583,7 +2584,7 @@ void MyMesh::loop() {
       int32_t delta = (int32_t)(now_rtc - _last_observed_rtc);
       if (delta > 300 || delta < -300) {   // 5 min jump in either direction
         if (next_night_flood_unix != 0) {
-          Serial.printf("[ADV-DBG] RTC jumped %ld sec, nightly slot invalidated\n", (long)delta);
+          pushDebugLog("[ADV-DBG] RTC jumped %ld sec, nightly slot invalidated\n", (long)delta);
           next_night_flood_unix = 0;
         }
       }
@@ -2782,7 +2783,7 @@ void MyMesh::updateMotionTracking() {
         // NOTE: this is a position fix (GPRMC status 'A'), NOT just a GPS
         // time-sync. The driver syncs the RTC earlier (time_valid > 2),
         // independent of this code path.
-        Serial.printf("[ADV-DBG] first GPS position-fix at millis=%lu, advert clamped to %lu\n",
+        pushDebugLog("[ADV-DBG] first GPS position-fix at millis=%lu, advert clamped to %lu\n",
                       now, target);
       }
     }
@@ -2857,7 +2858,7 @@ void MyMesh::doPeriodicZeroHopAdvert() {
     sendZeroHop(pkt);
     _tx_advert_count++;
     _gps_user_override_until_advert = false;   // user-on override expires with this advert
-    Serial.printf("[ADV-DBG] periodic, millis=%lu moving=%d\n", millis(), (int)_is_moving);
+    pushDebugLog("[ADV-DBG] periodic, millis=%lu moving=%d\n", millis(), (int)_is_moving);
   }
 }
 
@@ -2884,7 +2885,7 @@ void MyMesh::doNightFloodAdvert() {
     codes[1] = 0;
     sendFlood(pkt, codes, 0, /*path_hash_size=*/3);
     _tx_advert_count++;
-    Serial.printf("[ADV-DBG] nightly-flood (3B path), millis=%lu rtc=%lu\n",
+    pushDebugLog("[ADV-DBG] nightly-flood (3B path), millis=%lu rtc=%lu\n",
                   millis(), (unsigned long)getRTCClock()->getCurrentTime());
   }
 }
@@ -2953,16 +2954,43 @@ void MyMesh::manageGpsPower() {
     _gps_woke_at_millis = (now == 0 ? 1 : now);   // 0 means "never managed"
     _gps_off_at_millis = 0;
     _gps_fix_seen_this_wake = false;              // start a fresh wake cycle
-    Serial.printf("[GPS-DBG] wake at millis=%lu (until_advert=%lds)\n", now, until_advert / 1000);
+    pushDebugLog("[GPS-DBG] wake at millis=%lu (until_advert=%lds)\n", now, until_advert / 1000);
   } else if (!want_gps_on && gps_is_on) {
     sensors.setSettingValue("gps", "0");
     _gps_woke_at_millis = 0;
     _gps_off_at_millis = (now == 0 ? 1 : now);
     _gps_fix_seen_this_wake = false;
-    Serial.printf("[GPS-DBG] sleep at millis=%lu (until_advert=%lds, fix_was_seen=1)\n",
+    pushDebugLog("[GPS-DBG] sleep at millis=%lu (until_advert=%lds, fix_was_seen=1)\n",
                   now, until_advert / 1000);
   }
 #endif
+}
+
+void MyMesh::pushDebugLog(const char* fmt, ...) {
+  char buf[160];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n <= 0) return;
+  if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
+
+  // Always to Serial — direct USB users keep their stream
+  Serial.print(buf);
+  if (buf[n - 1] != '\n') Serial.print('\n');
+
+  // Push to app debug log if connected. Frame: [PUSH_CODE][text bytes, no null]
+  if (_serial != NULL && _serial->isConnected()) {
+    uint8_t frame[1 + sizeof(buf)];
+    frame[0] = PUSH_CODE_DEBUG_LOG;
+    int copy_len = n;
+    // strip trailing newline for the app frame — UI usually adds its own
+    while (copy_len > 0 && (buf[copy_len - 1] == '\n' || buf[copy_len - 1] == '\r')) {
+      copy_len--;
+    }
+    memcpy(&frame[1], buf, copy_len);
+    _serial->writeFrame(frame, 1 + copy_len);
+  }
 }
 
 void MyMesh::initRegionKeys() {
@@ -3004,7 +3032,7 @@ bool MyMesh::advert() {
   if (pkt) {
     sendZeroHop(pkt);
     _tx_advert_count++;
-    Serial.printf("[ADV-DBG] ui-button (advert()), millis=%lu\n", millis());
+    pushDebugLog("[ADV-DBG] ui-button (advert()), millis=%lu\n", millis());
     return true;
   } else {
     return false;

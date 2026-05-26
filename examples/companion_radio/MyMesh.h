@@ -301,6 +301,10 @@ private:
   // scope or unscoped packet).
   void initRegionKeys();
   const char* lookupRegionByTransportCode(const mesh::Packet* packet) const;
+  // Format a debug line, write it to Serial AND push it to the app as a
+  // PUSH_CODE_DEBUG_LOG frame (so the user can inspect logs in the app's
+  // Debug-Protokolle view when no USB-Serial is attached, e.g. mobile).
+  void pushDebugLog(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 
   // client-repeater + periodic advert helpers
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides
