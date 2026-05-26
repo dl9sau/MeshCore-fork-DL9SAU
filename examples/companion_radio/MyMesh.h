@@ -316,6 +316,21 @@ private:
   // No-op if either coordinate is exactly 0.0.
   void maybePushGeoRecommendation(double lat, double lon);
 
+  // Companion-Channel (lokal, kein RF): legt beim Boot einmalig den Channel
+  // "companion" an (oder findet ihn falls schon persistiert) und merkt sich
+  // den Index in _companion_channel_idx.
+  void setupCompanionChannel();
+  // Pusht einen Text als synthetische incoming-channel-message für den
+  // Companion-Channel. Sendername = board.getManufacturerName(). Wenn die App
+  // nicht connected ist landet die Nachricht in der Offline-Queue (16 Slots,
+  // älteste Channel-Msg fliegt raus bei Overflow) und wird beim nächsten BLE-
+  // Connect via PUSH_CODE_MSG_WAITING ausgeliefert. No-op wenn der Companion-
+  // Channel nicht angelegt werden konnte (_companion_channel_idx == 0xFF).
+  void pushCompanionMessage(const char* text);
+  // Parst und führt einen vom User über den Companion-Channel gesendeten
+  // Befehl aus. Antwort wird via pushCompanionMessage() zurückgegeben.
+  void handleCompanionCommand(const char* cmd);
+
   // client-repeater + periodic advert helpers
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides
   void markHeardDirect(uint8_t hash);   // call only for zero-hop adverts
@@ -431,6 +446,13 @@ private:
   // Grenz-Pendeln (zwischen zwei Bundesländern parken) bleibt alles ruhig.
   double        _geo_reco_anchor_lat;
   double        _geo_reco_anchor_lon;
+
+  // Index des lokalen "companion"-Channels in channels[]. Nachrichten an
+  // diesen Channel werden NICHT über LoRa gesendet, sondern als Befehle an
+  // die Firmware geparst. Output (z.B. Geo-Scope-Empfehlung) erscheint als
+  // synthetic incoming-channel-message — App sieht es als normalen Chat.
+  // 0xFF = nicht initialisiert / kein freier Slot.
+  uint8_t       _companion_channel_idx;
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual

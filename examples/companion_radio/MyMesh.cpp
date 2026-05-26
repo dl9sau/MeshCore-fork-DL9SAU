@@ -1037,6 +1037,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _last_geo_reco[0] = 0;
   _geo_reco_anchor_lat = 0.0;
   _geo_reco_anchor_lon = 0.0;
+  _companion_channel_idx = 0xFF;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -1102,9 +1103,7 @@ void MyMesh::begin(bool has_display) {
   _boot_lat = sensors.node_lat;
   _boot_lon = sensors.node_lon;
   _boot_pos_known = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
-  if (_boot_pos_known) {
-    maybePushGeoRecommendation(_boot_lat, _boot_lon);
-  }
+  // (Geo-Reco-Push folgt weiter unten nach setupCompanionChannel().)
 
   // One-time migration: any persisted 869.000 stands for the real EU narrow
   // 869.618 MHz. Rewrite the pref so display and app show the actual
@@ -1149,6 +1148,15 @@ void MyMesh::begin(bool has_display) {
   bootstrapRTCfromContacts();
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
+  // Companion-Channel (lokal, kein RF) anlegen oder Index aus persistiertem
+  // Eintrag übernehmen. Muss VOR jedem pushCompanionMessage() laufen — daher
+  // hier, NACH loadChannels() aber vor dem Boot-Geo-Push weiter unten.
+  setupCompanionChannel();
+
+  // Boot-Geo-Push (Channel ist jetzt vorhanden, Output erscheint im Chat):
+  if (_boot_pos_known) {
+    maybePushGeoRecommendation(_boot_lat, _boot_lon);
+  }
 
   applyRadioPolicy();
   radio_set_tx_power(_prefs.tx_power_dbm);
@@ -1448,6 +1456,11 @@ void MyMesh::handleCmdFrame(size_t len) {
 
     if (txt_type != TXT_TYPE_PLAIN) {
       writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+    } else if (channel_idx == _companion_channel_idx && _companion_channel_idx != 0xFF) {
+      // Lokaler Companion-Channel: NICHT senden, sondern als Befehl parsen.
+      // Antwort kommt asynchron als pushCompanionMessage() im Chat zurück.
+      handleCompanionCommand(text);
+      writeOKFrame();
     } else {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
@@ -3006,6 +3019,212 @@ void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
   strncpy(_last_geo_reco, buf, sizeof(_last_geo_reco) - 1);
   _last_geo_reco[sizeof(_last_geo_reco) - 1] = 0;
   pushDebugLog("[GEO-SCOPE] lat=%.4f lon=%.4f -> %s", lat, lon, buf);
+  // Zusätzlich im Companion-Channel anzeigen, damit die Info auch bei
+  // verbundener App sichtbar wird (nicht nur im Debug-Protokoll-View).
+  char chat[256];
+  snprintf(chat, sizeof(chat), "GEO-SCOPE @ %.4f,%.4f: %s", lat, lon, buf);
+  pushCompanionMessage(chat);
+}
+
+// ---------------------------------------------------------------------------
+// Companion-Channel — lokal, kein RF. Output erscheint im normalen Chat der
+// App, Input vom User wird als Befehl an die Firmware geparst statt zu
+// transmitten. Sinn: Sichtbarkeit der Firmware-Events (Geo-Empfehlung etc.)
+// und bidirektionale Konfiguration ohne die App-eigenen Menüs anfassen zu
+// müssen. Pre-Connect-Buffer: existierende Offline-Queue (16 Slots) — keine
+// eigene Datenstruktur nötig.
+// ---------------------------------------------------------------------------
+#define COMPANION_CHANNEL_NAME "companion"
+
+void MyMesh::setupCompanionChannel() {
+  ChannelDetails ch;
+
+  // Schon vorhanden (aus persistiertem /channels2 geladen)?
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    if (getChannel(i, ch) &&
+        strncmp(ch.name, COMPANION_CHANNEL_NAME, sizeof(ch.name)) == 0) {
+      _companion_channel_idx = (uint8_t)i;
+      return;
+    }
+  }
+  // Nicht gefunden — ersten freien Slot suchen und Channel manuell anlegen.
+  int target = -1;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    if (getChannel(i, ch) && ch.name[0] == 0) { target = i; break; }
+  }
+  if (target < 0) {
+    _companion_channel_idx = 0xFF; // kein Slot frei
+    return;
+  }
+  // Neue ChannelDetails komponieren und über setChannel() schreiben — das
+  // berechnet auch den Hash und respektiert die internen Datenstrukturen.
+  ChannelDetails nch;
+  memset(&nch, 0, sizeof(nch));
+  StrHelper::strncpy(nch.name, COMPANION_CHANNEL_NAME, sizeof(nch.name));
+  // 16 Null-Bytes als Pseudo-Key. Über diesen Channel wird NIE transmittet,
+  // der Key dient nur als Channel-Identität für die App-Liste.
+  // setChannel berechnet den hash aus secret automatisch (siehe BaseChatMesh).
+  setChannel(target, nch);
+  _companion_channel_idx = (uint8_t)target;
+  saveChannels(); // persistieren, damit der Index über Reboots stabil bleibt
+}
+
+void MyMesh::pushCompanionMessage(const char* text) {
+  if (_companion_channel_idx == 0xFF) return;
+  if (text == NULL || text[0] == 0) return;
+
+  // Frame analog zu onChannelMessageRecv() bauen, aber Sender = Plattform-
+  // Name (z.B. "Heltec V3") und path_len=0 (zero-hop / lokal).
+  // Konvention onChannelMessageRecv erkennt "Sender: msg" am ": " Separator,
+  // wir liefern das ebenso damit die App den Sender-Teil korrekt darstellt.
+  const char* sender = board.getManufacturerName();
+  char combined[MAX_TEXT_LEN];
+  int n = snprintf(combined, sizeof(combined), "%s: %s", sender ? sender : "fw", text);
+  if (n <= 0) return;
+  int total_len = n < (int)sizeof(combined) ? n : (int)sizeof(combined) - 1;
+
+  int i = 0;
+  if (app_target_ver >= 3) {
+    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
+    out_frame[i++] = 0;  // SNR: lokal -> 0
+    out_frame[i++] = 0;  // reserved1
+    out_frame[i++] = 0;  // reserved2
+  } else {
+    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV;
+  }
+  out_frame[i++] = _companion_channel_idx;
+  out_frame[i++] = 0;             // path_len = 0 (lokal, kein Funkweg)
+  out_frame[i++] = TXT_TYPE_PLAIN;
+  uint32_t ts = getRTCClock()->getCurrentTime();
+  memcpy(&out_frame[i], &ts, 4);
+  i += 4;
+  int max_text = MAX_FRAME_SIZE - i;
+  if (total_len > max_text) total_len = max_text;
+  memcpy(&out_frame[i], combined, total_len);
+  i += total_len;
+
+  addToOfflineQueue(out_frame, i);
+  if (_serial->isConnected()) {
+    uint8_t frame[1] = { PUSH_CODE_MSG_WAITING };
+    _serial->writeFrame(frame, 1);
+  }
+}
+
+// Mini-Helper: prüft ob Text mit dem gegebenen Wort + Whitespace/EOL beginnt.
+// Case-insensitive nicht nötig: wir verlangen Kleinschreibung.
+static bool starts_with_word(const char* text, const char* word) {
+  size_t wlen = strlen(word);
+  if (strncmp(text, word, wlen) != 0) return false;
+  char c = text[wlen];
+  return c == 0 || c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+void MyMesh::handleCompanionCommand(const char* cmd) {
+  if (cmd == NULL) return;
+  // Führende Whitespace überspringen
+  while (*cmd == ' ' || *cmd == '\t') cmd++;
+  if (*cmd == 0) {
+    pushCompanionMessage("(leerer Befehl — 'help' zeigt verfügbare Kommandos)");
+    return;
+  }
+
+  // ---------- help / ? --------------------------------------------------
+  if (starts_with_word(cmd, "help") || starts_with_word(cmd, "?")) {
+    // Optionales Topic?
+    const char* topic = strchr(cmd, ' ');
+    if (topic) {
+      while (*topic == ' ') topic++;
+    }
+    if (topic && *topic) {
+      if (starts_with_word(topic, "gps")) {
+        pushCompanionMessage(
+          "gps on/off: GPS-Modul ein-/ausschalten. "
+          "Bei Off wird die zuletzt bekannte Position weiter im Advert gesendet. "
+          "Beim Off->On Wechsel sucht das Modul neu nach Fix."
+        );
+        return;
+      }
+      if (starts_with_word(topic, "advert")) {
+        pushCompanionMessage(
+          "advert: sendet sofort einen zero-hop Advert mit der aktuellen Position "
+          "(falls advert_loc_policy != NONE)."
+        );
+        return;
+      }
+      if (starts_with_word(topic, "status")) {
+        pushCompanionMessage(
+          "status: zeigt Firmware-Version, Uptime, GPS-Status, Position, "
+          "Advert-Counter."
+        );
+        return;
+      }
+      pushCompanionMessage("(kein Help-Eintrag fuer dieses Topic)");
+      return;
+    }
+    pushCompanionMessage(
+      "Befehle: help [topic], status, advert, gps on, gps off, reboot. "
+      "Weitere folgen (zerohop on/off, nightly on/off, region set, scope set)."
+    );
+    return;
+  }
+
+  // ---------- status ----------------------------------------------------
+  if (starts_with_word(cmd, "status")) {
+    char line[200];
+    unsigned long up_s = millis() / 1000UL;
+    unsigned long up_h = up_s / 3600UL;
+    unsigned long up_m = (up_s % 3600UL) / 60UL;
+    snprintf(line, sizeof(line),
+             "fw=%s  up=%luh%02lum  adv=%lu  digi=%lu",
+             FIRMWARE_VERSION, up_h, up_m,
+             (unsigned long)_tx_advert_count,
+             (unsigned long)_tx_digi_count);
+    pushCompanionMessage(line);
+    snprintf(line, sizeof(line),
+             "gps=%s fix_ever=%d moving=%d  pos=%.4f,%.4f",
+             _prefs.gps_enabled ? "on" : "off",
+             (int)_gps_had_fix_ever, (int)_is_moving,
+             sensors.node_lat, sensors.node_lon);
+    pushCompanionMessage(line);
+    return;
+  }
+
+  // ---------- advert ----------------------------------------------------
+  if (starts_with_word(cmd, "advert")) {
+    next_periodic_advert_at = millis();  // löst im naechsten loop() einen Advert aus
+    pushCompanionMessage("OK — Advert wird im naechsten loop()-Tick gesendet.");
+    return;
+  }
+
+  // ---------- gps on/off ------------------------------------------------
+  if (starts_with_word(cmd, "gps")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    if (arg && starts_with_word(arg, "on")) {
+      _prefs.gps_enabled = 1;
+      savePrefs();
+      pushCompanionMessage("OK — GPS enabled.");
+    } else if (arg && starts_with_word(arg, "off")) {
+      _prefs.gps_enabled = 0;
+      savePrefs();
+      pushCompanionMessage("OK — GPS disabled.");
+    } else {
+      pushCompanionMessage("Usage: gps on  |  gps off");
+    }
+    return;
+  }
+
+  // ---------- reboot ----------------------------------------------------
+  if (starts_with_word(cmd, "reboot")) {
+    pushCompanionMessage("Reboot in 1s...");
+    // Kurz warten damit die Push-Nachricht noch raus geht
+    delay(1000);
+    board.reboot();
+    return;
+  }
+
+  // ---------- unbekannt -------------------------------------------------
+  pushCompanionMessage("(unbekannter Befehl — 'help' fuer Liste)");
 }
 
 void MyMesh::pushDebugLog(const char* fmt, ...) {

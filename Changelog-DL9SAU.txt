@@ -1094,6 +1094,74 @@ Phase 2 (deferred, KEIN aktueller Codestand):
   in Phase 1 implementiert um die Logik einfach zu halten.
 
 ================================================================================
+14q. Companion-Channel (lokal, kein RF) für Output + Konfiguration
+================================================================================
+
+Problem:
+  Debug-Output via pushDebugLog landete im "Debug-Protokolle"-View der
+  App und ging vor BLE-Connect verloren (kein Buffer). Ergänzend hatte
+  der User keine Möglichkeit, die Firmware ohne App-Menüs interaktiv
+  zu konfigurieren.
+
+Lösung:
+  Ein neuer Channel mit Namen "companion" wird beim Boot in
+  channels[] angelegt (ersten freien Slot). NICHT-OTA: Nachrichten an
+  diesen Channel werden im CMD_SEND_CHANNEL_TXT_MSG-Handler abgefangen
+  und an handleCompanionCommand() statt an sendGroupMessage()
+  weitergegeben. Output der Firmware (z.B. Geo-Scope-Empfehlung)
+  geht via pushCompanionMessage() als synthetische incoming-channel-
+  message in den Chat. Sender = board.getManufacturerName() (z.B.
+  "Heltec V3" für den Heltec Wireless Tracker).
+
+Pre-Connect-Buffer:
+  Die existierende OFFLINE_QUEUE_SIZE=16 (FIFO mit Drop-oldest-channel-
+  msg-on-overflow) übernimmt das Puffern. Beim BLE-Connect wird
+  PUSH_CODE_MSG_WAITING-Tickle gesendet, App holt sich die Nachrichten
+  via CMD_SYNC_NEXT_MSG. KEIN eigener Ringbuffer nötig.
+
+Phase-1-Befehlssatz (jetzt enthalten):
+  - help / ?                 Liste der Befehle
+  - help <topic>             Detail zu gps/advert/status
+  - status                   Firmware-Version, Uptime, Adv/Digi-Counter,
+                             GPS-Status, Moving-Flag, aktuelle Position
+  - advert                   sendet sofort einen zero-hop Advert (setzt
+                             next_periodic_advert_at = millis())
+  - gps on  /  gps off       _prefs.gps_enabled toggle + savePrefs
+  - reboot                   board.reboot() (1s delay damit der OK-Push
+                             noch raus geht)
+
+Phase-2 (geplant, separater Commit):
+  - advert.zerohop on/off    periodischer zero-hop Advert ein/aus
+  - nightly on/off           Nightly-Flood ein/aus
+  - region set <name>        Default-Flood-Scope setzen (CMD_SET_DEFAULT_-
+                             FLOOD_SCOPE-Äquivalent über Chat)
+  - scope set <name>         Nightly-Flood-Scope-Override
+  - client-repeat on/off     mit signalFitsInIsmBand-Pre-Check beim "on":
+                             Aktivierung wird abgelehnt wenn die aktuelle
+                             Frequenz nicht im erlaubten ISM-Band liegt
+                             (Sicherheit, keine --force-Option)
+  - Mirror der CommonCLI-Syntax (set name X, set lat, set advert.interval,
+                             get *, neighbors, ...) für vertraute Bedienung
+  - CommonCLI selbst NICHT eingebunden weil companion_radio und
+    simple_repeater unterschiedliche NodePrefs-Strukturen haben
+    (Namespace-Kollision + inkompatible Felder)
+
+Implementation-Hinweise:
+  - setupCompanionChannel() nutzt setChannel() (public API), nicht
+    direkten channels[]-Zugriff (der ist private in BaseChatMesh)
+  - Pseudo-Key = 16 Null-Bytes (Hash wird daraus berechnet). Sicherheit
+    irrelevant weil NIE transmittet.
+  - _companion_channel_idx persistiert via saveChannels() → über Reboots
+    stabil. Hash-Lookup via Name garantiert dass derselbe Slot benutzt
+    wird auch wenn andere Channels dazukommen/wegfallen.
+  - Frame-Layout für synthetic RX: RESP_CODE_CHANNEL_MSG_RECV_V3 (v3+)
+    bzw. _MSG_RECV (alt), path_len=0 (lokal/zero-hop), Sender als
+    "Heltec V3: text" im Payload (App erkennt "Sender: msg" an ": ")
+  - Begin()-Reihenfolge umgestellt: maybePushGeoRecommendation() läuft
+    jetzt NACH setupCompanionChannel(), sonst würde der Boot-Geo-Push
+    keinen Companion-Channel zum Pushen finden (no-op).
+
+================================================================================
 14j. Flood-Repeat-Power differenziert nach Quelle
 ================================================================================
 
