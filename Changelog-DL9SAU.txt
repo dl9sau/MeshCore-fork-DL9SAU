@@ -1073,11 +1073,19 @@ Stadtstaaten-Spezialregel (NUR Berlin/Brandenburg):
   Scope; dort sollen die umgebenden Flächenstaaten in der
   Empfehlung sichtbar bleiben.
 
-Dedup:
-  MyMesh::maybePushGeoRecommendation() merkt sich die zuletzt
-  gemeldete Empfehlungs-Zeichenkette in _last_geo_reco[] und logged
-  nur bei Änderung. Der 10-Minuten-Motion-Tick darf damit billig
-  aufrufen ohne den Debug-Log zu fluten.
+Dedup + Hysterese:
+  1) MyMesh::maybePushGeoRecommendation() merkt sich die zuletzt
+     gemeldete Empfehlungs-Zeichenkette in _last_geo_reco[] und
+     logged nur bei tatsächlicher Änderung.
+  2) Zusätzlich Distanz-Hysterese über CR_GEO_RECO_REEVAL_DIST_M
+     (10 km): es wird nur dann überhaupt neu evaluiert, wenn wir
+     uns seit der letzten Auswertung um mehr als 10 km von einem
+     Anker entfernt haben. Bei 40 km/h Autofahrt löst der Anker
+     alle ~15-20 min aus; ein Knoten der genau auf einer
+     Bundesland-Grenze parkt verursacht KEIN Empfehlungs-Flapping.
+     Anker wird bei jeder Berechnung neu gesetzt (auch wenn der
+     Output unverändert bleibt) damit die Distanz nicht von der
+     ursprünglichen Anker-Position akkumuliert.
 
 Phase 2 (deferred, KEIN aktueller Codestand):
   Grenz-Toleranz ~5-10 km für "erweiterte Heimat" — wer 5 km

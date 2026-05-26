@@ -1035,6 +1035,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _region_keys_ready = false;
 #endif
   _last_geo_reco[0] = 0;
+  _geo_reco_anchor_lat = 0.0;
+  _geo_reco_anchor_lon = 0.0;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -2981,6 +2983,22 @@ void MyMesh::manageGpsPower() {
 
 void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
   if (lat == 0.0 && lon == 0.0) return;
+
+  // Hysterese-Schwelle (siehe CR_GEO_RECO_REEVAL_DIST_M): solange wir uns
+  // seit der letzten Auswertung weniger als 10 km bewegt haben, sparen wir
+  // uns die Neu-Berechnung. Beim allerersten Aufruf ist der Anker (0,0) —
+  // jede reale Position liefert dann eine huge Distanz und triggert.
+  // Equirectangular approximation; reicht völlig für die 10-km-Schwelle.
+  double dlat_m = (lat - _geo_reco_anchor_lat) * 111320.0;
+  double dlon_m = (lon - _geo_reco_anchor_lon) * 111320.0 * cos(lat * DEG_TO_RAD);
+  double dist_m = sqrt(dlat_m * dlat_m + dlon_m * dlon_m);
+  if (dist_m < CR_GEO_RECO_REEVAL_DIST_M) return;
+
+  // Anker IMMER updaten (auch wenn der Output unverändert bleibt), damit die
+  // Distanz nicht von der ursprünglichen Anker-Position akkumuliert.
+  _geo_reco_anchor_lat = lat;
+  _geo_reco_anchor_lon = lon;
+
   char buf[200];
   dl9sau_recommend_scopes(lat, lon, buf, sizeof(buf));
   if (buf[0] == 0) return;

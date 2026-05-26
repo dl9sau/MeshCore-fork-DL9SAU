@@ -148,6 +148,12 @@ struct AdvertPath {
 // (sensors.node_lat/lon). Wider than CR_MOTION_RADIUS_M to absorb the
 // jitter that a cheap GPS module produces on a fresh cold-start fix.
 #define CR_BOOT_MOVE_TOLERANCE_M   120.0
+// Hysterese-Schwelle für maybePushGeoRecommendation(): solange wir uns
+// weniger als diesen Wert vom letzten Auswertungs-Anker entfernt haben,
+// wird die Geo-Scope-Empfehlung NICHT neu berechnet. Bei 40 km/h (Auto)
+// löst der Anker alle ~15-20 min eine Neu-Auswertung aus; ein Knoten,
+// der genau auf einer Bundesland-Grenze parkt, bleibt ruhig.
+#define CR_GEO_RECO_REEVAL_DIST_M  10000.0
 // 5 min after boot when GPS is off or has already obtained a fix; if GPS is
 // enabled but still searching, wait up to 10 min so that the first advert can
 // already carry a position. When the first fix arrives during the wait, the
@@ -418,6 +424,13 @@ private:
   // Cache of the last geo-scope recommendation we logged, so we don't spam
   // the debug log on every motion-tracking tick.
   char          _last_geo_reco[200];
+  // Hysterese-Anker: Position bei letzter Berechnung. Solange wir uns weniger
+  // als CR_GEO_RECO_REEVAL_DIST_M von dort entfernt haben, sparen wir uns die
+  // Neu-Auswertung. Bei kontinuierlicher Bewegung (z.B. 40 km/h Auto) löst der
+  // Anker alle ~15-20 min eine Neu-Berechnung aus; bei stillstand oder
+  // Grenz-Pendeln (zwischen zwei Bundesländern parken) bleibt alles ruhig.
+  double        _geo_reco_anchor_lat;
+  double        _geo_reco_anchor_lon;
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual
