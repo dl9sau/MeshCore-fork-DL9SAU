@@ -1103,6 +1103,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _geo_reco_anchor_lon = 0.0;
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
+  _runtime_scope_name_hint[0] = 0;
   memset(_heard_direct,       0, sizeof(_heard_direct));
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
   memset(_rx_flood_by_ptype,  0, sizeof(_rx_flood_by_ptype));
@@ -1646,6 +1647,7 @@ void MyMesh::handleCmdFrame(size_t len) {
         // 128-bit channel secrets map directly onto TransportKey.key.
         memcpy(runtime_last_channel_scope.key, channel.channel.secret, sizeof(runtime_last_channel_scope.key));
         runtime_last_channel_scope_at = getRTCClock()->getCurrentTime();
+        StrHelper::strncpy(_runtime_scope_name_hint, channel.name, sizeof(_runtime_scope_name_hint));
         traceCompanion(TRACE_SCOPE, "[scope] runtime_last_channel_scope=\"%s\"", channel.name);
         writeOKFrame();
       } else {
@@ -3517,7 +3519,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // tokenisieren raw_cmd selbst.
   static const char* const TOP_CMDS[] = {
     "help", "?", "status", "stats", "uptime", "advert", "autoadv",
-    "repeater", "gps", "trace", "chatname", "reboot", "duty",
+    "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -3601,6 +3603,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "scope")) {
+        pushCompanionMessage(
+          "scope verwaltet die Flood-Scope-Hierarchie (nightly + advert flood). "
+          "Reihenfolge: override > default > geo-fallback."
+        );
+        pushCompanionMessage(
+          "scope                       -> Status. "
+          "scope default <name>        -> persistent. "
+          "scope default clear         -> persistent loeschen."
+        );
+        pushCompanionMessage(
+          "scope override <name>       -> 12h. "
+          "scope override clear        -> Override sofort verwerfen. "
+          "<name> optional mit '#'-Prefix."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "duty")) {
         pushCompanionMessage(
           "duty: Duty-Cycle-Schutz (10% TX-Airtime pro rollendem 1h-Fenster). "
@@ -3672,8 +3691,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     pushCompanionMessage(
       "Befehle: help [topic], status, stats, uptime, advert, autoadv, "
-      "repeater, duty, gps, trace, chatname, reboot. (Weitere geplant: "
-      "region set, scope set.)"
+      "repeater, duty, scope, gps, trace, chatname, reboot."
     );
     return;
   }
@@ -4194,6 +4212,168 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     pushCompanionMessage("Usage: duty [soft N | hard N | reset]");
+    return;
+  }
+
+  // ---------- scope [default | override] <name>|clear -------------------
+  // Verwaltet die Flood-Scope-Hierarchie fuer den nightly-Job und
+  // 'advert flood'. Hierarchie (chooseNightFloodScope): override > default
+  // > geo-fallback.
+  //   scope                       -> Status (default + override + active)
+  //   scope default <name>        -> persistent Default
+  //   scope default clear         -> persistent Default loeschen
+  //   scope override <name>       -> 12h-Override (in RAM)
+  //   scope override clear        -> Override sofort verwerfen
+  if (starts_with_word(cmd, "scope")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+
+    // Helper-Lambda: name-Argument extrahieren, '#'-Prefix strippen, in
+    // lowercase Konvention. Token aus dem RAW-cmd damit Case nicht wichtig
+    // ist; wir lowercasen anschliessend (Scope-Namen sind by convention
+    // lowercase). Returns "" wenn kein Argument.
+    auto extract_name = [&](const char* sub_arg, char* out, size_t out_size) -> void {
+      out[0] = 0;
+      const char* p = strchr(sub_arg, ' ');
+      if (!p) return;
+      while (*p == ' ' || *p == '\t') p++;
+      if (*p == 0) return;
+      if (*p == '#') p++;   // Optional '#'-Prefix strippen
+      size_t i = 0;
+      while (*p && *p != ' ' && *p != '\t' && i + 1 < out_size) {
+        char c = *p++;
+        if (c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+        out[i++] = c;
+      }
+      out[i] = 0;
+    };
+
+    // -- Status (kein Arg) --
+    if (!arg || *arg == 0) {
+      char block[200];
+      // Default-Scope Status
+      bool default_set = false;
+      for (size_t k = 0; k < sizeof(_prefs.default_scope_key); k++) {
+        if (_prefs.default_scope_key[k] != 0) { default_set = true; break; }
+      }
+      char def_line[100];
+      if (default_set) {
+        snprintf(def_line, sizeof(def_line), "default = #%s",
+                 _prefs.default_scope_name[0] ? _prefs.default_scope_name : "?");
+      } else {
+        snprintf(def_line, sizeof(def_line), "default = (none)");
+      }
+      // Override-Status (mit Expiry)
+      char ovr_line[100];
+      bool override_active = false;
+      if (!runtime_last_channel_scope.isNull() && runtime_last_channel_scope_at != 0) {
+        uint32_t now = getRTCClock()->getCurrentTime();
+        if (now >= runtime_last_channel_scope_at &&
+            (now - runtime_last_channel_scope_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
+          uint32_t age = now - runtime_last_channel_scope_at;
+          uint32_t remaining = CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS - age;
+          uint32_t rem_h = remaining / 3600;
+          uint32_t rem_m = (remaining % 3600) / 60;
+          snprintf(ovr_line, sizeof(ovr_line),
+                   "override = %s%s (gueltig %luh%02lum)",
+                   _runtime_scope_name_hint[0] ? "#" : "",
+                   _runtime_scope_name_hint[0] ? _runtime_scope_name_hint : "(unbekannt)",
+                   (unsigned long)rem_h, (unsigned long)rem_m);
+          override_active = true;
+        } else {
+          snprintf(ovr_line, sizeof(ovr_line), "override = (expired)");
+        }
+      } else {
+        snprintf(ovr_line, sizeof(ovr_line), "override = (none)");
+      }
+      // Active Source
+      const char* active;
+      if (override_active) active = "override";
+      else if (default_set) active = "default";
+      else {
+        TransportKey tmp;
+        active = chooseGeoFallbackScope(tmp) ? "geo-fallback" : "(none)";
+      }
+      snprintf(block, sizeof(block),
+               "scope:\n  %s\n  %s\n  active in nightly = %s",
+               def_line, ovr_line, active);
+      pushCompanionMessage(block);
+      return;
+    }
+
+    // -- default <name>|clear --
+    if (starts_with_word(arg, "default")) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      if (!sub || *sub == 0) {
+        pushCompanionMessage("Usage: scope default <name>|clear");
+        return;
+      }
+      if (strcmp(sub, "clear") == 0) {
+        memset(_prefs.default_scope_name, 0, sizeof(_prefs.default_scope_name));
+        memset(_prefs.default_scope_key, 0, sizeof(_prefs.default_scope_key));
+        savePrefs();
+        pushCompanionMessage("OK - scope default cleared.");
+        return;
+      }
+      char name[32];
+      extract_name(arg, name, sizeof(name));
+      if (name[0] == 0) {
+        pushCompanionMessage("Usage: scope default <name>|clear");
+        return;
+      }
+      // Hash berechnen via TransportKeyStore.getAutoKeyFor (gleiches
+      // Verfahren wie geo-fallback und Repeater-Region-Lookup).
+      char tag[40];
+      snprintf(tag, sizeof(tag), "#%s", name);
+      TransportKey key;
+      TransportKeyStore tmp;
+      tmp.getAutoKeyFor(0, tag, key);
+      StrHelper::strncpy(_prefs.default_scope_name, name, sizeof(_prefs.default_scope_name));
+      memcpy(_prefs.default_scope_key, key.key, sizeof(_prefs.default_scope_key));
+      savePrefs();
+      char line[100];
+      snprintf(line, sizeof(line), "OK - scope default = #%s", name);
+      pushCompanionMessage(line);
+      return;
+    }
+
+    // -- override <name>|clear --
+    if (starts_with_word(arg, "override")) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      if (!sub || *sub == 0) {
+        pushCompanionMessage("Usage: scope override <name>|clear");
+        return;
+      }
+      if (strcmp(sub, "clear") == 0) {
+        memset(runtime_last_channel_scope.key, 0, sizeof(runtime_last_channel_scope.key));
+        runtime_last_channel_scope_at = 0;
+        _runtime_scope_name_hint[0] = 0;
+        pushCompanionMessage("OK - scope override cleared.");
+        return;
+      }
+      char name[32];
+      extract_name(arg, name, sizeof(name));
+      if (name[0] == 0) {
+        pushCompanionMessage("Usage: scope override <name>|clear");
+        return;
+      }
+      char tag[40];
+      snprintf(tag, sizeof(tag), "#%s", name);
+      TransportKey key;
+      TransportKeyStore tmp;
+      tmp.getAutoKeyFor(0, tag, key);
+      memcpy(runtime_last_channel_scope.key, key.key, sizeof(runtime_last_channel_scope.key));
+      runtime_last_channel_scope_at = getRTCClock()->getCurrentTime();
+      StrHelper::strncpy(_runtime_scope_name_hint, name, sizeof(_runtime_scope_name_hint));
+      char line[100];
+      snprintf(line, sizeof(line), "OK - scope override = #%s (12h)", name);
+      pushCompanionMessage(line);
+      return;
+    }
+
+    pushCompanionMessage("Usage: scope [default <name>|clear | override <name>|clear]");
     return;
   }
 

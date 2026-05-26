@@ -492,6 +492,10 @@ private:
   // reset bei Reboot — verhindert dass eine Trace-Kategorie versehentlich
   // unbegrenzt die Offline-Queue mit Events flutet.
   uint16_t      _trace_flags;
+  // Namens-Hint zum runtime_last_channel_scope (RAM-only). Wird gesetzt
+  // beim Channel-Send oder per "scope override <name>"-Befehl, damit der
+  // Status-Output den Namen anzeigen kann statt nur "runtime active".
+  char          _runtime_scope_name_hint[32];
   // Detail-Statistik-Counter (RAM-only, reset bei Reboot).
   // Indizes: ADV_TYPE_* (0..4) bzw. PAYLOAD_TYPE_* (0..0x0F).
   uint16_t      _heard_direct[5];        // zero-hop empfangene Adverts pro Node-Typ
