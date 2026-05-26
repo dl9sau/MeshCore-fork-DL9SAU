@@ -1072,8 +1072,6 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(send_scope.key, 0, sizeof(send_scope.key));
   memset(heard_list, 0, sizeof(heard_list));
   heard_next_idx = 0;
-  memset(_tx_scope_override.key, 0, sizeof(_tx_scope_override.key));
-  _tx_scope_override_at = 0;
   next_periodic_advert_at = 0;
   next_night_flood_unix = 0;
   _pos_anchor_lat = 0;
@@ -1103,7 +1101,6 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _geo_reco_anchor_lon = 0.0;
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
-  _tx_scope_override_name[0] = 0;
   _pending_reboot_at = 0;
   memset(_heard_direct,       0, sizeof(_heard_direct));
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
@@ -2903,26 +2900,36 @@ bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
 }
 
 bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
-  // 1) last App-channel send since boot — but only if recent (<12h).
-  //    A one-off "did this test channel work?" send shouldn't pin the
-  //    nightly flood to that channel for days.
-  if (!_tx_scope_override.isNull() && _tx_scope_override_at != 0) {
-    uint32_t now = getRTCClock()->getCurrentTime();
-    if (now >= _tx_scope_override_at &&
-        (now - _tx_scope_override_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
-      out_key = _tx_scope_override;
+  // Neue 4-stufige Hierarchie:
+  //   1) override (persistent, expiry-basiert)
+  //   2) bake-scope (persistent, explizit fuer nightly)
+  //   3) default-scope (persistent, fuer regulaere Sends)
+  //   4) geo-fallback (Position-basiert)
+  uint32_t now = getRTCClock()->getCurrentTime();
+  // 1) override: aktiv solange now < expiry
+  if (_prefs.override_expiry != 0 && now < _prefs.override_expiry) {
+    TransportKey k;
+    memcpy(k.key, _prefs.override_scope_key, sizeof(k.key));
+    if (!k.isNull()) {
+      out_key = k;
       return true;
     }
-    // fall through — expired, treat as if no recent channel was used
   }
-  // 2) configured default flood scope
+  // 2) bake-scope
+  TransportKey bake;
+  memcpy(bake.key, _prefs.bake_scope_key, sizeof(bake.key));
+  if (!bake.isNull()) {
+    out_key = bake;
+    return true;
+  }
+  // 3) default-scope
   TransportKey configured;
   memcpy(configured.key, _prefs.default_scope_key, sizeof(configured.key));
   if (!configured.isNull()) {
     out_key = configured;
     return true;
   }
-  // 3) geo fallback
+  // 4) geo fallback
   return chooseGeoFallbackScope(out_key);
 }
 
@@ -3486,7 +3493,7 @@ static const TraceCat trace_cats[] = {
   { "gps",     TRACE_GPS,     "GPS power on/off, first fix, fix loss" },
   { "adverts", TRACE_ADVERTS, "eigene Adverts (periodic/nightly/manual)" },
   { "repeat",  TRACE_REPEAT,  "durchgereichte Packets" },
-  { "scope",   TRACE_SCOPE,   "_tx_scope_override Wechsel" },
+  { "scope",   TRACE_SCOPE,   "scope override/default/bake Wechsel" },
   { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
   { "heard",   TRACE_HEARD,   "neue Direct-heard Nodes (HeardList)" },
   { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
@@ -3616,18 +3623,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "scope")) {
         pushCompanionMessage(
-          "scope verwaltet die Flood-Scope-Hierarchie (nightly + advert flood). "
-          "Reihenfolge: override > default > geo-fallback."
+          "scope steuert NUR die nightly bake / 'advert flood' Reichweite, "
+          "nicht regulaere Sends. Hierarchie: override > bake > default > geo."
         );
         pushCompanionMessage(
-          "scope                       -> Status. "
-          "scope default <name>        -> persistent. "
-          "scope default clear         -> persistent loeschen."
+          "scope                              -> Status aller 4 Quellen. "
+          "scope default <name>|clear         -> persistent (auch fuer normale Sends als Fallback)."
         );
         pushCompanionMessage(
-          "scope override <name>       -> 12h. "
-          "scope override clear        -> Override sofort verwerfen. "
-          "<name> optional mit '#'-Prefix."
+          "scope bake <name>|clear            -> persistent, NUR nightly. "
+          "Bewusst weiter als default moeglich (z.B. default=#de-be, bake=#de-bebb)."
+        );
+        pushCompanionMessage(
+          "scope override <name> [12h|3d]|clear -> persistent ueber Reboots "
+          "(default 12h, max 30d). Suffix h oder d. Hoechste Prio."
         );
         return;
       }
@@ -3800,18 +3809,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // Flood: Scope-Quelle vorab bestimmen fuer die Antwort, dann senden.
+    // Reihenfolge muss zu chooseNightFloodScope passen:
+    //   override (persistent) > bake > default > geo
     char src_label[64] = "(none - kein scope verfuegbar)";
     bool have_scope = false;
-    // 1) override (runtime, 12h)
-    if (!_tx_scope_override.isNull() && _tx_scope_override_at != 0) {
-      uint32_t now = getRTCClock()->getCurrentTime();
-      if (now >= _tx_scope_override_at &&
-          (now - _tx_scope_override_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
-        snprintf(src_label, sizeof(src_label), "override (runtime)");
+    uint32_t now = getRTCClock()->getCurrentTime();
+    // 1) override
+    if (_prefs.override_expiry != 0 && now < _prefs.override_expiry) {
+      snprintf(src_label, sizeof(src_label), "override = #%s",
+               _prefs.override_scope_name[0] ? _prefs.override_scope_name : "?");
+      have_scope = true;
+    }
+    // 2) bake
+    if (!have_scope) {
+      bool bake_set = false;
+      for (size_t k = 0; k < sizeof(_prefs.bake_scope_key); k++) {
+        if (_prefs.bake_scope_key[k] != 0) { bake_set = true; break; }
+      }
+      if (bake_set) {
+        snprintf(src_label, sizeof(src_label), "bake = #%s",
+                 _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
         have_scope = true;
       }
     }
-    // 2) configured default
+    // 3) configured default
     if (!have_scope) {
       bool default_set = false;
       for (size_t k = 0; k < sizeof(_prefs.default_scope_key); k++) {
@@ -3823,7 +3844,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         have_scope = true;
       }
     }
-    // 3) geo fallback
+    // 4) geo fallback
     if (!have_scope) {
       TransportKey k;
       if (chooseGeoFallbackScope(k)) {
@@ -4228,30 +4249,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  // ---------- scope [default | override] <name>|clear -------------------
+  // ---------- scope [default|bake|override] -----------------------------
   // Verwaltet die Flood-Scope-Hierarchie fuer den nightly-Job und
-  // 'advert flood'. Hierarchie (chooseNightFloodScope): override > default
-  // > geo-fallback.
-  //   scope                       -> Status (default + override + active)
-  //   scope default <name>        -> persistent Default
-  //   scope default clear         -> persistent Default loeschen
-  //   scope override <name>       -> 12h-Override (in RAM)
-  //   scope override clear        -> Override sofort verwerfen
+  // 'advert flood'. Wirkt NICHT auf regulaere Channel-/Direct-Sends.
+  // Hierarchie (chooseNightFloodScope):
+  //   1) override (persistent, mit expiry)
+  //   2) bake     (persistent, fuer nightly bewusst weiter als default)
+  //   3) default  (persistent, fuer regulaere Sends — Fallback fuer nightly)
+  //   4) geo-fallback (Position-basiert)
   if (starts_with_word(cmd, "scope")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
 
-    // Helper-Lambda: name-Argument extrahieren, '#'-Prefix strippen, in
-    // lowercase Konvention. Token aus dem RAW-cmd damit Case nicht wichtig
-    // ist; wir lowercasen anschliessend (Scope-Namen sind by convention
-    // lowercase). Returns "" wenn kein Argument.
+    // Hilfs-Helper: name-Argument extrahieren (das jeweils 2. Token nach
+    // dem Sub-Befehl), '#'-Prefix strippen, lowercase. Returns "" wenn
+    // kein Argument.
     auto extract_name = [&](const char* sub_arg, char* out, size_t out_size) -> void {
       out[0] = 0;
       const char* p = strchr(sub_arg, ' ');
       if (!p) return;
       while (*p == ' ' || *p == '\t') p++;
       if (*p == 0) return;
-      if (*p == '#') p++;   // Optional '#'-Prefix strippen
+      if (*p == '#') p++;
       size_t i = 0;
       while (*p && *p != ' ' && *p != '\t' && i + 1 < out_size) {
         char c = *p++;
@@ -4261,55 +4280,82 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       out[i] = 0;
     };
 
+    // TTL-Parser: "72h" -> 72*3600. "3d" -> 3*86400. Default 12h wenn
+    // ohne Suffix oder ohne Token. Maximum 30d = 720h.
+    auto parse_ttl_secs = [&](const char* sub_arg) -> uint32_t {
+      // Token nach dem name extrahieren (3. Token im sub_arg).
+      const char* p = strchr(sub_arg, ' ');
+      if (!p) return 12UL * 3600UL;
+      while (*p == ' ') p++;
+      if (!*p) return 12UL * 3600UL;
+      while (*p && *p != ' ') p++;     // skip name token
+      while (*p == ' ') p++;
+      if (!*p) return 12UL * 3600UL;
+      uint32_t n = 0;
+      while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; }
+      if (n == 0) return 12UL * 3600UL;
+      char unit = (*p == 0) ? 'h' : (char)((*p >= 'A' && *p <= 'Z') ? (*p + 32) : *p);
+      uint32_t secs;
+      if (unit == 'h') secs = n * 3600UL;
+      else if (unit == 'd') secs = n * 86400UL;
+      else return 0;  // unbekanntes Suffix
+      if (secs > 30UL * 86400UL) secs = 30UL * 86400UL;  // cap auf 30 Tage
+      return secs;
+    };
+
     // -- Status (kein Arg) --
     if (!arg || *arg == 0) {
-      char block[200];
-      // Default-Scope Status
-      bool default_set = false;
-      for (size_t k = 0; k < sizeof(_prefs.default_scope_key); k++) {
-        if (_prefs.default_scope_key[k] != 0) { default_set = true; break; }
-      }
-      char def_line[100];
-      if (default_set) {
-        snprintf(def_line, sizeof(def_line), "default = #%s",
-                 _prefs.default_scope_name[0] ? _prefs.default_scope_name : "?");
-      } else {
-        snprintf(def_line, sizeof(def_line), "default = (none)");
-      }
-      // Override-Status (mit Expiry)
-      char ovr_line[100];
-      bool override_active = false;
-      if (!_tx_scope_override.isNull() && _tx_scope_override_at != 0) {
-        uint32_t now = getRTCClock()->getCurrentTime();
-        if (now >= _tx_scope_override_at &&
-            (now - _tx_scope_override_at) <= CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS) {
-          uint32_t age = now - _tx_scope_override_at;
-          uint32_t remaining = CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS - age;
-          uint32_t rem_h = remaining / 3600;
-          uint32_t rem_m = (remaining % 3600) / 60;
-          snprintf(ovr_line, sizeof(ovr_line),
-                   "override = %s%s (gueltig %luh%02lum)",
-                   _tx_scope_override_name[0] ? "#" : "",
-                   _tx_scope_override_name[0] ? _tx_scope_override_name : "(unbekannt)",
+      auto is_set = [](const uint8_t* keybuf, size_t len) -> bool {
+        for (size_t k = 0; k < len; k++) if (keybuf[k] != 0) return true;
+        return false;
+      };
+      uint32_t now = getRTCClock()->getCurrentTime();
+      bool override_active = (_prefs.override_expiry != 0 && now < _prefs.override_expiry);
+      bool bake_set    = is_set(_prefs.bake_scope_key,    sizeof(_prefs.bake_scope_key));
+      bool default_set = is_set(_prefs.default_scope_key, sizeof(_prefs.default_scope_key));
+
+      char def_line[80], bake_line[80], ovr_line[120];
+      if (default_set) snprintf(def_line, sizeof(def_line), "default  = #%s",
+               _prefs.default_scope_name[0] ? _prefs.default_scope_name : "?");
+      else snprintf(def_line, sizeof(def_line), "default  = (none)");
+
+      if (bake_set) snprintf(bake_line, sizeof(bake_line), "bake     = #%s",
+               _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
+      else snprintf(bake_line, sizeof(bake_line), "bake     = (none)");
+
+      if (override_active) {
+        uint32_t remaining = _prefs.override_expiry - now;
+        uint32_t rem_d = remaining / 86400UL;
+        uint32_t rem_h = (remaining % 86400UL) / 3600UL;
+        uint32_t rem_m = (remaining % 3600UL) / 60UL;
+        if (rem_d > 0)
+          snprintf(ovr_line, sizeof(ovr_line), "override = #%s (noch %lud%02luh%02lum)",
+                   _prefs.override_scope_name[0] ? _prefs.override_scope_name : "?",
+                   (unsigned long)rem_d, (unsigned long)rem_h, (unsigned long)rem_m);
+        else
+          snprintf(ovr_line, sizeof(ovr_line), "override = #%s (noch %luh%02lum)",
+                   _prefs.override_scope_name[0] ? _prefs.override_scope_name : "?",
                    (unsigned long)rem_h, (unsigned long)rem_m);
-          override_active = true;
-        } else {
-          snprintf(ovr_line, sizeof(ovr_line), "override = (expired)");
-        }
+      } else if (_prefs.override_expiry != 0) {
+        snprintf(ovr_line, sizeof(ovr_line), "override = (expired)");
       } else {
         snprintf(ovr_line, sizeof(ovr_line), "override = (none)");
       }
-      // Active Source
+
       const char* active;
       if (override_active) active = "override";
+      else if (bake_set)   active = "bake";
       else if (default_set) active = "default";
       else {
         TransportKey tmp;
         active = chooseGeoFallbackScope(tmp) ? "geo-fallback" : "(none)";
       }
+      char block[300];
       snprintf(block, sizeof(block),
-               "scope:\n  %s\n  %s\n  active in nightly = %s",
-               def_line, ovr_line, active);
+               "scope (nightly bake hierarchy):\n"
+               "  %s\n  %s\n  %s\n"
+               "  active = %s",
+               def_line, bake_line, ovr_line, active);
       pushCompanionMessage(block);
       return;
     }
@@ -4318,75 +4364,93 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (starts_with_word(arg, "default")) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
-      if (!sub || *sub == 0) {
-        pushCompanionMessage("Usage: scope default <name>|clear");
-        return;
-      }
+      if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope default <name>|clear"); return; }
       if (strcmp(sub, "clear") == 0) {
         memset(_prefs.default_scope_name, 0, sizeof(_prefs.default_scope_name));
-        memset(_prefs.default_scope_key, 0, sizeof(_prefs.default_scope_key));
+        memset(_prefs.default_scope_key,  0, sizeof(_prefs.default_scope_key));
         savePrefs();
         pushCompanionMessage("OK - scope default cleared.");
         return;
       }
       char name[32];
       extract_name(arg, name, sizeof(name));
-      if (name[0] == 0) {
-        pushCompanionMessage("Usage: scope default <name>|clear");
-        return;
-      }
-      // Hash berechnen via TransportKeyStore.getAutoKeyFor (gleiches
-      // Verfahren wie geo-fallback und Repeater-Region-Lookup).
-      char tag[40];
-      snprintf(tag, sizeof(tag), "#%s", name);
-      TransportKey key;
-      TransportKeyStore tmp;
-      tmp.getAutoKeyFor(0, tag, key);
+      if (name[0] == 0) { pushCompanionMessage("Usage: scope default <name>|clear"); return; }
+      char tag[40]; snprintf(tag, sizeof(tag), "#%s", name);
+      TransportKey key; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, key);
       StrHelper::strncpy(_prefs.default_scope_name, name, sizeof(_prefs.default_scope_name));
       memcpy(_prefs.default_scope_key, key.key, sizeof(_prefs.default_scope_key));
       savePrefs();
-      char line[100];
-      snprintf(line, sizeof(line), "OK - scope default = #%s", name);
+      char line[100]; snprintf(line, sizeof(line), "OK - scope default = #%s", name);
       pushCompanionMessage(line);
       return;
     }
 
-    // -- override <name>|clear --
+    // -- bake <name>|clear --
+    if (starts_with_word(arg, "bake")) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope bake <name>|clear"); return; }
+      if (strcmp(sub, "clear") == 0) {
+        memset(_prefs.bake_scope_name, 0, sizeof(_prefs.bake_scope_name));
+        memset(_prefs.bake_scope_key,  0, sizeof(_prefs.bake_scope_key));
+        savePrefs();
+        pushCompanionMessage("OK - scope bake cleared.");
+        return;
+      }
+      char name[32];
+      extract_name(arg, name, sizeof(name));
+      if (name[0] == 0) { pushCompanionMessage("Usage: scope bake <name>|clear"); return; }
+      char tag[40]; snprintf(tag, sizeof(tag), "#%s", name);
+      TransportKey key; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, key);
+      StrHelper::strncpy(_prefs.bake_scope_name, name, sizeof(_prefs.bake_scope_name));
+      memcpy(_prefs.bake_scope_key, key.key, sizeof(_prefs.bake_scope_key));
+      savePrefs();
+      char line[100]; snprintf(line, sizeof(line), "OK - scope bake = #%s", name);
+      pushCompanionMessage(line);
+      return;
+    }
+
+    // -- override <name> [<ttl>] | clear --
     if (starts_with_word(arg, "override")) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
-      if (!sub || *sub == 0) {
-        pushCompanionMessage("Usage: scope override <name>|clear");
-        return;
-      }
+      if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope override <name> [<n>h|<n>d] | clear"); return; }
       if (strcmp(sub, "clear") == 0) {
-        memset(_tx_scope_override.key, 0, sizeof(_tx_scope_override.key));
-        _tx_scope_override_at = 0;
-        _tx_scope_override_name[0] = 0;
+        memset(_prefs.override_scope_name, 0, sizeof(_prefs.override_scope_name));
+        memset(_prefs.override_scope_key,  0, sizeof(_prefs.override_scope_key));
+        _prefs.override_expiry = 0;
+        savePrefs();
         pushCompanionMessage("OK - scope override cleared.");
         return;
       }
       char name[32];
       extract_name(arg, name, sizeof(name));
-      if (name[0] == 0) {
-        pushCompanionMessage("Usage: scope override <name>|clear");
+      if (name[0] == 0) { pushCompanionMessage("Usage: scope override <name> [<n>h|<n>d] | clear"); return; }
+      uint32_t ttl = parse_ttl_secs(sub);
+      if (ttl == 0) {
+        pushCompanionMessage("Usage: scope override <name> [<n>h|<n>d] (max 30d)");
         return;
       }
-      char tag[40];
-      snprintf(tag, sizeof(tag), "#%s", name);
-      TransportKey key;
-      TransportKeyStore tmp;
-      tmp.getAutoKeyFor(0, tag, key);
-      memcpy(_tx_scope_override.key, key.key, sizeof(_tx_scope_override.key));
-      _tx_scope_override_at = getRTCClock()->getCurrentTime();
-      StrHelper::strncpy(_tx_scope_override_name, name, sizeof(_tx_scope_override_name));
-      char line[100];
-      snprintf(line, sizeof(line), "OK - scope override = #%s (12h)", name);
+      char tag[40]; snprintf(tag, sizeof(tag), "#%s", name);
+      TransportKey key; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, key);
+      StrHelper::strncpy(_prefs.override_scope_name, name, sizeof(_prefs.override_scope_name));
+      memcpy(_prefs.override_scope_key, key.key, sizeof(_prefs.override_scope_key));
+      uint32_t now = getRTCClock()->getCurrentTime();
+      _prefs.override_expiry = (now > 1500000000UL) ? (now + ttl) : ttl;
+      savePrefs();
+      char line[120];
+      uint32_t ttl_h = ttl / 3600;
+      if (ttl >= 86400UL && (ttl % 86400UL) == 0)
+        snprintf(line, sizeof(line), "OK - scope override = #%s (%lud)",
+                 name, (unsigned long)(ttl/86400));
+      else
+        snprintf(line, sizeof(line), "OK - scope override = #%s (%luh)",
+                 name, (unsigned long)ttl_h);
       pushCompanionMessage(line);
       return;
     }
 
-    pushCompanionMessage("Usage: scope [default <name>|clear | override <name>|clear]");
+    pushCompanionMessage("Usage: scope [default|bake|override] <name>|clear");
     return;
   }
 

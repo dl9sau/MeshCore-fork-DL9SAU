@@ -117,4 +117,58 @@ Klaerungsbedarf (deferred):
 
 User-Wunsch: erstmal nicht jetzt - kommen wir spaeter dazu.
 
+UPDATE 2026-05-26 (gleicher Tag, spaeter): Autolearn wurde entfernt
+(Option A) im Commit cd0e84e0. Variable umbenannt nach
+_tx_scope_override. Damit ist die Klaerung im Wesentlichen
+abgeschlossen — verbleibend nur "scope bake" als 2. persistente
+Variable und Override-Persistierung (Akkubank-Power-Cycle ueberlebt
+RAM-only nicht). Wird in einem Refactor-Commit umgesetzt.
+
 Quelle: Diskussion in dieser Session, 2026-05-26.
+
+
+--------------------------------------------------------------------------------
+4. Companion-CLI: Argument-Prefix-Matching mit Ambiguity-Warnung
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  Top-Level-Befehle (status, autoadv, repeater, ...) sind per Prefix
+  abkuerzbar (z.B. "stat" matched mehrdeutig "status"/"stats" -> Warning;
+  "up" eindeutig zu "uptime"). Argumente innerhalb der Sub-Handler
+  matchen jedoch noch per starts_with_word/strcmp (Whole-Word/Exact).
+
+Soll-Verhalten:
+  Generischer Helper analog zum Top-Level Prefix-Match: Argument gegen
+  bekannte Auswahl-Liste matchen, exact-match wins, eindeutiger Prefix
+  expand, mehrdeutig -> "Mehrdeutig: <liste>".
+
+Beispiel-Sites:
+  autoadv on/off (mehrdeutig bei "o")
+  gps on/off (mehrdeutig bei "o")
+  repeater on/off (mehrdeutig bei "o")
+  advert zero-hop/flood (verlangt noch f/z-Alias-Liste)
+  duty soft/hard/reset (eindeutig per "s"/"h"/"r")
+  scope default/override/bake (eindeutig per Prefix)
+  chatname default/N/custom/hex (eindeutig)
+
+Quelle: User-Anfrage in dieser Session, 2026-05-26.
+
+
+--------------------------------------------------------------------------------
+5. scope geo-prefers <on/off> - Auto-Geo statt Default-Scope wenn fern
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  chooseNightFloodScope-Hierarchie: Override > Bake > Default > Geo.
+  Wenn User Default gesetzt hat (z.B. "#de-be" fuer Berlin) und sich
+  weit entfernt aufhaelt (z.B. Ostfriesland), greift Default - der
+  Geo-Fallback wird nicht erreicht.
+
+Soll-Verhalten:
+  Optionaler Schalter "scope geo-prefers on":
+    - chooseGeoFallbackScope() liefert eine Region
+    - Wenn diese Region != Default-Region: Geo gewinnt VOR Default
+    - Begruendung: "User ist offensichtlich nicht zu Hause"
+  Default: off (Auto-Magic kann nervig sein, User entscheidet bewusst).
+
+Quelle: User-Anfrage in dieser Session, 2026-05-26.

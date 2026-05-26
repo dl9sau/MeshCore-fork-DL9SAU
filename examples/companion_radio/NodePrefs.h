@@ -64,4 +64,18 @@ struct NodePrefs {  // persisted to file
   //                         Spam-Verhalten z.B. eines Chat-Bots ueber USB.
   uint8_t duty_soft_pct;
   uint8_t duty_hard_pct;
+  // Nightly-Bake-Scope (persistent). Separater Scope NUR fuer den
+  // periodischen Flood-Advert ("nightly bake" + "advert flood"-Befehl).
+  // Default-Scope (oben) bleibt fuer regulaere Sends; Bake darf bewusst
+  // weiter gehen (z.B. default=#de-be lokal, bake=#de-bebb fuer groesseren
+  // Outreach in Berlin/Brandenburg).
+  char    bake_scope_name[31];
+  uint8_t bake_scope_key[16];
+  // Override-Scope (persistent ueber Reboots damit Power-Cycles waehrend
+  // einer mehrtaegigen Reise nicht den Override killen).
+  // override_expiry = unix-sec wann Override ablaeuft. 0 = inaktiv.
+  // Hat Prioritaet 1 in chooseNightFloodScope (vor bake, default, geo).
+  char     override_scope_name[31];
+  uint8_t  override_scope_key[16];
+  uint32_t override_expiry;
 };

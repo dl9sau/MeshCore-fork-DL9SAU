@@ -188,11 +188,9 @@ struct AdvertPath {
 #define CR_NIGHT_FLOOD_START_HOUR_LOCAL 23
 #define CR_NIGHT_FLOOD_END_HOUR_LOCAL    5     // exclusive
 
-// _tx_scope_override expires after this many seconds — long enough
-// to cover a normal evening of messaging, short enough that a one-off test
-// channel ("did it work? no... never mind") won't dominate the next
-// nightly flood scope for days.
-#define CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS  (12UL * 3600UL)
+// (override-expiry ist jetzt absolut in _prefs.override_expiry, kein
+//  relative max-age mehr; Default-TTL bei 'scope override <name>' ohne
+//  Suffix = 12h.)
 
 // When sending a channel text message, truncate the sender name (prefixed
 // as "name: msg" in the group payload) to this many whitespace-separated
@@ -441,20 +439,6 @@ private:
   HeardEntry heard_list[CR_HEARD_TABLE_SIZE];
   uint8_t    heard_next_idx;    // FIFO eviction index
 
-  // TX-Scope-Override: HMAC-Key fuer transport_codes der naechsten
-  // selbst-generierten Flood-Pakete (nightly-flood, 'advert flood').
-  // Hat Prioritaet 1 in chooseNightFloodScope (vor default_scope und
-  // geo-fallback). Gefuellt durch:
-  //   a) CMD_SEND_CHANNEL_TXT_MSG -> channel.secret (Channel-HMAC-Key,
-  //      filter auf Knoten die diesen Channel kennen)
-  //   b) Companion-CLI "scope override <name>" -> SHA-256("#name")[0..15]
-  //      (klassischer Scope-Hash)
-  // Beide Pfade fuellen denselben TransportKey-Slot mit aber semantisch
-  // unterschiedlichen Hashes — empfangende Knoten muessen entweder den
-  // Channel haben (a) oder den Scope kennen (b) um zu matchen.
-  // RAM-only, Expiry nach CR_LAST_CHANNEL_SCOPE_MAX_AGE_SECS (12h).
-  TransportKey _tx_scope_override;
-  uint32_t     _tx_scope_override_at; // RTC unix when above was set; 0 = unset
   unsigned long next_periodic_advert_at;     // millis()
   uint32_t      next_night_flood_unix;       // RTC unix; 0 means not scheduled
 
@@ -504,10 +488,6 @@ private:
   // reset bei Reboot — verhindert dass eine Trace-Kategorie versehentlich
   // unbegrenzt die Offline-Queue mit Events flutet.
   uint16_t      _trace_flags;
-  // Namens-Hint zum _tx_scope_override (RAM-only). Wird gesetzt
-  // beim Channel-Send oder per "scope override <name>"-Befehl, damit der
-  // Status-Output den Namen anzeigen kann statt nur "runtime active".
-  char          _tx_scope_override_name[32];
   // Deferred reboot: wenn != 0, dann millis()-Zeitpunkt zu dem die loop()
   // den reboot ausloesen soll. Vermeidet das blockierende delay() im
   // CLI-Handler — sonst wuerde die loop() pausiert und der "Rebooting
