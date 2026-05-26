@@ -595,6 +595,16 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
 
   if (_prefs.client_repeat == 0) return false;
 
+  // Duty-Cycle Soft-Limit: Repeats unterdruecken bei Annaeherung an die
+  // 10%/h-Grenze. Eigene Pakete (Auto-Adverts, User-Chat) laufen weiter
+  // bis Hard erreicht ist. Stats-Counter + Trace.
+  if (dutySoftReached()) {
+    _duty_blocked_count++;
+    traceCompanion(TRACE_DUTY, "[duty] repeat dropped (last_h=%lus soft=%lus)",
+                   getTxAirLastHour()/1000, getDutySoftLimitMs()/1000);
+    return false;
+  }
+
   // path-length cap (hop count, not byte length)
   if (packet->getPathHashCount() > CR_MAX_REPEAT_PATH_LEN) return false;
 
@@ -1101,9 +1111,16 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(_heard_quality,      0, sizeof(_heard_quality));
   _tx_repeat_airtime_ms = 0;
   _last_advert_snr_q4 = 0;
+  memset(_duty_air_ms_per_minute, 0, sizeof(_duty_air_ms_per_minute));
+  _duty_slot_idx = 0;
+  _duty_slot_start_ms = 0;
+  _duty_last_total_ms = 0;
+  _duty_blocked_count = 0;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
+  _prefs.duty_soft_pct = 80;   // Repeats droppen bei 80% von 360s (= 288s)
+  _prefs.duty_hard_pct = 100;  // alle TX droppen bei 360s (= 10% TX/h)
   _prefs.airtime_factor = 1.0;
   strcpy(_prefs.node_name, "NONAME");
   _prefs.freq = LORA_FREQ;
@@ -1501,6 +1518,16 @@ void MyMesh::handleCmdFrame(size_t len) {
     i += tlen;
     _serial->writeFrame(out_frame, i);
   } else if (cmd_frame[0] == CMD_SEND_TXT_MSG && len >= 14) {
+    // Duty-Cycle Hard-Limit: blockt JEDEN TX inkl. User-Chat (z.B. wenn
+    // ein Bot ueber USB zu viel sendet). Schuetzt 10% TX/h auch bei
+    // unbeabsichtigtem App-Verhalten.
+    if (dutyHardReached()) {
+      _duty_blocked_count++;
+      traceCompanion(TRACE_DUTY, "[duty] txt blocked (last_h=%lus hard=%lus)",
+                     getTxAirLastHour()/1000, getDutyHardLimitMs()/1000);
+      writeErrFrame(ERR_CODE_NOT_FOUND);
+      return;
+    }
     int i = 1;
     uint8_t txt_type = cmd_frame[i++];
     uint8_t attempt = cmd_frame[i++];
@@ -1547,6 +1574,9 @@ void MyMesh::handleCmdFrame(size_t len) {
                         : ERR_CODE_UNSUPPORTED_CMD); // unknown recipient, or unsuported TXT_TYPE_*
     }
   } else if (cmd_frame[0] == CMD_SEND_CHANNEL_TXT_MSG) { // send GroupChannel text msg
+    // Companion-Channel-Befehle laufen OHNE Funk - durfen daher den Duty-
+    // Check ueberspringen. Check passiert weiter unten, NACH dem Channel-
+    // Index-Decoding (siehe interne Verzweigung).
     int i = 1;
     uint8_t txt_type = cmd_frame[i++]; // should be TXT_TYPE_PLAIN
     uint8_t channel_idx = cmd_frame[i++];
@@ -1578,6 +1608,13 @@ void MyMesh::handleCmdFrame(size_t len) {
       }
       handleCompanionCommand(cmd_buf);
       writeOKFrame();
+    } else if (dutyHardReached()) {
+      // Hard-Limit blockt das echte LoRa-Send (Companion-Channel ist oben
+      // bereits abgefangen und nicht betroffen).
+      _duty_blocked_count++;
+      traceCompanion(TRACE_DUTY, "[duty] grp-txt blocked (last_h=%lus hard=%lus)",
+                     getTxAirLastHour()/1000, getDutyHardLimitMs()/1000);
+      writeErrFrame(ERR_CODE_NOT_FOUND);
     } else {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
@@ -1705,6 +1742,13 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
   } else if (cmd_frame[0] == CMD_SEND_SELF_ADVERT) {
+    if (dutyHardReached()) {
+      _duty_blocked_count++;
+      traceCompanion(TRACE_DUTY, "[duty] self-advert blocked (last_h=%lus)",
+                     getTxAirLastHour()/1000);
+      writeErrFrame(ERR_CODE_NOT_FOUND);
+      return;
+    }
     mesh::Packet* pkt;
     if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
       pkt = createSelfAdvert(_prefs.node_name);
@@ -2691,6 +2735,11 @@ void MyMesh::loop() {
     _last_millis_seen = now_ms;
   }
 
+  // Duty-Cycle Sliding-Window aktualisieren VOR BaseChatMesh::loop() —
+  // damit allowPacketForward() (was vom Mesh-Layer aus loop() kommt) bei
+  // seinem Soft-Check aktuelle Werte sieht.
+  updateDutyWindow();
+
   BaseChatMesh::loop();
 
   if (_cli_rescue) {
@@ -3015,6 +3064,12 @@ void MyMesh::updateMotionTracking() {
 }
 
 void MyMesh::doPeriodicZeroHopAdvert() {
+  if (dutyHardReached()) {
+    _duty_blocked_count++;
+    traceCompanion(TRACE_DUTY, "[duty] periodic blocked (last_h=%lus hard=%lus)",
+                   getTxAirLastHour()/1000, getDutyHardLimitMs()/1000);
+    return;
+  }
   mesh::Packet* pkt;
   if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
     pkt = createSelfAdvert(_prefs.node_name);
@@ -3039,6 +3094,12 @@ void MyMesh::doPeriodicZeroHopAdvert() {
 }
 
 void MyMesh::doNightFloodAdvert() {
+  if (dutyHardReached()) {
+    _duty_blocked_count++;
+    traceCompanion(TRACE_DUTY, "[duty] nightly blocked (last_h=%lus hard=%lus)",
+                   getTxAirLastHour()/1000, getDutyHardLimitMs()/1000);
+    return;
+  }
   TransportKey scope;
   if (!chooseNightFloodScope(scope)) {
     MESH_DEBUG_PRINTLN("night-flood: no scope available, skipping");
@@ -3308,6 +3369,51 @@ static bool topic_prefix_match(const char* input, const char* keyword) {
   return strncmp(input, keyword, tlen) == 0;
 }
 
+// ---------- Duty-Cycle Sliding-Window ---------------------------------
+// 60 Slots a 1 Minute, millis()-basiert (kein RTC/GPS noetig). Jeder
+// Loop-Tick: Delta zu getTotalAirTime() in den aktuellen Slot addieren.
+// Slot-Wechsel anhand der Differenz now - slot_start (wrap-safe via
+// signed Vergleich), beim Rotieren wird der neue Slot auf 0 gesetzt.
+void MyMesh::updateDutyWindow() {
+  unsigned long now = millis();
+  if (_duty_slot_start_ms == 0 && _duty_last_total_ms == 0) {
+    _duty_slot_start_ms = now == 0 ? 1 : now;
+    _duty_last_total_ms = getTotalAirTime();
+    return;
+  }
+  unsigned long curr_tot = getTotalAirTime();
+  unsigned long delta = curr_tot - _duty_last_total_ms;
+  if (delta < 600000UL) {  // Sanity: weniger als 10 min pro Tick
+    _duty_air_ms_per_minute[_duty_slot_idx] += delta;
+  }
+  _duty_last_total_ms = curr_tot;
+  while ((long)(now - _duty_slot_start_ms) >= (long)CR_DUTY_SLOT_MS) {
+    _duty_slot_idx = (_duty_slot_idx + 1) % CR_DUTY_WINDOW_SLOTS;
+    _duty_air_ms_per_minute[_duty_slot_idx] = 0;
+    _duty_slot_start_ms += CR_DUTY_SLOT_MS;
+  }
+}
+
+unsigned long MyMesh::getTxAirLastHour() const {
+  unsigned long sum = 0;
+  for (size_t i = 0; i < CR_DUTY_WINDOW_SLOTS; i++) sum += _duty_air_ms_per_minute[i];
+  return sum;
+}
+
+unsigned long MyMesh::getDutySoftLimitMs() const {
+  return CR_DUTY_HARD_BASE_MS * (unsigned long)_prefs.duty_soft_pct / 100UL;
+}
+unsigned long MyMesh::getDutyHardLimitMs() const {
+  return CR_DUTY_HARD_BASE_MS * (unsigned long)_prefs.duty_hard_pct / 100UL;
+}
+
+bool MyMesh::dutySoftReached() const {
+  return getTxAirLastHour() >= getDutySoftLimitMs();
+}
+bool MyMesh::dutyHardReached() const {
+  return getTxAirLastHour() >= getDutyHardLimitMs();
+}
+
 void MyMesh::traceCompanion(uint16_t flag, const char* fmt, ...) {
   if ((_trace_flags & flag) == 0) return;
   char buf[160];
@@ -3356,6 +3462,7 @@ static const TraceCat trace_cats[] = {
   { "connect", TRACE_CONNECT, "BLE-App-Connect Events" },
   { "filter",  TRACE_FILTER,  "abgelehnte Forward-Kandidaten (kann viel)" },
   { "night",   TRACE_NIGHT,   "Nightly-Flood Schedule + Scope-Auswahl" },
+  { "duty",    TRACE_DUTY,    "Duty-Cycle Drops (Soft/Hard) ueber 10% TX/h" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
@@ -3471,6 +3578,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "duty")) {
+        pushCompanionMessage(
+          "duty: Duty-Cycle-Schutz (10% TX-Airtime pro rollendem 1h-Fenster). "
+          "Ohne Arg -> Status (current, soft/hard-Schwellen, blocked-Counter)."
+        );
+        pushCompanionMessage(
+          "duty soft N (0..99): Repeats droppen ab N%. duty hard N (1..100): "
+          "ALLE TX droppen ab N%. Default 80/100. Trace-Kategorie 'duty'."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "repeater")) {
         pushCompanionMessage(
           "repeater [on [force] | off]: schaltet client_repeat ein/aus. "
@@ -3532,7 +3650,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     pushCompanionMessage(
       "Befehle: help [topic], status, stats, uptime, advert, autoadv, "
-      "repeater, gps, trace, chatname, reboot. (Weitere geplant: "
+      "repeater, duty, gps, trace, chatname, reboot. (Weitere geplant: "
       "region set, scope set.)"
     );
     return;
@@ -3825,6 +3943,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              rx_s, rx_pct,
              tx_s, tx_pct, own_s, tx_own_pct, rep_s, tx_rep_pct);
     pushCompanionMessage(block);
+
+    // ---- duty cycle: rolling 1h-Window vs. 10% Hard-Limit ----
+    {
+      unsigned long cur = getTxAirLastHour();
+      unsigned long soft_ms = getDutySoftLimitMs();
+      unsigned long hard_ms = getDutyHardLimitMs();
+      double cur_pct = hard_ms > 0 ? 100.0 * (double)cur / (double)hard_ms : 0.0;
+      char cur_s[16], soft_s[16], hard_s[16];
+      fmt_secs(cur_s,  sizeof(cur_s),  cur);
+      fmt_secs(soft_s, sizeof(soft_s), soft_ms);
+      fmt_secs(hard_s, sizeof(hard_s), hard_ms);
+      snprintf(block, sizeof(block),
+               "duty: last_h=%s of %s (%.1f%%)\n"
+               "  soft=%u%% (%s) hard=%u%% (%s) blocked=%lu",
+               cur_s, hard_s, cur_pct,
+               (unsigned)_prefs.duty_soft_pct, soft_s,
+               (unsigned)_prefs.duty_hard_pct, hard_s,
+               (unsigned long)_duty_blocked_count);
+      pushCompanionMessage(block);
+    }
     return;
   }
 
@@ -3905,6 +4043,62 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
     }
     pushCompanionMessage("Unbekannte trace-Kategorie. 'trace list' fuer Uebersicht.");
+    return;
+  }
+
+  // ---------- duty [soft N | hard N] ------------------------------------
+  // Duty-Cycle-Schwellen verwalten. Ohne Arg -> Status:
+  //   "duty: current=145s/360s (40%)  soft=80%(288s) hard=100%(360s)  blocked=12"
+  // duty soft N -> soft_pct setzen (0..99)
+  // duty hard N -> hard_pct setzen (1..100)
+  if (starts_with_word(cmd, "duty")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    if (!arg || *arg == 0) {
+      unsigned long cur = getTxAirLastHour();
+      unsigned long soft_ms = getDutySoftLimitMs();
+      unsigned long hard_ms = getDutyHardLimitMs();
+      unsigned long cur_pct = hard_ms > 0 ? (cur * 100UL / hard_ms) : 0;
+      char line[160];
+      snprintf(line, sizeof(line),
+               "duty: current=%lus/%lus (%lu%%)",
+               cur/1000, hard_ms/1000, cur_pct);
+      pushCompanionMessage(line);
+      snprintf(line, sizeof(line),
+               "  soft=%u%% (%lus)  hard=%u%% (%lus)  blocked=%lu",
+               (unsigned)_prefs.duty_soft_pct, soft_ms/1000,
+               (unsigned)_prefs.duty_hard_pct, hard_ms/1000,
+               (unsigned long)_duty_blocked_count);
+      pushCompanionMessage(line);
+      return;
+    }
+    if (starts_with_word(arg, "soft") || starts_with_word(arg, "hard")) {
+      bool is_soft = starts_with_word(arg, "soft");
+      const char* num = strchr(arg, ' ');
+      if (num) { while (*num == ' ') num++; }
+      if (!num || *num == 0 || !(num[0] >= '0' && num[0] <= '9')) {
+        pushCompanionMessage(is_soft ? "Usage: duty soft <0..99>"
+                                     : "Usage: duty hard <1..100>");
+        return;
+      }
+      int pct = atoi(num);
+      int lo = is_soft ? 0 : 1;
+      int hi = is_soft ? 99 : 100;
+      if (pct < lo || pct > hi) {
+        char line[80];
+        snprintf(line, sizeof(line), "Wert ausserhalb (%d..%d).", lo, hi);
+        pushCompanionMessage(line);
+        return;
+      }
+      if (is_soft) _prefs.duty_soft_pct = (uint8_t)pct;
+      else         _prefs.duty_hard_pct = (uint8_t)pct;
+      savePrefs();
+      char line[80];
+      snprintf(line, sizeof(line), "OK - duty %s = %d%%", is_soft ? "soft" : "hard", pct);
+      pushCompanionMessage(line);
+      return;
+    }
+    pushCompanionMessage("Usage: duty [soft N | hard N]");
     return;
   }
 

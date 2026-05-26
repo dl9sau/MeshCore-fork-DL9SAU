@@ -167,7 +167,15 @@ struct AdvertPath {
 #define TRACE_CONNECT  0x0080
 #define TRACE_FILTER   0x0100
 #define TRACE_NIGHT    0x0200
-#define TRACE_ALL_MASK 0x03FF
+#define TRACE_DUTY     0x0400
+#define TRACE_ALL_MASK 0x07FF
+
+// Duty-Cycle-Schutz: regulatorische 10% TX-Airtime pro rollendem 1h-Fenster
+// (EU SRD 869 narrow). Sliding-Window mit 60 Slots à 1 Minute (millis-basiert,
+// GPS/RTC-unabhaengig). Threshold-Schwellen als %% von 360s in _prefs.
+#define CR_DUTY_WINDOW_SLOTS    60UL
+#define CR_DUTY_SLOT_MS         60000UL
+#define CR_DUTY_HARD_BASE_MS    360000UL   // 10% von 1h = 360s = "100% Limit"
 // 5 min after boot when GPS is off or has already obtained a fix; if GPS is
 // enabled but still searching, wait up to 10 min so that the first advert can
 // already carry a position. When the first fix arrives during the wait, the
@@ -349,6 +357,14 @@ private:
   // Pusht eine Trace-Message in den Companion-Channel — aber nur wenn das
   // entsprechende Flag in _trace_flags gesetzt ist. No-op sonst.
   void traceCompanion(uint16_t flag, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+  // Duty-Cycle Helper. updateDutyWindow muss in loop() laufen damit
+  // get/Reached-Funktionen aktuelle Werte liefern.
+  void updateDutyWindow();
+  unsigned long getTxAirLastHour() const;
+  unsigned long getDutySoftLimitMs() const;
+  unsigned long getDutyHardLimitMs() const;
+  bool dutySoftReached() const;
+  bool dutyHardReached() const;
 
   // client-repeater + periodic advert helpers
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides
@@ -488,6 +504,12 @@ private:
   uint16_t      _repeat_by_ptype[16];    // Pakete die WIR tatsaechlich durchgereicht haben
   uint16_t      _tx_total_by_ptype[16];  // ALLE TX (eigen + repeated); eigen = total - repeat
   uint32_t      _tx_repeat_airtime_ms;   // geschaetzte Airtime nur unserer Repeats
+  // Duty-Cycle Sliding-Window (siehe CR_DUTY_* Konstanten).
+  uint32_t      _duty_air_ms_per_minute[CR_DUTY_WINDOW_SLOTS];
+  uint8_t       _duty_slot_idx;          // 0..59
+  unsigned long _duty_slot_start_ms;     // millis() bei Slot-Start
+  unsigned long _duty_last_total_ms;     // letzter Snapshot getTotalAirTime()
+  uint32_t      _duty_blocked_count;     // gedroppte Pakete (Soft+Hard zusammen)
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual

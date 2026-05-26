@@ -50,10 +50,18 @@ struct NodePrefs {  // persisted to file
   // Konfiguration die der User noch nicht freigegeben hat.
   uint8_t auto_advert_enabled;
   // Persistente Erinnerung dass der Repeater explizit per Companion-Chat
-  // "repeater on force" aktiviert wurde — App-Pfad CMD_SET_RADIO_PARAMS
+  // "repeater on force" aktiviert wurde - App-Pfad CMD_SET_RADIO_PARAMS
   // ueberspringt damit den strict-Range-Check und schreibt _prefs durch.
   // Wird gecleared sobald der Repeater per App auf 0 gesetzt wird ODER
-  // per Companion "repeater on" (ohne force) bzw. "repeater off" — so muss
+  // per Companion "repeater on" (ohne force) bzw. "repeater off" - so muss
   // der force-Modus explizit per Companion-Geste reaktiviert werden.
   uint8_t client_repeat_force;
+  // Duty-Cycle-Schwellen in % der regulatorischen 10% TX-Airtime-Grenze
+  // (= 360 s in einem rollenden 1h-Fenster). Default 80 / 100.
+  //   duty_soft_pct (80) -> bei Erreichen werden Forward/Repeats abgelehnt
+  //   duty_hard_pct(100) -> bei Erreichen werden ALLE TX blockiert (auch
+  //                         User-Chat) - schuetzt gegen unbeabsichtigtes
+  //                         Spam-Verhalten z.B. eines Chat-Bots ueber USB.
+  uint8_t duty_soft_pct;
+  uint8_t duty_hard_pct;
 };

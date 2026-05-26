@@ -237,8 +237,10 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // die memset(0)-Defaults aus dem MyMesh-Konstruktor bleiben stehen.
     file.read((uint8_t *)&_prefs.chat_name_mode, sizeof(_prefs.chat_name_mode));           // 137
     file.read((uint8_t *)_prefs.chat_name_custom, sizeof(_prefs.chat_name_custom));        // 138
-    file.read((uint8_t *)&_prefs.auto_advert_enabled, sizeof(_prefs.auto_advert_enabled));   // 170
-    file.read((uint8_t *)&_prefs.client_repeat_force, sizeof(_prefs.client_repeat_force));   // 171
+    file.read((uint8_t *)&_prefs.auto_advert_enabled, sizeof(_prefs.auto_advert_enabled)); // 170
+    file.read((uint8_t *)&_prefs.client_repeat_force, sizeof(_prefs.client_repeat_force)); // 171
+    file.read((uint8_t *)&_prefs.duty_soft_pct, sizeof(_prefs.duty_soft_pct));             // 172
+    file.read((uint8_t *)&_prefs.duty_hard_pct, sizeof(_prefs.duty_hard_pct));             // 173
 
     file.close();
   }
@@ -281,8 +283,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)_prefs.default_scope_key, sizeof(_prefs.default_scope_key));     // 121
     file.write((uint8_t *)&_prefs.chat_name_mode, sizeof(_prefs.chat_name_mode));           // 137
     file.write((uint8_t *)_prefs.chat_name_custom, sizeof(_prefs.chat_name_custom));        // 138
-    file.write((uint8_t *)&_prefs.auto_advert_enabled, sizeof(_prefs.auto_advert_enabled));   // 170
-    file.write((uint8_t *)&_prefs.client_repeat_force, sizeof(_prefs.client_repeat_force));   // 171
+    file.write((uint8_t *)&_prefs.auto_advert_enabled, sizeof(_prefs.auto_advert_enabled)); // 170
+    file.write((uint8_t *)&_prefs.client_repeat_force, sizeof(_prefs.client_repeat_force)); // 171
+    file.write((uint8_t *)&_prefs.duty_soft_pct, sizeof(_prefs.duty_soft_pct));             // 172
+    file.write((uint8_t *)&_prefs.duty_hard_pct, sizeof(_prefs.duty_hard_pct));             // 173
 
     file.close();
   }
