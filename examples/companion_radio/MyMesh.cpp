@@ -3167,6 +3167,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
+  // Smartphone-Tastaturen capitalisieren oft das erste Zeichen automatisch
+  // ("Help" statt "help"). Lokale lowercase-Kopie für case-insensitive
+  // Befehl-/Argument-Matching. Phase-2-Sub-Befehle die Original-Case
+  // brauchen (z.B. "chatname custom <text>") müssen den raw-Input separat
+  // verarbeiten — dafür nehmen sie den Offset des Argument-Tokens und
+  // greifen über den hier weitergegebenen raw_cmd ab.
+  const char* raw_cmd = cmd; (void)raw_cmd;  // reserviert für Phase 2
+  char lower[200];
+  size_t L = strlen(cmd);
+  if (L >= sizeof(lower)) L = sizeof(lower) - 1;
+  for (size_t k = 0; k < L; k++) {
+    char c = cmd[k];
+    lower[k] = (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+  }
+  lower[L] = 0;
+  cmd = lower;
+
   // ---------- help / ? --------------------------------------------------
   if (starts_with_word(cmd, "help") || starts_with_word(cmd, "?")) {
     // Optionales Topic?
