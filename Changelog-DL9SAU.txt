@@ -1060,15 +1060,18 @@ Datenbasis (Phase 1, minimum viable):
     Boxes verwenden GENAU diese Namen, so dass die Empfehlung mit
     dem Lookup-Mechanismus (siehe 14n) konsistent ist.
 
-Stadtstaaten-Spezialregel:
-  Berliner / Hamburger / Bremer brauchen ihren umgebenden
-  Flächenstaat in der Empfehlung NICHT zu sehen — die Brandenburger
-  bleiben unter #de-bb, und zur Kommunikation Berlin <-> Brandenburg
-  wird #de-bebb verwendet. Konkret:
+Stadtstaaten-Spezialregel (NUR Berlin/Brandenburg):
+  Berlin und Brandenburg haben eine etablierte Bridge-Scope
+  #de-bebb für gemeinsame Kommunikation; die Brandenburger
+  bleiben unter sich auf #de-bb. Für einen Berlin-Node wäre
+  #de-bb in der Empfehlung daher irreführend. Konkret:
     - de-be (Berlin)    -> unterdrückt de-bb
-    - de-hb (Bremen)    -> unterdrückt de-ni
-    - de-hh (Hamburg)   -> unterdrückt de-ni UND de-sh
   Implementiert als CityStateRule[]-Tabelle in der .cpp.
+
+  Hinweis: für Hamburg <-> Niedersachsen / Schleswig-Holstein und
+  Bremen <-> Niedersachsen gibt es KEINE entsprechende Bridge-
+  Scope; dort sollen die umgebenden Flächenstaaten in der
+  Empfehlung sichtbar bleiben.
 
 Dedup:
   MyMesh::maybePushGeoRecommendation() merkt sich die zuletzt

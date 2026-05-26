@@ -52,19 +52,18 @@ static const GeoRegion regions[] = {
 };
 static const size_t REGION_COUNT = sizeof(regions) / sizeof(regions[0]);
 
-// "If you sit inside the city-state box, do NOT list the surrounding
-//  Flächenstaat in the recommendation" — they keep their own scope and
-//  the city-state has its own (and possibly a bridge scope for shared
-//  comms, e.g. de-bebb for Berlin/Brandenburg)."
+// Berlin/Brandenburg has an explicit bridge-scope (#de-bebb) so a Berlin
+// node listing #de-bb in addition would be misleading — Brandenburger
+// stay among themselves on #de-bb and use #de-bebb to reach Berlin.
+// No equivalent bridge-scope exists for Bremen <-> Niedersachsen or
+// Hamburg <-> Niedersachsen/Schleswig-Holstein, so we let the surrounding
+// Flächenstaat show up in those recommendations.
 struct CityStateRule {
   const char* city_state;
   const char* skip;
 };
 static const CityStateRule city_rules[] = {
-  { "de-be", "de-bb" },   // Berlin in Brandenburg-box -> suppress de-bb
-  { "de-hb", "de-ni" },   // Bremen in Niedersachsen-box -> suppress de-ni
-  { "de-hh", "de-ni" },   // Hamburg straddles NI/SH -> suppress both
-  { "de-hh", "de-sh" },
+  { "de-be", "de-bb" },   // Berlin in Brandenburg-box -> suppress de-bb (de-bebb bridge)
 };
 static const size_t CITY_RULE_COUNT = sizeof(city_rules) / sizeof(city_rules[0]);
 
