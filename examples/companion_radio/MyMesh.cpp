@@ -3598,7 +3598,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   static const char* const TOP_CMDS[] = {
     "help", "?", "status", "stats", "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
-    "prefs", "neighbors", "tempradio",
+    "prefs", "neighbors", "tempradio", "set", "get", "clock", "time",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -3654,7 +3654,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "gps")) {
         pushCompanionMessage(
           "gps on/off: Modul ein/aus. Off behaelt letzte Position im Advert. "
-          "Ohne Arg -> Status (state, fix_ever, moving, pos)."
+          "Ohne Arg -> Status. gps sync: einmaliger Wake-Trigger (RTC/Position)."
         );
         pushCompanionMessage(
           "gps power [always-on | cycle | lead <N> | reset]: "
@@ -3708,6 +3708,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "neighbors: Liste der Contacts die in den letzten 48h via Advert "
           "gehoert wurden. Zeigt Typ (rep/cmp/room/sns), Name, Alter, Hops."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "set")) {
+        pushCompanionMessage(
+          "set <key> <value>: persistente Settings setzen. "
+          "Keys: name, lat, lon, freq, sf, bw, cr, tx_power."
+        );
+        pushCompanionMessage(
+          "Sued/West negativ (z.B. 'set lat -10.5'). freq in MHz, bw in kHz. "
+          "Aenderungen werden sofort applied + savePrefs."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "get")) {
+        pushCompanionMessage(
+          "get <key>: liest persistente Settings. "
+          "Keys: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps, "
+          "advert_loc_policy, airtime_factor, rx_boosted_gain, manual_add_contacts."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "clock") || topic_prefix_match(topic, "time")) {
+        pushCompanionMessage(
+          "clock: zeigt RTC (Unix-sec, UTC, lokal). "
+          "time <epoch>: setzt RTC. Sanity-Check 1500000000..4000000000."
         );
         return;
       }
@@ -3809,7 +3835,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     pushCompanionMessage(
       "Befehle: help [topic], status, stats, uptime, neighbors, advert, "
-      "autoadv, repeater, duty, scope, gps, trace, chatname, prefs, reboot."
+      "autoadv, repeater, duty, scope, gps, trace, chatname, prefs, "
+      "set, get, clock, time, tempradio, reboot."
     );
     return;
   }
@@ -4066,8 +4093,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.gps_enabled = 0;
       savePrefs();
       pushCompanionMessage("OK - GPS disabled.");
+    } else if (strcmp(arg, "sync") == 0) {
+      // Einmaliger Wake-Trigger - GPS bleibt wach bis zum naechsten Advert
+      // (gleicher Mechanismus wie der app-toggle-Override). Nicht-persistent.
+      _gps_user_override_until_advert = true;
+      pushCompanionMessage("OK - GPS sync request (wach bis naechster Advert).");
     } else {
-      pushCompanionMessage("Usage: gps [on | off | power ...]  (ohne Arg -> Status)");
+      pushCompanionMessage("Usage: gps [on | off | sync | power ...]  (ohne Arg -> Status)");
     }
     return;
   }
@@ -4369,6 +4401,249 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line("  (alle Werte auf Default)");
     }
     flush_buf(true);
+    return;
+  }
+
+  // ---------- clock ----------------------------------------------------
+  // Zeigt die aktuelle RTC-Zeit (Unix-Sekunden + UTC-formatiert + lokal).
+  if (starts_with_word(cmd, "clock")) {
+    uint32_t now = getRTCClock()->getCurrentTime();
+    if (now < 1500000000UL) {
+      pushCompanionMessage("clock: RTC nicht gesetzt (pre-2017).");
+      return;
+    }
+    // UTC: simple JJJJ-MM-DD HH:MM:SS via time_t (kein lokal TZ-Offset)
+    time_t t = (time_t)now;
+    struct tm utc;
+    gmtime_r(&t, &utc);
+    char utc_str[40];
+    snprintf(utc_str, sizeof(utc_str), "%04d-%02d-%02d %02d:%02d:%02d UTC",
+             utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+             utc.tm_hour, utc.tm_min, utc.tm_sec);
+    // Lokal: now + LOCAL_TZ_OFFSET_SECS
+    time_t local_t = (time_t)(now + (uint32_t)LOCAL_TZ_OFFSET_SECS);
+    struct tm loc;
+    gmtime_r(&local_t, &loc);
+    char loc_str[40];
+    snprintf(loc_str, sizeof(loc_str), "%04d-%02d-%02d %02d:%02d:%02d (TZ+%lds)",
+             loc.tm_year + 1900, loc.tm_mon + 1, loc.tm_mday,
+             loc.tm_hour, loc.tm_min, loc.tm_sec, (long)LOCAL_TZ_OFFSET_SECS);
+    char block[200];
+    snprintf(block, sizeof(block),
+             "clock:\n  unix = %lu\n  utc  = %s\n  loc  = %s",
+             (unsigned long)now, utc_str, loc_str);
+    pushCompanionMessage(block);
+    return;
+  }
+
+  // ---------- time <epoch> ----------------------------------------------
+  // RTC setzen. Sanity: epoch muss in plausiblem Bereich (post-2017,
+  // pre-2096). Triggert RTC-Jump-Detector -> nightly slot wird neu geplant.
+  if (starts_with_word(cmd, "time")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    if (!arg || !(arg[0] >= '0' && arg[0] <= '9')) {
+      pushCompanionMessage("Usage: time <unix-epoch-sec>  (post-2017, < 4 Mrd)");
+      return;
+    }
+    uint32_t epoch = (uint32_t)atoll(arg);
+    if (epoch < 1500000000UL || epoch > 4000000000UL) {
+      pushCompanionMessage("epoch ausserhalb plausibel (1500000000..4000000000).");
+      return;
+    }
+    getRTCClock()->setCurrentTime(epoch);
+    next_night_flood_unix = 0;  // re-schedule mit neuer Zeit
+    char line[80];
+    snprintf(line, sizeof(line), "OK - RTC = %lu (nightly slot invalidated).",
+             (unsigned long)epoch);
+    pushCompanionMessage(line);
+    return;
+  }
+
+  // ---------- set <key> <value> -----------------------------------------
+  // Aenderungen an persistenten Settings, analog zur Repeater-CommonCLI
+  // (CMD_SET_RADIO_PARAMS / set name / set lat / set lon). Schreibt _prefs
+  // und savePrefs.
+  //
+  // Keys: name freq sf bw cr tx_power lat lon
+  //
+  // Hinweis Lat/Lon: South negativ, West negativ. Z.B. 53.5172 oder -10.123.
+  if (starts_with_word(cmd, "set")) {
+    const char* p = strchr(cmd, ' ');
+    if (!p) { pushCompanionMessage("Usage: set <key> <value>  (help set fuer keys)"); return; }
+    while (*p == ' ') p++;
+    if (!*p) { pushCompanionMessage("Usage: set <key> <value>"); return; }
+
+    // Key extrahieren
+    const char* key_start = p;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    size_t key_len = (size_t)(p - key_start);
+    char key[24];
+    if (key_len >= sizeof(key)) key_len = sizeof(key) - 1;
+    memcpy(key, key_start, key_len);
+    key[key_len] = 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) {
+      char r[100]; snprintf(r, sizeof(r), "Usage: set %s <value>", key);
+      pushCompanionMessage(r);
+      return;
+    }
+    const char* value_lc = p;  // value in lower-buffer (numeric values ok)
+
+    // -- set name <text> (case-sensitiv, raw_cmd-Token-Walk) --
+    if (strcmp(key, "name") == 0) {
+      // 3. Token im RAW finden (set name <text>)
+      const char* rp = raw_cmd;
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip "set"
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip "name"
+      while (*rp == ' ' || *rp == '\t') rp++;
+      if (!*rp) { pushCompanionMessage("Usage: set name <text>"); return; }
+      // Trim trailing WS, length cap
+      char clean[32];
+      size_t cl = 0;
+      while (*rp && cl + 1 < sizeof(clean)) clean[cl++] = *rp++;
+      while (cl > 0 && (clean[cl-1] == ' ' || clean[cl-1] == '\t'
+                        || clean[cl-1] == '\r' || clean[cl-1] == '\n')) cl--;
+      clean[cl] = 0;
+      if (cl == 0) { pushCompanionMessage("Usage: set name <text>"); return; }
+      StrHelper::strncpy(_prefs.node_name, clean, sizeof(_prefs.node_name));
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - name = \"%s\"", _prefs.node_name);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // -- set lat / set lon (double) --
+    if (strcmp(key, "lat") == 0) {
+      double v = atof(value_lc);
+      if (v < -90.0 || v > 90.0) {
+        pushCompanionMessage("lat ausserhalb -90.0 .. 90.0 (Sued = negativ).");
+        return;
+      }
+      sensors.node_lat = v;
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - lat = %.6f", v);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (strcmp(key, "lon") == 0) {
+      double v = atof(value_lc);
+      if (v < -180.0 || v > 180.0) {
+        pushCompanionMessage("lon ausserhalb -180.0 .. 180.0 (West = negativ).");
+        return;
+      }
+      sensors.node_lon = v;
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - lon = %.6f", v);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // -- set freq <X> in MHz --
+    if (strcmp(key, "freq") == 0) {
+      float v = atof(value_lc);
+      if (v < 150.0f || v > 2500.0f) {
+        pushCompanionMessage("freq ausserhalb 150..2500 MHz");
+        return;
+      }
+      _prefs.freq = v;
+      savePrefs();
+      applyRadioPolicy();
+      char r[80]; snprintf(r, sizeof(r), "OK - freq = %.4f MHz", v);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (strcmp(key, "bw") == 0) {
+      float v = atof(value_lc);
+      if (v < 7.0f || v > 500.0f) {
+        pushCompanionMessage("bw ausserhalb 7..500 kHz");
+        return;
+      }
+      _prefs.bw = v;
+      savePrefs();
+      applyRadioPolicy();
+      char r[80]; snprintf(r, sizeof(r), "OK - bw = %.1f kHz", v);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (strcmp(key, "sf") == 0) {
+      int v = atoi(value_lc);
+      if (v < 5 || v > 12) { pushCompanionMessage("sf ausserhalb 5..12"); return; }
+      _prefs.sf = (uint8_t)v;
+      savePrefs();
+      applyRadioPolicy();
+      char r[40]; snprintf(r, sizeof(r), "OK - sf = %d", v);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (strcmp(key, "cr") == 0) {
+      int v = atoi(value_lc);
+      if (v < 5 || v > 8) { pushCompanionMessage("cr ausserhalb 5..8"); return; }
+      _prefs.cr = (uint8_t)v;
+      savePrefs();
+      applyRadioPolicy();
+      char r[40]; snprintf(r, sizeof(r), "OK - cr = %d", v);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (strcmp(key, "tx_power") == 0) {
+      int v = atoi(value_lc);
+      if (v < -9 || v > MAX_LORA_TX_POWER) {
+        char r[80]; snprintf(r, sizeof(r), "tx_power ausserhalb -9..%d", (int)MAX_LORA_TX_POWER);
+        pushCompanionMessage(r);
+        return;
+      }
+      _prefs.tx_power_dbm = (int8_t)v;
+      savePrefs();
+      radio_set_tx_power(_prefs.tx_power_dbm);
+      char r[40]; snprintf(r, sizeof(r), "OK - tx_power = %d dBm", v);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // Unbekannter key
+    char r[120];
+    snprintf(r, sizeof(r),
+             "Unbekannter set-key '%s'. Bekannt: name, lat, lon, freq, sf, bw, cr, tx_power.", key);
+    pushCompanionMessage(r);
+    return;
+  }
+
+  // ---------- get <key> -------------------------------------------------
+  // Liest persistente Settings. Useful fuer USB-only-User die ihre Config
+  // ohne App eintragen oder sichern moechten.
+  if (starts_with_word(cmd, "get")) {
+    const char* p = strchr(cmd, ' ');
+    if (!p) { pushCompanionMessage("Usage: get <key>  (help get fuer Liste)"); return; }
+    while (*p == ' ') p++;
+    if (!*p) { pushCompanionMessage("Usage: get <key>"); return; }
+    // Trim trailing WS
+    size_t klen = 0;
+    while (p[klen] && p[klen] != ' ' && p[klen] != '\t' && klen < 23) klen++;
+    char key[24];
+    memcpy(key, p, klen); key[klen] = 0;
+
+    char r[160];
+    if      (strcmp(key, "name") == 0)     snprintf(r, sizeof(r), "name = \"%s\"", _prefs.node_name);
+    else if (strcmp(key, "freq") == 0)     snprintf(r, sizeof(r), "freq = %.4f MHz", _prefs.freq);
+    else if (strcmp(key, "sf") == 0)       snprintf(r, sizeof(r), "sf = %u", (unsigned)_prefs.sf);
+    else if (strcmp(key, "bw") == 0)       snprintf(r, sizeof(r), "bw = %.1f kHz", _prefs.bw);
+    else if (strcmp(key, "cr") == 0)       snprintf(r, sizeof(r), "cr = %u", (unsigned)_prefs.cr);
+    else if (strcmp(key, "tx_power") == 0) snprintf(r, sizeof(r), "tx_power = %d dBm", (int)_prefs.tx_power_dbm);
+    else if (strcmp(key, "lat") == 0)      snprintf(r, sizeof(r), "lat = %.6f", sensors.node_lat);
+    else if (strcmp(key, "lon") == 0)      snprintf(r, sizeof(r), "lon = %.6f", sensors.node_lon);
+    else if (strcmp(key, "repeat") == 0)   snprintf(r, sizeof(r), "repeat = %u", (unsigned)_prefs.client_repeat);
+    else if (strcmp(key, "gps") == 0)      snprintf(r, sizeof(r), "gps = %u", (unsigned)_prefs.gps_enabled);
+    else if (strcmp(key, "advert_loc_policy") == 0) snprintf(r, sizeof(r), "advert_loc_policy = %u", (unsigned)_prefs.advert_loc_policy);
+    else if (strcmp(key, "airtime_factor") == 0)    snprintf(r, sizeof(r), "airtime_factor = %.3f", _prefs.airtime_factor);
+    else if (strcmp(key, "rx_boosted_gain") == 0)   snprintf(r, sizeof(r), "rx_boosted_gain = %u", (unsigned)_prefs.rx_boosted_gain);
+    else if (strcmp(key, "manual_add_contacts") == 0) snprintf(r, sizeof(r), "manual_add_contacts = %u", (unsigned)_prefs.manual_add_contacts);
+    else {
+      snprintf(r, sizeof(r), "Unbekannter key '%s'. Beispiele: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps.", key);
+    }
+    pushCompanionMessage(r);
     return;
   }
 
