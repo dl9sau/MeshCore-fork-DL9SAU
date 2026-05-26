@@ -421,10 +421,35 @@ bool MyMesh::isLocallyHeard(uint8_t hash) const {
   return false;
 }
 
+void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
+                          uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) {
+  // SNR vom Paket fuer die nachfolgende Quality-Klassifikation in
+  // onDiscoveredContact() merken (Q4-Format, wie ueblich in MeshCore).
+  _last_advert_snr_q4 = (packet != NULL) ? packet->_snr : 0;
+  BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
+}
+
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
+  // Stats: alle empfangenen Adverts (egal Hop-Count) pro Node-Typ
+  if (contact.type < 5 && _rx_advert_total[contact.type] < 0xFFFF) {
+    _rx_advert_total[contact.type]++;
+  }
   // Track only adverts received directly (zero-hop, no repeater in the path).
   if ((path_len & 63) == 0) {
     markHeardDirect(contact.id.pub_key[0]);
+    // Stats: zero-hop direkt empfangene Adverts pro Node-Typ
+    if (contact.type < 5 && _heard_direct[contact.type] < 0xFFFF) {
+      _heard_direct[contact.type]++;
+      // SNR-Quality-Klassifikation. Schwellen in Q4 (snr*4):
+      //   gut:     SNR >= 0 dB  -> q4 >= 0
+      //   mittel:  -8 <= SNR < 0 -> -32 <= q4 < 0
+      //   schlecht: SNR < -8 dB -> q4 < -32
+      int8_t snr_q4 = _last_advert_snr_q4;
+      int q_idx = (snr_q4 >= 0) ? 0 : (snr_q4 >= -32 ? 1 : 2);
+      if (_heard_quality[contact.type][q_idx] < 0xFFFF) {
+        _heard_quality[contact.type][q_idx]++;
+      }
+    }
   }
 
   if (_serial->isConnected()) {
@@ -559,6 +584,15 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
+  uint8_t ptype_raw = packet->getPayloadType();
+  // Stats: alle Flood-Pakete die wir als Forward-Kandidaten sehen (egal ob
+  // wir sie am Ende durchreichen oder nicht). Decken nicht die Direct-Pakete
+  // ab — die durchlaufen einen anderen Mesh-Pfad. Aber im realen Mesh sind
+  // floods der Hauptanteil des Hintergrundsrauschens.
+  if (ptype_raw < 16 && _rx_flood_by_ptype[ptype_raw] < 0xFFFF) {
+    _rx_flood_by_ptype[ptype_raw]++;
+  }
+
   if (_prefs.client_repeat == 0) return false;
 
   // path-length cap (hop count, not byte length)
@@ -601,6 +635,13 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
 
   if (decision) {
     _tx_digi_count++;
+    if (ptype < 16 && _repeat_by_ptype[ptype] < 0xFFFF) {
+      _repeat_by_ptype[ptype]++;
+    }
+    // Geschaetzte Airtime des Repeats (vor TX, gleiche Formel wie an
+    // anderen Stellen im Code: pathBytes + payload + 2 Header-Bytes).
+    _tx_repeat_airtime_ms += _radio->getEstAirtimeFor(
+        packet->getPathByteLen() + packet->payload_len + 2);
     traceCompanion(TRACE_REPEAT, "[repeat] type=%u hops=%u scope=%s",
                    (unsigned)ptype, (unsigned)packet->getPathHashCount(),
                    packet->hasTransportCodes() ? "yes" : "no");
@@ -1052,6 +1093,14 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _geo_reco_anchor_lon = 0.0;
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
+  memset(_heard_direct,       0, sizeof(_heard_direct));
+  memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
+  memset(_rx_flood_by_ptype,  0, sizeof(_rx_flood_by_ptype));
+  memset(_repeat_by_ptype,    0, sizeof(_repeat_by_ptype));
+  memset(_tx_total_by_ptype,  0, sizeof(_tx_total_by_ptype));
+  memset(_heard_quality,      0, sizeof(_heard_quality));
+  _tx_repeat_airtime_ms = 0;
+  _last_advert_snr_q4 = 0;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -1270,6 +1319,12 @@ void MyMesh::applyRadioPolicy() {
 
 void MyMesh::applyPacketTxOverrides(const mesh::Packet* packet) {
   if (packet == NULL) return;
+  // Stats: zentraler TX-Hook — laeuft fuer JEDEN ausgehenden Packet (eigene
+  // UND repeated). Eigene Pakete = _tx_total_by_ptype - _repeat_by_ptype.
+  uint8_t pt = packet->getPayloadType();
+  if (pt < 16 && _tx_total_by_ptype[pt] < 0xFFFF) {
+    _tx_total_by_ptype[pt]++;
+  }
   uint8_t flags = packet->tx_flags;
   if (flags == 0) return;
 
@@ -3309,6 +3364,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "stats")) {
+        pushCompanionMessage(
+          "stats: detaillierte RX/Repeat/Airtime-Statistik. Aufschluesselung "
+          "nach Node-Typ und Payload-Typ, plus /h und /d hochgerechnet."
+        );
+        pushCompanionMessage(
+          "Direct-Pakete sind NICHT erfasst (nur Flood — der Hauptanteil "
+          "des Mesh-Hintergrundtraffics). Counter sind RAM-only."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "trace")) {
         pushCompanionMessage(
           "trace: selektives Live-Logging in den Companion-Chat. "
@@ -3338,9 +3404,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     pushCompanionMessage(
-      "Befehle: help [topic], status, uptime, advert, gps on/off, trace, "
-      "chatname, reboot. (Weitere geplant: zerohop/nightly on/off, region set, "
-      "scope set, client-repeat on/off.)"
+      "Befehle: help [topic], status, stats, uptime, advert, gps on/off, "
+      "trace, chatname, reboot. (Weitere geplant: zerohop/nightly on/off, "
+      "region set, scope set, client-repeat on/off.)"
     );
     return;
   }
@@ -3433,6 +3499,162 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Kurz warten damit die Push-Nachricht noch raus geht
     delay(1000);
     board.reboot();
+    return;
+  }
+
+  // ---------- stats -----------------------------------------------------
+  // Detail-Statistik mit Aufschluesselung nach Node-Typ, Pakettyp und
+  // Airtime. Alle Counter sind RAM-only (reset bei Reboot). Pro-Stunde/
+  // Pro-Tag wird aus dem Session-Total und der Uptime berechnet.
+  if (starts_with_word(cmd, "stats")) {
+    uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
+    if (total_ms == 0) total_ms = 1;   // div-by-zero guard direkt nach Boot
+    uint64_t total_s = total_ms / 1000ULL;
+    if (total_s == 0) total_s = 1;
+    double per_hour_factor = 3600.0 / (double)total_s;
+    double per_day_factor  = 86400.0 / (double)total_s;
+    char line[160];
+
+    // Heard direct (zero-hop empfangene Adverts) nach Node-Typ + Quality
+    uint32_t hd_total = 0;
+    for (int t = 0; t < 5; t++) hd_total += _heard_direct[t];
+    snprintf(line, sizeof(line),
+             "heard direct: rep=%u cmp=%u room=%u sns=%u (total=%lu, %.1f/h, %.1f/d)",
+             (unsigned)_heard_direct[ADV_TYPE_REPEATER],
+             (unsigned)_heard_direct[ADV_TYPE_CHAT],
+             (unsigned)_heard_direct[ADV_TYPE_ROOM],
+             (unsigned)_heard_direct[ADV_TYPE_SENSOR],
+             (unsigned long)hd_total,
+             hd_total * per_hour_factor,
+             hd_total * per_day_factor);
+    pushCompanionMessage(line);
+    // SNR-Qualitaet (gut >= 0 dB, mittel -8..0, schlecht < -8) pro Node-Typ.
+    // Nur Zeilen ausgeben fuer Typen die wir tatsaechlich gehoert haben.
+    static const struct { const char* label; uint8_t type; } qrows[] = {
+      { "rep",  ADV_TYPE_REPEATER },
+      { "cmp",  ADV_TYPE_CHAT },
+      { "room", ADV_TYPE_ROOM },
+      { "sns",  ADV_TYPE_SENSOR },
+    };
+    for (size_t qi = 0; qi < sizeof(qrows)/sizeof(qrows[0]); qi++) {
+      uint8_t t = qrows[qi].type;
+      if (_heard_direct[t] == 0) continue;
+      snprintf(line, sizeof(line),
+               "  %-4s qualitaet: gut=%u mittel=%u schlecht=%u",
+               qrows[qi].label,
+               (unsigned)_heard_quality[t][0],
+               (unsigned)_heard_quality[t][1],
+               (unsigned)_heard_quality[t][2]);
+      pushCompanionMessage(line);
+    }
+
+    // Alle empfangenen Adverts (egal Hop-Count) nach Node-Typ
+    uint32_t ad_total = 0;
+    for (int t = 0; t < 5; t++) ad_total += _rx_advert_total[t];
+    snprintf(line, sizeof(line),
+             "rx adv all: rep=%u cmp=%u room=%u sns=%u (total=%lu, %.1f/h)",
+             (unsigned)_rx_advert_total[ADV_TYPE_REPEATER],
+             (unsigned)_rx_advert_total[ADV_TYPE_CHAT],
+             (unsigned)_rx_advert_total[ADV_TYPE_ROOM],
+             (unsigned)_rx_advert_total[ADV_TYPE_SENSOR],
+             (unsigned long)ad_total,
+             ad_total * per_hour_factor);
+    pushCompanionMessage(line);
+
+    // Flood-Empfangene Pakete nach Payload-Typ. Direct-Pakete sind nicht
+    // erfasst (anderer Mesh-Pfad — nur Flood durchlaeuft allowPacketForward).
+    uint32_t rxf_total = 0;
+    for (int p = 0; p < 16; p++) rxf_total += _rx_flood_by_ptype[p];
+    snprintf(line, sizeof(line),
+             "rx flood: adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u",
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE]);
+    pushCompanionMessage(line);
+    snprintf(line, sizeof(line),
+             "rx flood total=%lu (%.1f/h, %.1f/d)  (direct nicht erfasst)",
+             (unsigned long)rxf_total,
+             rxf_total * per_hour_factor,
+             rxf_total * per_day_factor);
+    pushCompanionMessage(line);
+
+    // Repeated (Pakete die WIR durchgereicht haben)
+    uint32_t rep_total = 0;
+    for (int p = 0; p < 16; p++) rep_total += _repeat_by_ptype[p];
+    snprintf(line, sizeof(line),
+             "repeated: adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u",
+             (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ADVERT],
+             (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_PATH],
+             (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_TXT_MSG],
+             (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_GRP_TXT],
+             (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ACK],
+             (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_REQ],
+             (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_RESPONSE],
+             (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_TRACE]);
+    pushCompanionMessage(line);
+    snprintf(line, sizeof(line),
+             "repeated total=%lu (%.1f/h, %.1f/d)",
+             (unsigned long)rep_total,
+             rep_total * per_hour_factor,
+             rep_total * per_day_factor);
+    pushCompanionMessage(line);
+
+    // Eigene TX (alle TX minus repeated, pro Pakettyp). _tx_total_by_ptype
+    // wird in applyPacketTxOverrides() inkrementiert (zentraler Hook fuer
+    // JEDEN ausgehenden Packet, eigen + repeated). Differenz = eigene.
+    auto own_of = [&](uint8_t p) -> unsigned {
+      uint16_t tot = _tx_total_by_ptype[p];
+      uint16_t rep = _repeat_by_ptype[p];
+      return (tot > rep) ? (unsigned)(tot - rep) : 0u;
+    };
+    uint32_t own_total = 0;
+    for (int p = 0; p < 16; p++) own_total += own_of((uint8_t)p);
+    snprintf(line, sizeof(line),
+             "tx own: adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u",
+             own_of(PAYLOAD_TYPE_ADVERT),
+             own_of(PAYLOAD_TYPE_PATH),
+             own_of(PAYLOAD_TYPE_TXT_MSG),
+             own_of(PAYLOAD_TYPE_GRP_TXT),
+             own_of(PAYLOAD_TYPE_ACK),
+             own_of(PAYLOAD_TYPE_REQ),
+             own_of(PAYLOAD_TYPE_RESPONSE),
+             own_of(PAYLOAD_TYPE_TRACE));
+    pushCompanionMessage(line);
+    snprintf(line, sizeof(line),
+             "tx own total=%lu (%.1f/h, %.1f/d)",
+             (unsigned long)own_total,
+             own_total * per_hour_factor,
+             own_total * per_day_factor);
+    pushCompanionMessage(line);
+
+    // Airtime — RX direkt aus Dispatcher (Schaetzung aus pkt-len),
+    // TX-Total gemessen (outbound_start..isSendComplete). TX wird in
+    // own/repeat aufgeteilt: repeat-airtime schaetzen wir beim Forward-
+    // Decide. Own = total - repeat-Schaetzung (kann leicht abweichen).
+    unsigned long rx_air = getReceiveAirTime();
+    unsigned long tx_air = getTotalAirTime();
+    unsigned long tx_rep_air = _tx_repeat_airtime_ms;
+    if (tx_rep_air > tx_air) tx_rep_air = tx_air;   // Schaetzung-Clamp
+    unsigned long tx_own_air = tx_air - tx_rep_air;
+    double rx_pct      = 100.0 * (double)rx_air     / (double)total_ms;
+    double tx_pct      = 100.0 * (double)tx_air     / (double)total_ms;
+    double tx_own_pct  = 100.0 * (double)tx_own_air / (double)total_ms;
+    double tx_rep_pct  = 100.0 * (double)tx_rep_air / (double)total_ms;
+    double free_pct    = 100.0 - rx_pct - tx_pct;
+    if (free_pct < 0) free_pct = 0;
+    snprintf(line, sizeof(line),
+             "airtime rx=%lums (%.2f%%) tx=%lums (%.2f%%) -> frei=%.2f%%",
+             rx_air, rx_pct, tx_air, tx_pct, free_pct);
+    pushCompanionMessage(line);
+    snprintf(line, sizeof(line),
+             "tx aufgeteilt: own=%lums (%.2f%%) repeat=%lums (%.2f%%)",
+             tx_own_air, tx_own_pct, tx_rep_air, tx_rep_pct);
+    pushCompanionMessage(line);
     return;
   }
 

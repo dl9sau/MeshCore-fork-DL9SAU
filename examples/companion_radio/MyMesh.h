@@ -242,6 +242,8 @@ protected:
   void onContactOverwrite(const uint8_t* pub_key) override;
   bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
+  // SNR der Advert für die Quality-Klassifikation in onDiscoveredContact merken.
+  void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override;
   void onContactPathUpdated(const ContactInfo &contact) override;
   ContactInfo* processAck(const uint8_t *data) override;
   void queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt, uint32_t sender_timestamp,
@@ -474,6 +476,18 @@ private:
   // reset bei Reboot — verhindert dass eine Trace-Kategorie versehentlich
   // unbegrenzt die Offline-Queue mit Events flutet.
   uint16_t      _trace_flags;
+  // Detail-Statistik-Counter (RAM-only, reset bei Reboot).
+  // Indizes: ADV_TYPE_* (0..4) bzw. PAYLOAD_TYPE_* (0..0x0F).
+  uint16_t      _heard_direct[5];        // zero-hop empfangene Adverts pro Node-Typ
+  // Qualitaets-Klassifizierung der zero-hop empfangenen Adverts (SNR-Schwellen
+  // in dB: gut >= 0, mittel >= -8, schlecht < -8). Dimensionen: [type][quality]
+  uint16_t      _heard_quality[5][3];    // [ADV_TYPE_*][0=gut, 1=mittel, 2=schlecht]
+  int8_t        _last_advert_snr_q4;     // SNR (q4) der zuletzt empfangenen Advert
+  uint16_t      _rx_advert_total[5];     // ALLE empfangenen Adverts (egal Hop-Count) pro Node-Typ
+  uint16_t      _rx_flood_by_ptype[16];  // Flood-Pakete als Forward-Kandidat (alle Pkt-Typen)
+  uint16_t      _repeat_by_ptype[16];    // Pakete die WIR tatsaechlich durchgereicht haben
+  uint16_t      _tx_total_by_ptype[16];  // ALLE TX (eigen + repeated); eigen = total - repeat
+  uint32_t      _tx_repeat_airtime_ms;   // geschaetzte Airtime nur unserer Repeats
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual
