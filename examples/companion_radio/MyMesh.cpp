@@ -399,12 +399,16 @@ void MyMesh::markHeardDirect(uint8_t hash) {
       break;
     }
   }
-  if (slot == NULL) {
+  bool is_new = (slot == NULL);
+  if (is_new) {
     slot = &heard_list[heard_next_idx];
     heard_next_idx = (heard_next_idx + 1) % CR_HEARD_TABLE_SIZE;
     slot->hash = hash;
   }
   slot->last_heard = now;
+  if (is_new) {
+    traceCompanion(TRACE_HEARD, "[heard] neuer Direct-Node hash=0x%02X", hash);
+  }
 }
 
 bool MyMesh::isLocallyHeard(uint8_t hash) const {
@@ -595,7 +599,16 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   }
   // else: unknown payload types stay decision=false (do not forward)
 
-  if (decision) _tx_digi_count++;
+  if (decision) {
+    _tx_digi_count++;
+    traceCompanion(TRACE_REPEAT, "[repeat] type=%u hops=%u scope=%s",
+                   (unsigned)ptype, (unsigned)packet->getPathHashCount(),
+                   packet->hasTransportCodes() ? "yes" : "no");
+  } else {
+    traceCompanion(TRACE_FILTER, "[filter] reject type=%u hops=%u scope=%s",
+                   (unsigned)ptype, (unsigned)packet->getPathHashCount(),
+                   packet->hasTransportCodes() ? "yes" : "no");
+  }
   return decision;
 }
 
@@ -1038,6 +1051,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _geo_reco_anchor_lat = 0.0;
   _geo_reco_anchor_lon = 0.0;
   _companion_channel_idx = 0xFF;
+  _trace_flags = 0;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -1504,6 +1518,7 @@ void MyMesh::handleCmdFrame(size_t len) {
         // 128-bit channel secrets map directly onto TransportKey.key.
         memcpy(runtime_last_channel_scope.key, channel.channel.secret, sizeof(runtime_last_channel_scope.key));
         runtime_last_channel_scope_at = getRTCClock()->getCurrentTime();
+        traceCompanion(TRACE_SCOPE, "[scope] runtime_last_channel_scope=\"%s\"", channel.name);
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
@@ -1635,6 +1650,8 @@ void MyMesh::handleCmdFrame(size_t len) {
       _tx_advert_count++;
       pushDebugLog("[ADV-DBG] app-cmd (CMD_SEND_SELF_ADVERT flood=%d), millis=%lu\n",
                     (int)(len >= 2 && cmd_frame[1] == 1), millis());
+      traceCompanion(TRACE_ADVERTS, "[adv] manual (app-cmd) flood=%d",
+                     (int)(len >= 2 && cmd_frame[1] == 1));
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_TABLE_FULL);
@@ -2612,6 +2629,10 @@ void MyMesh::loop() {
     bool is_connected = _serial->isConnected();
     if (is_connected && !_last_serial_connected) {
       _bt_connect_count++;
+      traceCompanion(TRACE_CONNECT, "[connect] App connected (count=%lu)",
+                     (unsigned long)_bt_connect_count);
+    } else if (!is_connected && _last_serial_connected) {
+      traceCompanion(TRACE_CONNECT, "[connect] App disconnected");
     }
     _last_serial_connected = is_connected;
   }
@@ -2636,6 +2657,7 @@ void MyMesh::loop() {
     if (_last_observed_rtc != 0) {
       int32_t delta = (int32_t)(now_rtc - _last_observed_rtc);
       if (delta > 300 || delta < -300) {   // 5 min jump in either direction
+        traceCompanion(TRACE_RTC, "[rtc] Sprung %ld sec erkannt", (long)delta);
         if (next_night_flood_unix != 0) {
           pushDebugLog("[ADV-DBG] RTC jumped %ld sec, nightly slot invalidated\n", (long)delta);
           next_night_flood_unix = 0;
@@ -2765,6 +2787,9 @@ void MyMesh::scheduleNextNightFlood() {
   uint32_t span = window_end - window_start;
   uint32_t pick_local = window_start + getRNG()->nextInt(0, span);
   next_night_flood_unix = pick_local - (uint32_t)LOCAL_TZ_OFFSET_SECS;
+  uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  long until_s = (long)next_night_flood_unix - (long)now_rtc;
+  traceCompanion(TRACE_NIGHT, "[night] scheduled in %ld min", until_s / 60);
 }
 
 // Adaptive zero-hop advert pacing:
@@ -2822,6 +2847,7 @@ void MyMesh::updateMotionTracking() {
 
   if (!_gps_had_fix_ever) {
     _gps_had_fix_ever = true;
+    traceCompanion(TRACE_GPS, "[gps] first fix erkannt");
     // First fix arrived during boot wait: collapse the GPS-extended boot
     // delay (10 min) to "5 min after boot" (not "5 min from now"!). If we are
     // already past that mark, fire as soon as possible.
@@ -2886,6 +2912,10 @@ void MyMesh::updateMotionTracking() {
     _pos_anchor_lon = cur_lon;
     _pos_anchor_millis = now;
 
+    if (was_moving != _is_moving) {
+      traceCompanion(TRACE_MOTION, "[motion] %s (Anker-Distanz %d m)",
+                     _is_moving ? "moving" : "static", (int)d_m);
+    }
     // Movement just started — accelerate the next advert so a fresh
     // position goes out promptly, instead of waiting out the static
     // (1h) slot we may currently be on.
@@ -2917,6 +2947,8 @@ void MyMesh::doPeriodicZeroHopAdvert() {
     _tx_advert_count++;
     _gps_user_override_until_advert = false;   // user-on override expires with this advert
     pushDebugLog("[ADV-DBG] periodic, millis=%lu moving=%d\n", millis(), (int)_is_moving);
+    traceCompanion(TRACE_ADVERTS, "[adv] periodic zero-hop moving=%d",
+                   (int)_is_moving);
   }
 }
 
@@ -2945,6 +2977,7 @@ void MyMesh::doNightFloodAdvert() {
     _tx_advert_count++;
     pushDebugLog("[ADV-DBG] nightly-flood (3B path), millis=%lu rtc=%lu\n",
                   millis(), (unsigned long)getRTCClock()->getCurrentTime());
+    traceCompanion(TRACE_ADVERTS, "[adv] nightly-flood (3B path)");
   }
 }
 
@@ -3013,6 +3046,7 @@ void MyMesh::manageGpsPower() {
     _gps_off_at_millis = 0;
     _gps_fix_seen_this_wake = false;              // start a fresh wake cycle
     pushDebugLog("[GPS-DBG] wake at millis=%lu (until_advert=%lds)\n", now, until_advert / 1000);
+    traceCompanion(TRACE_GPS, "[gps] wake (until_advert=%lds)", until_advert / 1000);
   } else if (!want_gps_on && gps_is_on) {
     sensors.setSettingValue("gps", "0");
     _gps_woke_at_millis = 0;
@@ -3020,6 +3054,7 @@ void MyMesh::manageGpsPower() {
     _gps_fix_seen_this_wake = false;
     pushDebugLog("[GPS-DBG] sleep at millis=%lu (until_advert=%lds, fix_was_seen=1)\n",
                   now, until_advert / 1000);
+    traceCompanion(TRACE_GPS, "[gps] sleep (fix_seen=%d)", (int)_gps_fix_seen_this_wake);
   }
 #endif
 }
@@ -3187,6 +3222,38 @@ static bool topic_prefix_match(const char* input, const char* keyword) {
   return strncmp(input, keyword, tlen) == 0;
 }
 
+void MyMesh::traceCompanion(uint16_t flag, const char* fmt, ...) {
+  if ((_trace_flags & flag) == 0) return;
+  char buf[160];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n <= 0) return;
+  if (n >= (int)sizeof(buf)) buf[sizeof(buf) - 1] = 0;
+  pushCompanionMessage(buf);
+}
+
+// Trace-Kategorien-Tabelle für die CLI (Name + Flag + Beschreibung).
+struct TraceCat {
+  const char* name;
+  uint16_t flag;
+  const char* desc;
+};
+static const TraceCat trace_cats[] = {
+  { "gps",     TRACE_GPS,     "GPS power on/off, first fix, fix loss" },
+  { "adverts", TRACE_ADVERTS, "eigene Adverts (periodic/nightly/manual)" },
+  { "repeat",  TRACE_REPEAT,  "durchgereichte Packets" },
+  { "scope",   TRACE_SCOPE,   "runtime_last_channel_scope Wechsel" },
+  { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
+  { "heard",   TRACE_HEARD,   "neue Direct-heard Nodes (HeardList)" },
+  { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
+  { "connect", TRACE_CONNECT, "BLE-App-Connect Events" },
+  { "filter",  TRACE_FILTER,  "abgelehnte Forward-Kandidaten (kann viel)" },
+  { "night",   TRACE_NIGHT,   "Nightly-Flood Schedule + Scope-Auswahl" },
+};
+static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
+
 void MyMesh::handleCompanionCommand(const char* cmd) {
   if (cmd == NULL) return;
   // Führende Whitespace überspringen
@@ -3242,6 +3309,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "trace")) {
+        pushCompanionMessage(
+          "trace: selektives Live-Logging in den Companion-Chat. "
+          "Bitmask, RAM-only (reset bei Reboot)."
+        );
+        pushCompanionMessage(
+          "Args: 'list' = Kategorien-Uebersicht, '<cat> on/off', "
+          "'all on/off', 'off'. Ohne Arg -> aktive Kategorien."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "chatname")) {
         // Nachrichten max. MAX_TEXT_LEN=160 Zeichen — daher Help in zwei
         // Häppchen aufteilen statt zu kürzen.
@@ -3260,8 +3338,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     pushCompanionMessage(
-      "Befehle: help [topic], status, uptime, advert, gps on/off, chatname, "
-      "reboot. (Weitere geplant: trace, zerohop/nightly on/off, region set, "
+      "Befehle: help [topic], status, uptime, advert, gps on/off, trace, "
+      "chatname, reboot. (Weitere geplant: zerohop/nightly on/off, region set, "
       "scope set, client-repeat on/off.)"
     );
     return;
@@ -3355,6 +3433,86 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Kurz warten damit die Push-Nachricht noch raus geht
     delay(1000);
     board.reboot();
+    return;
+  }
+
+  // ---------- trace -----------------------------------------------------
+  // Selektives Live-Logging einzelner Event-Kategorien in den Companion-
+  // Channel. Bitmask in _trace_flags (RAM-only, reset bei Reboot).
+  //   trace                  -> aktive Kategorien
+  //   trace list             -> alle verfuegbaren Kategorien + Beschreibung
+  //   trace <cat> on/off     -> Flag setzen/loeschen
+  //   trace all on/off       -> alle Flags
+  //   trace off              -> Alias fuer "trace all off"
+  if (starts_with_word(cmd, "trace")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+
+    if (!arg || *arg == 0) {
+      // Status — aktive Kategorien anzeigen
+      char line[160];
+      int used = snprintf(line, sizeof(line), "trace aktiv:");
+      bool any = false;
+      for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
+        if (_trace_flags & trace_cats[k].flag) {
+          used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
+          any = true;
+        }
+      }
+      if (!any) snprintf(line + used, sizeof(line) - used, " (keine)");
+      pushCompanionMessage(line);
+      return;
+    }
+    if (starts_with_word(arg, "list")) {
+      // Jede Kategorie als eigene Message (Beschreibungen würden sonst
+      // den 160-Byte MAX_TEXT_LEN sprengen).
+      for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
+        char line[160];
+        snprintf(line, sizeof(line), "  %s - %s", trace_cats[k].name, trace_cats[k].desc);
+        pushCompanionMessage(line);
+      }
+      return;
+    }
+    if (strcmp(arg, "off") == 0) {
+      _trace_flags = 0;
+      pushCompanionMessage("OK — alle traces aus.");
+      return;
+    }
+    if (starts_with_word(arg, "all")) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      if (sub && strcmp(sub, "on") == 0) {
+        _trace_flags = TRACE_ALL_MASK;
+        pushCompanionMessage("OK — alle traces an.");
+      } else if (sub && strcmp(sub, "off") == 0) {
+        _trace_flags = 0;
+        pushCompanionMessage("OK — alle traces aus.");
+      } else {
+        pushCompanionMessage("Usage: trace all on  |  trace all off");
+      }
+      return;
+    }
+    // <cat> on/off
+    for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
+      if (starts_with_word(arg, trace_cats[k].name)) {
+        const char* sub = strchr(arg, ' ');
+        if (sub) { while (*sub == ' ') sub++; }
+        if (sub && strcmp(sub, "on") == 0) {
+          _trace_flags |= trace_cats[k].flag;
+          char r[80]; snprintf(r, sizeof(r), "OK — trace %s an.", trace_cats[k].name);
+          pushCompanionMessage(r);
+        } else if (sub && strcmp(sub, "off") == 0) {
+          _trace_flags &= ~trace_cats[k].flag;
+          char r[80]; snprintf(r, sizeof(r), "OK — trace %s aus.", trace_cats[k].name);
+          pushCompanionMessage(r);
+        } else {
+          char r[80]; snprintf(r, sizeof(r), "Usage: trace %s on|off", trace_cats[k].name);
+          pushCompanionMessage(r);
+        }
+        return;
+      }
+    }
+    pushCompanionMessage("Unbekannte trace-Kategorie. 'trace list' fuer Uebersicht.");
     return;
   }
 
@@ -3492,6 +3650,7 @@ bool MyMesh::advert() {
     sendZeroHop(pkt);
     _tx_advert_count++;
     pushDebugLog("[ADV-DBG] ui-button (advert()), millis=%lu\n", millis());
+    traceCompanion(TRACE_ADVERTS, "[adv] ui-button (manual)");
     return true;
   } else {
     return false;

@@ -154,6 +154,20 @@ struct AdvertPath {
 // löst der Anker alle ~15-20 min eine Neu-Auswertung aus; ein Knoten,
 // der genau auf einer Bundesland-Grenze parkt, bleibt ruhig.
 #define CR_GEO_RECO_REEVAL_DIST_M  10000.0
+// Trace-Flags: RAM-only Bitmask die selektiv Events als Companion-Channel-
+// Messages pusht. Setzen via "trace <cat> on/off" Befehl. Reset bei Reboot,
+// damit man nicht versehentlich eine Trace-Kategorie auf-Dauer aktiv lässt.
+#define TRACE_GPS      0x0001
+#define TRACE_ADVERTS  0x0002
+#define TRACE_REPEAT   0x0004
+#define TRACE_SCOPE    0x0008
+#define TRACE_MOTION   0x0010
+#define TRACE_HEARD    0x0020
+#define TRACE_RTC      0x0040
+#define TRACE_CONNECT  0x0080
+#define TRACE_FILTER   0x0100
+#define TRACE_NIGHT    0x0200
+#define TRACE_ALL_MASK 0x03FF
 // 5 min after boot when GPS is off or has already obtained a fix; if GPS is
 // enabled but still searching, wait up to 10 min so that the first advert can
 // already carry a position. When the first fix arrives during the wait, the
@@ -330,6 +344,9 @@ private:
   // Parst und führt einen vom User über den Companion-Channel gesendeten
   // Befehl aus. Antwort wird via pushCompanionMessage() zurückgegeben.
   void handleCompanionCommand(const char* cmd);
+  // Pusht eine Trace-Message in den Companion-Channel — aber nur wenn das
+  // entsprechende Flag in _trace_flags gesetzt ist. No-op sonst.
+  void traceCompanion(uint16_t flag, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
 
   // client-repeater + periodic advert helpers
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides
@@ -453,6 +470,10 @@ private:
   // synthetic incoming-channel-message — App sieht es als normalen Chat.
   // 0xFF = nicht initialisiert / kein freier Slot.
   uint8_t       _companion_channel_idx;
+  // Bitmask aktiver Trace-Kategorien (siehe TRACE_*-Konstanten). RAM-only,
+  // reset bei Reboot — verhindert dass eine Trace-Kategorie versehentlich
+  // unbegrenzt die Offline-Queue mit Events flutet.
+  uint16_t      _trace_flags;
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual
