@@ -3172,6 +3172,21 @@ static bool starts_with_word(const char* text, const char* word) {
   return c == 0 || c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
+// Prüft ob das erste Wort von `input` ein Prefix von `keyword` ist
+// (Tipparbeit sparen). "chat" matcht "chatname", "stat" matcht "status".
+// Nur fürs help-Topic-Matching benutzen — bei Top-Level-Befehlen würden
+// Prefixes künftige Erweiterungen kollidieren lassen (z.B. "r" für
+// reboot vs. region/reset).
+static bool topic_prefix_match(const char* input, const char* keyword) {
+  size_t tlen = 0;
+  while (input[tlen] != 0 && input[tlen] != ' ' && input[tlen] != '\t'
+         && input[tlen] != '\r' && input[tlen] != '\n') {
+    tlen++;
+  }
+  if (tlen == 0) return false;
+  return strncmp(input, keyword, tlen) == 0;
+}
+
 void MyMesh::handleCompanionCommand(const char* cmd) {
   if (cmd == NULL) return;
   // Führende Whitespace überspringen
@@ -3205,7 +3220,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       while (*topic == ' ') topic++;
     }
     if (topic && *topic) {
-      if (starts_with_word(topic, "gps")) {
+      if (topic_prefix_match(topic, "gps")) {
         pushCompanionMessage(
           "gps on/off: GPS-Modul ein-/ausschalten. "
           "Bei Off wird die zuletzt bekannte Position weiter im Advert gesendet. "
@@ -3213,27 +3228,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
-      if (starts_with_word(topic, "advert")) {
+      if (topic_prefix_match(topic, "advert")) {
         pushCompanionMessage(
           "advert: sendet sofort einen zero-hop Advert mit der aktuellen Position "
           "(falls advert_loc_policy != NONE)."
         );
         return;
       }
-      if (starts_with_word(topic, "status")) {
+      if (topic_prefix_match(topic, "status")) {
         pushCompanionMessage(
           "status: zeigt Firmware-Version, Uptime, GPS-Status, Position, "
           "Advert-Counter."
         );
         return;
       }
-      if (starts_with_word(topic, "chatname")) {
+      if (topic_prefix_match(topic, "chatname")) {
+        // Nachrichten max. MAX_TEXT_LEN=160 Zeichen — daher Help in zwei
+        // Häppchen aufteilen statt zu kürzen.
         pushCompanionMessage(
           "chatname konfiguriert den Sendernamen in Group-Channel-Messages. "
-          "Default sind die ersten 2 Woerter aus dem konfigurierten Node-Namen. "
-          "Argumente: '1' = nur erstes Wort, '2' oder 'auto' = 2 Woerter, "
-          "'custom <Name>' = frei waehlbar (Original-Case bleibt erhalten). "
-          "Ohne Argument wird der aktuelle Stand angezeigt."
+          "Default: erste 2 Woerter aus dem konfigurierten Node-Namen."
+        );
+        pushCompanionMessage(
+          "Args: '1' = 1 Wort, '2'/'auto'/'default' = 2 Woerter, "
+          "'custom <Name>' = frei waehlbar (Original-Case). "
+          "Ohne Arg -> Status."
         );
         return;
       }
@@ -3330,7 +3349,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("OK — chatname = erstes Wort.");
       return;
     }
-    if (strcmp(arg, "2") == 0 || starts_with_word(arg, "auto")) {
+    if (strcmp(arg, "2") == 0 || starts_with_word(arg, "auto")
+        || starts_with_word(arg, "default")) {
       _prefs.chat_name_mode = 0;
       savePrefs();
       pushCompanionMessage("OK — chatname = erste 2 Woerter (Standard).");
@@ -3361,7 +3381,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(reply);
       return;
     }
-    pushCompanionMessage("Usage: chatname [1 | 2 | auto | custom <Name>]");
+    pushCompanionMessage("Usage: chatname [1 | 2 | auto | default | custom <Name>]");
     return;
   }
 
