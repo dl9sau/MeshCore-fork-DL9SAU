@@ -1151,6 +1151,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(&_prefs, 0, sizeof(_prefs));
   _prefs.duty_soft_pct = 80;   // Repeats droppen bei 80% von 360s (= 288s)
   _prefs.duty_hard_pct = 100;  // alle TX droppen bei 360s (= 10% TX/h)
+  _prefs.gps_power_mode = 0;   // 0=cycle (Default), 1=always-on
+  _prefs.gps_lead_min   = 5;   // 5 min Wake vor Advert (Sleep = 10 min im 15-min-Cycle)
   _prefs.airtime_factor = 1.0;
   strcpy(_prefs.node_name, "NONAME");
   _prefs.freq = LORA_FREQ;
@@ -3215,11 +3217,29 @@ void MyMesh::manageGpsPower() {
   const char* cur = sensors.getSettingByKey("gps");
   if (cur != NULL) gps_is_on = (cur[0] == '1');
 
+  // always-on Modus: nicht cyceln, GPS dauerhaft an
+  if (_prefs.gps_power_mode == 1) {
+    if (!gps_is_on) {
+      sensors.setSettingValue("gps", "1");
+      _gps_woke_at_millis = (now == 0 ? 1 : now);
+      _gps_off_at_millis = 0;
+      _gps_fix_seen_this_wake = false;
+      pushDebugLog("[GPS-DBG] wake (always-on mode) at millis=%lu\n", now);
+      traceCompanion(TRACE_GPS, "[gps] wake (always-on)");
+    }
+    return;
+  }
+
+  // Lead-Zeit aus _prefs.gps_lead_min (Minuten). Backward-compat: wenn der
+  // gespeicherte Wert 0 ist (z.B. alte Datei ohne Feld), nutze Default 5.
+  uint8_t lead_min = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
+  unsigned long lead_ms = (unsigned long)lead_min * 60UL * 1000UL;
+
   // distance to next advert (signed; can be negative if we're past schedule)
   long until_advert = (long)(next_periodic_advert_at - now);
 
   // baseline: turn GPS on shortly before each scheduled advert
-  bool want_gps_on = (until_advert <= (long)CR_GPS_LEAD_BEFORE_ADVERT_MS);
+  bool want_gps_on = (until_advert <= (long)lead_ms);
 
   // Periodic motion check / time-sync wake, independent of the advert
   // schedule. At static-rate adverts the next slot may be 55 min away,
@@ -3231,8 +3251,8 @@ void MyMesh::manageGpsPower() {
     unsigned long check_interval = (_prefs.advert_loc_policy == ADVERT_LOC_NONE)
                                      ? CR_GPS_TIME_SYNC_INTERVAL_MS
                                      : CR_GPS_MOTION_CHECK_INTERVAL_MS;
-    // wake CR_GPS_LEAD_BEFORE_ADVERT_MS earlier so a fix has time to lock
-    if (off_for + CR_GPS_LEAD_BEFORE_ADVERT_MS >= check_interval) {
+    // wake lead_ms earlier so a fix has time to lock
+    if (off_for + lead_ms >= check_interval) {
       want_gps_on = true;
     }
   }
@@ -3623,9 +3643,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (topic && *topic) {
       if (topic_prefix_match(topic, "gps")) {
         pushCompanionMessage(
-          "gps on/off: GPS-Modul ein-/ausschalten. "
-          "Bei Off wird die zuletzt bekannte Position weiter im Advert gesendet. "
-          "Beim Off->On Wechsel sucht das Modul neu nach Fix."
+          "gps on/off: Modul ein/aus. Off behaelt letzte Position im Advert. "
+          "Ohne Arg -> Status (state, fix_ever, moving, pos)."
+        );
+        pushCompanionMessage(
+          "gps power [always-on | cycle | lead <N> | reset]: "
+          "Power-Management. Default cycle, lead=5 -> Sleep=10 im 15-min-Cycle."
         );
         return;
       }
@@ -3937,6 +3960,62 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(block);
       return;
     }
+    // ---- gps power [...] - Power-Management-Konfig ----
+    if (starts_with_word(arg, "power")) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      if (!sub || *sub == 0) {
+        // Status
+        char block[200];
+        const char* mode_str = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
+        uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
+        snprintf(block, sizeof(block),
+                 "gps power:\n  mode = %s\n  lead = %u min (sleep = %u min im 15-min-Cycle)",
+                 mode_str, (unsigned)lead, (unsigned)(15 - lead));
+        pushCompanionMessage(block);
+        return;
+      }
+      if (strcmp(sub, "always-on") == 0) {
+        _prefs.gps_power_mode = 1;
+        savePrefs();
+        pushCompanionMessage("OK - gps power = always-on (kein Cycling).");
+        return;
+      }
+      if (strcmp(sub, "cycle") == 0) {
+        _prefs.gps_power_mode = 0;
+        savePrefs();
+        pushCompanionMessage("OK - gps power = cycle (Default).");
+        return;
+      }
+      if (starts_with_word(sub, "lead")) {
+        const char* num = strchr(sub, ' ');
+        if (num) { while (*num == ' ') num++; }
+        if (!num || !(num[0] >= '0' && num[0] <= '9')) {
+          pushCompanionMessage("Usage: gps power lead <N>  (1..14 Minuten)");
+          return;
+        }
+        int n = atoi(num);
+        if (n < 1 || n > 14) {
+          pushCompanionMessage("lead muss 1..14 sein (kleiner als 15-min-Cycle).");
+          return;
+        }
+        _prefs.gps_lead_min = (uint8_t)n;
+        savePrefs();
+        char r[80]; snprintf(r, sizeof(r), "OK - gps power lead = %d min (sleep = %d min).", n, 15 - n);
+        pushCompanionMessage(r);
+        return;
+      }
+      if (strcmp(sub, "reset") == 0) {
+        _prefs.gps_power_mode = 0;
+        _prefs.gps_lead_min   = 5;
+        savePrefs();
+        pushCompanionMessage("OK - gps power reset: mode=cycle, lead=5 min.");
+        return;
+      }
+      pushCompanionMessage("Usage: gps power [always-on | cycle | lead <N> | reset]");
+      return;
+    }
+
     if (starts_with_word(arg, "on")) {
       _prefs.gps_enabled = 1;
       savePrefs();
@@ -3946,7 +4025,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       savePrefs();
       pushCompanionMessage("OK - GPS disabled.");
     } else {
-      pushCompanionMessage("Usage: gps [on | off]  (ohne Arg -> Status)");
+      pushCompanionMessage("Usage: gps [on | off | power ...]  (ohne Arg -> Status)");
     }
     return;
   }

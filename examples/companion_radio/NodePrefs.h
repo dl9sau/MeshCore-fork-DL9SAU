@@ -84,4 +84,13 @@ struct NodePrefs {  // persisted to file
   // einmalige Auswahl ueber Reboots stabil ohne dass die Firmware
   // automatisch wieder zu loggen anfaengt.
   uint16_t trace_flags_persistent;
+  // GPS Power-Management Konfiguration:
+  //   gps_power_mode = 0 (cycle, Default) -> Power-Cycle aktiv,
+  //                                          GPS schlaeft zwischen Adverts
+  //   gps_power_mode = 1 (always-on)     -> GPS dauerhaft an, kein Cycling
+  //   gps_lead_min  (1..14, Default 5)   -> Wake-Zeit vor Advert in Minuten.
+  //                                         Sleep-Dauer = (15 - lead) min im
+  //                                         hardcoded 15-min Motion-Check-Cycle.
+  uint8_t gps_power_mode;
+  uint8_t gps_lead_min;
 };
