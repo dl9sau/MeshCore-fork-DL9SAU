@@ -496,6 +496,11 @@ private:
   // beim Channel-Send oder per "scope override <name>"-Befehl, damit der
   // Status-Output den Namen anzeigen kann statt nur "runtime active".
   char          _runtime_scope_name_hint[32];
+  // Deferred reboot: wenn != 0, dann millis()-Zeitpunkt zu dem die loop()
+  // den reboot ausloesen soll. Vermeidet das blockierende delay() im
+  // CLI-Handler — sonst wuerde die loop() pausiert und der "Rebooting
+  // now.."-Push waere nicht zur App ausgeliefert.
+  unsigned long _pending_reboot_at;
   // Detail-Statistik-Counter (RAM-only, reset bei Reboot).
   // Indizes: ADV_TYPE_* (0..4) bzw. PAYLOAD_TYPE_* (0..0x0F).
   uint16_t      _heard_direct[5];        // zero-hop empfangene Adverts pro Node-Typ

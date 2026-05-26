@@ -1104,6 +1104,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
   _runtime_scope_name_hint[0] = 0;
+  _pending_reboot_at = 0;
   memset(_heard_direct,       0, sizeof(_heard_direct));
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
   memset(_rx_flood_by_ptype,  0, sizeof(_rx_flood_by_ptype));
@@ -2837,6 +2838,15 @@ void MyMesh::loop() {
 #ifdef DISPLAY_CLASS
   if (_ui) _ui->setHasConnection(_serial->isConnected());
 #endif
+
+  // Deferred reboot — siehe handleCompanionCommand("reboot"). Erst hier am
+  // Ende der loop() pruefen: bis dahin hatten App-Frame-Auslieferung +
+  // CMD_SYNC_NEXT_MSG genug Zeit. (long)(now - target) >= 0 ist
+  // wrap-safe via signed-diff.
+  if (_pending_reboot_at != 0 && (long)(millis() - _pending_reboot_at) >= 0) {
+    board.reboot();
+    // returns not.
+  }
 }
 
 bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
@@ -3874,12 +3884,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // ---------- reboot ----------------------------------------------------
   if (starts_with_word(cmd, "reboot")) {
     pushCompanionMessage("Rebooting now..");
-    // 5 Sekunden warten damit die Push-Message und der OK-Frame ueber
-    // BLE/Serial sicher zur App durchkommen (PUSH_CODE_MSG_WAITING-Tickle
-    // + CMD_SYNC_NEXT_MSG-Round-Trip braucht ein bisschen). 1s war zu
-    // knapp, der User hat den Reboot dann gar nicht im Chat gesehen.
-    delay(5000);
-    board.reboot();
+    // DEFERRED reboot: blockierendes delay() hier wuerde die loop()
+    // pausieren — Push-Frame-Auslieferung (PUSH_CODE_MSG_WAITING-Tickle
+    // + App-CMD_SYNC_NEXT_MSG-Round-Trip) UND der OK-Frame zur App
+    // koennten in der Zeit nicht stattfinden. Stattdessen Flag mit
+    // Zielzeit setzen, loop() prueft und triggert den reboot ohne die
+    // Frame-Verarbeitung zu blockieren.
+    _pending_reboot_at = millis() + 3000;
+    if (_pending_reboot_at == 0) _pending_reboot_at = 1;  // 0 = sentinel "nichts pending"
     return;
   }
 
