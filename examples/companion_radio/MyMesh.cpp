@@ -3581,11 +3581,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "duty")) {
         pushCompanionMessage(
           "duty: Duty-Cycle-Schutz (10% TX-Airtime pro rollendem 1h-Fenster). "
-          "Ohne Arg -> Status (current, soft/hard-Schwellen, blocked-Counter)."
+          "Ohne Arg -> Status (stats, blocked, soft/hard-Limits)."
         );
         pushCompanionMessage(
-          "duty soft N (0..99): Repeats droppen ab N%. duty hard N (1..100): "
-          "ALLE TX droppen ab N%. Default 80/100. Trace-Kategorie 'duty'."
+          "duty soft N (0..99): Repeats ab N% droppen. duty hard N (1..100): "
+          "ALLE TX ab N% droppen. duty reset -> Default 80/100. "
+          "Trace-Kategorie 'duty'."
         );
         return;
       }
@@ -4046,11 +4047,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  // ---------- duty [soft N | hard N] ------------------------------------
-  // Duty-Cycle-Schwellen verwalten. Ohne Arg -> Status:
-  //   "duty: current=145s/360s (40%)  soft=80%(288s) hard=100%(360s)  blocked=12"
-  // duty soft N -> soft_pct setzen (0..99)
-  // duty hard N -> hard_pct setzen (1..100)
+  // ---------- duty [soft N | hard N | reset] ----------------------------
+  // Duty-Cycle-Schwellen verwalten. Ohne Arg -> Status in einer Message.
   if (starts_with_word(cmd, "duty")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
@@ -4059,17 +4057,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       unsigned long soft_ms = getDutySoftLimitMs();
       unsigned long hard_ms = getDutyHardLimitMs();
       unsigned long cur_pct = hard_ms > 0 ? (cur * 100UL / hard_ms) : 0;
-      char line[160];
-      snprintf(line, sizeof(line),
-               "duty: current=%lus/%lus (%lu%%)",
-               cur/1000, hard_ms/1000, cur_pct);
-      pushCompanionMessage(line);
-      snprintf(line, sizeof(line),
-               "  soft=%u%% (%lus)  hard=%u%% (%lus)  blocked=%lu",
+      char block[200];
+      snprintf(block, sizeof(block),
+               "duty:\n"
+               "  stats=%lus/%lus (%lu%%)\n"
+               "  blocked=%lu\n"
+               "  limits:\n"
+               "    soft=%u%% (%lus)\n"
+               "    hard=%u%% (%lus)",
+               cur/1000, hard_ms/1000, cur_pct,
+               (unsigned long)_duty_blocked_count,
                (unsigned)_prefs.duty_soft_pct, soft_ms/1000,
-               (unsigned)_prefs.duty_hard_pct, hard_ms/1000,
-               (unsigned long)_duty_blocked_count);
-      pushCompanionMessage(line);
+               (unsigned)_prefs.duty_hard_pct, hard_ms/1000);
+      pushCompanionMessage(block);
+      return;
+    }
+    if (strcmp(arg, "reset") == 0) {
+      // Zurueck auf die hardcoded Defaults — Counter bleibt erhalten
+      // (ist nur eine Statistik, nicht Teil der Konfiguration).
+      _prefs.duty_soft_pct = 80;
+      _prefs.duty_hard_pct = 100;
+      savePrefs();
+      pushCompanionMessage("OK - duty reset: soft=80%, hard=100%.");
       return;
     }
     if (starts_with_word(arg, "soft") || starts_with_word(arg, "hard")) {
@@ -4098,7 +4107,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(line);
       return;
     }
-    pushCompanionMessage("Usage: duty [soft N | hard N]");
+    pushCompanionMessage("Usage: duty [soft N | hard N | reset]");
     return;
   }
 
