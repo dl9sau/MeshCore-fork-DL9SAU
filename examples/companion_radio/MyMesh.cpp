@@ -1441,12 +1441,15 @@ void MyMesh::copyShortSenderName(char* dest, size_t dest_size) const {
     }
   }
 
-  // Gemeinsamer Trim am Ende: trailing whitespace UND beendet sauber mit 0.
-  // Beim ersten Fix hatte Mode 0 noch keinen Trim, Mode 255 nie, Mode N nur
-  // " \t" — jetzt einheitlich auch \r \n und am Ende defensiv.
+  // Gemeinsamer Trim am Ende: trailing whitespace + alle control-bytes.
+  // Erweitert auf "alles <= 0x20" damit auch NUL, 0x1F-Steuerzeichen usw.
+  // weggetrimmt werden. Achtung: das schneidet keine UTF-8-Multi-Byte-
+  // continuation-bytes (>= 0x80), die wuerden falls am Ende ein gekapptes
+  // Emoji bilden — gegen das hilft nur einen UTF-8-aware Trim oder eine
+  // hex-Diagnose-Anzeige ('chatname hex').
   while (out > 0) {
-    char c = dest[out - 1];
-    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') break;
+    unsigned char c = (unsigned char)dest[out - 1];
+    if (c > 0x20) break;
     out--;
   }
   dest[out] = 0;
@@ -4541,6 +4544,29 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.chat_name_mode = 0;
       savePrefs();
       pushCompanionMessage("OK - chatname = default (full node_name).");
+      return;
+    }
+
+    // ---- chatname hex: Diagnose, dumpt die bytes von node_name + preview
+    // ---- Nutzlich um UTF-8-Multi-Byte-Probleme zu erkennen (z.B. wenn ein
+    // ---- Emoji am Ende des Names unklar wirkt).
+    if (strcmp(arg, "hex") == 0) {
+      auto dump_hex = [&](const char* label, const char* src, size_t src_max) {
+        char buf[200];
+        int p = snprintf(buf, sizeof(buf), "%s:", label);
+        size_t k = 0;
+        while (k < src_max && src[k] != 0 && p + 4 < (int)sizeof(buf)) {
+          p += snprintf(buf + p, sizeof(buf) - p, " %02X", (unsigned char)src[k]);
+          k++;
+        }
+        if (k == 0) snprintf(buf + p, sizeof(buf) - p, " (empty)");
+        pushCompanionMessage(buf);
+      };
+      dump_hex("node_name", _prefs.node_name, sizeof(_prefs.node_name));
+      dump_hex("chat_name_custom", _prefs.chat_name_custom, sizeof(_prefs.chat_name_custom));
+      char preview[64];
+      copyShortSenderName(preview, sizeof(preview));
+      dump_hex("preview", preview, sizeof(preview));
       return;
     }
 
