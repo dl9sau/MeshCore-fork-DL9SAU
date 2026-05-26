@@ -3260,30 +3260,66 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     pushCompanionMessage(
-      "Befehle: help [topic], status, advert, gps on/off, chatname, reboot. "
-      "Weitere folgen (zerohop on/off, nightly on/off, region set, scope set, "
-      "client-repeat on/off mit ISM-Pruefung)."
+      "Befehle: help [topic], status, uptime, advert, gps on/off, chatname, "
+      "reboot. (Weitere geplant: trace, zerohop/nightly on/off, region set, "
+      "scope set, client-repeat on/off.)"
     );
     return;
   }
 
   // ---------- status ----------------------------------------------------
   if (starts_with_word(cmd, "status")) {
-    char line[200];
-    unsigned long up_s = millis() / 1000UL;
-    unsigned long up_h = up_s / 3600UL;
-    unsigned long up_m = (up_s % 3600UL) / 60UL;
+    char line[160];
+    // Uptime inkl. millis()-Wrap (>49 Tage)
+    uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
+    uint64_t total_s = total_ms / 1000ULL;
+    unsigned long up_d = (unsigned long)(total_s / 86400ULL);
+    unsigned long up_h = (unsigned long)((total_s % 86400ULL) / 3600ULL);
+    unsigned long up_m = (unsigned long)((total_s % 3600ULL) / 60ULL);
+
+    if (up_d > 0) {
+      snprintf(line, sizeof(line), "fw=%s  up=%lud%02luh%02lum",
+               FIRMWARE_VERSION, up_d, up_h, up_m);
+    } else {
+      snprintf(line, sizeof(line), "fw=%s  up=%luh%02lum",
+               FIRMWARE_VERSION, up_h, up_m);
+    }
+    pushCompanionMessage(line);
+    // Counter — wie auf der STATS-Display-Page (RX/TX vom Radio-Driver,
+    // Adv/Digi/BT eigene RAM-Counter).
     snprintf(line, sizeof(line),
-             "fw=%s  up=%luh%02lum  adv=%lu  digi=%lu",
-             FIRMWARE_VERSION, up_h, up_m,
+             "rx=%lu  tx=%lu  adv=%lu  digi=%lu  bt=%lu",
+             (unsigned long)radio_driver.getPacketsRecv(),
+             (unsigned long)radio_driver.getPacketsSent(),
              (unsigned long)_tx_advert_count,
-             (unsigned long)_tx_digi_count);
+             (unsigned long)_tx_digi_count,
+             (unsigned long)_bt_connect_count);
     pushCompanionMessage(line);
     snprintf(line, sizeof(line),
              "gps=%s fix_ever=%d moving=%d  pos=%.4f,%.4f",
              _prefs.gps_enabled ? "on" : "off",
              (int)_gps_had_fix_ever, (int)_is_moving,
              sensors.node_lat, sensors.node_lon);
+    pushCompanionMessage(line);
+    return;
+  }
+
+  // ---------- uptime ----------------------------------------------------
+  if (starts_with_word(cmd, "uptime")) {
+    uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
+    uint64_t total_s = total_ms / 1000ULL;
+    unsigned long up_d   = (unsigned long)(total_s / 86400ULL);
+    unsigned long up_h   = (unsigned long)((total_s % 86400ULL) / 3600ULL);
+    unsigned long up_m   = (unsigned long)((total_s % 3600ULL)  / 60ULL);
+    unsigned long up_sec = (unsigned long)(total_s % 60ULL);
+    char line[80];
+    if (up_d > 0) {
+      snprintf(line, sizeof(line), "uptime: %lud %02luh%02lum%02lus",
+               up_d, up_h, up_m, up_sec);
+    } else {
+      snprintf(line, sizeof(line), "uptime: %02luh%02lum%02lus",
+               up_h, up_m, up_sec);
+    }
     pushCompanionMessage(line);
     return;
   }
