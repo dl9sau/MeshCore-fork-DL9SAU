@@ -175,6 +175,59 @@ Quelle: User-Anregung in dieser Session, 2026-05-26.
 
 
 --------------------------------------------------------------------------------
+4c. RTC-Update aus signierten Adverts von trusted Knoten
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  Heltec Tracker hat GPS, RTC wird daher per GPS-time sync gesetzt.
+  Plattformen ohne GPS (Heltec V3, etc.) haben keine RTC-Quelle ausser
+  - manuell per "time <epoch>" (zukuenftig per CommonCLI-Mirror)
+  - oder erhalten Zeit per CMD_SET_DEVICE_TIME von der App.
+
+Soll-Verhalten:
+  Adverts enthalten einen signierten Timestamp (per Identity-Privkey
+  signed, Replay-Schutz via _last_advert_timestamp pro Contact). Wir
+  koennen RTC aus diesem Timestamp aktualisieren wenn der Advert-
+  Sender in einer User-konfigurierbaren TRUST-Liste steht.
+
+  Trust-Quelle: nicht nur Repeater, sondern auch User-Knoten mit GPS
+  (z.B. Heltec Wireless Tracker eines Nachbarn). Identity-Match per
+  Pubkey-Prefix.
+
+CLI:
+  clock trust list
+  clock trust add <hex> [<hex2> ...]    (space- oder komma-getrennt,
+                                         mehrere auf einmal hinzufuegen)
+  clock trust remove <hex>
+  clock trust clear
+
+  <hex> ist eine variabel-lange Pubkey-Prefix-Angabe (3 Byte = 6 Hex
+  bis 32 Byte = 64 Hex). Empfehlung 3+ Byte (= 16M Moeglichkeiten,
+  schwer fuer Angreifer zu kollidieren). Speicher: z.B. 4 Slots, jeder
+  bis 8 Byte (8 + Laenge-byte = 9 Byte pro Slot = 36 Byte total).
+
+Logik bei onAdvertRecv:
+  - Sender-Pubkey gegen jeden Trust-Slot vergleichen (Prefix-Match nach
+    der vom User konfigurierten Laenge)
+  - Wenn match UND:
+      a) RTC noch nicht gesetzt (pre-2017): direkt setzen
+      b) Drift > Schwelle (z.B. 5 min): setzen (statt RTC-Sprung-Trace)
+  - Sub-Sekunden-Genauigkeit nicht moeglich (Latenz Send->Empfang, Hops)
+    aber Mesh-Zwecke sind > 5 min reichlich
+
+Caveats:
+  - Replay-Schutz von BaseChatMesh::onAdvertRecv reicht (sender muss
+    timestamp monoton inkrementieren)
+  - Multi-Hop Adverts haben aelteren Timestamp als zero-hop -> wir
+    sollten zero-hop bevorzugen (path_len == 0)
+
+Quelle: User-Anregung in dieser Session, 2026-05-27.
+
+Vermerkt: dieser Punkt ist auch upstream-MeshCore-relevant (vom User
+schon mal auf github angesprochen).
+
+
+--------------------------------------------------------------------------------
 5. scope geo-prefers <on/off> - Auto-Geo statt Default-Scope wenn fern
 --------------------------------------------------------------------------------
 

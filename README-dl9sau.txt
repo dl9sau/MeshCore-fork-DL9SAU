@@ -336,3 +336,69 @@
   Verhalten beim Power/CR-Management entspricht jetzt deinem Mental-Modell: zurückhaltend gegenüber dem MeshCore-Netz (Community-Ethos), aber
   tracking-tauglich beim moving Auto-Advert (zero-hop = harmlos).
 
+
+
+================================================================================
+Companion-Repeater: Loop-Detection und Netz-Impact (Diskussion 2026-05-27)
+================================================================================
+
+Frage: koennen wir als Companion-Repeater Loops verursachen, da wir keine
+eigene Caching-Logik haben wie ein full repeater?
+
+Antwort: zwei separate Mechanismen, beide auch in der Companion-Firmware
+aktiv:
+
+1) De-Duplication-Hash (8 Byte, hasSeen-Cache)
+   - SHA-256(packet) erste 8 Bytes -> 64-bit Hash
+   - SimpleMeshTables: 128 Slots Ring-Buffer + 64 Slots fuer ACK-CRCs
+   - Aufruf VOR allowPacketForward() in Mesh.cpp -> Duplikate kommen gar
+     nicht erst zum Forwarder
+   - Statistik: getNumDirectDups / getNumFloodDups
+
+2) Path-Hash (1/2/3/4 Byte pro Hop, im Packet-Header packet->path[])
+   - "Wer war schon Hop in diesem Paket?"
+   - path_hash_size bestimmt wie viel Bytes pro Hop in der Hop-Liste
+     gespeichert werden (1 Byte = Default, hoehere Werte caps MAX_PATH_SIZE
+     auf weniger Hops)
+   - Mesh::routeRecvPacket ruft removeSelfFromPath() -> wenn wir bereits in
+     der Hop-Liste sind, kein Repeat
+   - Bei 1 Byte (256 Werte) gibt es Kollisionen (= "false-positive Loops");
+     bei 2/3 Byte praktisch null Kollisionen
+   - Loop-Erkennung greift auch wenn der hasSeen-Cache schon einen
+     verdraengten Hash hat (siehe Artikel: https://nodakmesh.org/blog/meshcore-path-hash-explained )
+
+Beide Mechanismen sind UNABHAENGIG und greifen kumulativ.
+
+  Impact des Companion-Repeaters aufs Netz:
+
+  ┌──────────────────────┬──────────────────────────┬──────────────────────────────┐
+  │       Faktor         │        Companion         │         full Repeater        │
+  ├──────────────────────┼──────────────────────────┼──────────────────────────────┤
+  │ hasSeen-Cache        │ 128 x 8 Byte (gleich)    │ 128 x 8 Byte                 │
+  ├──────────────────────┼──────────────────────────┼──────────────────────────────┤
+  │ Path-Hash-Selfcheck  │ removeSelfFromPath ja    │ removeSelfFromPath ja        │
+  ├──────────────────────┼──────────────────────────┼──────────────────────────────┤
+  │ Hop-Cap              │ 16 (CR_MAX_REPEAT_PATH)  │ meist 64 (konfigurierbar)    │
+  ├──────────────────────┼──────────────────────────┼──────────────────────────────┤
+  │ Filter               │ scoped-only + PATH-local │ alles                        │
+  ├──────────────────────┼──────────────────────────┼──────────────────────────────┤
+  │ TX-Power-Reduktion   │ -6 dB                    │ full                         │
+  ├──────────────────────┼──────────────────────────┼──────────────────────────────┤
+  │ Duty-Cycle           │ 80% soft / 100% hard SW  │ meist nur HW-Brownout-Schutz │
+  ├──────────────────────┼──────────────────────────┼──────────────────────────────┤
+  │ Direct-routed Pakete │ wir repeaten NICHT       │ Repeater repeated            │
+  └──────────────────────┴──────────────────────────┴──────────────────────────────┘
+
+Companion-Repeater ist DEUTLICH konservativer als ein full repeater:
+  - Loop-Risiko praktisch null (8-Byte-Hash * 128 Slots + Path-Selfcheck
+    plus 16-Hop-Cap)
+  - Netz-Impact mehrere Groessenordnungen geringer
+  - Theoretischer Cache-Druck: bei >128 Paketen in kurzer Zeit koennten
+    aeltere hashes verdraengt werden. Bei EU 869 Narrow-Band ~1000 bps
+    Bitrate praktisch unerreichbar.
+
+Klarstellung zur Begrifflichkeit "1/3-byte-Hash":
+  - De-Duplication-Hash = 8 Byte (sehr kollisionsresistent)
+  - path_hash_size = 1/2/3/4 Byte (Multi-Hop-Trail im Packet-Header,
+    NICHT De-Dup; haengt mit Routing-Reichweite zusammen)
+  Die zwei sind orthogonal.
