@@ -86,3 +86,35 @@ Warum nicht jetzt:
     dokumentiert/gewarnt werden.
 
 Quelle: User-Anfrage in dieser Session, 2026-05-26.
+
+
+--------------------------------------------------------------------------------
+3. scope vs runtime_last_channel_scope - Konzept-Klaerung
+--------------------------------------------------------------------------------
+
+Ist-Zustand (kurz):
+  - CMD_SEND_CHANNEL_TXT_MSG speichert die RAW BYTES des channel.secret
+    (16 Byte Channel-Decryption-Key) in runtime_last_channel_scope.key.
+  - Diese Bytes werden beim nightly-flood als HMAC-Key fuer
+    transport_codes verwendet -> implizite Routing-Beschraenkung auf
+    Knoten die DENSELBEN Channel kennen.
+  - send_scope (App-CMD_SET_SEND_SCOPE, z.B. "#bebb") ist eine SEPARATE
+    Variable und wird NICHT in runtime_last_channel_scope gespiegelt.
+  - "Scope #channelname" gibt es technisch nicht zwingend - das ist nur
+    eine Konvention die im Code nicht klar abgegrenzt ist.
+
+Verwirrungspunkt (User-Reaktion):
+  Die Bezeichnung "runtime_last_channel_scope" suggeriert einen Scope,
+  enthaelt aber Channel-Secret-Bytes. Doku/Naming/Verhalten widerspruechlich.
+
+Klaerungsbedarf (deferred):
+  a) Wollen wir wirklich channel.secret als runtime-scope verwenden, oder
+     den explizit per App gewaehlten send_scope?
+  b) Soll bei Channel-Send mit explizitem send_scope der send_scope
+     Prioritaet haben?
+  c) Variable umbenennen damit klar wird was sie enthaelt?
+  d) Doku/Help-Texte schaerfen.
+
+User-Wunsch: erstmal nicht jetzt - kommen wir spaeter dazu.
+
+Quelle: Diskussion in dieser Session, 2026-05-26.
