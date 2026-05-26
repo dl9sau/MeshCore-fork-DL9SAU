@@ -1209,6 +1209,15 @@ void MyMesh::begin(bool has_display) {
   // load persisted prefs
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
 
+  // Migration: alter auto_advert_enabled=1 (= "on" mit beiden Adverts) zu
+  // dem neuen Bitmask-Schema (3 = AUTO_ADV_ZEROHOP | AUTO_ADV_NIGHTLY).
+  // Andere Werte (0, 2, 3) bleiben unangetastet — sie waren entweder im
+  // alten Schema "off" oder schon in der neuen Bitmask-Semantik gesetzt.
+  if (_prefs.auto_advert_enabled == 1) {
+    _prefs.auto_advert_enabled = AUTO_ADV_ALL;
+    _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  }
+
   // Snapshot the persisted position before GPS updates start overwriting
   // sensors.node_lat/lon. Used by updateMotionTracking() to decide if the
   // device has moved since the last session.
@@ -2822,7 +2831,7 @@ void MyMesh::loop() {
   // Adaptive zero-hop unscoped advert (3h / 1h / 15min depending on motion)
   updateMotionTracking();
   manageGpsPower();
-  if (_prefs.auto_advert_enabled
+  if ((_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)
       && next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
     doPeriodicZeroHopAdvert();
     next_periodic_advert_at = futureMillis(computeNextAdvertIntervalMs());
@@ -2849,9 +2858,9 @@ void MyMesh::loop() {
     }
     _last_observed_rtc = now_rtc;
 
-    if (!_prefs.auto_advert_enabled) {
-      // Auto-Adverts deaktiviert: kein Schedule, kein Send. Beim Wieder-
-      // einschalten setzt der "auto advert on"-Befehl next_night_flood_unix=0
+    if (!(_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY)) {
+      // Nightly-Flood deaktiviert: kein Schedule, kein Send. Beim Wieder-
+      // einschalten setzt der "autoadv ..."-Befehl next_night_flood_unix=0
       // und triggert die Neuplanung hier.
     } else if (next_night_flood_unix == 0) {
       scheduleNextNightFlood();   // no-op if RTC still unset
@@ -3667,12 +3676,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "autoadv")) {
         pushCompanionMessage(
-          "autoadv [on/off]: schaltet die periodisch wiederkehrenden Adverts "
-          "ein/aus (15min/1h/3h zero-hop + nightly flood)."
+          "autoadv: wiederkehrende Adverts ein/aus, separat fuer "
+          "periodic zerohop (15/60/180 min) und nightly scoped flood."
         );
         pushCompanionMessage(
-          "Default nach Flash ist OFF - explizit per 'autoadv on' aktivieren. "
-          "Unterschied zu 'advert': 'advert' sendet EINMAL jetzt."
+          "Args: 'on'/'off' (beide), 'zerohop on/off', 'nightly on/off'. "
+          "Default nach Flash: beide off."
         );
         return;
       }
@@ -3821,9 +3830,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (int)_gps_had_fix_ever, (int)_is_moving,
              sensors.node_lat, sensors.node_lon);
     pushCompanionMessage(line);
+    const char* zh = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) ? "on" : "off";
+    const char* nl = (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) ? "on" : "off";
     snprintf(line, sizeof(line),
-             "auto-adv=%s  repeater=%s%s",
-             _prefs.auto_advert_enabled ? "on" : "off",
+             "autoadv: zerohop=%s nightly=%s  repeater=%s%s",
+             zh, nl,
              _prefs.client_repeat ? "on" : "off",
              _prefs.client_repeat_force ? "(force)" : "");
     pushCompanionMessage(line);
@@ -4114,10 +4125,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.chat_name_custom[0] != 0) non_default_count++;
     }
-    // autoadv
+    // autoadv (Bitmask)
     if (show_all || _prefs.auto_advert_enabled != 0) {
-      snprintf(tmp, sizeof(tmp), "  auto_advert_enabled = %u%s",
+      snprintf(tmp, sizeof(tmp),
+               "  auto_advert_enabled = 0x%02X (zerohop=%s nightly=%s)%s",
                (unsigned)_prefs.auto_advert_enabled,
+               (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) ? "on" : "off",
+               (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) ? "on" : "off",
                _prefs.auto_advert_enabled == 0 ? " [default]" : " (default: 0)");
       add_line(tmp);
       if (_prefs.auto_advert_enabled != 0) non_default_count++;
@@ -4856,39 +4870,76 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  // ---------- autoadv ---------------------------------------------------
-  // Schaltet die selbst-generierten wiederkehrenden Adverts ein/aus (das
-  // sind: periodic zero-hop alle 15min/1h/3h + nightly flood). Default OFF
-  // nach Flash — User muss explizit aktivieren. Unterschied zu 'advert':
-  // 'advert' sendet EINMAL JETZT; 'autoadv' steuert den Scheduler.
+  // ---------- autoadv [on/off | zerohop on/off | nightly on/off] ---------
+  // Schaltet die wiederkehrenden Adverts ein/aus, separat fuer
+  // periodic zero-hop und nightly scoped flood. Bitmask in
+  // _prefs.auto_advert_enabled. Default 0 (beide aus) nach frischem Flash.
   if (starts_with_word(cmd, "autoadv")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
-    if (!arg || *arg == 0) {
-      char line[100];
-      snprintf(line, sizeof(line), "autoadv = %s",
-               _prefs.auto_advert_enabled ? "on" : "off");
+
+    auto print_status = [&]() {
+      char line[120];
+      snprintf(line, sizeof(line), "autoadv: zerohop=%s  nightly=%s",
+               (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) ? "on" : "off",
+               (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) ? "on" : "off");
       pushCompanionMessage(line);
-      return;
-    }
-    if (strcmp(arg, "on") == 0) {
-      _prefs.auto_advert_enabled = 1;
-      savePrefs();
-      // Sofort triggern als Sanity-Test, statt bis zur naechsten Schedule
-      // (15min/1h/3h) zu warten. Nightly wird durch next_night_flood_unix=0
-      // im naechsten loop-Tick neu geplant.
+    };
+    auto trigger_zerohop_now = [&]() {
       next_periodic_advert_at = millis();
+    };
+    auto trigger_nightly_reschedule = [&]() {
       next_night_flood_unix = 0;
-      pushCompanionMessage("OK - autoadv on (sofort + nightly schedule).");
+    };
+
+    if (!arg || *arg == 0) { print_status(); return; }
+
+    // "on" / "off" -> beide Flags
+    if (strcmp(arg, "on") == 0) {
+      _prefs.auto_advert_enabled = AUTO_ADV_ALL;
+      savePrefs();
+      trigger_zerohop_now();
+      trigger_nightly_reschedule();
+      pushCompanionMessage("OK - autoadv zerohop=on, nightly=on (sofort + reschedule).");
       return;
     }
     if (strcmp(arg, "off") == 0) {
       _prefs.auto_advert_enabled = 0;
       savePrefs();
-      pushCompanionMessage("OK - autoadv off.");
+      pushCompanionMessage("OK - autoadv zerohop=off, nightly=off.");
       return;
     }
-    pushCompanionMessage("Usage: autoadv [on | off]");
+
+    // "zerohop on/off" / "nightly on/off"
+    bool is_zh = starts_with_word(arg, "zerohop");
+    bool is_nl = starts_with_word(arg, "nightly");
+    if (is_zh || is_nl) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      if (!sub || (strcmp(sub, "on") != 0 && strcmp(sub, "off") != 0)) {
+        pushCompanionMessage(is_zh
+          ? "Usage: autoadv zerohop on|off"
+          : "Usage: autoadv nightly on|off");
+        return;
+      }
+      uint8_t mask = is_zh ? AUTO_ADV_ZEROHOP : AUTO_ADV_NIGHTLY;
+      bool on = (strcmp(sub, "on") == 0);
+      if (on) {
+        _prefs.auto_advert_enabled |= mask;
+        if (is_zh) trigger_zerohop_now();
+        else       trigger_nightly_reschedule();
+      } else {
+        _prefs.auto_advert_enabled &= ~mask;
+      }
+      savePrefs();
+      char r[120];
+      snprintf(r, sizeof(r), "OK - autoadv %s %s.",
+               is_zh ? "zerohop" : "nightly", on ? "on" : "off");
+      pushCompanionMessage(r);
+      return;
+    }
+
+    pushCompanionMessage("Usage: autoadv [on | off | zerohop on/off | nightly on/off]");
     return;
   }
 

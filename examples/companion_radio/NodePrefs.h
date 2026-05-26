@@ -43,11 +43,13 @@ struct NodePrefs {  // persisted to file
   // die memset(0)-Defaults stehen, mode=0 = bisheriges Verhalten).
   uint8_t chat_name_mode;
   char    chat_name_custom[32];
-  // Auto-Adverts ein/aus (zerohop periodic UND nightly flood gemeinsam).
-  // Default 0 = aus: nach einem frischen Flash sendet die Firmware NICHTS
-  // von selbst. Aktivierung explizit ueber den Companion-Chat-Befehl
-  // "auto advert on". Vermeidet versehentliches Aussenden bei einer
-  // Konfiguration die der User noch nicht freigegeben hat.
+  // Auto-Adverts als Bitmask:
+  //   bit 0 (AUTO_ADV_ZEROHOP, 0x01) = periodic zero-hop (15/60/180 min adaptiv)
+  //   bit 1 (AUTO_ADV_NIGHTLY, 0x02) = nightly scoped flood (random 23-5 lokal)
+  // Default 0 = beides aus. Aktivierung via Companion-CLI "autoadv on" oder
+  // einzeln per "autoadv zerohop on" / "autoadv nightly on".
+  // Migration: alter Wert 1 (= "on" mit beiden flags zusammen) wird beim
+  // ersten Boot mit dieser Firmware-Version auf 3 erhoben.
   uint8_t auto_advert_enabled;
   // Persistente Erinnerung dass der Repeater explizit per Companion-Chat
   // "repeater on force" aktiviert wurde - App-Pfad CMD_SET_RADIO_PARAMS

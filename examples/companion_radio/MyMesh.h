@@ -176,6 +176,11 @@ struct AdvertPath {
 #define CR_DUTY_WINDOW_SLOTS    60UL
 #define CR_DUTY_SLOT_MS         60000UL
 #define CR_DUTY_HARD_BASE_MS    360000UL   // 10% von 1h = 360s = "100% Limit"
+
+// auto_advert_enabled-Bitmask (siehe NodePrefs.h Kommentar)
+#define AUTO_ADV_ZEROHOP        0x01
+#define AUTO_ADV_NIGHTLY        0x02
+#define AUTO_ADV_ALL            (AUTO_ADV_ZEROHOP | AUTO_ADV_NIGHTLY)
 // 5 min after boot when GPS is off or has already obtained a fix; if GPS is
 // enabled but still searching, wait up to 10 min so that the first advert can
 // already carry a position. When the first fix arrives during the wait, the
