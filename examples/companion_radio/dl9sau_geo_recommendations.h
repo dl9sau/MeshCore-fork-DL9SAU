@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 // Compute a comma-separated list of MeshCore region/scope names that
 // reasonably apply to the given GPS position. Walks a hardcoded table of
@@ -37,7 +38,13 @@ bool dl9sau_lookup_region_bbox(const char* name,
                                double* lon_min, double* lon_max);
 
 // Index-Lookup: Returns position (0..count-1) der Region in der internen
-// Tabelle, oder -1 wenn name nicht gefunden. Wird vom Scope-Architektur-
-// Pivot (Wunschliste 11) verwendet — der Status-Byte fuer einen Build-in-
-// Eintrag wird ueber diesen Index in scope_buildin_status[] adressiert.
+// Tabelle, oder -1 wenn name nicht gefunden. Praktisch wenn die Position
+// gebraucht wird (z.B. zum Iterieren beider Storages parallel).
 int  dl9sau_find_region_index(const char* name);
+
+// FNV-1a 32-bit Hash ueber den Namen (case-sensitive). Wird vom Scope-
+// Architektur-Pivot (Wunschliste 11) verwendet um non-default Status-
+// Eintraege in scope_buildin_status[] zu indexieren — dadurch ueberleben
+// User-Customisierungen auch Reorder/Insert/Remove in der Build-in-
+// Tabelle. Schreibt die 4 Hash-Bytes (Little-Endian) in out[0..3].
+void dl9sau_compute_name_hash(const char* name, uint8_t out[4]);

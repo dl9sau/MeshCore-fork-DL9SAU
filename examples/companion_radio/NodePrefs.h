@@ -37,10 +37,10 @@
 
 // ---- Scope-Architektur-Pivot (Wunschliste 11) ---------------------------
 // Ab diesem Punkt: Build-in-Tabelle (in Flash, dl9sau_geo_recommendations.cpp)
-// wird zur Quelle der bekannten Regionen. Pro Build-in-Eintrag liegt ein
-// Status-Byte hier in NodePrefs (= scope_buildin_status[]). Selbst-erfundene
-// Namen die NICHT in der Build-in-Tabelle stehen kommen in scope_extras[]
-// als vollwertige Eintraege.
+// wird zur Quelle der bekannten Regionen. Pro Build-in-Eintrag mit non-default
+// Status liegt ein Sparse-Eintrag hier in NodePrefs (= scope_buildin_status[]).
+// Selbst-erfundene Namen die NICHT in der Build-in-Tabelle stehen kommen in
+// scope_extras[] als vollwertige Eintraege.
 //
 // Status-Byte-Layout:
 //   bits 0-1: repeat_mode (00=auto, 01=on, 10=off, 11=reserved)
@@ -55,8 +55,21 @@
 //   bits 5-7: reserved
 //
 // Default = 0x00 = auto / Geo-Send aktiv / nicht disabled / nicht deleted.
-#define SCOPE_BUILDIN_STATUS_SLOTS   64    // Reserve fuer Build-in-Wachstum
+//
+// Indexierung ueber 4-Byte FNV-1a-Hash des Region-Namens (NICHT ueber
+// Position in der Build-in-Tabelle). Damit ueberlebt der Status auch
+// Reorder/Insert/Remove in der Build-in-Tabelle. Nur Eintraege mit
+// non-default Status werden gespeichert (sparse). Max-Anzahl Slots
+// begrenzt durch SCOPE_BUILDIN_STATUS_MAX — sollte deutlich groesser
+// sein als die typische Anzahl angepasster Eintraege.
+#define SCOPE_BUILDIN_STATUS_MAX     32    // Sparse-Slots fuer customisierte Build-in-Eintraege
 #define SCOPE_EXTRAS_SLOTS           16    // User-erfundene Namen
+
+struct BuildinStatusEntry {
+  uint8_t name_hash[4];       // FNV-1a 32-bit ueber den Region-Namen
+  uint8_t status;             // SCOPE_STATUS_* Flags
+  uint8_t _reserved[3];       // Padding fuer 4-Byte Alignment + future use
+};                            // = 8 Byte pro Eintrag
 
 #define SCOPE_STATUS_REPEAT_MASK     0x03  // bits 0-1
 #define SCOPE_STATUS_REPEAT_AUTO     0x00
@@ -177,11 +190,11 @@ struct NodePrefs {  // persisted to file
   uint8_t        repeat_scope_mode;          // REPEAT_SCOPE_MODE_*
   ScopeRegEntry  scope_registry[SCOPE_REG_SLOTS];
 
-  // Status-Array pro Build-in-Eintrag (siehe SCOPE_STATUS_* in NodePrefs.h).
-  // Index entspricht der Position in der Build-in-Tabelle
-  // (dl9sau_geo_recommendations.cpp). Reserve fuer bis zu 64 Build-in-
-  // Eintraege; aktuelle Tabelle hat ~25 Eintraege.
-  uint8_t        scope_buildin_status[SCOPE_BUILDIN_STATUS_SLOTS];
+  // Sparse-Status fuer Build-in-Eintraege mit non-default Settings.
+  // Indexiert via FNV-1a-Hash des Region-Namens (NICHT Position) — damit
+  // ueberlebt User-Konfig auch wenn die Build-in-Tabelle reorderet wird.
+  uint8_t              scope_buildin_status_count;
+  BuildinStatusEntry   scope_buildin_status[SCOPE_BUILDIN_STATUS_MAX];
 
   // User-Extras: Eintraege fuer Namen die NICHT in der Build-in-Tabelle
   // stehen (eigener Vereins-Scope, Kiez-Scope, voruebergehende Region).

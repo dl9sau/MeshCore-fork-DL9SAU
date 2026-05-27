@@ -160,3 +160,19 @@ int dl9sau_find_region_index(const char* name) {
   }
   return -1;
 }
+
+void dl9sau_compute_name_hash(const char* name, uint8_t out[4]) {
+  // FNV-1a 32-bit. Klein, schnell, ausreichende Distribution fuer
+  // Region-Namen-Set. Kein crypto, nur Index-Lookup.
+  uint32_t h = 0x811c9dc5u;
+  if (name) {
+    while (*name) {
+      h ^= (uint8_t)(*name++);
+      h *= 0x01000193u;
+    }
+  }
+  out[0] = (uint8_t)(h & 0xFF);
+  out[1] = (uint8_t)((h >> 8) & 0xFF);
+  out[2] = (uint8_t)((h >> 16) & 0xFF);
+  out[3] = (uint8_t)((h >> 24) & 0xFF);
+}

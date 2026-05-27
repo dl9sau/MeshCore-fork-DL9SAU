@@ -1410,13 +1410,15 @@ void MyMesh::begin(bool has_display) {
   {
     // Snapshot der neuen Storage vor Migration — damit wir nur savePrefs
     // schreiben wenn sich tatsaechlich etwas geaendert hat.
-    uint8_t old_status[SCOPE_BUILDIN_STATUS_SLOTS];
-    memcpy(old_status, _prefs.scope_buildin_status, sizeof(old_status));
+    uint8_t old_status_count = _prefs.scope_buildin_status_count;
+    BuildinStatusEntry old_status_snap[SCOPE_BUILDIN_STATUS_MAX];
+    memcpy(old_status_snap, _prefs.scope_buildin_status, sizeof(old_status_snap));
     uint8_t old_extras_count = _prefs.scope_extras_count;
     ScopeRegEntry old_extras_snap[SCOPE_EXTRAS_SLOTS];
     memcpy(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap));
 
     // Reset target (wir uebernehmen aus alter Registry, nicht aufaddieren)
+    _prefs.scope_buildin_status_count = 0;
     memset(_prefs.scope_buildin_status, 0, sizeof(_prefs.scope_buildin_status));
     _prefs.scope_extras_count = 0;
     memset(_prefs.scope_extras, 0, sizeof(_prefs.scope_extras));
@@ -1443,17 +1445,25 @@ void MyMesh::begin(bool has_display) {
       }
       if (old_disabled) status |= SCOPE_STATUS_DISABLED;
 
-      int idx = dl9sau_find_region_index(src.name);
-      if (idx >= 0 && idx < SCOPE_BUILDIN_STATUS_SLOTS) {
-        // Build-in-Match: Status-Byte schreiben. Bbox + Key kommen
-        // beim Lookup aus der Build-in-Tabelle (read-only).
-        _prefs.scope_buildin_status[idx] = status;
-        migrated_to_status++;
+      bool is_buildin = (dl9sau_find_region_index(src.name) >= 0);
+      if (is_buildin) {
+        // Build-in-Eintrag: nur speichern wenn non-default Status.
+        // Sparse-Storage: jedes Slot kostet 8 Byte, wir speichern nur
+        // was abweicht.
+        if (status != 0
+            && _prefs.scope_buildin_status_count < SCOPE_BUILDIN_STATUS_MAX) {
+          BuildinStatusEntry& e =
+              _prefs.scope_buildin_status[_prefs.scope_buildin_status_count];
+          dl9sau_compute_name_hash(src.name, e.name_hash);
+          e.status = status;
+          memset(e._reserved, 0, sizeof(e._reserved));
+          _prefs.scope_buildin_status_count++;
+          migrated_to_status++;
+        }
+        // status==0 = Default; kein Slot noetig.
       } else {
-        // User-Extra: vollstaendigen Eintrag kopieren. Flags wandeln
-        // wir nicht — alte Bitmuster bleiben in scope_extras[].flags
-        // erhalten (Konsumenten der neuen Storage muessen sie genauso
-        // lesen). Wenn voll: drop.
+        // User-Extra: vollstaendigen Eintrag kopieren. Flags bleiben
+        // alte Bitmuster — Konsumenten muessen sie weiter lesen koennen.
         if (_prefs.scope_extras_count < SCOPE_EXTRAS_SLOTS) {
           _prefs.scope_extras[_prefs.scope_extras_count] = src;
           _prefs.scope_extras_count++;
@@ -1466,7 +1476,8 @@ void MyMesh::begin(bool has_display) {
 
     // savePrefs nur wenn sich etwas geaendert hat (Flash-Wear-Schutz).
     bool changed =
-        (memcmp(old_status, _prefs.scope_buildin_status, sizeof(old_status)) != 0)
+        (old_status_count != _prefs.scope_buildin_status_count)
+     || (memcmp(old_status_snap, _prefs.scope_buildin_status, sizeof(old_status_snap)) != 0)
      || (old_extras_count != _prefs.scope_extras_count)
      || (memcmp(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap)) != 0);
 

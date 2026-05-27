@@ -259,9 +259,10 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // (wird in begin() migriert). Bei alten persistierten Files liefert
     // file.read 0 Bytes und memset(0)-Defaults bleiben stehen — Migration
     // wird dann beim ersten Boot ausgefuehrt.
-    file.read((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 1118 (64 Byte)
-    file.read((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 1182
-    file.read((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 1183 (52*16=832 Byte)
+    file.read((uint8_t *)&_prefs.scope_buildin_status_count, sizeof(_prefs.scope_buildin_status_count)); // 1118
+    file.read((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 1119 (8*32=256 Byte)
+    file.read((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 1375
+    file.read((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 1376 (52*16=832 Byte)
 
     file.close();
   }
@@ -321,9 +322,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.scope_registry_count, sizeof(_prefs.scope_registry_count));       // 284
     file.write((uint8_t *)&_prefs.repeat_scope_mode, sizeof(_prefs.repeat_scope_mode));             // 285
     file.write((uint8_t *)_prefs.scope_registry, sizeof(_prefs.scope_registry));                    // 286 (52*16=832 Byte)
-    file.write((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 1118 (64 Byte)
-    file.write((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 1182
-    file.write((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 1183 (52*16=832 Byte)
+    file.write((uint8_t *)&_prefs.scope_buildin_status_count, sizeof(_prefs.scope_buildin_status_count)); // 1118
+    file.write((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 1119 (8*32=256 Byte)
+    file.write((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 1375
+    file.write((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 1376 (52*16=832 Byte)
 
     file.close();
   }
