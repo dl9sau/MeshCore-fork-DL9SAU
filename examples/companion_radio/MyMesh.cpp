@@ -3452,27 +3452,86 @@ static bool starts_with_word(const char* text, const char* word) {
   return c == 0 || c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-// Argument-Prefix-Match fuer on/off (User-Wunsch Wunschliste-4).
+// Argument-Prefix-Match gegen beliebige Auswahl-Liste (Wunschliste-4).
+// Exact-Match gewinnt; sonst eindeutiger Prefix; sonst ambiguous oder not-found.
+// Eintraege mit no_abbrev=true matchen NUR exakt (fuer reset/clear/remove
+// u.ae. — Tippfehler wuerden sonst Daten kosten).
+//
 // Returns:
-//    1 = "on"  (exakt oder eindeutiger Prefix)
-//    0 = "off" (exakt oder eindeutiger Prefix)
-//   -1 = ambiguous (z.B. nur "o" -> on UND off matchen)
-//   -2 = not found / leer
-static int match_on_off(const char* arg) {
+//   >=0 = Index in choices[] des eindeutigen Treffers
+//   -1  = ambiguous (mehrere abkuerzbare Prefix-Treffer)
+//   -2  = leer / kein Arg
+//   -3  = nicht gefunden
+//
+// Falls out_ambig != NULL, wird bei -1 eine kommagetrennte Liste der
+// matchenden Namen geschrieben (fuer "Mehrdeutig: ..."-Output).
+struct CompanionChoice {
+  const char* name;
+  bool        no_abbrev;
+};
+
+static int match_choice(const char* arg,
+                        const CompanionChoice* choices, int nchoices,
+                        char* out_ambig, size_t out_size) {
   if (!arg) return -2;
   while (*arg == ' ' || *arg == '\t') arg++;
   size_t alen = 0;
   while (arg[alen] && arg[alen] != ' ' && arg[alen] != '\t') alen++;
   if (alen == 0) return -2;
-  // exact wins
-  if (alen == 2 && strncmp(arg, "on", 2) == 0)  return 1;
-  if (alen == 3 && strncmp(arg, "off", 3) == 0) return 0;
-  // prefix
-  bool on_pre  = (alen < 2 && strncmp(arg, "on",  alen) == 0);
-  bool off_pre = (alen < 3 && strncmp(arg, "off", alen) == 0);
-  if (on_pre && off_pre) return -1;
-  if (on_pre)  return 1;
-  if (off_pre) return 0;
+
+  // exact match wins (auch fuer no_abbrev-Eintraege)
+  for (int i = 0; i < nchoices; i++) {
+    size_t nlen = strlen(choices[i].name);
+    if (alen == nlen && strncmp(arg, choices[i].name, alen) == 0) return i;
+  }
+
+  // prefix match (no_abbrev-Eintraege ueberspringen)
+  int matched_idx = -1;
+  int n_matches = 0;
+  for (int i = 0; i < nchoices; i++) {
+    if (choices[i].no_abbrev) continue;
+    size_t nlen = strlen(choices[i].name);
+    if (alen < nlen && strncmp(arg, choices[i].name, alen) == 0) {
+      n_matches++;
+      if (matched_idx < 0) matched_idx = i;
+    }
+  }
+  if (n_matches == 1) return matched_idx;
+  if (n_matches > 1) {
+    if (out_ambig && out_size > 0) {
+      size_t off = 0;
+      for (int i = 0; i < nchoices && off + 1 < out_size; i++) {
+        if (choices[i].no_abbrev) continue;
+        size_t nlen = strlen(choices[i].name);
+        if (alen < nlen && strncmp(arg, choices[i].name, alen) == 0) {
+          if (off > 0 && off + 2 < out_size) {
+            out_ambig[off++] = ',';
+            out_ambig[off++] = ' ';
+          }
+          size_t copy = nlen;
+          if (off + copy >= out_size) copy = out_size - 1 - off;
+          memcpy(out_ambig + off, choices[i].name, copy);
+          off += copy;
+        }
+      }
+      out_ambig[off] = 0;
+    }
+    return -1;
+  }
+  return -3;
+}
+
+// Wrapper ueber match_choice fuer on/off. Beibehaltene Semantik:
+//   1 = on    0 = off    -1 = ambiguous    -2 = leer/nicht gefunden
+static int match_on_off(const char* arg) {
+  static const CompanionChoice on_off[] = {
+    { "on",  false },
+    { "off", false },
+  };
+  int r = match_choice(arg, on_off, 2, NULL, 0);
+  if (r == 0)  return 1;
+  if (r == 1)  return 0;
+  if (r == -1) return -1;
   return -2;
 }
 
@@ -3945,15 +4004,33 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     bool want_flood = false;
     if (arg && *arg) {
-      if (strcmp(arg, "flood") == 0 || strcmp(arg, "f") == 0) {
-        want_flood = true;
-      } else if (strcmp(arg, "zero-hop") == 0 || strcmp(arg, "zerohop") == 0
-                 || strcmp(arg, "z") == 0) {
-        want_flood = false;
-      } else {
-        pushCompanionMessage("Usage: advert [zero-hop | flood]  (Aliase: z, f)");
+      // "zerohop" (ohne Bindestrich) als Alias bewahren: vor match_choice
+      // auf den kanonischen Namen normalisieren.
+      char norm[64];
+      const char* effective = arg;
+      if (starts_with_word(arg, "zerohop")) {
+        size_t off = 0;
+        memcpy(norm, "zero-hop", 8); off = 8;
+        const char* p = arg + 7;
+        while (*p && off + 1 < sizeof(norm)) norm[off++] = *p++;
+        norm[off] = 0;
+        effective = norm;
+      }
+      static const CompanionChoice ch[] = {
+        { "zero-hop", false },
+        { "flood",    false },
+      };
+      char ambig[40];
+      int m = match_choice(effective, ch, 2, ambig, sizeof(ambig));
+      if (m == -1) {
+        char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", ambig);
+        pushCompanionMessage(r); return;
+      }
+      if (m < 0) {
+        pushCompanionMessage("Usage: advert [zero-hop | flood]");
         return;
       }
+      want_flood = (m == 1);
     }
 
     if (!want_flood) {
@@ -5009,33 +5086,46 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // 'trace <cat> on/off' -> bit in BEIDEN (User-Selektion)
+    // 'trace <cat> on/off' -> bit in BEIDEN (User-Selektion).
+    // Wandeln trace_cats[] in CompanionChoice[] (alle abkuerzbar) — damit
+    // 'trace gp on' (gp -> gps) auch geht. Ambiguity-Beispiel: 'r' matcht
+    // repeat UND rtc -> Warnung.
+    CompanionChoice tc_choices[TRACE_CAT_COUNT];
     for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
-      if (starts_with_word(arg, trace_cats[k].name)) {
-        const char* sub = strchr(arg, ' ');
-        if (sub) { while (*sub == ' ') sub++; }
-        int cm = match_on_off(sub);
-        if (cm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
-        if (cm == 1) {
-          _trace_flags |= trace_cats[k].flag;
-          _prefs.trace_flags_persistent |= trace_cats[k].flag;
-          savePrefs();
-          char r[80]; snprintf(r, sizeof(r), "OK - trace %s an.", trace_cats[k].name);
-          pushCompanionMessage(r);
-        } else if (cm == 0) {
-          _trace_flags &= ~trace_cats[k].flag;
-          _prefs.trace_flags_persistent &= ~trace_cats[k].flag;
-          savePrefs();
-          char r[80]; snprintf(r, sizeof(r), "OK - trace %s aus.", trace_cats[k].name);
-          pushCompanionMessage(r);
-        } else {
-          char r[80]; snprintf(r, sizeof(r), "Usage: trace %s on|off", trace_cats[k].name);
-          pushCompanionMessage(r);
-        }
-        return;
-      }
+      tc_choices[k].name      = trace_cats[k].name;
+      tc_choices[k].no_abbrev = false;
     }
-    pushCompanionMessage("Unbekannte trace-Kategorie. 'trace list' fuer Uebersicht.");
+    char tc_ambig[100];
+    int tc_idx = match_choice(arg, tc_choices, (int)TRACE_CAT_COUNT,
+                              tc_ambig, sizeof(tc_ambig));
+    if (tc_idx == -1) {
+      char r[180]; snprintf(r, sizeof(r), "Mehrdeutig: %s", tc_ambig);
+      pushCompanionMessage(r); return;
+    }
+    if (tc_idx < 0) {
+      pushCompanionMessage("Unbekannte trace-Kategorie. 'trace list' fuer Uebersicht.");
+      return;
+    }
+    const char* sub = strchr(arg, ' ');
+    if (sub) { while (*sub == ' ') sub++; }
+    int cm = match_on_off(sub);
+    if (cm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+    if (cm == 1) {
+      _trace_flags                  |= trace_cats[tc_idx].flag;
+      _prefs.trace_flags_persistent |= trace_cats[tc_idx].flag;
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - trace %s an.", trace_cats[tc_idx].name);
+      pushCompanionMessage(r);
+    } else if (cm == 0) {
+      _trace_flags                  &= ~trace_cats[tc_idx].flag;
+      _prefs.trace_flags_persistent &= ~trace_cats[tc_idx].flag;
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - trace %s aus.", trace_cats[tc_idx].name);
+      pushCompanionMessage(r);
+    } else {
+      char r[80]; snprintf(r, sizeof(r), "Usage: trace %s on|off", trace_cats[tc_idx].name);
+      pushCompanionMessage(r);
+    }
     return;
   }
 
@@ -5064,17 +5154,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(block);
       return;
     }
-    if (strcmp(arg, "reset") == 0) {
-      // Zurueck auf die hardcoded Defaults — Counter bleibt erhalten
-      // (ist nur eine Statistik, nicht Teil der Konfiguration).
+    static const CompanionChoice duty_ch[] = {
+      { "reset", true  },   // no_abbrev: zerstoerend, nur exakt
+      { "soft",  false },
+      { "hard",  false },
+    };
+    char ambig[40];
+    int dm = match_choice(arg, duty_ch, 3, ambig, sizeof(ambig));
+    if (dm == -1) {
+      char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", ambig);
+      pushCompanionMessage(r); return;
+    }
+    if (dm == 0) {
+      // 'reset' — Zurueck auf die hardcoded Defaults. Counter bleibt
+      // erhalten (Statistik, nicht Teil der Konfiguration).
       _prefs.duty_soft_pct = 80;
       _prefs.duty_hard_pct = 100;
       savePrefs();
       pushCompanionMessage("OK - duty reset: soft=80%, hard=100%.");
       return;
     }
-    if (starts_with_word(arg, "soft") || starts_with_word(arg, "hard")) {
-      bool is_soft = starts_with_word(arg, "soft");
+    if (dm == 1 || dm == 2) {
+      bool is_soft = (dm == 1);
       const char* num = strchr(arg, ' ');
       if (num) { while (*num == ' ') num++; }
       if (!num || *num == 0 || !(num[0] >= '0' && num[0] <= '9')) {
@@ -5503,7 +5604,34 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    if (strcmp(arg, "default") == 0) {
+    // Numerisches Argument zuerst pruefen — chatname N (1..253) hat keinen
+    // festen Keyword-Namen und wuerde sonst von match_choice abgelehnt.
+    if (arg[0] >= '0' && arg[0] <= '9') {
+      int n = atoi(arg);
+      if (n < 1 || n > 253) {
+        pushCompanionMessage("chatname N: N muss 1..253 sein. Nutze 'chatname default' fuer den vollen Namen.");
+        return;
+      }
+      _prefs.chat_name_mode = (uint8_t)n;
+      savePrefs();
+      char line[80];
+      snprintf(line, sizeof(line), "OK - chatname = erste %d Woerter aus node_name.", n);
+      pushCompanionMessage(line);
+      return;
+    }
+
+    static const CompanionChoice cn_ch[] = {
+      { "default", false },
+      { "hex",     false },
+      { "custom",  false },
+    };
+    char cn_ambig[40];
+    int cn_m = match_choice(arg, cn_ch, 3, cn_ambig, sizeof(cn_ambig));
+    if (cn_m == -1) {
+      char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", cn_ambig);
+      pushCompanionMessage(r); return;
+    }
+    if (cn_m == 0) {
       _prefs.chat_name_mode = 0;
       savePrefs();
       pushCompanionMessage("OK - chatname = default (full node_name).");
@@ -5513,7 +5641,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // ---- chatname hex: Diagnose, dumpt die bytes von node_name + preview
     // ---- Nutzlich um UTF-8-Multi-Byte-Probleme zu erkennen (z.B. wenn ein
     // ---- Emoji am Ende des Names unklar wirkt).
-    if (strcmp(arg, "hex") == 0) {
+    if (cn_m == 1) {
       auto dump_hex = [&](const char* label, const char* src, size_t src_max) {
         char buf[200];
         int p = snprintf(buf, sizeof(buf), "%s:", label);
@@ -5533,22 +5661,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // Numerisches Argument? chatname N (N=1..253) -> erste N Woerter
-    if (arg[0] >= '0' && arg[0] <= '9') {
-      int n = atoi(arg);
-      if (n < 1 || n > 253) {
-        pushCompanionMessage("chatname N: N muss 1..253 sein. Nutze 'chatname default' fuer den vollen Namen.");
-        return;
-      }
-      _prefs.chat_name_mode = (uint8_t)n;
-      savePrefs();
-      char line[80];
-      snprintf(line, sizeof(line), "OK - chatname = erste %d Woerter aus node_name.", n);
-      pushCompanionMessage(line);
-      return;
-    }
-
-    if (starts_with_word(arg, "custom")) {
+    if (cn_m == 2) {
       // Custom-Text aus raw_cmd (Original-Case) via Token-Walk: 3. Token
       // nach "chatname"+"custom". Robust gegen Top-Level-Prefix-Expansion.
       const char* lc_text = strchr(arg, ' ');
