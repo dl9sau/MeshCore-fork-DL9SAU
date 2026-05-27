@@ -650,6 +650,10 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       ptype == PAYLOAD_TYPE_TXT_MSG || ptype == PAYLOAD_TYPE_ANON_REQ) {
     decision = packet->hasTransportCodes();
     if (!decision) reject_reason = "unscoped";
+    else if (!scopeAllowedForRepeat(packet)) {
+      decision = false;
+      reject_reason = "scope-not-allowed";
+    }
   } else if (ptype == PAYLOAD_TYPE_PATH) {
     // PATH discovery: only repeat for local nodes (heard < 48h OR known contact < 48h)
     if (packet->payload_len >= 2) {
@@ -1176,6 +1180,24 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 #endif
 }
 
+// Geo bounding boxes (inclusive). Adjust per-build with #defines if needed.
+// Werden in begin() einmalig in die Scope-Registry geschrieben sowie als
+// Fallback in chooseGeoFallbackScope() verwendet (fuer Installs ohne
+// Registry-Eintrag — kann eigentlich nicht mehr passieren nach
+// Pre-Population, aber als Defense-in-Depth bleibt der Pfad).
+#ifndef CR_BBOX_BEBB_LAT_MIN
+#define CR_BBOX_BEBB_LAT_MIN  51.40
+#define CR_BBOX_BEBB_LAT_MAX  53.60
+#define CR_BBOX_BEBB_LON_MIN  11.20
+#define CR_BBOX_BEBB_LON_MAX  14.80
+#endif
+#ifndef CR_BBOX_OSTFR_LAT_MIN
+#define CR_BBOX_OSTFR_LAT_MIN 53.10
+#define CR_BBOX_OSTFR_LAT_MAX 53.80
+#define CR_BBOX_OSTFR_LON_MIN  6.50
+#define CR_BBOX_OSTFR_LON_MAX  8.50
+#endif
+
 void MyMesh::begin(bool has_display) {
   BaseChatMesh::begin();
 
@@ -1248,6 +1270,24 @@ void MyMesh::begin(bool has_display) {
   }
   if (_prefs.direct_tx_delay_factor <= 0.0f || _prefs.direct_tx_delay_factor > 2.0f) {
     _prefs.direct_tx_delay_factor = 0.2f;
+  }
+  // Scope-Registry Pre-Population beim ersten Boot (Liste A).
+  // Triggert solange Registry leer (count==0); existierende Eintraege werden
+  // nicht angefasst, der User darf #bebb/#ostfriesland auch loeschen.
+  // Default-Flags: sticky (kein geo_managed) und NICHT in Repeat-Liste.
+  // Damit ist nach Boot zwar das Wissen ueber die Regionen da, aber kein
+  // Repeating aktiv bis der User explizit 'scope repeater add <name>' macht.
+  if (_prefs.scope_registry_count == 0) {
+    if (_prefs.repeat_scope_mode > REPEAT_SCOPE_MODE_ALLOWLIST) {
+      _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
+    }
+    addScopeRegistryDefault("bebb",
+      CR_BBOX_BEBB_LAT_MIN, CR_BBOX_BEBB_LAT_MAX,
+      CR_BBOX_BEBB_LON_MIN, CR_BBOX_BEBB_LON_MAX);
+    addScopeRegistryDefault("ostfriesland",
+      CR_BBOX_OSTFR_LAT_MIN, CR_BBOX_OSTFR_LAT_MAX,
+      CR_BBOX_OSTFR_LON_MIN, CR_BBOX_OSTFR_LON_MAX);
+    _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
@@ -2921,19 +2961,98 @@ bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
   return false;
 }
 
-// Geo bounding boxes (inclusive). Adjust per-build with #defines if needed.
-#ifndef CR_BBOX_BEBB_LAT_MIN
-#define CR_BBOX_BEBB_LAT_MIN  51.40
-#define CR_BBOX_BEBB_LAT_MAX  53.60
-#define CR_BBOX_BEBB_LON_MIN  11.20
-#define CR_BBOX_BEBB_LON_MAX  14.80
-#endif
-#ifndef CR_BBOX_OSTFR_LAT_MIN
-#define CR_BBOX_OSTFR_LAT_MIN 53.10
-#define CR_BBOX_OSTFR_LAT_MAX 53.80
-#define CR_BBOX_OSTFR_LON_MIN  6.50
-#define CR_BBOX_OSTFR_LON_MAX  8.50
-#endif
+// --- Scope-Registry-Helpers (Liste A) ---------------------------------------
+
+// Normalisiert User-Input: strippt fuehrendes '#', lowercase, akzeptiert
+// nur [a-z0-9-_]. Lehnt leer, doppelte '#', zu lang ab.
+bool MyMesh::normalizeScopeName(const char* in, char* out, size_t out_size) const {
+  if (!in || out_size < 2) return false;
+  while (*in == ' ' || *in == '\t') in++;
+  if (*in == 0) return false;
+  if (*in == '#') {
+    in++;
+    if (*in == '#') return false;   // "##foo" wuerde doppelt gehasht
+  }
+  if (*in == 0) return false;
+  size_t k = 0;
+  while (*in && *in != ' ' && *in != '\t' && k + 1 < out_size) {
+    char c = *in++;
+    if (c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+          || c == '-' || c == '_')) return false;
+    out[k++] = c;
+  }
+  out[k] = 0;
+  return k > 0;
+}
+
+void MyMesh::computeScopeHash(const char* name, uint8_t out_hash[4]) const {
+  // SHA-256("#" + name)[0..3] — kompatibel zu TransportKeyStore::
+  // getAutoKeyFor(), nur der erste 4-Byte-Anteil.
+  char tag[40];
+  snprintf(tag, sizeof(tag), "#%s", name);
+  TransportKey k;
+  TransportKeyStore tmp;
+  tmp.getAutoKeyFor(0, tag, k);
+  memcpy(out_hash, k.key, 4);
+}
+
+int MyMesh::findScopeRegistryByName(const char* name) const {
+  if (!name || *name == 0) return -1;
+  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
+    if (strncmp(_prefs.scope_registry[i].name, name,
+                sizeof(_prefs.scope_registry[i].name)) == 0) return i;
+  }
+  return -1;
+}
+
+int MyMesh::findScopeRegistryByHash(const uint8_t hash[4]) const {
+  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
+    if (memcmp(_prefs.scope_registry[i].key, hash, 4) == 0) return i;
+  }
+  return -1;
+}
+
+int MyMesh::addScopeRegistryDefault(const char* name, float lat_min, float lat_max,
+                                    float lon_min, float lon_max) {
+  if (_prefs.scope_registry_count >= SCOPE_REG_SLOTS) return -1;
+  if (findScopeRegistryByName(name) >= 0) return -1;
+  int slot = _prefs.scope_registry_count;
+  ScopeRegEntry& e = _prefs.scope_registry[slot];
+  memset(&e, 0, sizeof(e));
+  size_t nlen = strlen(name);
+  if (nlen >= sizeof(e.name)) nlen = sizeof(e.name) - 1;
+  memcpy(e.name, name, nlen);
+  e.name[nlen] = 0;
+  // Voller TransportKey ablegen (16 Byte) — fuer calcTransportCode-Match.
+  char tag[40];
+  snprintf(tag, sizeof(tag), "#%s", e.name);
+  TransportKey k;
+  TransportKeyStore tmp;
+  tmp.getAutoKeyFor(0, tag, k);
+  memcpy(e.key, k.key, sizeof(e.key));
+  e.flags = SCOPE_FLAG_HAS_GEO_BOX;   // sticky, NICHT im Repeat-Set
+  e.bbox_lat_min = lat_min;
+  e.bbox_lat_max = lat_max;
+  e.bbox_lon_min = lon_min;
+  e.bbox_lon_max = lon_max;
+  _prefs.scope_registry_count++;
+  return slot;
+}
+
+bool MyMesh::scopeAllowedForRepeat(const mesh::Packet* packet) const {
+  if (_prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL) return true;
+  if (!packet || !packet->hasTransportCodes()) return false;
+  uint16_t target = packet->transport_codes[0];
+  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
+    const ScopeRegEntry& e = _prefs.scope_registry[i];
+    if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) continue;
+    TransportKey k;
+    memcpy(k.key, e.key, sizeof(k.key));
+    if (k.calcTransportCode(packet) == target) return true;
+  }
+  return false;
+}
 
 bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
   double lat, lon;
@@ -5370,8 +5489,33 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // -- Sub-Befehl-Dispatch via match_choice (Prefix-Matching erlaubt).
+    // 'remove' und 'clear' sind no_abbrev (zerstoerend).
+    static const CompanionChoice scope_subs[] = {
+      { "default",  false },  // 0  - eigene Send-Default
+      { "bake",     false },  // 1  - nightly bake
+      { "override", false },  // 2  - persistent override mit TTL
+      { "list",     false },  // 3  - Registry (Liste A) anzeigen
+      { "add",      false },  // 4  - Registry-Eintrag hinzufuegen
+      { "remove",   true  },  // 5  - Registry-Eintrag loeschen (no_abbrev!)
+      { "info",     false },  // 6  - Detail-Anzeige fuer einen Eintrag
+      { "repeater", false },  // 7  - Sub-Namespace: Repeat-Policy (Liste B)
+    };
+    char scope_ambig[80];
+    int sub_idx = match_choice(arg, scope_subs,
+                               (int)(sizeof(scope_subs)/sizeof(scope_subs[0])),
+                               scope_ambig, sizeof(scope_ambig));
+    if (sub_idx == -1) {
+      char r[120]; snprintf(r, sizeof(r), "Mehrdeutig: %s", scope_ambig);
+      pushCompanionMessage(r); return;
+    }
+    if (sub_idx < 0) {
+      pushCompanionMessage("Usage: scope [default|bake|override|list|add|remove|info|repeater]");
+      return;
+    }
+
     // -- default <name>|clear --
-    if (starts_with_word(arg, "default")) {
+    if (sub_idx == 0) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope default <name>|clear"); return; }
@@ -5396,7 +5540,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // -- bake <name>|clear --
-    if (starts_with_word(arg, "bake")) {
+    if (sub_idx == 1) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope bake <name>|clear"); return; }
@@ -5421,7 +5565,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // -- override <name> [<ttl>] | clear --
-    if (starts_with_word(arg, "override")) {
+    if (sub_idx == 2) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope override <name> [<n>h|<n>d] | clear"); return; }
@@ -5460,7 +5604,309 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    pushCompanionMessage("Usage: scope [default|bake|override] <name>|clear");
+    // -- list (Registry / Liste A) --
+    if (sub_idx == 3) {
+      char gb[200]; size_t gu = 0;
+      auto gflush = [&](bool force) {
+        if (gu == 0) return;
+        if (!force && gu < 130) return;
+        gb[gu] = 0; pushCompanionMessage(gb); gu = 0;
+      };
+      auto gline = [&](const char* line) {
+        size_t len = strlen(line);
+        if (gu + len + 2 >= sizeof(gb)) gflush(true);
+        if (gu > 0) gb[gu++] = '\n';
+        for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
+        gflush(false);
+      };
+      char head[60];
+      snprintf(head, sizeof(head), "scope list (%u/%u, mode=%s):",
+               (unsigned)_prefs.scope_registry_count, (unsigned)SCOPE_REG_SLOTS,
+               _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL ? "all" : "allowlist");
+      gline(head);
+      for (int i = 0; i < _prefs.scope_registry_count; i++) {
+        const ScopeRegEntry& e = _prefs.scope_registry[i];
+        char flagstr[20] = "";
+        if (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) strcat(flagstr, " R");
+        if (e.flags & SCOPE_FLAG_GEO_MANAGED)   strcat(flagstr, " G");
+        if (e.flags & SCOPE_FLAG_HAS_GEO_BOX)   strcat(flagstr, " b");
+        char tmp[80];
+        snprintf(tmp, sizeof(tmp), "  #%s%s", e.name, flagstr);
+        gline(tmp);
+      }
+      if (_prefs.scope_registry_count == 0) gline("  (leer)");
+      gline("Flags: R=in repeat-list, G=geo_managed, b=has bbox");
+      gflush(true);
+      return;
+    }
+
+    // -- add <name> [geo <lat1,lon1,lat2,lon2>] (Registry) --
+    if (sub_idx == 4) {
+      const char* p = strchr(arg, ' ');
+      if (p) { while (*p == ' ') p++; }
+      if (!p || *p == 0) { pushCompanionMessage("Usage: scope add <name> [geo <lat_min,lon_min,lat_max,lon_max>]"); return; }
+      char name[16];
+      if (!normalizeScopeName(p, name, sizeof(name))) {
+        pushCompanionMessage("Name ungueltig: erlaubt [a-z0-9-_], 1..15 Zeichen, kein '##'.");
+        return;
+      }
+      if (findScopeRegistryByName(name) >= 0) {
+        char r[80]; snprintf(r, sizeof(r), "#%s ist schon in der Registry.", name);
+        pushCompanionMessage(r); return;
+      }
+      if (_prefs.scope_registry_count >= SCOPE_REG_SLOTS) {
+        char r[80]; snprintf(r, sizeof(r), "Registry voll (max %d).", SCOPE_REG_SLOTS);
+        pushCompanionMessage(r); return;
+      }
+      // optional: "geo lat,lon,lat,lon" Token nach dem name
+      bool has_geo = false;
+      float lat_min=0, lat_max=0, lon_min=0, lon_max=0;
+      const char* q = p;
+      while (*q && *q != ' ' && *q != '\t') q++;
+      while (*q == ' ' || *q == '\t') q++;
+      if (starts_with_word(q, "geo")) {
+        q = strchr(q, ' ');
+        if (q) { while (*q == ' ') q++; }
+        if (!q || sscanf(q, "%f,%f,%f,%f", &lat_min, &lon_min, &lat_max, &lon_max) != 4) {
+          pushCompanionMessage("Usage: scope add <name> geo <lat_min,lon_min,lat_max,lon_max>");
+          return;
+        }
+        if (lat_min > lat_max || lon_min > lon_max
+            || lat_min < -90 || lat_max > 90 || lon_min < -180 || lon_max > 180) {
+          pushCompanionMessage("geo: lat_min<=lat_max, lon_min<=lon_max, lat -90..90, lon -180..180.");
+          return;
+        }
+        has_geo = true;
+      }
+      int slot = _prefs.scope_registry_count;
+      ScopeRegEntry& e = _prefs.scope_registry[slot];
+      memset(&e, 0, sizeof(e));
+      strncpy(e.name, name, sizeof(e.name) - 1);
+      char tag[40]; snprintf(tag, sizeof(tag), "#%s", e.name);
+      TransportKey k; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, k);
+      memcpy(e.key, k.key, sizeof(e.key));
+      e.flags = 0;
+      if (has_geo) {
+        e.flags |= SCOPE_FLAG_HAS_GEO_BOX;
+        e.bbox_lat_min = lat_min; e.bbox_lat_max = lat_max;
+        e.bbox_lon_min = lon_min; e.bbox_lon_max = lon_max;
+      }
+      _prefs.scope_registry_count++;
+      savePrefs();
+      char r[120];
+      snprintf(r, sizeof(r), "OK - #%s in Registry (Slot %d%s).",
+               e.name, slot, has_geo ? ", mit Bbox" : "");
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // -- remove <name> (Registry) --
+    if (sub_idx == 5) {
+      const char* p = strchr(arg, ' ');
+      if (p) { while (*p == ' ') p++; }
+      if (!p || *p == 0) { pushCompanionMessage("Usage: scope remove <name>"); return; }
+      char name[16];
+      if (!normalizeScopeName(p, name, sizeof(name))) {
+        pushCompanionMessage("Name ungueltig.");
+        return;
+      }
+      int idx = findScopeRegistryByName(name);
+      if (idx < 0) {
+        char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
+        pushCompanionMessage(r); return;
+      }
+      // Kompaktion: alle nachfolgenden Eintraege um eins nach vorne ziehen
+      for (int i = idx; i < _prefs.scope_registry_count - 1; i++) {
+        _prefs.scope_registry[i] = _prefs.scope_registry[i + 1];
+      }
+      _prefs.scope_registry_count--;
+      memset(&_prefs.scope_registry[_prefs.scope_registry_count], 0, sizeof(ScopeRegEntry));
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - #%s aus Registry entfernt.", name);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // -- info <name> --
+    if (sub_idx == 6) {
+      const char* p = strchr(arg, ' ');
+      if (p) { while (*p == ' ') p++; }
+      if (!p || *p == 0) { pushCompanionMessage("Usage: scope info <name>"); return; }
+      char name[16];
+      if (!normalizeScopeName(p, name, sizeof(name))) {
+        pushCompanionMessage("Name ungueltig.");
+        return;
+      }
+      int idx = findScopeRegistryByName(name);
+      if (idx < 0) {
+        char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
+        pushCompanionMessage(r); return;
+      }
+      const ScopeRegEntry& e = _prefs.scope_registry[idx];
+      char block[280];
+      int p_off = snprintf(block, sizeof(block),
+                           "#%s (slot %d):\n"
+                           "  hash = %02X%02X%02X%02X\n"
+                           "  in_repeat_list = %s\n"
+                           "  geo_managed = %s",
+                           e.name, idx,
+                           e.key[0], e.key[1], e.key[2], e.key[3],
+                           (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) ? "yes" : "no",
+                           (e.flags & SCOPE_FLAG_GEO_MANAGED)    ? "yes" : "no");
+      if (e.flags & SCOPE_FLAG_HAS_GEO_BOX) {
+        snprintf(block + p_off, sizeof(block) - p_off,
+                 "\n  bbox = lat[%.3f..%.3f] lon[%.3f..%.3f]",
+                 (double)e.bbox_lat_min, (double)e.bbox_lat_max,
+                 (double)e.bbox_lon_min, (double)e.bbox_lon_max);
+      }
+      pushCompanionMessage(block);
+      return;
+    }
+
+    // -- repeater <...> (Sub-Namespace: Repeat-Policy / Liste B) --
+    if (sub_idx == 7) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      if (!sub || *sub == 0) {
+        // Status
+        int n_in_list = 0;
+        for (int i = 0; i < _prefs.scope_registry_count; i++) {
+          if (_prefs.scope_registry[i].flags & SCOPE_FLAG_IN_REPEAT_LIST) n_in_list++;
+        }
+        char block[280]; size_t bo = 0;
+        bo += snprintf(block + bo, sizeof(block) - bo,
+                       "scope repeater:\n  mode = %s\n  count = %d",
+                       _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL ? "all" : "allowlist",
+                       n_in_list);
+        if (n_in_list > 0 && bo + 4 < sizeof(block)) {
+          bo += snprintf(block + bo, sizeof(block) - bo, "\n  list:");
+          for (int i = 0; i < _prefs.scope_registry_count && bo + 12 < sizeof(block); i++) {
+            const ScopeRegEntry& e = _prefs.scope_registry[i];
+            if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) continue;
+            bo += snprintf(block + bo, sizeof(block) - bo,
+                           " #%s%s", e.name,
+                           (e.flags & SCOPE_FLAG_GEO_MANAGED) ? "(G)" : "");
+          }
+        }
+        pushCompanionMessage(block);
+        return;
+      }
+
+      static const CompanionChoice rep_subs[] = {
+        { "mode",   false },  // 0
+        { "add",    false },  // 1
+        { "remove", true  },  // 2 no_abbrev
+        { "geo",    false },  // 3
+      };
+      char rep_ambig[60];
+      int rs = match_choice(sub, rep_subs, 4, rep_ambig, sizeof(rep_ambig));
+      if (rs == -1) {
+        char r[100]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rep_ambig);
+        pushCompanionMessage(r); return;
+      }
+      if (rs < 0) {
+        pushCompanionMessage("Usage: scope repeater [mode all|allowlist | add <name> | remove <name> | geo <name> on|off]");
+        return;
+      }
+
+      // -- repeater mode all|allowlist --
+      if (rs == 0) {
+        const char* mv = strchr(sub, ' ');
+        if (mv) { while (*mv == ' ') mv++; }
+        static const CompanionChoice mode_ch[] = {
+          { "all",       false },
+          { "allowlist", false },
+        };
+        char ma[40];
+        int mm = match_choice(mv, mode_ch, 2, ma, sizeof(ma));
+        if (mm == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", ma); pushCompanionMessage(r); return; }
+        if (mm < 0)   { pushCompanionMessage("Usage: scope repeater mode all|allowlist"); return; }
+        _prefs.repeat_scope_mode = (mm == 0) ? REPEAT_SCOPE_MODE_ALL : REPEAT_SCOPE_MODE_ALLOWLIST;
+        savePrefs();
+        pushCompanionMessage(mm == 0 ? "OK - scope repeater mode = all"
+                                     : "OK - scope repeater mode = allowlist");
+        return;
+      }
+
+      // -- repeater add <name> --
+      if (rs == 1) {
+        const char* nv = strchr(sub, ' ');
+        if (nv) { while (*nv == ' ') nv++; }
+        if (!nv || *nv == 0) { pushCompanionMessage("Usage: scope repeater add <name>"); return; }
+        char name[16];
+        if (!normalizeScopeName(nv, name, sizeof(name))) { pushCompanionMessage("Name ungueltig."); return; }
+        int idx = findScopeRegistryByName(name);
+        if (idx < 0) {
+          char r[100]; snprintf(r, sizeof(r), "#%s nicht in Registry. Erst 'scope add %s'.", name, name);
+          pushCompanionMessage(r); return;
+        }
+        if (_prefs.scope_registry[idx].flags & SCOPE_FLAG_IN_REPEAT_LIST) {
+          char r[80]; snprintf(r, sizeof(r), "#%s ist schon in repeat-list.", name);
+          pushCompanionMessage(r); return;
+        }
+        _prefs.scope_registry[idx].flags |= SCOPE_FLAG_IN_REPEAT_LIST;
+        savePrefs();
+        char r[80]; snprintf(r, sizeof(r), "OK - #%s in repeat-list aufgenommen.", name);
+        pushCompanionMessage(r);
+        return;
+      }
+
+      // -- repeater remove <name> --
+      if (rs == 2) {
+        const char* nv = strchr(sub, ' ');
+        if (nv) { while (*nv == ' ') nv++; }
+        if (!nv || *nv == 0) { pushCompanionMessage("Usage: scope repeater remove <name>"); return; }
+        char name[16];
+        if (!normalizeScopeName(nv, name, sizeof(name))) { pushCompanionMessage("Name ungueltig."); return; }
+        int idx = findScopeRegistryByName(name);
+        if (idx < 0) {
+          char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
+          pushCompanionMessage(r); return;
+        }
+        if (!(_prefs.scope_registry[idx].flags & SCOPE_FLAG_IN_REPEAT_LIST)) {
+          char r[80]; snprintf(r, sizeof(r), "#%s war nicht in repeat-list.", name);
+          pushCompanionMessage(r); return;
+        }
+        _prefs.scope_registry[idx].flags &= ~SCOPE_FLAG_IN_REPEAT_LIST;
+        savePrefs();
+        char r[80]; snprintf(r, sizeof(r), "OK - #%s aus repeat-list entfernt.", name);
+        pushCompanionMessage(r);
+        return;
+      }
+
+      // -- repeater geo <name> on|off --
+      if (rs == 3) {
+        const char* nv = strchr(sub, ' ');
+        if (nv) { while (*nv == ' ') nv++; }
+        if (!nv || *nv == 0) { pushCompanionMessage("Usage: scope repeater geo <name> on|off"); return; }
+        char name[16];
+        if (!normalizeScopeName(nv, name, sizeof(name))) { pushCompanionMessage("Name ungueltig."); return; }
+        int idx = findScopeRegistryByName(name);
+        if (idx < 0) {
+          char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
+          pushCompanionMessage(r); return;
+        }
+        const ScopeRegEntry& e0 = _prefs.scope_registry[idx];
+        if (!(e0.flags & SCOPE_FLAG_HAS_GEO_BOX)) {
+          char r[100]; snprintf(r, sizeof(r), "#%s hat keine Geo-Box — geo_managed nicht moeglich.", name);
+          pushCompanionMessage(r); return;
+        }
+        const char* mv = nv;
+        while (*mv && *mv != ' ') mv++;
+        while (*mv == ' ') mv++;
+        int gm = match_on_off(mv);
+        if (gm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+        if (gm < 0)   { pushCompanionMessage("Usage: scope repeater geo <name> on|off"); return; }
+        if (gm == 1) _prefs.scope_registry[idx].flags |= SCOPE_FLAG_GEO_MANAGED;
+        else         _prefs.scope_registry[idx].flags &= ~SCOPE_FLAG_GEO_MANAGED;
+        savePrefs();
+        char r[80]; snprintf(r, sizeof(r), "OK - #%s geo_managed = %s", name, gm == 1 ? "on" : "off");
+        pushCompanionMessage(r);
+        return;
+      }
+    }
+
+    pushCompanionMessage("Usage: scope [default|bake|override|list|add|remove|info|repeater]");
     return;
   }
 

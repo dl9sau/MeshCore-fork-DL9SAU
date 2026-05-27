@@ -376,6 +376,22 @@ private:
   bool getEffectiveLatLon(double& lat, double& lon) const;
   bool chooseGeoFallbackScope(TransportKey& out_key) const;
   bool chooseNightFloodScope(TransportKey& out_key) const;
+  // Scope-Registry (Liste A) Helpers.
+  // normalize: strippt fuehrendes '#', lowercase, lehnt leer/"##"/zu-lang ab.
+  bool normalizeScopeName(const char* in, char* out, size_t out_size) const;
+  void computeScopeHash(const char* name, uint8_t out_hash[4]) const;
+  int  findScopeRegistryByName(const char* name) const;       // -1 wenn nicht gefunden
+  int  findScopeRegistryByHash(const uint8_t hash[4]) const;  // -1 wenn nicht gefunden
+  // Fuegt einen Eintrag mit Geo-Box ein (fuer Pre-Population beim ersten Boot).
+  // Returns Slot-Index oder -1 bei voll/Duplikat. Flags = HAS_GEO_BOX (sticky,
+  // nicht im Repeat-Set).
+  int  addScopeRegistryDefault(const char* name, float lat_min, float lat_max,
+                               float lon_min, float lon_max);
+  // Repeat-Policy: liefert true wenn das Paket geforwarded werden darf
+  // (entweder Mode=ALL oder Mode=ALLOWLIST und transport_code matcht
+  // einen Eintrag mit IN_REPEAT_LIST-Flag). Aufrufer hat bereits
+  // hasTransportCodes()-Check gemacht.
+  bool scopeAllowedForRepeat(const mesh::Packet* packet) const;
   void scheduleNextNightFlood();
   void doPeriodicZeroHopAdvert();
   void doNightFloodAdvert();

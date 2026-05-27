@@ -251,6 +251,9 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.gps_lead_min, sizeof(_prefs.gps_lead_min));                       // 275
     file.read((uint8_t *)&_prefs.tx_delay_factor, sizeof(_prefs.tx_delay_factor));                 // 276
     file.read((uint8_t *)&_prefs.direct_tx_delay_factor, sizeof(_prefs.direct_tx_delay_factor));   // 280
+    file.read((uint8_t *)&_prefs.scope_registry_count, sizeof(_prefs.scope_registry_count));       // 284
+    file.read((uint8_t *)&_prefs.repeat_scope_mode, sizeof(_prefs.repeat_scope_mode));             // 285
+    file.read((uint8_t *)_prefs.scope_registry, sizeof(_prefs.scope_registry));                    // 286 (52*16=832 Byte)
 
     file.close();
   }
@@ -307,6 +310,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.gps_lead_min, sizeof(_prefs.gps_lead_min));                       // 275
     file.write((uint8_t *)&_prefs.tx_delay_factor, sizeof(_prefs.tx_delay_factor));                 // 276
     file.write((uint8_t *)&_prefs.direct_tx_delay_factor, sizeof(_prefs.direct_tx_delay_factor));   // 280
+    file.write((uint8_t *)&_prefs.scope_registry_count, sizeof(_prefs.scope_registry_count));       // 284
+    file.write((uint8_t *)&_prefs.repeat_scope_mode, sizeof(_prefs.repeat_scope_mode));             // 285
+    file.write((uint8_t *)_prefs.scope_registry, sizeof(_prefs.scope_registry));                    // 286 (52*16=832 Byte)
 
     file.close();
   }

@@ -8,6 +8,37 @@
 #define ADVERT_LOC_NONE       0
 #define ADVERT_LOC_SHARE      1
 
+// Scope-Registry: Liste A — bekannte Scopes (Region-Name + 16-Byte
+// TransportKey = SHA-256("#name") + optionale Geo-Bbox). Pre-populated
+// beim ersten Boot mit den hartcodierten Boxen (#bebb, #ostfriesland).
+// User erweiterbar per 'scope add'. Liste B (Repeat-Allowlist) wird
+// ueber das Flag SCOPE_FLAG_IN_REPEAT_LIST pro Eintrag markiert.
+//
+// Vergleich gegen ein eingehendes Paket erfolgt nicht ueber den Key-Inhalt
+// direkt: transport_codes[0] in Paketen ist ein 2-Byte HMAC-Wert. Wir
+// nutzen TransportKey::calcTransportCode(packet) wie in
+// lookupRegionByTransportCode() — daher das Speichern der vollen 16 Byte.
+#define SCOPE_REG_SLOTS              16
+#define SCOPE_FLAG_HAS_GEO_BOX       0x01   // bbox_* sind gueltig
+#define SCOPE_FLAG_GEO_MANAGED       0x02   // bei Geo-Eintritt/Austritt
+                                            //   IN_REPEAT_LIST automatisch
+                                            //   setzen/loeschen
+#define SCOPE_FLAG_IN_REPEAT_LIST    0x04   // Liste B (Repeat-Policy)
+
+#define REPEAT_SCOPE_MODE_ALL        0      // heute: jeden scoped repeaten
+#define REPEAT_SCOPE_MODE_ALLOWLIST  1      // nur Eintraege mit IN_REPEAT_LIST
+
+struct ScopeRegEntry {
+  char     name[16];          // ohne fuehrendes '#', null-terminated
+  uint8_t  key[16];           // SHA-256("#" + name) (= TransportKey-Bytes)
+  uint8_t  flags;
+  uint8_t  _reserved[3];      // padding fuer 4-Byte Alignment der floats
+  float    bbox_lat_min;
+  float    bbox_lat_max;
+  float    bbox_lon_min;
+  float    bbox_lon_max;
+};                            // = 16 + 16 + 1 + 3 + 16 = 52 Byte/Slot
+
 struct NodePrefs {  // persisted to file
   float airtime_factor;
   char node_name[32];
@@ -101,4 +132,10 @@ struct NodePrefs {  // persisted to file
   // den Companion-Default (0.5 / 0.2 — die alten hartcodierten Werte) gesetzt.
   float tx_delay_factor;
   float direct_tx_delay_factor;
+  // Scope-Registry (Liste A) + Repeat-Policy (Mode + IN_REPEAT_LIST-Flag
+  // pro Eintrag). scope_registry_count == 0 triggert in begin() einmalige
+  // Pre-Population mit den hartcodierten Geo-Boxen (#bebb, #ostfriesland).
+  uint8_t        scope_registry_count;
+  uint8_t        repeat_scope_mode;          // REPEAT_SCOPE_MODE_*
+  ScopeRegEntry  scope_registry[SCOPE_REG_SLOTS];
 };
