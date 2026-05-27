@@ -6266,7 +6266,154 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r); return;
     }
     if (sub_idx < 0) {
-      pushCompanionMessage("Usage: scope [default|bake|override|list|add|remove|info|repeater|regions]");
+      // Kein Keyword-Match — vielleicht hat der User 'scope <name> <action>'
+      // getippt. Wunschliste 11 Schritt 7. Zerlegen + dispatchen.
+      char first_word[24];
+      const char* p = arg;
+      size_t fl = 0;
+      while (*p && *p != ' ' && *p != '\t' && fl + 1 < sizeof(first_word)) {
+        first_word[fl++] = *p++;
+      }
+      first_word[fl] = 0;
+      while (*p == ' ' || *p == '\t') p++;
+
+      char name[16];
+      if (!normalizeScopeName(first_word, name, sizeof(name))) {
+        pushCompanionMessage(
+          "Usage: scope [default|bake|override|list|add|remove|info|repeater|regions]\n"
+          "       scope <name> repeat|advert|disable|enable|delete|undelete|info");
+        return;
+      }
+      ScopeRef ref = findScopeByName(name);
+      if (ref.storage == SCOPE_NONE) {
+        char r[120];
+        snprintf(r, sizeof(r),
+          "Unbekannter Scope: #%s\n'scope add %s' fuer Anlegen, 'scope regions' fuer bekannte Namen.",
+          name, name);
+        pushCompanionMessage(r);
+        return;
+      }
+      if (!*p) {
+        pushCompanionMessage(
+          "Usage: scope <name> repeat auto|on|off\n"
+          "       scope <name> advert auto|off\n"
+          "       scope <name> disable | enable\n"
+          "       scope <name> delete | undelete   (no_abbrev fuer delete)\n"
+          "       scope <name> info");
+        return;
+      }
+
+      static const CompanionChoice action_choices[] = {
+        { "repeat",   false },  // 0
+        { "advert",   false },  // 1
+        { "disable",  false },  // 2
+        { "enable",   false },  // 3
+        { "delete",   true  },  // 4 no_abbrev
+        { "undelete", false },  // 5
+        { "info",     false },  // 6
+      };
+      char act_ambig[80];
+      int aidx = match_choice(p, action_choices,
+                              (int)(sizeof(action_choices)/sizeof(action_choices[0])),
+                              act_ambig, sizeof(act_ambig));
+      if (aidx == -1) {
+        char r[120]; snprintf(r, sizeof(r), "Mehrdeutig: %s", act_ambig);
+        pushCompanionMessage(r); return;
+      }
+      if (aidx < 0) {
+        char r[160]; snprintf(r, sizeof(r),
+          "Unbekannte Aktion. Erlaubt: repeat|advert|disable|enable|delete|undelete|info");
+        pushCompanionMessage(r); return;
+      }
+
+      // Argument nach der Aktion ermitteln
+      const char* aarg = strchr(p, ' ');
+      if (aarg) { while (*aarg == ' ' || *aarg == '\t') aarg++; }
+
+      uint8_t status = getScopeStatus(ref);
+
+      if (aidx == 0) {  // repeat auto|on|off
+        static const CompanionChoice repeat_choices[] = {
+          { "auto", false }, { "on", false }, { "off", false },
+        };
+        char rmambig[40];
+        int rm = match_choice(aarg, repeat_choices, 3, rmambig, sizeof(rmambig));
+        if (rm == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rmambig); pushCompanionMessage(r); return; }
+        if (rm < 0)   { pushCompanionMessage("Usage: scope <name> repeat auto|on|off"); return; }
+        status &= ~SCOPE_STATUS_REPEAT_MASK;
+        if      (rm == 0) status |= SCOPE_STATUS_REPEAT_AUTO;
+        else if (rm == 1) status |= SCOPE_STATUS_REPEAT_ON;
+        else              status |= SCOPE_STATUS_REPEAT_OFF;
+        setScopeStatus(ref, status);
+        savePrefs();
+        const char* mode_str = (rm == 0) ? "auto" : (rm == 1) ? "on" : "off";
+        char r[100]; snprintf(r, sizeof(r), "OK - #%s repeat = %s", name, mode_str);
+        pushCompanionMessage(r);
+        return;
+      }
+
+      if (aidx == 1) {  // advert auto|off
+        static const CompanionChoice advert_choices[] = {
+          { "auto", false }, { "off", false },
+        };
+        char amambig[40];
+        int am = match_choice(aarg, advert_choices, 2, amambig, sizeof(amambig));
+        if (am == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", amambig); pushCompanionMessage(r); return; }
+        if (am < 0)   { pushCompanionMessage("Usage: scope <name> advert auto|off"); return; }
+        if (am == 0) status &= ~SCOPE_STATUS_ADVERT_OFF;
+        else         status |=  SCOPE_STATUS_ADVERT_OFF;
+        setScopeStatus(ref, status);
+        savePrefs();
+        char r[100]; snprintf(r, sizeof(r), "OK - #%s advert = %s",
+                              name, (am == 0) ? "auto" : "off");
+        pushCompanionMessage(r);
+        return;
+      }
+
+      if (aidx == 2 || aidx == 3) {  // disable / enable
+        if (aidx == 2) status |=  SCOPE_STATUS_DISABLED;
+        else           status &= ~SCOPE_STATUS_DISABLED;
+        setScopeStatus(ref, status);
+        savePrefs();
+        char r[100]; snprintf(r, sizeof(r), "OK - #%s %s",
+                              name, (aidx == 2) ? "disabled" : "enabled");
+        pushCompanionMessage(r);
+        return;
+      }
+
+      if (aidx == 4 || aidx == 5) {  // delete / undelete
+        if (ref.storage == SCOPE_EXTRAS) {
+          pushCompanionMessage(
+            "delete/undelete nur fuer Build-in-Eintraege. Fuer Extras\n"
+            "stattdessen 'scope remove <name>' (loescht den Eintrag).");
+          return;
+        }
+        if (aidx == 4) status |=  SCOPE_STATUS_USER_DELETED;
+        else           status &= ~SCOPE_STATUS_USER_DELETED;
+        setScopeStatus(ref, status);
+        savePrefs();
+        char r[100]; snprintf(r, sizeof(r), "OK - #%s %s",
+                              name, (aidx == 4) ? "deleted (versteckt)" : "undeleted");
+        pushCompanionMessage(r);
+        return;
+      }
+
+      if (aidx == 6) {  // info — gleich wie 'scope info <name>'
+        // Wir koennten den Code dupliziern, aber einfacher: weiter-
+        // delegieren waere komplex. Fuer jetzt: kurze Info zeigen.
+        char head[140];
+        const char* st_str = (status & SCOPE_STATUS_USER_DELETED) ? "deleted"
+                           : (status & SCOPE_STATUS_DISABLED)     ? "disabled"
+                           : ((status & SCOPE_STATUS_REPEAT_MASK) == SCOPE_STATUS_REPEAT_ON) ? "repeat=on"
+                           : ((status & SCOPE_STATUS_REPEAT_MASK) == SCOPE_STATUS_REPEAT_OFF) ? "repeat=off"
+                           : "repeat=auto";
+        const char* ad_str = (status & SCOPE_STATUS_ADVERT_OFF) ? "advert=off" : "advert=auto";
+        const char* store_str = (ref.storage == SCOPE_BUILDIN) ? "build-in" : "extras";
+        snprintf(head, sizeof(head), "#%s [%s] %s %s", name, store_str, st_str, ad_str);
+        pushCompanionMessage(head);
+        return;
+      }
+      pushCompanionMessage("(unbehandelte action)");
       return;
     }
 
