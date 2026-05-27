@@ -637,8 +637,9 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   bool decision = false;
   const char* reject_reason = "?";
 
-  // path-length cap (hop count, not byte length)
-  if (packet->getPathHashCount() > CR_MAX_REPEAT_PATH_LEN) {
+  // path-length cap (hop count, not byte length). _prefs.flood_max
+  // analog CommonCLI/simple_repeater 'flood.max'.
+  if (packet->getPathHashCount() > _prefs.flood_max) {
     reject_reason = "path-too-long";
   }
   // ADVERTs and ACKs: forward only if the packet is scoped (transport-coded)
@@ -1360,10 +1361,17 @@ void MyMesh::begin(bool has_display) {
     }
   }
 
+  // flood_max: 0 = uninitialisiert -> Default 16 (analog dem alten
+  // hartcodierten Wert). Range 1..64 analog CommonCLI flood.max.
+  if (_prefs.flood_max == 0 || _prefs.flood_max > 64) {
+    _prefs.flood_max = 16;
+  }
   // scope_regional_hop_limit: 0 = uninitialisiert -> Companion-Default 3.
-  // Range 1..16 (max 16 entspricht unserem CR_MAX_REPEAT_PATH_LEN).
-  if (_prefs.scope_regional_hop_limit == 0 || _prefs.scope_regional_hop_limit > 16) {
-    _prefs.scope_regional_hop_limit = 3;
+  // Range 1..flood_max (sonst widerspruechlich — flood_max ist die harte
+  // Obergrenze, regional muss drunter liegen).
+  if (_prefs.scope_regional_hop_limit == 0
+      || _prefs.scope_regional_hop_limit > _prefs.flood_max) {
+    _prefs.scope_regional_hop_limit = (_prefs.flood_max < 3) ? _prefs.flood_max : 3;
   }
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
@@ -4232,26 +4240,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "der Repeat-Liste markierten Eintraege.");
         pushCompanionMessage(
           "scope repeater\n"
-          "  Status (Mode + Liste)");
+          "  Status (Mode + Repeat-Liste mit Tags)");
         pushCompanionMessage(
           "scope repeater mode all|allowlist\n"
-          "  Policy umschalten");
+          "  Global: Liste ueberhaupt anwenden (allowlist) oder alle\n"
+          "  scoped Pakete repeaten (all).");
         pushCompanionMessage(
-          "scope repeater add <name>\n"
-          "  in Repeat-Liste (Name muss in Registry sein, 'scope add')");
+          "Per Eintrag (statt der alten 'scope repeater add/remove/..'):");
         pushCompanionMessage(
-          "scope repeater remove <name>\n"
-          "  aus Repeat-Liste (kein Prefix-Match — Tippschutz)");
+          "  scope <name> pin     immer aktiv (Tag P)\n"
+          "  scope <name> geo     aktiv wenn GPS in Bbox (Tags A / A-)\n"
+          "  scope <name> off     nie aktiv");
         pushCompanionMessage(
-          "scope repeater enable <name>\n"
-          "  Aktiv setzen (Default)");
-        pushCompanionMessage(
-          "scope repeater disable <name>\n"
-          "  Inaktiv setzen, bleibt in Liste");
-        pushCompanionMessage(
-          "scope repeater geo <name> on|off\n"
-          "  geo_managed-Flag. Wenn on, wird der Repeat-Listen-Status\n"
-          "  automatisch bei Eintritt/Austritt der Bbox getoggelt.");
+          "  scope <name> disable temporaer aus (Mode bleibt erhalten)\n"
+          "  scope <name> enable  temporaer wieder an\n"
+          "  scope <name> delete  dauerhaft verstecken (Build-in)");
         return;
       }
       if (topic_prefix_match(topic, "scope")) {
@@ -5331,17 +5334,41 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // Hop-Cap fuer #region / #regional. Range 1..16. 0 wird in begin()
-    // als uninitialisiert auf 3 normalisiert — daher hier untere Schranke 1.
+    // Hop-Cap fuer #region / #regional. Range 1..flood_max. 0 wird in
+    // begin() als uninitialisiert auf 3 normalisiert.
     if (strcmp(key, "scope_regional_hops") == 0) {
       int v = atoi(value_lc);
-      if (v < 1 || v > 16) {
-        pushCompanionMessage("Wert ausserhalb 1..16");
+      if (v < 1 || v > _prefs.flood_max) {
+        char r[80]; snprintf(r, sizeof(r),
+          "Wert ausserhalb 1..%u (flood_max-Cap)", (unsigned)_prefs.flood_max);
+        pushCompanionMessage(r);
         return;
       }
       _prefs.scope_regional_hop_limit = (uint8_t)v;
       savePrefs();
       char r[60]; snprintf(r, sizeof(r), "OK - scope_regional_hops = %d", v);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // Globale Repeat-Hop-Obergrenze. Range 1..64 analog CommonCLI flood.max.
+    // 'flood.max' (CommonCLI-Stil) als Alias erlaubt.
+    if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) {
+      int v = atoi(value_lc);
+      if (v < 1 || v > 64) {
+        pushCompanionMessage("Wert ausserhalb 1..64");
+        return;
+      }
+      _prefs.flood_max = (uint8_t)v;
+      // Wenn scope_regional_hop_limit jetzt drueber liegt: nach unten ziehen
+      // damit die Beziehung gilt (regional <= flood_max).
+      if (_prefs.scope_regional_hop_limit > _prefs.flood_max) {
+        _prefs.scope_regional_hop_limit = _prefs.flood_max;
+      }
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r),
+        "OK - flood_max = %d (scope_regional_hops auf %u gecapped falls drueber)",
+        v, (unsigned)_prefs.scope_regional_hop_limit);
       pushCompanionMessage(r);
       return;
     }
@@ -5476,6 +5503,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_float ("txdelay",             _prefs.tx_delay_factor,       0.5f,                   "",     3);
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
       emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
+      emit_uint  ("flood_max",           _prefs.flood_max,             16);
 
       if (list_changed && changed == 0) gline("  (keine Aenderungen — alle Werte auf Default)");
       gflush();
@@ -5510,6 +5538,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "txdelay") == 0)           snprintf(r, sizeof(r), "txdelay = %.3f", _prefs.tx_delay_factor);
     else if (strcmp(key, "direct_txdelay") == 0)    snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
     else if (strcmp(key, "scope_regional_hops") == 0) snprintf(r, sizeof(r), "scope_regional_hops = %u", (unsigned)_prefs.scope_regional_hop_limit);
+    else if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) snprintf(r, sizeof(r), "flood_max = %u", (unsigned)_prefs.flood_max);
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
     }
@@ -6719,12 +6748,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (sub && sub[0] == '?'
           && (sub[1] == 0 || sub[1] == ' ' || sub[1] == '\t')) {
         pushCompanionMessage("scope repeater — Sub-Befehle:");
-        pushCompanionMessage("  scope repeater\n    Status (Mode + Liste)");
-        pushCompanionMessage("  scope repeater mode all|allowlist\n    Policy umschalten");
-        pushCompanionMessage("  scope repeater add <name>\n    in Repeat-Liste");
-        pushCompanionMessage("  scope repeater remove <name>\n    aus Repeat-Liste (no_abbrev)");
-        pushCompanionMessage("  scope repeater geo <name> on|off\n    geo_managed-Flag");
-        pushCompanionMessage("  scope repeater enable|disable <name>\n    Repeat-Flag temporaer aktiv/inaktiv");
+        pushCompanionMessage("  scope repeater\n    Status (Mode + Repeat-Liste mit Tags)");
+        pushCompanionMessage("  scope repeater mode all|allowlist\n    Global: Liste anwenden (allowlist) oder alles (all)");
+        pushCompanionMessage("Per Eintrag (statt 'scope repeater add/remove/...'):");
+        pushCompanionMessage("  scope <name> pin | geo | off\n    Repeat-Mode setzen");
+        pushCompanionMessage("  scope <name> disable | enable\n    temporaer aus/an (Mode bleibt)");
+        pushCompanionMessage("  scope <name> delete | undelete\n    dauerhaft verstecken (Build-in)");
         return;
       }
       if (!sub || *sub == 0) {

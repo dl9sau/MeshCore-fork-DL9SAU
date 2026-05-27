@@ -199,4 +199,10 @@ struct NodePrefs {  // persisted to file
   // Schritt 12). Pakete mit path_hash_count >= scope_regional_hop_limit werden
   // nicht repeated. 0 wird beim Boot auf Default 3 gehoben.
   uint8_t        scope_regional_hop_limit;
+
+  // Allgemeine Hop-Obergrenze fuer Repeat. Pakete mit path_hash_count >=
+  // flood_max werden nicht weitergeleitet. Analog zu CommonCLI/simple_
+  // repeater 'flood.max'. 0 wird beim Boot auf Default 16 gehoben. Range
+  // 1..64. CLI: set flood_max <N> (oder flood.max).
+  uint8_t        flood_max;
 };

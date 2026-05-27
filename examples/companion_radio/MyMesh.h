@@ -101,7 +101,6 @@ struct AdvertPath {
 // the wire protocol — collisions are accepted, same as the rest of MeshCore.
 #define CR_HEARD_TABLE_SIZE     64
 #define CR_HEARD_MAX_AGE_SECS   (48UL * 3600UL)
-#define CR_MAX_REPEAT_PATH_LEN  16
 #define CR_NARROW_FREQ_TRIGGER  869.000f
 #define CR_NARROW_FREQ_ACTUAL   869.618f
 #define CR_REPEATER_CR          5
