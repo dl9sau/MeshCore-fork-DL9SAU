@@ -1332,114 +1332,20 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.direct_tx_delay_factor <= 0.0f || _prefs.direct_tx_delay_factor > 2.0f) {
     _prefs.direct_tx_delay_factor = 0.2f;
   }
-  // Scope-Registry Pre-Population (Liste A).
-  //
-  // Bundeslaender (zwei-Buchstaben-ISO) bekommen "de-"-Prefix:
-  //   de-be    Berlin
-  //   de-bebb  Berlin+Brandenburg (kombinierter Scope)
-  // Geografisch/kulturell uebergreifende Regionen bleiben ohne Prefix:
-  //   ostfriesland  (analog zu harz, hansemesh, franken usw.)
-  //
-  // Default-Flags: sticky (kein geo_managed) und NICHT in Repeat-Liste.
-  // Damit ist nach Boot zwar das Wissen ueber die Regionen da, aber kein
-  // Repeating aktiv bis der User explizit 'scope repeater add <name>' macht.
   if (_prefs.repeat_scope_mode > REPEAT_SCOPE_MODE_ALLOWLIST) {
     _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
   }
-  {
-    // Kanonische Pre-Population-Eintraege mit ihren Default-Bboxen.
-    struct PrepopEntry {
-      const char* name;
-      float lat_min, lat_max, lon_min, lon_max;
-    };
-    static const PrepopEntry prepop[] = {
-      // de-bebb (Bridge Berlin+Brandenburg) und de-bb (Brandenburg) teilen
-      // die Bbox — Berlin liegt geografisch ganz in Brandenburg. Beide
-      // pre-populiert, damit der User je nach Sende-Absicht (broad vs.
-      // strictly-Brandenburg) den richtigen Scope-Namen verwendet.
-      { "de-bebb",      CR_BBOX_BEBB_LAT_MIN,  CR_BBOX_BEBB_LAT_MAX,
-                        CR_BBOX_BEBB_LON_MIN,  CR_BBOX_BEBB_LON_MAX  },
-      { "de-bb",        CR_BBOX_BEBB_LAT_MIN,  CR_BBOX_BEBB_LAT_MAX,
-                        CR_BBOX_BEBB_LON_MIN,  CR_BBOX_BEBB_LON_MAX  },
-      { "de-be",        CR_BBOX_DE_BE_LAT_MIN, CR_BBOX_DE_BE_LAT_MAX,
-                        CR_BBOX_DE_BE_LON_MIN, CR_BBOX_DE_BE_LON_MAX },
-      { "ostfriesland", CR_BBOX_OSTFR_LAT_MIN, CR_BBOX_OSTFR_LAT_MAX,
-                        CR_BBOX_OSTFR_LON_MIN, CR_BBOX_OSTFR_LON_MAX },
-    };
-    bool migrated = false;
 
-    // Alter Bug: "bebb" war falsch (es heisst "de-bebb"). In-Place-
-    // Rename + Key-Neuberechnung, damit alle User-Flags erhalten bleiben
-    // aber der Hash zum richtigen Wire-Namen passt. Falls "de-bebb" schon
-    // existiert (z.B. weil User selbst angelegt), lassen wir "bebb" in
-    // Ruhe — der User entscheidet selbst was er damit macht.
-    int idx_old = findScopeRegistryByName("bebb");
-    if (idx_old >= 0 && findScopeRegistryByName("de-bebb") < 0) {
-      ScopeRegEntry& e = _prefs.scope_registry[idx_old];
-      strncpy(e.name, "de-bebb", sizeof(e.name) - 1);
-      e.name[sizeof(e.name) - 1] = 0;
-      char tag[40]; snprintf(tag, sizeof(tag), "#%s", e.name);
-      TransportKey k; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, k);
-      memcpy(e.key, k.key, sizeof(e.key));
-      migrated = true;
-    }
-
-    // Kanonische Eintraege:
-    //   - fehlt komplett        -> hinzufuegen (mit Default-Bbox)
-    //   - existiert OHNE Bbox   -> Default-Bbox nachtragen + HAS_GEO_BOX-
-    //                              Flag setzen. Use-Case: User hat per
-    //                              'scope add <name>' ohne geo-Argument
-    //                              angelegt. Custom-Bbox (HAS_GEO_BOX
-    //                              gesetzt) bleibt unangetastet.
-    for (size_t i = 0; i < sizeof(prepop)/sizeof(prepop[0]); i++) {
-      const PrepopEntry& p = prepop[i];
-      int idx = findScopeRegistryByName(p.name);
-      if (idx < 0) {
-        if (_prefs.scope_registry_count < SCOPE_REG_SLOTS) {
-          addScopeRegistryDefault(p.name,
-                                  p.lat_min, p.lat_max, p.lon_min, p.lon_max);
-          migrated = true;
-        }
-      } else if (!(_prefs.scope_registry[idx].flags & SCOPE_FLAG_HAS_GEO_BOX)) {
-        ScopeRegEntry& e = _prefs.scope_registry[idx];
-        // Bbox + GEO_MANAGED zusammen setzen (Opt-Out-Modell). User
-        // kann GEO_MANAGED danach explizit per 'scope repeater geo
-        // <name> off' wieder ausschalten.
-        e.flags         |= SCOPE_FLAG_HAS_GEO_BOX | SCOPE_FLAG_GEO_MANAGED;
-        e.bbox_lat_min  = p.lat_min;
-        e.bbox_lat_max  = p.lat_max;
-        e.bbox_lon_min  = p.lon_min;
-        e.bbox_lon_max  = p.lon_max;
-        migrated = true;
-      }
-    }
-
-    // Erweiterte Migration: ALLE existierenden Registry-Eintraege ohne
-    // HAS_GEO_BOX gegen die Build-in dl9sau_regions-Tabelle pruefen. Wenn
-    // dort ein Match nach Name -> Bbox + GEO_MANAGED nachtragen. Damit
-    // werden auch User-Eintraege wie 'scope add de-ni' (vor diesem Commit
-    // ohne Bbox angelegt) one-shot upgradet, ohne dass der User remove
-    // und re-add machen muss.
-    for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
-      ScopeRegEntry& e = _prefs.scope_registry[i];
-      if (e.flags & SCOPE_FLAG_HAS_GEO_BOX) continue;
-      double a_lat1, a_lat2, a_lon1, a_lon2;
-      if (dl9sau_lookup_region_bbox(e.name,
-                                    &a_lat1, &a_lat2, &a_lon1, &a_lon2)) {
-        e.flags |= SCOPE_FLAG_HAS_GEO_BOX | SCOPE_FLAG_GEO_MANAGED;
-        e.bbox_lat_min = (float)a_lat1; e.bbox_lat_max = (float)a_lat2;
-        e.bbox_lon_min = (float)a_lon1; e.bbox_lon_max = (float)a_lon2;
-        migrated = true;
-      }
-    }
-
-    if (migrated) _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
-  }
-
-  // ----- Scope-Architektur-Pivot Migration (Wunschliste 11, Schritt 3) -----
-  // Kopiert alte scope_registry in die neuen Storages. Wird in den Helper
-  // syncScopePivotFromLegacy() ausgelagert damit die Migration auch nach
-  // CLI-Aenderungen an scope_registry (alte Pfade) erneut laufen kann.
+  // ----- Scope-Architektur-Pivot Migration (Wunschliste 11, Schritt 8) -----
+  // One-shot: kopiert eventuell-noch-vorhandene scope_registry-Daten in
+  // die neuen Storages und draint danach scope_registry_count = 0. Auf
+  // nachfolgenden Boots ist count=0 und dieser Helper ist no-op.
+  //
+  // Kanonische Region-Eintraege (de, de-by, ..., de-bebb, ostfriesland,
+  // local, region usw.) brauchen keine Pre-Population mehr — sie kommen
+  // aus der Build-in-Tabelle (dl9sau_geo_recommendations.cpp) und sind
+  // out-of-the-box im Repeat-Set (Default-Status AUTO bzw. Pin fuer
+  // local/lokal/region/regional).
   if (syncScopePivotFromLegacy()) {
     _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
@@ -3174,71 +3080,6 @@ void MyMesh::computeScopeHash(const char* name, uint8_t out_hash[4]) const {
   memcpy(out_hash, k.key, 4);
 }
 
-int MyMesh::findScopeRegistryByName(const char* name) const {
-  if (!name || *name == 0) return -1;
-  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
-    if (strncmp(_prefs.scope_registry[i].name, name,
-                sizeof(_prefs.scope_registry[i].name)) == 0) return i;
-  }
-  return -1;
-}
-
-int MyMesh::findScopeRegistryByHash(const uint8_t hash[4]) const {
-  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
-    if (memcmp(_prefs.scope_registry[i].key, hash, 4) == 0) return i;
-  }
-  return -1;
-}
-
-int MyMesh::addScopeRegistryDefault(const char* name, float lat_min, float lat_max,
-                                    float lon_min, float lon_max) {
-  if (_prefs.scope_registry_count >= SCOPE_REG_SLOTS) return -1;
-  if (findScopeRegistryByName(name) >= 0) return -1;
-  int slot = _prefs.scope_registry_count;
-  ScopeRegEntry& e = _prefs.scope_registry[slot];
-  memset(&e, 0, sizeof(e));
-  size_t nlen = strlen(name);
-  if (nlen >= sizeof(e.name)) nlen = sizeof(e.name) - 1;
-  memcpy(e.name, name, nlen);
-  e.name[nlen] = 0;
-  // Voller TransportKey ablegen (16 Byte) — fuer calcTransportCode-Match.
-  char tag[40];
-  snprintf(tag, sizeof(tag), "#%s", e.name);
-  TransportKey k;
-  TransportKeyStore tmp;
-  tmp.getAutoKeyFor(0, tag, k);
-  memcpy(e.key, k.key, sizeof(e.key));
-  e.flags = SCOPE_FLAG_HAS_GEO_BOX;   // sticky, NICHT im Repeat-Set
-  e.bbox_lat_min = lat_min;
-  e.bbox_lat_max = lat_max;
-  e.bbox_lon_min = lon_min;
-  e.bbox_lon_max = lon_max;
-  _prefs.scope_registry_count++;
-  return slot;
-}
-
-void MyMesh::evaluateGeoManagedEntries(double lat, double lon) {
-  bool dirty = false;
-  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
-    ScopeRegEntry& e = _prefs.scope_registry[i];
-    if (!(e.flags & SCOPE_FLAG_GEO_MANAGED)) continue;
-    if (!(e.flags & SCOPE_FLAG_HAS_GEO_BOX)) continue;
-    bool inside = (lat >= e.bbox_lat_min && lat <= e.bbox_lat_max
-                   && lon >= e.bbox_lon_min && lon <= e.bbox_lon_max);
-    bool was_in = (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) != 0;
-    if (inside && !was_in) {
-      e.flags |= SCOPE_FLAG_IN_REPEAT_LIST;
-      dirty = true;
-      traceCompanion(TRACE_SCOPE, "[scope] #%s entered bbox -> repeat ON", e.name);
-    } else if (!inside && was_in) {
-      e.flags &= ~SCOPE_FLAG_IN_REPEAT_LIST;
-      dirty = true;
-      traceCompanion(TRACE_SCOPE, "[scope] #%s left bbox -> repeat OFF", e.name);
-    }
-  }
-  if (dirty) savePrefs();
-}
-
 // ----- Scope-Pivot Migration Helper (Wunschliste 11 Schritt 5) -------------
 //
 // Idempotente Migration: kopiert alte scope_registry in
@@ -3314,19 +3155,30 @@ bool MyMesh::syncScopePivotFromLegacy() {
    || (old_extras_count != _prefs.scope_extras_count)
    || (memcmp(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap)) != 0);
 
+  // Wunschliste 11 Schritt 8: nach Erfolg legacy scope_registry drainen.
+  // Damit ist die Migration one-shot — auf naechstem Boot ist count=0 und
+  // dieser Helper macht nichts. CLI-Aenderungen schreiben nicht mehr nach
+  // scope_registry (siehe 'scope add'/'remove'), also kann uns hier auch
+  // nichts mehr "verwirren". Das raeumt den frueheren Bug aus, dass dieser
+  // Sync USER_DELETED/Repeat-Aenderungen aus scope_buildin_status
+  // weggewischt hat.
+  if (_prefs.scope_registry_count > 0) {
+    _prefs.scope_registry_count = 0;
+    memset(_prefs.scope_registry, 0, sizeof(_prefs.scope_registry));
+    changed = true;
+  }
+
   // Hinweis: kein internes _store->savePrefs() — der Aufrufer entscheidet
   // ob/wann gespeichert wird (vermeidet Doppel-Saves wenn aus savePrefs()
   // selbst heraus aufgerufen).
   return changed;
 }
 
-// ----- Bbox-Membership-Update fuer neue Storage (Wunschliste 11 Schritt 5) -
-//
+// ----- Bbox-Membership-Update -----
 // Iteriert beide Storages, prueft fuer jeden Eintrag mit Bbox ob die
 // aktuelle Position drin liegt, schreibt das Ergebnis in
-// _buildin_in_bbox[] / _extras_in_bbox[]. Komplement zu
-// evaluateGeoManagedEntries() (welche das alte IN_REPEAT_LIST-Flag
-// pflegt) — beide laufen parallel waehrend der dual-storage-Phase.
+// _buildin_in_bbox[] / _extras_in_bbox[]. Aufruf vom Motion-Tracker
+// nach jedem Anker-Update.
 void MyMesh::evaluateScopeBboxes(double lat, double lon) {
   // Build-in
   for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
@@ -3782,9 +3634,7 @@ void MyMesh::updateMotionTracking() {
     _pos_anchor_lat = cur_lat;
     _pos_anchor_lon = cur_lon;
     _pos_anchor_millis = now;
-    // Wir wissen jetzt erstmalig wo wir sind — geo_managed-Eintraege
-    // gegen die aktuelle Position evaluieren (Wunschliste 4d Sub-Punkt).
-    evaluateGeoManagedEntries(cur_lat, cur_lon);
+    // Position erstmals bekannt — Scope-Bbox-Membership evaluieren.
     evaluateScopeBboxes(cur_lat, cur_lon);
     return;
   }
@@ -3807,10 +3657,9 @@ void MyMesh::updateMotionTracking() {
     if (!was_moving && _is_moving) {
       next_periodic_advert_at = millis();
     }
-    // Position-Anker wurde gerade frisch gesetzt — geo_managed-Eintraege
-    // neu bewerten. Das 370m-Anker-Update wirkt als Hysterese; ohne
-    // signifikante Distanz wird hier sowieso nicht reingegangen.
-    evaluateGeoManagedEntries(cur_lat, cur_lon);
+    // Position-Anker frisch — Scope-Bbox-Membership neu bewerten.
+    // Das 370m-Anker-Update wirkt als Hysterese (Aufruf nur bei
+    // signifikanter Distanz).
     evaluateScopeBboxes(cur_lat, cur_lon);
   }
 #else
@@ -5188,21 +5037,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.trace_flags_persistent = 0;
       _prefs.gps_power_mode = 0;
       _prefs.gps_lead_min = 5;
-      // repeat_scope_mode auf ALL (Default). Registry-Inhalte bleiben
-      // erhalten — pre-populated + user-curated Namen sollen nicht durch
-      // einen prefs-reset verloren gehen. Aber die Policy-Flags pro
-      // Eintrag (IN_REPEAT_LIST, GEO_MANAGED) werden gecleared, damit
-      // der reset auch das Repeat-Verhalten neutralisiert.
+      // repeat_scope_mode auf ALL (Default). Scope-User-Customizations
+      // (scope_buildin_status + scope_extras) bleiben erhalten — User
+      // soll sie nicht durch einen prefs-reset verlieren. Wer das auch
+      // los werden will: 'scope <name> repeat off|delete' pro Eintrag,
+      // bzw. 'scope remove <name>' fuer Extras.
       _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
-      for (int i = 0; i < _prefs.scope_registry_count; i++) {
-        _prefs.scope_registry[i].flags &= ~(SCOPE_FLAG_IN_REPEAT_LIST
-                                             | SCOPE_FLAG_GEO_MANAGED
-                                             | SCOPE_FLAG_DISABLED);
-      }
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
-      pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt. "
-                           "Registry-Eintraege bleiben, Repeat-Flags gecleared.");
+      pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.\n"
+                           "Scope-Customizations bleiben (separate Befehle).");
       return;
     }
 
@@ -5339,25 +5183,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.repeat_scope_mode != REPEAT_SCOPE_MODE_ALL) non_default_count++;
     }
-    // scope_registry: immer anzeigen (pre-populated Eintraege gehoeren auch
-    // zur Konfiguration und sind editierbar). show_all zusaetzlich macht
-    // keinen Unterschied — die Liste ist immer komplett.
-    if (_prefs.scope_registry_count > 0) {
-      snprintf(tmp, sizeof(tmp), "  scope_registry = %u/%u (siehe 'scope list')",
-               (unsigned)_prefs.scope_registry_count, (unsigned)SCOPE_REG_SLOTS);
+    // Hinweis: Scope-Liste hier nicht mehr inline. 'scope list' /
+    // 'scope rep' zeigen die User-Customizations + Extras getrennt.
+    if (_prefs.scope_buildin_status_count > 0 || _prefs.scope_extras_count > 0) {
+      snprintf(tmp, sizeof(tmp),
+               "  scope = %u customs / %u extras (siehe 'scope list')",
+               (unsigned)_prefs.scope_buildin_status_count,
+               (unsigned)_prefs.scope_extras_count);
       add_line(tmp);
-      for (int i = 0; i < _prefs.scope_registry_count; i++) {
-        const ScopeRegEntry& e = _prefs.scope_registry[i];
-        uint8_t marks = e.flags & (SCOPE_FLAG_IN_REPEAT_LIST | SCOPE_FLAG_GEO_MANAGED);
-        char flagstr[12] = "";
-        if (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) strcat(flagstr, "R");
-        if (e.flags & SCOPE_FLAG_DISABLED)      strcat(flagstr, "D");
-        if (e.flags & SCOPE_FLAG_GEO_MANAGED)   strcat(flagstr, "G");
-        if (e.flags & SCOPE_FLAG_HAS_GEO_BOX)   strcat(flagstr, "b");
-        snprintf(tmp, sizeof(tmp), "    #%s  [%s]", e.name, flagstr[0] ? flagstr : "-");
-        add_line(tmp);
-        if (marks != 0) non_default_count++;
-      }
     }
 
     if (!show_all && non_default_count == 0) {
@@ -6475,12 +6308,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             "stattdessen 'scope remove <name>' (loescht den Eintrag).");
           return;
         }
-        if (aidx == 4) status |=  SCOPE_STATUS_USER_DELETED;
-        else           status &= ~SCOPE_STATUS_USER_DELETED;
+        if (aidx == 4) {
+          // delete: USER_DELETED + repeat zwingend OFF (sonst bliebe ein
+          // alter Pin (P) bestehen und der Eintrag wuerde weiter repeated).
+          status |= SCOPE_STATUS_USER_DELETED;
+          status = (status & ~SCOPE_STATUS_REPEAT_MASK) | SCOPE_STATUS_REPEAT_OFF;
+        } else {
+          // undelete: USER_DELETED loeschen, repeat auf AUTO (= 0, default).
+          // User kann danach explizit auf 'on'/'off' setzen.
+          status &= ~SCOPE_STATUS_USER_DELETED;
+          status = (status & ~SCOPE_STATUS_REPEAT_MASK) | SCOPE_STATUS_REPEAT_AUTO;
+        }
         setScopeStatus(ref, status);
         savePrefs();
         char r[100]; snprintf(r, sizeof(r), "OK - #%s %s",
-                              name, (aidx == 4) ? "deleted (versteckt)" : "undeleted");
+                              name,
+                              (aidx == 4) ? "deleted (versteckt, repeat=off)"
+                                          : "undeleted (repeat=auto)");
         pushCompanionMessage(r);
         return;
       }
@@ -6715,15 +6559,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // -- add <name> [geo <lat1,lon1,lat2,lon2>] (Registry) --
+    // -- add <name> [<lat1,lon1,lat2,lon2>] (User-Extras) --
+    // Wunschliste 11 Schritt 8: schreibt direkt in scope_extras (nicht
+    // mehr ueber Legacy-scope_registry-Buffer + Migration). Build-in-
+    // Namen werden abgewiesen — die haben ihren Slot in der Build-in-
+    // Tabelle und werden via 'scope <name> repeat on/off' gesteuert.
     if (sub_idx == 4) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ') p++; }
       if (!p || *p == 0) {
         pushCompanionMessage(
           "Usage: scope add <name> [<lat_min,lon_min,lat_max,lon_max>]\n"
-          "Bekannte Namen aus der Build-in-Tabelle bekommen die Bbox\n"
-          "automatisch (siehe 'scope regions').");
+          "Fuer Build-in-Namen (siehe 'scope regions') stattdessen\n"
+          "'scope <name> repeat on' verwenden.");
         return;
       }
       char name[16];
@@ -6731,24 +6579,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("Name ungueltig: erlaubt [a-z0-9-_], 1..15 Zeichen, kein '##'.");
         return;
       }
-      if (findScopeRegistryByName(name) >= 0) {
-        char r[80]; snprintf(r, sizeof(r), "#%s ist schon in der Registry.", name);
+      // Build-in -> ablehnen mit Hinweis
+      if (dl9sau_find_region_index(name) >= 0) {
+        char r[120]; snprintf(r, sizeof(r),
+          "#%s ist Build-in. 'scope %s repeat on' zum Pinnen,\n"
+          "'scope regions' fuer Bbox-Detail.", name, name);
         pushCompanionMessage(r); return;
       }
-      if (_prefs.scope_registry_count >= SCOPE_REG_SLOTS) {
-        char r[80]; snprintf(r, sizeof(r), "Registry voll (max %d).", SCOPE_REG_SLOTS);
+      // Schon in Extras?
+      ScopeRef existing = findScopeByName(name);
+      if (existing.storage == SCOPE_EXTRAS) {
+        char r[80]; snprintf(r, sizeof(r), "#%s ist schon in den Extras.", name);
         pushCompanionMessage(r); return;
       }
-      // optional: "geo lat,lon,lat,lon" Token nach dem name
+      if (_prefs.scope_extras_count >= SCOPE_EXTRAS_SLOTS) {
+        char r[80]; snprintf(r, sizeof(r),
+          "Extras voll (max %u).", (unsigned)SCOPE_EXTRAS_SLOTS);
+        pushCompanionMessage(r); return;
+      }
       bool has_geo = false;
       float lat_min=0, lat_max=0, lon_min=0, lon_max=0;
       const char* q = p;
       while (*q && *q != ' ' && *q != '\t') q++;
       while (*q == ' ' || *q == '\t') q++;
-      // Vereinfachte Syntax: 'scope add <name> <lat_min,lon_min,lat_max,lon_max>'
-      // (kein 'geo'-Keyword mehr noetig). Altes 'scope add <name> geo <bbox>'
-      // bleibt aus Backward-Compat erkannt — wir strippen das geo-Wort
-      // einfach und parsen die folgenden vier Floats.
+      // 'geo'-Keyword (Backward-Compat) wird stillschweigend uebersprungen
       if (starts_with_word(q, "geo")) {
         q = strchr(q, ' ');
         if (q) { while (*q == ' ') q++; }
@@ -6768,26 +6622,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         has_geo = true;
       }
-      // Wenn User keine 'geo'-Option mitgegeben hat: in der Build-in-
-      // Region-Tabelle (dl9sau_geo_recommendations.cpp) lookuppen.
-      // Bundeslaender (de-by, de-ni, de-nw, ...), Aggregate (de-nord,
-      // de-west, de-ost, ...), top-level (de, europe) und specials
-      // (de-bebb, de-bb, ostfriesland) sind dort definiert.
-      // 'scope add <name>' soll fuer den User direkt funktionieren ohne
-      // dass er die Koordinaten selbst kennen muss.
-      const char* auto_src = NULL;
-      if (!has_geo) {
-        double a_lat1, a_lat2, a_lon1, a_lon2;
-        if (dl9sau_lookup_region_bbox(name, &a_lat1, &a_lat2, &a_lon1, &a_lon2)) {
-          lat_min = (float)a_lat1; lat_max = (float)a_lat2;
-          lon_min = (float)a_lon1; lon_max = (float)a_lon2;
-          has_geo = true;
-          auto_src = " (Default-Bbox aus Build-in-Tabelle)";
-        }
-      }
 
-      int slot = _prefs.scope_registry_count;
-      ScopeRegEntry& e = _prefs.scope_registry[slot];
+      // Slot belegen
+      int slot = _prefs.scope_extras_count;
+      ScopeRegEntry& e = _prefs.scope_extras[slot];
       memset(&e, 0, sizeof(e));
       strncpy(e.name, name, sizeof(e.name) - 1);
       char tag[40]; snprintf(tag, sizeof(tag), "#%s", e.name);
@@ -6795,37 +6633,33 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memcpy(e.key, k.key, sizeof(e.key));
       e.flags = 0;
       if (has_geo) {
-        // Bbox + GEO_MANAGED gleichzeitig setzen (Opt-Out-Modell):
-        // Sobald ein Eintrag eine Bbox hat, ist er per Default auto-
-        // managed. User kann via 'scope repeater geo <name> off' das
-        // Auto-Add unterdruecken (z.B. Traffic-Kontrolle).
+        // Opt-Out-Modell: hat Bbox -> auto-managed (AUTO-Repeat in Bbox).
+        // User kann via 'scope <name> repeat on/off' explizit pinnen/aus.
         e.flags |= SCOPE_FLAG_HAS_GEO_BOX | SCOPE_FLAG_GEO_MANAGED;
         e.bbox_lat_min = lat_min; e.bbox_lat_max = lat_max;
         e.bbox_lon_min = lon_min; e.bbox_lon_max = lon_max;
       }
-      _prefs.scope_registry_count++;
+      _prefs.scope_extras_count++;
       savePrefs();
-      // Sofort gegen aktuelle Position evaluieren — analog zur Logik
-      // in 'scope repeater geo <name> on'. Bei Treffer landet der Eintrag
-      // direkt in der Repeat-Liste.
+      // Bbox-Membership sofort updaten — sonst sieht scopeAllowedForRepeat
+      // bis zum naechsten GPS-Tick noch in_bbox=false fuer den neuen Slot.
       if (has_geo) {
         double cur_lat, cur_lon;
         if (getEffectiveLatLon(cur_lat, cur_lon)) {
-          evaluateGeoManagedEntries(cur_lat, cur_lon);
-    evaluateScopeBboxes(cur_lat, cur_lon);
+          evaluateScopeBboxes(cur_lat, cur_lon);
         }
       }
-      char r[160];
-      snprintf(r, sizeof(r), "OK - #%s in Registry (Slot %d%s%s%s).",
+      char r[120];
+      snprintf(r, sizeof(r), "OK - #%s in Extras (Slot %d%s).",
                e.name, slot,
-               has_geo ? ", mit Bbox" : "",
-               has_geo ? ", auto-managed" : "",
-               auto_src ? auto_src : "");
+               has_geo ? ", mit Bbox + auto-managed" : "");
       pushCompanionMessage(r);
       return;
     }
 
-    // -- remove <name> (Registry) --
+    // -- remove <name> (User-Extras) --
+    // Wunschliste 11 Schritt 8: entfernt aus scope_extras, kompaktiert.
+    // Build-in-Namen: USER_DELETED-Bit setzen statt entfernen.
     if (sub_idx == 5) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ') p++; }
@@ -6835,19 +6669,37 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("Name ungueltig.");
         return;
       }
-      int idx = findScopeRegistryByName(name);
-      if (idx < 0) {
-        char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
+      ScopeRef ref = findScopeByName(name);
+      if (ref.storage == SCOPE_BUILDIN) {
+        // Build-in -> als user_deleted markieren (Slot bleibt sticky in
+        // scope_buildin_status). Vorher abklappern damit andere Status-
+        // Bits erhalten bleiben.
+        uint8_t st = getBuildinStatus(ref.idx);
+        st |= SCOPE_STATUS_USER_DELETED;
+        // Repeat ausschalten — sonst wirkt USER_DELETED nicht.
+        st = (st & ~SCOPE_STATUS_REPEAT_MASK) | SCOPE_STATUS_REPEAT_OFF;
+        setBuildinStatus(ref.idx, st);
+        savePrefs();
+        char r[120]; snprintf(r, sizeof(r),
+          "OK - #%s (Build-in) als 'user_deleted' markiert.\n"
+          "Mit 'scope %s repeat auto' wieder reaktivieren.", name, name);
         pushCompanionMessage(r); return;
       }
-      // Kompaktion: alle nachfolgenden Eintraege um eins nach vorne ziehen
-      for (int i = idx; i < _prefs.scope_registry_count - 1; i++) {
-        _prefs.scope_registry[i] = _prefs.scope_registry[i + 1];
+      if (ref.storage != SCOPE_EXTRAS) {
+        char r[80]; snprintf(r, sizeof(r), "#%s nicht in den Extras.", name);
+        pushCompanionMessage(r); return;
       }
-      _prefs.scope_registry_count--;
-      memset(&_prefs.scope_registry[_prefs.scope_registry_count], 0, sizeof(ScopeRegEntry));
+      int idx = ref.idx;
+      // Kompaktion: alle nachfolgenden Slots um eins nach vorne
+      for (int i = idx; i < _prefs.scope_extras_count - 1; i++) {
+        _prefs.scope_extras[i] = _prefs.scope_extras[i + 1];
+        _extras_in_bbox[i]     = _extras_in_bbox[i + 1];
+      }
+      _prefs.scope_extras_count--;
+      memset(&_prefs.scope_extras[_prefs.scope_extras_count], 0, sizeof(ScopeRegEntry));
+      _extras_in_bbox[_prefs.scope_extras_count] = false;
       savePrefs();
-      char r[80]; snprintf(r, sizeof(r), "OK - #%s aus Registry entfernt.", name);
+      char r[80]; snprintf(r, sizeof(r), "OK - #%s aus Extras entfernt.", name);
       pushCompanionMessage(r);
       return;
     }
@@ -7031,29 +6883,33 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           }
           gflush();
           pushCompanionMessage(
-            "Legende: (A)=auto, aktiv (Bbox-Match),\n"
-            "(A-)=auto, inaktiv (kein Bbox-Match),\n"
-            "(P)=pin, (D)=disabled");
+            "Legende: (A)=aktiv (auto Bbox),\n"
+            "(A-)=inaktiv (auto Bbox),\n"
+            "(P)=pin (immer aktiv), (D)=disabled\n"
+            "Umschalten: scope <name> repeat auto|on|off");
         }
         return;
       }
 
+      // Wunschliste 11 Schritt 8: nur 'mode' bleibt als rep-Sub-Aktion.
+      // add/remove/geo/enable/disable wurden durch das per-Name CLI
+      // ersetzt: 'scope <name> repeat on|off|auto', 'scope <name> disable'.
       static const CompanionChoice rep_subs[] = {
         { "mode",    false },  // 0
-        { "add",     false },  // 1
-        { "remove",  true  },  // 2 no_abbrev
-        { "geo",     false },  // 3
-        { "enable",  false },  // 4
-        { "disable", false },  // 5 (Tippfehler kostet hier nichts — nur Flag-Toggle)
       };
       char rep_ambig[60];
-      int rs = match_choice(sub, rep_subs, 6, rep_ambig, sizeof(rep_ambig));
+      int rs = match_choice(sub, rep_subs, 1, rep_ambig, sizeof(rep_ambig));
       if (rs == -1) {
         char r[100]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rep_ambig);
         pushCompanionMessage(r); return;
       }
       if (rs < 0) {
-        pushCompanionMessage("Unbekannte Sub-Aktion. 'scope rep ?' fuer Sub-Befehle.");
+        pushCompanionMessage(
+          "Sub-Aktion unbekannt. Per-Eintrag jetzt:\n"
+          "  scope <name> repeat on|off|auto\n"
+          "  scope <name> advert on|off\n"
+          "  scope <name> disable | delete\n"
+          "Global:  scope repeater mode all|allowlist");
         return;
       }
 
@@ -7073,149 +6929,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         savePrefs();
         pushCompanionMessage(mm == 0 ? "OK - scope repeater mode = all"
                                      : "OK - scope repeater mode = allowlist");
-        return;
-      }
-
-      // -- repeater add <name> --
-      if (rs == 1) {
-        const char* nv = strchr(sub, ' ');
-        if (nv) { while (*nv == ' ') nv++; }
-        if (!nv || *nv == 0) { pushCompanionMessage("Usage: scope repeater add <name>"); return; }
-        char name[16];
-        if (!normalizeScopeName(nv, name, sizeof(name))) { pushCompanionMessage("Name ungueltig."); return; }
-        int idx = findScopeRegistryByName(name);
-        if (idx < 0) {
-          char r[100]; snprintf(r, sizeof(r), "#%s nicht in Registry. Erst 'scope add %s'.", name, name);
-          pushCompanionMessage(r); return;
-        }
-        if (_prefs.scope_registry[idx].flags & SCOPE_FLAG_IN_REPEAT_LIST) {
-          char r[80]; snprintf(r, sizeof(r), "#%s ist schon in repeat-list.", name);
-          pushCompanionMessage(r); return;
-        }
-        _prefs.scope_registry[idx].flags |= SCOPE_FLAG_IN_REPEAT_LIST;
-        // Beim (Re-)Add aktiv setzen — Disabled wuerde sonst silent uebernommen.
-        _prefs.scope_registry[idx].flags &= ~SCOPE_FLAG_DISABLED;
-        savePrefs();
-        char r[80]; snprintf(r, sizeof(r), "OK - #%s in repeat-list aufgenommen.", name);
-        pushCompanionMessage(r);
-        return;
-      }
-
-      // -- repeater remove <name> --
-      if (rs == 2) {
-        const char* nv = strchr(sub, ' ');
-        if (nv) { while (*nv == ' ') nv++; }
-        if (!nv || *nv == 0) { pushCompanionMessage("Usage: scope repeater remove <name>"); return; }
-        char name[16];
-        if (!normalizeScopeName(nv, name, sizeof(name))) { pushCompanionMessage("Name ungueltig."); return; }
-        int idx = findScopeRegistryByName(name);
-        if (idx < 0) {
-          char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
-          pushCompanionMessage(r); return;
-        }
-        if (!(_prefs.scope_registry[idx].flags & SCOPE_FLAG_IN_REPEAT_LIST)) {
-          char r[80]; snprintf(r, sizeof(r), "#%s war nicht in repeat-list.", name);
-          pushCompanionMessage(r); return;
-        }
-        _prefs.scope_registry[idx].flags &= ~SCOPE_FLAG_IN_REPEAT_LIST;
-        savePrefs();
-        char r[80]; snprintf(r, sizeof(r), "OK - #%s aus repeat-list entfernt.", name);
-        pushCompanionMessage(r);
-        return;
-      }
-
-      // -- repeater geo <name> on|off --
-      if (rs == 3) {
-        const char* nv = strchr(sub, ' ');
-        if (nv) { while (*nv == ' ') nv++; }
-        if (!nv || *nv == 0) { pushCompanionMessage("Usage: scope repeater geo <name> on|off"); return; }
-        char name[16];
-        if (!normalizeScopeName(nv, name, sizeof(name))) { pushCompanionMessage("Name ungueltig."); return; }
-        int idx = findScopeRegistryByName(name);
-        if (idx < 0) {
-          char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
-          pushCompanionMessage(r); return;
-        }
-        const ScopeRegEntry& e0 = _prefs.scope_registry[idx];
-        if (!(e0.flags & SCOPE_FLAG_HAS_GEO_BOX)) {
-          char r[100]; snprintf(r, sizeof(r), "#%s hat keine Geo-Box — geo_managed nicht moeglich.", name);
-          pushCompanionMessage(r); return;
-        }
-        const char* mv = nv;
-        while (*mv && *mv != ' ') mv++;
-        while (*mv == ' ') mv++;
-        int gm = match_on_off(mv);
-        if (gm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
-        if (gm < 0)   { pushCompanionMessage("Usage: scope repeater geo <name> on|off"); return; }
-        if (gm == 1) _prefs.scope_registry[idx].flags |= SCOPE_FLAG_GEO_MANAGED;
-        else         _prefs.scope_registry[idx].flags &= ~SCOPE_FLAG_GEO_MANAGED;
-        savePrefs();
-        // Sofortige Position-Evaluation (analog zu scope add) — damit
-        // der User nicht auf den naechsten Motion-Tick warten muss.
-        bool pos_known = false;
-        bool in_bbox = false;
-        if (gm == 1) {
-          double cur_lat, cur_lon;
-          if (getEffectiveLatLon(cur_lat, cur_lon)) {
-            pos_known = true;
-            const ScopeRegEntry& e = _prefs.scope_registry[idx];
-            in_bbox = (cur_lat >= e.bbox_lat_min && cur_lat <= e.bbox_lat_max
-                       && cur_lon >= e.bbox_lon_min && cur_lon <= e.bbox_lon_max);
-            evaluateGeoManagedEntries(cur_lat, cur_lon);
-    evaluateScopeBboxes(cur_lat, cur_lon);
-          }
-        }
-        char r[160];
-        if (gm == 1) {
-          if (!pos_known) {
-            snprintf(r, sizeof(r), "OK - #%s geo_managed=on\n"
-                     "  keine Position bekannt - Auto-Add beim naechsten GPS-Fix", name);
-          } else if (in_bbox) {
-            snprintf(r, sizeof(r), "OK - #%s geo_managed=on\n"
-                     "  in Bbox -> jetzt in repeat-list", name);
-          } else {
-            snprintf(r, sizeof(r), "OK - #%s geo_managed=on\n"
-                     "  ausserhalb Bbox -> nicht in repeat-list (Auto-Add bei Eintritt)", name);
-          }
-        } else {
-          snprintf(r, sizeof(r), "OK - #%s geo_managed=off\n"
-                   "  Auto-Add deaktiviert; repeat-list-Zustand unveraendert", name);
-        }
-        pushCompanionMessage(r);
-        return;
-      }
-
-      // -- repeater enable/disable <name> (Flag SCOPE_FLAG_DISABLED togglen) --
-      if (rs == 4 || rs == 5) {
-        const char* nv = strchr(sub, ' ');
-        if (nv) { while (*nv == ' ') nv++; }
-        if (!nv || *nv == 0) {
-          pushCompanionMessage(rs == 4 ? "Usage: scope repeater enable <name>"
-                                       : "Usage: scope repeater disable <name>");
-          return;
-        }
-        char name[16];
-        if (!normalizeScopeName(nv, name, sizeof(name))) {
-          pushCompanionMessage("Name ungueltig."); return;
-        }
-        int idx = findScopeRegistryByName(name);
-        if (idx < 0) {
-          char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
-          pushCompanionMessage(r); return;
-        }
-        ScopeRegEntry& e = _prefs.scope_registry[idx];
-        if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) {
-          char r[100]; snprintf(r, sizeof(r),
-                   "#%s nicht in Repeat-Liste. Erst 'scope repeater add %s'.",
-                   name, name);
-          pushCompanionMessage(r); return;
-        }
-        if (rs == 4) e.flags &= ~SCOPE_FLAG_DISABLED;
-        else         e.flags |=  SCOPE_FLAG_DISABLED;
-        savePrefs();
-        char r[80]; snprintf(r, sizeof(r), "OK - #%s ist jetzt %s.",
-                 name, rs == 4 ? "aktiv" : "inaktiv (disabled)");
-        pushCompanionMessage(r);
         return;
       }
     }

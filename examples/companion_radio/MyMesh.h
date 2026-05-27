@@ -294,14 +294,13 @@ protected:
   }
 
 public:
-  // Wunschliste 11 Schritt 5: vor jedem flash-Write synchronisiert die
-  // alte scope_registry in die neuen Storages (sparse-status + extras).
-  // Migration ist idempotent + leicht (~2KB memcpy + 16 hash-rechnungen);
-  // kostet ein paar Mikrosekunden pro savePrefs, dafuer sind die neuen
-  // Konsumenten (scopeAllowedForRepeat, chooseGeoFallbackScope etc.) nach
-  // jeder CLI-Aenderung sofort up-to-date — kein reboot noetig.
+  // Wunschliste 11 Schritt 8: savePrefs ist jetzt thin-wrapper. Die alte
+  // scope_registry wird ausschliesslich noch in begin() als one-shot-
+  // Migration gelesen (syncScopePivotFromLegacy drain ihren count auf 0).
+  // CLI-Aenderungen schreiben direkt in scope_buildin_status / scope_extras,
+  // sodass kein post-save Resync mehr noetig ist — er wuerde sogar Schaden
+  // anrichten (USER_DELETED, repeat-Modus etc. ueberschreiben).
   void savePrefs() {
-    syncScopePivotFromLegacy();
     _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
 
@@ -385,17 +384,10 @@ private:
   bool getEffectiveLatLon(double& lat, double& lon) const;
   bool chooseGeoFallbackScope(TransportKey& out_key) const;
   bool chooseNightFloodScope(TransportKey& out_key) const;
-  // Scope-Registry (Liste A) Helpers.
+  // Scope-Helper.
   // normalize: strippt fuehrendes '#', lowercase, lehnt leer/"##"/zu-lang ab.
   bool normalizeScopeName(const char* in, char* out, size_t out_size) const;
   void computeScopeHash(const char* name, uint8_t out_hash[4]) const;
-  int  findScopeRegistryByName(const char* name) const;       // -1 wenn nicht gefunden
-  int  findScopeRegistryByHash(const uint8_t hash[4]) const;  // -1 wenn nicht gefunden
-  // Fuegt einen Eintrag mit Geo-Box ein (fuer Pre-Population beim ersten Boot).
-  // Returns Slot-Index oder -1 bei voll/Duplikat. Flags = HAS_GEO_BOX (sticky,
-  // nicht im Repeat-Set).
-  int  addScopeRegistryDefault(const char* name, float lat_min, float lat_max,
-                               float lon_min, float lon_max);
   // Repeat-Policy: liefert true wenn das Paket geforwarded werden darf
   // (entweder Mode=ALL oder Mode=ALLOWLIST und transport_code matcht
   // einen Eintrag mit IN_REPEAT_LIST-Flag). Aufrufer hat bereits
@@ -410,8 +402,8 @@ private:
   bool syncScopePivotFromLegacy();
 
   // Updated _buildin_in_bbox[] und _extras_in_bbox[] basierend auf der
-  // angegebenen Position. Komplement zu evaluateGeoManagedEntries
-  // (welche das alte IN_REPEAT_LIST-Flag setzt). Aufruf-Sites parallel.
+  // angegebenen Position. Wird vom Motion-Tracking gerufen wenn der
+  // 370m-Motion-Anker frisch gesetzt wird.
   void evaluateScopeBboxes(double lat, double lon);
 
   // ----- Scope-Architektur-Pivot Helpers (Wunschliste 11 Schritt 4) -----
@@ -455,13 +447,6 @@ private:
   bool getScopeBbox(const ScopeRef& ref,
                     double* lat_min, double* lat_max,
                     double* lon_min, double* lon_max) const;
-  // Iteriert Scope-Registry, vergleicht aktuelle (lat,lon) gegen die Bbox
-  // aller Eintraege mit SCOPE_FLAG_GEO_MANAGED + SCOPE_FLAG_HAS_GEO_BOX
-  // und setzt/loescht SCOPE_FLAG_IN_REPEAT_LIST entsprechend. Hysterese
-  // kommt aus dem Aufruf-Zeitpunkt — wir hooken in updateMotionTracking()
-  // an die Stellen, an denen der 370m-Motion-Anker frisch gesetzt wird.
-  // Bei Flag-Wechsel: savePrefs + TRACE_SCOPE-Log.
-  void evaluateGeoManagedEntries(double lat, double lon);
   void scheduleNextNightFlood();
   void doPeriodicZeroHopAdvert();
   void doNightFloodAdvert();
