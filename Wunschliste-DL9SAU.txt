@@ -364,34 +364,83 @@ Ist-Zustand:
   KEINE REQ_TYPE_GET_STATUS / GET_OWNER_INFO / GET_NEIGHBOURS.
   Real repeater haben diese Endpoints als Standard.
 
+Design-Leitsatz:
+  advert role IST der Modus. Wenn wir uns als X advertisen, antworten
+  wir auch wie X auf Discovery-Queries — sonst Verwirrung beim
+  anfragenden User. Es gibt also keinen separaten 'sensor-Mode'-
+  Schalter; 'advert role fixed sensor' setzt uns in den Sensor-Modus.
+
+Default-Matrix fuer 'advert role auto' (siehe Punkt 8 fuer profile):
+  +----------------+----------+---------------------+
+  | client_repeat  | profile  | auto liefert        |
+  +----------------+----------+---------------------+
+  | 0              | (n/a)    | CHAT                |
+  | 1              | defensive| CHAT                |
+  | 1              | normal   | REPEATER            |
+  +----------------+----------+---------------------+
+
+  Begruendung CHAT-Default im defensiv-Profil: der Companion chattet
+  primaer und leitet nur sekundaer weiter. Andere User sollen das
+  sehen ('chat-tauglich'). Erst im full-Modus advertet er als
+  Repeater. SENSOR und ROOM sind nur per 'fixed' erreichbar — beide
+  wuerden bei Auto-Detection User-Verwirrung erzeugen.
+
+Discovery-Response-Tabelle (Effective Role steuert):
+  +----------+---------------------------------------------------+
+  | Role     | Antwortet auf                                     |
+  +----------+---------------------------------------------------+
+  | CHAT     | nur ANON_REQ_TYPE_BASIC (Clock) — fuer Time-Sync   |
+  |          | nutzbar, sonst still                              |
+  | REPEATER | ANON_REQ_TYPE_OWNER, _REGIONS, _BASIC +           |
+  |          | REQ_TYPE_GET_STATUS, _GET_NEIGHBOURS,             |
+  |          | _GET_TELEMETRY_DATA — vollwertig                  |
+  | SENSOR   | REQ_TYPE_GET_TELEMETRY_DATA (Hauptzweck) +        |
+  |          | ANON_REQ_TYPE_BASIC                               |
+  | ROOM     | Room-Server-Protokolle (eigene Wunschliste 9)     |
+  +----------+---------------------------------------------------+
+
+Edge-Case (intentional): profile=defensive + 'advert role fixed
+repeater'. Wir advertisen als REPEATER, antworten auf REPEATER-
+Queries (Owner-Info, Scopes, Status) — bringt anderen Usern Kontakt-
+daten und Eindruck was der Repeater macht. Forward-Verhalten bleibt
+aber defensiv. RepeaterStats wuerde dann ggf. niedrige Digi-Count
+zeigen — informativ, nicht problematisch.
+
 Soll-Verhalten (Phasen):
 
   Phase 1 — owner_info Feld + Mirror
-    _prefs.owner_info[120] in NodePrefs anhaengen (CommonCLI-aequivalent).
+    _prefs.owner_info[120] in NodePrefs anhaengen (CommonCLI-aequiv.).
     'set owner_info <text>' + 'get owner_info' + 'get all'.
 
-  Phase 2 — ANON_REQ-Handler
+  Phase 2 — advert_role Konfiguration
+    _prefs.advert_role: 0=auto, 1=chat, 2=repeater, 3=sensor, 4=room.
+    'auto' folgt der Default-Matrix oben. Override createSelfAdvert()
+    in Companion-MyMesh.cpp. CLI:
+      advert role                       Status (Mode + effective Role)
+      advert role auto                  Auto-Modus aktiv
+      advert role fixed <type>          fix pinnen
+    Hilfsfunktion effectiveAdvertRole() liefert den aktuell gueltigen
+    Type — wird sowohl in createSelfAdvert() als auch im Discovery-
+    Handler verwendet (single source of truth).
+
+  Phase 3 — ANON_REQ-Handler (gated by effective role)
     handleAnonOwnerReq, handleAnonRegionsReq, handleAnonClockReq analog
-    zum simple_repeater einbauen — siehe examples/simple_repeater/
-    MyMesh.cpp:567. App-Standard-Discovery (Login -> Status-Anzeige)
-    funktioniert dann.
+    simple_repeater MyMesh.cpp:567. Aktive Untermenge wird per
+    effectiveAdvertRole() gewaehlt:
+      CHAT       -> nur _BASIC
+      REPEATER   -> alle drei
+      SENSOR     -> nur _BASIC
 
-  Phase 3 — REQ_TYPE_GET_STATUS
-    Authenticated-Request-Handler analog simple_repeater:218 +
-    RepeaterStats-Struktur (56 Byte Wire-Layout). Befuellung aus den
-    bestehenden _tx_advert_count/_tx_digi_count/radio_driver-Countern.
+  Phase 4 — REQ_TYPE_GET_STATUS etc. (gated by effective role)
+    Authenticated-Request-Handler analog simple_repeater:218 mit
+    RepeaterStats (56 Byte Wire-Layout). Aktive Untermenge:
+      REPEATER   -> GET_STATUS + GET_NEIGHBOURS + GET_TELEMETRY_DATA
+      SENSOR     -> nur GET_TELEMETRY_DATA (existiert teilweise schon,
+                    MyMesh.cpp:870)
+      CHAT       -> nichts
 
-  Phase 4 — advert_role Konfiguration
-    _prefs.advert_role: 0=auto, 1=chat, 2=repeater, 3=room, 4=sensor.
-    'auto' = ADV_TYPE_REPEATER wenn client_repeat=1, sonst ADV_TYPE_CHAT.
-    Override createSelfAdvert() in Companion-MyMesh.cpp. CLI:
-    'advert role <name>' / 'advert role'.
-
-Reihenfolge: Phasen 1+4 zuerst (klein, bringt sofort Sichtbarkeit in
-der App). Phasen 2+3 nachziehen wenn die Antworten auch substantiell
-sein sollen. Phase 3 koennte mittelfristig auch GET_NEIGHBOURS und
-GET_TELEMETRY_DATA einbeziehen — letzteres ist schon teilweise da
-(MyMesh.cpp:870).
+Reihenfolge: Phase 1+2 zuerst (klein, bringt sofort App-Sichtbarkeit).
+Phase 3+4 nachziehen sobald die Antworten substantiell werden sollen.
 
 Quelle: User-Frage in dieser Session, 2026-05-28.
 
@@ -440,4 +489,41 @@ Soll-Verhalten:
     - Eigene Auto-Advert Reduktion (orthogonal zum Repeat-Verhalten;
       sollte unabhaengig steuerbar sein, ggf. spaeter)
 
+Verzahnung mit Punkt 7 (advert_role):
+  Profile und Role sind unabhaengige Konfigs, aber 'advert role auto'
+  beruecksichtigt das Profile (siehe Default-Matrix in Punkt 7):
+    defensive + client_repeat=1 + role=auto  -> CHAT (chat-tauglich)
+    normal    + client_repeat=1 + role=auto  -> REPEATER (vollwertig)
+  User kann mit 'advert role fixed' das uebersteuern (s. Edge-Case
+  in Punkt 7).
+
 Quelle: User-Frage in dieser Session, 2026-05-28.
+
+
+--------------------------------------------------------------------------------
+9. ROOM-Server Funktionalitaet
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  ADV_TYPE_ROOM existiert protokollseitig (AdvertDataHelpers.h). Ein
+  ROOM-Server ist im MeshCore-Universum ein lokaler Mehr-Teilnehmer-
+  Chat-Server (anders als ein flood-Repeater). simple_room_server
+  implementiert das (examples/simple_room_server/).
+
+Soll-Verhalten:
+  Companion bekommt einen weiteren Modus, in dem er als ROOM-Server
+  agiert: 'advert role fixed room' (Punkt 7) + entsprechende
+  Protokoll-Endpoints (Login, Subscribe, post message zu allen
+  registrierten Clients).
+
+Warum aufgeschoben:
+  - Server-Logik ist deutlich groesser als ein paar Discovery-
+    Antworten (Client-Registrierung, Message-Routing zwischen
+    Teilnehmern, Persistierung).
+  - User-Verwirrung-Argument (analog Punkt 7 Sensor): wenn die App
+    den Companion als ROOM-Server zeigt, erwarten User dort einen
+    funktionierenden Chat-Raum.
+  - Macht erst dann Sinn wenn die anderen Discovery/Status-Phasen
+    aus Punkt 7 fertig sind und der User einen 'echten Server' will.
+
+Quelle: User-Anregung in dieser Session, 2026-05-28.
