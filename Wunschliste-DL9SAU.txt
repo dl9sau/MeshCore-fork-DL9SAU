@@ -315,3 +315,129 @@ Verzahnung mit 4d:
   verzahnen — beides nutzt dann denselben Bbox-Membership-Check.
 
 Quelle: User-Anfrage in dieser Session, 2026-05-26.
+
+
+--------------------------------------------------------------------------------
+6. flood_max + loop.detect Companion-CLI Mirror
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  - CR_MAX_REPEAT_PATH_LEN ist in MyMesh.h auf 16 hartcodiert. Repeater
+    kennen dafuer das _prefs.flood_max Feld (CommonCLI.h:42) und der
+    User kann es ueber 'set flood.max <N>' setzen. Companion-NodePrefs
+    hat das Feld nicht.
+  - _prefs.loop_detect existiert in CommonCLI.h:63 mit Modi OFF /
+    MINIMAL / MODERATE / AGGRESSIVE (sieht ein Knoten seinen eigenen
+    path_hash in einem reingekommenen Paket -> Verhalten je nach Modus).
+    Companion-NodePrefs hat das Feld ebenfalls nicht; aktuelle Loop-
+    Detection laeuft ueber den 8-Byte hasSeen-Cache (siehe README-
+    dl9sau.txt 'Loop-Detection-Mechanismen').
+
+Soll-Verhalten (Companion):
+  Beide Felder in examples/companion_radio/NodePrefs.h anhaengen
+  (Backward-Compat-Load wie txdelay), Persistenz in DataStore. CLI:
+
+    set flood_max <1..63>          oder 'flood.max' fuer CommonCLI-Stil
+    get flood_max
+    set loop.detect <mode>         off | minimal | moderate | aggressive
+    get loop.detect
+
+  Migration in begin(): wenn 0 oder ausserhalb -> Default
+  (flood_max = 16, loop_detect = MINIMAL oder OFF — anhand simple_repeater
+  pruefen). allowPacketForward() benutzt dann _prefs.flood_max anstelle
+  von CR_MAX_REPEAT_PATH_LEN.
+
+Quelle: User-Anregung 2026-05-28 (Spaziergang-Test).
+
+
+--------------------------------------------------------------------------------
+7. Discoverability: advert_role + owner_info + Standard-Queries
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  BaseChatMesh::createSelfAdvert() ist hartcodiert auf ADV_TYPE_CHAT.
+  Companion advertet sich daher immer als 'chat node'. Die App kennt
+  Discovery-Buttons nur fuer ADV_TYPE_REPEATER und ADV_TYPE_SENSOR
+  (= unsere Companions sind dort 'unsichtbar' bei Discovery).
+
+  Zusaetzlich beantwortet der Companion KEINE ANON_REQ-Queries und
+  KEINE REQ_TYPE_GET_STATUS / GET_OWNER_INFO / GET_NEIGHBOURS.
+  Real repeater haben diese Endpoints als Standard.
+
+Soll-Verhalten (Phasen):
+
+  Phase 1 — owner_info Feld + Mirror
+    _prefs.owner_info[120] in NodePrefs anhaengen (CommonCLI-aequivalent).
+    'set owner_info <text>' + 'get owner_info' + 'get all'.
+
+  Phase 2 — ANON_REQ-Handler
+    handleAnonOwnerReq, handleAnonRegionsReq, handleAnonClockReq analog
+    zum simple_repeater einbauen — siehe examples/simple_repeater/
+    MyMesh.cpp:567. App-Standard-Discovery (Login -> Status-Anzeige)
+    funktioniert dann.
+
+  Phase 3 — REQ_TYPE_GET_STATUS
+    Authenticated-Request-Handler analog simple_repeater:218 +
+    RepeaterStats-Struktur (56 Byte Wire-Layout). Befuellung aus den
+    bestehenden _tx_advert_count/_tx_digi_count/radio_driver-Countern.
+
+  Phase 4 — advert_role Konfiguration
+    _prefs.advert_role: 0=auto, 1=chat, 2=repeater, 3=room, 4=sensor.
+    'auto' = ADV_TYPE_REPEATER wenn client_repeat=1, sonst ADV_TYPE_CHAT.
+    Override createSelfAdvert() in Companion-MyMesh.cpp. CLI:
+    'advert role <name>' / 'advert role'.
+
+Reihenfolge: Phasen 1+4 zuerst (klein, bringt sofort Sichtbarkeit in
+der App). Phasen 2+3 nachziehen wenn die Antworten auch substantiell
+sein sollen. Phase 3 koennte mittelfristig auch GET_NEIGHBOURS und
+GET_TELEMETRY_DATA einbeziehen — letzteres ist schon teilweise da
+(MyMesh.cpp:870).
+
+Quelle: User-Frage in dieser Session, 2026-05-28.
+
+
+--------------------------------------------------------------------------------
+8. repeater profile [defensive | normal] — temporaerer "wie ein Repeater"
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  Companion-Repeater ist intentional defensiv konfiguriert:
+    - nur scoped flood weiterleitet (Filter)
+    - PATH-Discovery nur fuer locally-heard Endpoints
+    - reduzierte TX-Power + CR5 fuer Repeats (PKT_TX_REDUCE_POWER +
+      PKT_TX_FORCE_CR5 ueber shouldReduceFloodRetransmit)
+  Sinn: minimaler Netzimpact, Companion ist primaer Client.
+
+User-Use-Case:
+  Voruebergehender Standortwechsel an einen besonders guten Spot —
+  z.B. exponiert auf einem Hochhaus — fuer ein paar Stunden 'normal'
+  repeaten, dann wieder defensiv. Aktuell muesste man die Filter im
+  Source-Code aendern.
+
+Soll-Verhalten:
+  Modus-Schalter _prefs.repeater_profile mit zwei Werten:
+    0 = defensive (default, aktuelles Verhalten — 'client-repeater')
+    1 = normal    (Filter 5 + Power/CR-Reduktion ausschalten)
+
+  CLI:
+    repeater profile                      Status + Erklaerung
+    repeater profile defensive | normal   umschalten
+
+  Konkrete Bypaesse in normal-Modus:
+    - allowPacketForward() Filter 5 (PATH local-only) ueberspringen
+      -> PATH-Discovery fuer ALLE Endpoints weiterleiten
+    - shouldReduceFloodRetransmit() liefert immer false in normal-mode
+      -> Repeats gehen mit voller Power + konfigurierter CR raus
+
+  Was BLEIBT auch im normal-mode:
+    - client_repeat-Master-Schalter (kann abgestellt werden)
+    - duty-cycle Soft/Hard-Limit (EU 10%/h)
+    - hop-cap (siehe Punkt 6 flood_max)
+    - Filter 4 (scoped-only) — Standard-Repeater haben Region-
+      Allowlists, kein 'all scope'. Wenn der User explizit unscoped
+      auch repeaten wollte: 'scope repeater mode all' (siehe 4d).
+    - Filter 6 (Scope-Allowlist) — Standard bei Repeatern, allowf/denyf
+    - Eigene Auto-Advert Reduktion (orthogonal zum Repeat-Verhalten;
+      sollte unabhaengig steuerbar sein, ggf. spaeter)
+
+Quelle: User-Frage in dieser Session, 2026-05-28.
