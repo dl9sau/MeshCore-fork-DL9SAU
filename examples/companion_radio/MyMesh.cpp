@@ -6624,43 +6624,60 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         out[k] = 0;
       };
 
+      // Filter fuer kompakte Liste: zeige alle Eintraege die "in der
+      // Repeat-Liste" sind = mode != OFF und nicht user_deleted. Damit
+      // entspricht 'scope list' dem mentalen Modell des Users ('was
+      // repeate ich'). 'list all' zeigt zusaetzlich OFF + DELETED.
+      auto inRepeatSet = [](uint8_t st) -> bool {
+        if (st & SCOPE_STATUS_USER_DELETED) return false;
+        uint8_t mode = st & SCOPE_STATUS_REPEAT_MASK;
+        return mode != SCOPE_STATUS_REPEAT_OFF;
+      };
+
       // Count first (Header)
-      int total = 0, shown = 0;
+      int n_build = 0, n_extras = 0;
       for (int i = 0; i < _buildin_keys_count; i++) {
         uint8_t st = getBuildinStatus(i);
-        if (!show_all && (st & SCOPE_STATUS_USER_DELETED)) continue;
-        if (!show_all && st == 0) continue;  // default = nicht-customisiert
-        total++;
+        if (!show_all && !inRepeatSet(st)) continue;
+        n_build++;
       }
-      for (int i = 0; i < _prefs.scope_extras_count; i++) total++;
-      shown = total;
+      for (int i = 0; i < _prefs.scope_extras_count; i++) {
+        ScopeRef r = { SCOPE_EXTRAS, i };
+        uint8_t st = getScopeStatus(r);
+        if (!show_all && !inRepeatSet(st)) continue;
+        n_extras++;
+      }
 
-      char head[100];
-      snprintf(head, sizeof(head), "scope list%s (mode=%s):",
+      char head[120];
+      snprintf(head, sizeof(head),
+               "scope list%s (mode=%s, %d build-in + %d extras):",
                show_all ? " all" : "",
                _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL
-                   ? "all" : "allowlist");
+                   ? "all" : "allowlist",
+               n_build, n_extras);
       gline(head);
 
       // Build-in
       for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
         uint8_t st = getBuildinStatus(i);
-        if (!show_all && (st & SCOPE_STATUS_USER_DELETED)) continue;
-        if (!show_all && st == 0) continue;
+        if (!show_all && !inRepeatSet(st)) continue;
         const char* nm = NULL;
         if (!dl9sau_get_region((size_t)i, &nm, NULL, NULL, NULL, NULL)) continue;
+        bool has_bbox = false;
+        dl9sau_get_region_meta((size_t)i, &has_bbox, NULL);
         char flagstr[16];
-        fmtFlags(st, _buildin_in_bbox[i], true, flagstr, sizeof(flagstr));
+        fmtFlags(st, _buildin_in_bbox[i], has_bbox, flagstr, sizeof(flagstr));
         char tmp[80];
         snprintf(tmp, sizeof(tmp), "  #%s  [%s] (b-in)",
                  nm, flagstr[0] ? flagstr : "-");
         gline(tmp);
       }
-      // Extras (immer alle anzeigen — User hat sie explizit angelegt)
+      // Extras
       for (int i = 0; i < _prefs.scope_extras_count && i < SCOPE_EXTRAS_SLOTS; i++) {
         const ScopeRegEntry& e = _prefs.scope_extras[i];
         ScopeRef r = { SCOPE_EXTRAS, i };
         uint8_t st = getScopeStatus(r);
+        if (!show_all && !inRepeatSet(st)) continue;
         bool has_bbox = (e.flags & SCOPE_FLAG_HAS_GEO_BOX) != 0;
         char flagstr[16];
         fmtFlags(st, _extras_in_bbox[i], has_bbox, flagstr, sizeof(flagstr));
@@ -6669,7 +6686,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  e.name, flagstr[0] ? flagstr : "-");
         gline(tmp);
       }
-      if (shown == 0) gline("  (alles default — 'list all' fuer komplette Sicht)");
+      if (n_build + n_extras == 0) {
+        gline(show_all
+              ? "  (Registry leer)"
+              : "  (kein Eintrag in der Repeat-Liste — 'list all' zeigt alle)");
+      }
       gflush();
       pushCompanionMessage(
         "Flags: R=aktiv jetzt, A=auto-mode, P=pin, D=disabled,\n"
@@ -6904,23 +6925,46 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (!sub || *sub == 0) {
-        // Status — Header + Liste als getrennte Messages damit wire-Limit
-        // bei vielen Eintraegen nicht reisst.
-        int n_in_list = 0, n_disabled = 0;
-        for (int i = 0; i < _prefs.scope_registry_count; i++) {
-          uint8_t f = _prefs.scope_registry[i].flags;
-          if (f & SCOPE_FLAG_IN_REPEAT_LIST) {
-            n_in_list++;
-            if (f & SCOPE_FLAG_DISABLED) n_disabled++;
-          }
+        // Status auf NEW Storage. Header + Liste getrennt damit wire-Limit
+        // bei vielen Eintraegen nicht reisst. Wunschliste 11 Schritt 7+9.
+        auto inList = [](uint8_t st) -> bool {
+          if (st & SCOPE_STATUS_USER_DELETED) return false;
+          uint8_t m = st & SCOPE_STATUS_REPEAT_MASK;
+          return m != SCOPE_STATUS_REPEAT_OFF;
+        };
+
+        int n_total = 0, n_active = 0;
+        for (int i = 0; i < _buildin_keys_count; i++) {
+          uint8_t st = getBuildinStatus(i);
+          if (!inList(st)) continue;
+          n_total++;
+          uint8_t m = st & SCOPE_STATUS_REPEAT_MASK;
+          bool live = !(st & SCOPE_STATUS_DISABLED)
+                    && (m == SCOPE_STATUS_REPEAT_ON
+                        || (m == SCOPE_STATUS_REPEAT_AUTO && _buildin_in_bbox[i]));
+          if (live) n_active++;
         }
+        for (int i = 0; i < _prefs.scope_extras_count; i++) {
+          ScopeRef r = { SCOPE_EXTRAS, i };
+          uint8_t st = getScopeStatus(r);
+          if (!inList(st)) continue;
+          n_total++;
+          uint8_t m = st & SCOPE_STATUS_REPEAT_MASK;
+          bool live = !(st & SCOPE_STATUS_DISABLED)
+                    && (m == SCOPE_STATUS_REPEAT_ON
+                        || (m == SCOPE_STATUS_REPEAT_AUTO && _extras_in_bbox[i]));
+          if (live) n_active++;
+        }
+
         char head[140];
         snprintf(head, sizeof(head),
-                 "scope repeater:\n  mode = %s\n  count = %d (aktiv: %d)",
-                 _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL ? "all" : "allowlist",
-                 n_in_list, n_in_list - n_disabled);
+                 "scope repeater:\n  mode = %s\n  count = %d (aktiv jetzt: %d)",
+                 _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL
+                     ? "all" : "allowlist",
+                 n_total, n_active);
         pushCompanionMessage(head);
-        if (n_in_list > 0) {
+
+        if (n_total > 0) {
           char gb[140]; size_t gu = 0;
           auto gflush = [&]() {
             if (gu == 0) return;
@@ -6932,16 +6976,46 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = s[i];
           };
           gappend("  list:");
-          for (int i = 0; i < _prefs.scope_registry_count; i++) {
-            const ScopeRegEntry& e = _prefs.scope_registry[i];
-            if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) continue;
+          // Build-in
+          for (int i = 0; i < _buildin_keys_count; i++) {
+            uint8_t st = getBuildinStatus(i);
+            if (!inList(st)) continue;
+            const char* nm = NULL;
+            if (!dl9sau_get_region((size_t)i, &nm, NULL, NULL, NULL, NULL)) continue;
+            uint8_t m = st & SCOPE_STATUS_REPEAT_MASK;
+            const char* tag_state =
+                (st & SCOPE_STATUS_DISABLED)      ? "(D)"
+              : (m == SCOPE_STATUS_REPEAT_ON)     ? "(P)"
+              : (m == SCOPE_STATUS_REPEAT_AUTO
+                 && !_buildin_in_bbox[i])         ? "(A-)"  // auto, derzeit aus bbox
+              : (m == SCOPE_STATUS_REPEAT_AUTO)   ? "(A)"   // auto, in bbox
+                                                  : "";
             char tag[40];
-            const char* state = (e.flags & SCOPE_FLAG_DISABLED) ? "(D)"
-                              : (e.flags & SCOPE_FLAG_GEO_MANAGED) ? "(G)" : "";
-            snprintf(tag, sizeof(tag), " #%s%s", e.name, state);
+            snprintf(tag, sizeof(tag), " #%s%s", nm, tag_state);
+            gappend(tag);
+          }
+          // Extras
+          for (int i = 0; i < _prefs.scope_extras_count; i++) {
+            const ScopeRegEntry& e = _prefs.scope_extras[i];
+            ScopeRef r = { SCOPE_EXTRAS, i };
+            uint8_t st = getScopeStatus(r);
+            if (!inList(st)) continue;
+            uint8_t m = st & SCOPE_STATUS_REPEAT_MASK;
+            const char* tag_state =
+                (st & SCOPE_STATUS_DISABLED)      ? "(D)"
+              : (m == SCOPE_STATUS_REPEAT_ON)     ? "(P)"
+              : (m == SCOPE_STATUS_REPEAT_AUTO
+                 && !_extras_in_bbox[i])          ? "(A-)"
+              : (m == SCOPE_STATUS_REPEAT_AUTO)   ? "(A)"
+                                                  : "";
+            char tag[40];
+            snprintf(tag, sizeof(tag), " #%s%s", e.name, tag_state);
             gappend(tag);
           }
           gflush();
+          pushCompanionMessage(
+            "Legende: (A)=auto in Bbox, (A-)=auto aus Bbox,\n"
+            "(P)=pin, (D)=disabled");
         }
         return;
       }
