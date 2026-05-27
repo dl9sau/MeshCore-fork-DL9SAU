@@ -3970,8 +3970,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "get")) {
         pushCompanionMessage(
-          "get <key>: liest persistente Settings. 'get all' listet alle "
-          "App-Settings in einem Rutsch (USB-Backup-tauglich)."
+          "get          -> nur veraenderte App-Settings (analog 'prefs').\n"
+          "get all      -> alle Settings mit [default] / (default: X) Markierung.\n"
+          "get <key>    -> einzelner Wert."
         );
         pushCompanionMessage(
           "Keys: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps, "
@@ -4922,18 +4923,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // ohne App eintragen oder sichern moechten.
   if (starts_with_word(cmd, "get")) {
     const char* p = strchr(cmd, ' ');
-    if (!p) { pushCompanionMessage("Usage: get <key>  (help get fuer Liste)"); return; }
-    while (*p == ' ') p++;
-    if (!*p) { pushCompanionMessage("Usage: get <key>"); return; }
-    // Trim trailing WS
-    size_t klen = 0;
-    while (p[klen] && p[klen] != ' ' && p[klen] != '\t' && klen < 23) klen++;
     char key[24];
-    memcpy(key, p, klen); key[klen] = 0;
+    key[0] = 0;
+    if (p) {
+      while (*p == ' ') p++;
+      if (*p) {
+        size_t klen = 0;
+        while (p[klen] && p[klen] != ' ' && p[klen] != '\t' && klen < 23) klen++;
+        memcpy(key, p, klen); key[klen] = 0;
+      }
+    }
 
-    // 'get all' -> alle App-Settings in einem Rutsch (akkumulierender Buffer
-    // wie bei prefs). Praktisch fuer USB-only Backup.
-    if (strcmp(key, "all") == 0) {
+    // get          -> nur veraenderte Settings (analog 'prefs')
+    // get all      -> alle, mit [default]/(default: X) Markierung (analog 'prefs all')
+    // get <key>    -> einzelner Wert (wie bisher)
+    bool list_changed = (key[0] == 0);
+    bool list_all     = (strcmp(key, "all") == 0);
+    if (list_changed || list_all) {
       char gb[200];
       size_t gu = 0;
       auto gflush = [&](bool force) {
@@ -4951,24 +4957,82 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         gflush(false);
       };
       char tmp[160];
-      gline("get all (App-Settings):");
-      snprintf(tmp, sizeof(tmp), "  name = \"%s\"", _prefs.node_name);                gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  freq = %.4f MHz", _prefs.freq);                   gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  sf = %u", (unsigned)_prefs.sf);                   gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  bw = %.1f kHz", _prefs.bw);                       gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  cr = %u", (unsigned)_prefs.cr);                   gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  tx_power = %d dBm", (int)_prefs.tx_power_dbm);    gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  lat = %.6f", sensors.node_lat);                   gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  lon = %.6f", sensors.node_lon);                   gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  repeat = %u", (unsigned)_prefs.client_repeat);    gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  gps = %u", (unsigned)_prefs.gps_enabled);         gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  advert_loc_policy = %u", (unsigned)_prefs.advert_loc_policy); gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  airtime_factor = %.3f", _prefs.airtime_factor);   gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  rx_boosted_gain = %u", (unsigned)_prefs.rx_boosted_gain); gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  manual_add_contacts = %u", (unsigned)_prefs.manual_add_contacts); gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  rxdelay = %.3f", _prefs.rx_delay_base);           gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  txdelay = %.3f", _prefs.tx_delay_factor);         gline(tmp);
-      snprintf(tmp, sizeof(tmp), "  direct_txdelay = %.3f", _prefs.direct_tx_delay_factor); gline(tmp);
+      int changed = 0;
+      gline(list_all ? "get all (App-Settings):" : "get (changed App-Settings):");
+
+      // name: Default ist build-/identity-abhaengig -> kein default-Check,
+      // immer mit zeigen wenn list_all, sonst weglassen.
+      if (list_all) {
+        snprintf(tmp, sizeof(tmp), "  name = \"%s\"", _prefs.node_name);
+        gline(tmp);
+      }
+
+      // Hilfs-Lambdas fuer typsicheres Default-Vergleichen + Formatierung.
+      // Ein Eintrag landet in der Ausgabe wenn:
+      //   list_all == true                          -> immer
+      //   list_changed && (current != default)      -> nur Aenderungen
+      // Marker:
+      //   list_all + at-default                     -> " [default]"
+      //   list_all + nicht-default                  -> " (default: X)"
+      //   list_changed (nie at-default hier)        -> " (default: X)"
+      auto emit_int = [&](const char* name, int cur, int def, const char* unit) {
+        bool eq = (cur == def);
+        if (list_changed && eq) return;
+        if (!eq) changed++;
+        if (eq) {
+          snprintf(tmp, sizeof(tmp), "  %s = %d%s [default]", name, cur, unit);
+        } else {
+          snprintf(tmp, sizeof(tmp), "  %s = %d%s (default: %d%s)", name, cur, unit, def, unit);
+        }
+        gline(tmp);
+      };
+      auto emit_uint = [&](const char* name, unsigned cur, unsigned def) {
+        bool eq = (cur == def);
+        if (list_changed && eq) return;
+        if (!eq) changed++;
+        if (eq) snprintf(tmp, sizeof(tmp), "  %s = %u [default]", name, cur);
+        else    snprintf(tmp, sizeof(tmp), "  %s = %u (default: %u)", name, cur, def);
+        gline(tmp);
+      };
+      auto emit_float = [&](const char* name, float cur, float def, const char* unit, int prec) {
+        bool eq = (cur == def);
+        if (list_changed && eq) return;
+        if (!eq) changed++;
+        if (eq) snprintf(tmp, sizeof(tmp), "  %s = %.*f%s [default]", name, prec, (double)cur, unit);
+        else    snprintf(tmp, sizeof(tmp), "  %s = %.*f%s (default: %.*f%s)",
+                         name, prec, (double)cur, unit, prec, (double)def, unit);
+        gline(tmp);
+      };
+      auto emit_double = [&](const char* name, double cur, double def, int prec) {
+        bool eq = (cur == def);
+        if (list_changed && eq) return;
+        if (!eq) changed++;
+        if (eq) snprintf(tmp, sizeof(tmp), "  %s = %.*f [default]", name, prec, cur);
+        else    snprintf(tmp, sizeof(tmp), "  %s = %.*f (default: %.*f)", name, prec, cur, prec, def);
+        gline(tmp);
+      };
+
+#ifndef SX126X_RX_BOOSTED_GAIN_DEFAULT
+#define SX126X_RX_BOOSTED_GAIN_DEFAULT 1
+#endif
+      emit_float ("freq",                _prefs.freq,                  (float)LORA_FREQ,       " MHz", 4);
+      emit_uint  ("sf",                  _prefs.sf,                    (unsigned)LORA_SF);
+      emit_float ("bw",                  _prefs.bw,                    (float)LORA_BW,         " kHz", 1);
+      emit_uint  ("cr",                  _prefs.cr,                    (unsigned)LORA_CR);
+      emit_int   ("tx_power",            (int)_prefs.tx_power_dbm,     (int)LORA_TX_POWER,     " dBm");
+      emit_double("lat",                 sensors.node_lat,             0.0,                    6);
+      emit_double("lon",                 sensors.node_lon,             0.0,                    6);
+      emit_uint  ("repeat",              _prefs.client_repeat,         0);
+      emit_uint  ("gps",                 _prefs.gps_enabled,           0);
+      emit_uint  ("advert_loc_policy",   _prefs.advert_loc_policy,     0);
+      emit_float ("airtime_factor",      _prefs.airtime_factor,        1.0f,                   "",     3);
+      emit_uint  ("rx_boosted_gain",     _prefs.rx_boosted_gain,       (unsigned)SX126X_RX_BOOSTED_GAIN_DEFAULT);
+      emit_uint  ("manual_add_contacts", _prefs.manual_add_contacts,   0);
+      emit_float ("rxdelay",             _prefs.rx_delay_base,         0.0f,                   "",     3);
+      emit_float ("txdelay",             _prefs.tx_delay_factor,       0.5f,                   "",     3);
+      emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
+
+      if (list_changed && changed == 0) gline("  (keine Aenderungen — alle Werte auf Default)");
       gflush(true);
       return;
     }
