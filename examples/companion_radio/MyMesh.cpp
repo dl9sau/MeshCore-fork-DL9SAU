@@ -656,7 +656,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     } else {
       // Wunschliste 11 Schritte 11+12: Special-Scope-Handling.
       // local/lokal: single-hop, beim Repeat Scope-Rewrite zu local-discard.
-      // region/regional: konfigurierbares Hop-Limit (_prefs.region_hop_limit).
+      // region/regional: konfigurierbares Hop-Limit (_prefs.scope_regional_hop_limit).
       // local-discard: wird durch default-REPEAT_OFF schon abgelehnt; falls
       // doch (User hat es manuell gepinnt) -> Sentinel, hier hart blocken.
       uint16_t target = packet->transport_codes[0];
@@ -694,7 +694,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
         // (idx_local_discard nicht gefunden: einfach normal weiterleiten —
         // sollte nicht passieren da local-discard im Build-in-Table steht.)
       } else if (is_region) {
-        if (hops >= _prefs.region_hop_limit) {
+        if (hops >= _prefs.scope_regional_hop_limit) {
           decision = false;
           reject_reason = "region-hop-limit";
         }
@@ -1461,10 +1461,10 @@ void MyMesh::begin(bool has_display) {
     }
   }
 
-  // region_hop_limit: 0 = uninitialisiert -> Companion-Default 3.
+  // scope_regional_hop_limit: 0 = uninitialisiert -> Companion-Default 3.
   // Range 1..16 (max 16 entspricht unserem CR_MAX_REPEAT_PATH_LEN).
-  if (_prefs.region_hop_limit == 0 || _prefs.region_hop_limit > 16) {
-    _prefs.region_hop_limit = 3;
+  if (_prefs.scope_regional_hop_limit == 0 || _prefs.scope_regional_hop_limit > 16) {
+    _prefs.scope_regional_hop_limit = 3;
   }
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
@@ -5599,6 +5599,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Hop-Cap fuer #region / #regional. Range 1..16. 0 wird in begin()
+    // als uninitialisiert auf 3 normalisiert — daher hier untere Schranke 1.
+    if (strcmp(key, "scope_regional_hops") == 0) {
+      int v = atoi(value_lc);
+      if (v < 1 || v > 16) {
+        pushCompanionMessage("Wert ausserhalb 1..16");
+        return;
+      }
+      _prefs.scope_regional_hop_limit = (uint8_t)v;
+      savePrefs();
+      char r[60]; snprintf(r, sizeof(r), "OK - scope_regional_hops = %d", v);
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Unbekannter key
     char r[120];
     snprintf(r, sizeof(r),
@@ -5728,6 +5743,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_float ("rxdelay",             _prefs.rx_delay_base,         0.0f,                   "",     3);
       emit_float ("txdelay",             _prefs.tx_delay_factor,       0.5f,                   "",     3);
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
+      emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
 
       if (list_changed && changed == 0) gline("  (keine Aenderungen — alle Werte auf Default)");
       gflush();
@@ -5761,6 +5777,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "rxdelay") == 0)           snprintf(r, sizeof(r), "rxdelay = %.3f", _prefs.rx_delay_base);
     else if (strcmp(key, "txdelay") == 0)           snprintf(r, sizeof(r), "txdelay = %.3f", _prefs.tx_delay_factor);
     else if (strcmp(key, "direct_txdelay") == 0)    snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
+    else if (strcmp(key, "scope_regional_hops") == 0) snprintf(r, sizeof(r), "scope_regional_hops = %u", (unsigned)_prefs.scope_regional_hop_limit);
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
     }
@@ -7014,7 +7031,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           }
           gflush();
           pushCompanionMessage(
-            "Legende: (A)=auto in Bbox, (A-)=auto aus Bbox,\n"
+            "Legende: (A)=auto, aktiv (Bbox-Match),\n"
+            "(A-)=auto, inaktiv (kein Bbox-Match),\n"
             "(P)=pin, (D)=disabled");
         }
         return;
