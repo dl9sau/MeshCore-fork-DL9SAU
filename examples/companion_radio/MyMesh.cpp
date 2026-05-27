@@ -1297,28 +1297,27 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.repeat_scope_mode > REPEAT_SCOPE_MODE_ALLOWLIST) {
     _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
   }
-  if (_prefs.scope_registry_count == 0) {
-    // Fresh install — Default-Einträge schreiben.
-    addScopeRegistryDefault("de-bebb",
-      CR_BBOX_BEBB_LAT_MIN, CR_BBOX_BEBB_LAT_MAX,
-      CR_BBOX_BEBB_LON_MIN, CR_BBOX_BEBB_LON_MAX);
-    addScopeRegistryDefault("de-be",
-      CR_BBOX_DE_BE_LAT_MIN, CR_BBOX_DE_BE_LAT_MAX,
-      CR_BBOX_DE_BE_LON_MIN, CR_BBOX_DE_BE_LON_MAX);
-    addScopeRegistryDefault("ostfriesland",
-      CR_BBOX_OSTFR_LAT_MIN, CR_BBOX_OSTFR_LAT_MAX,
-      CR_BBOX_OSTFR_LON_MIN, CR_BBOX_OSTFR_LON_MAX);
-    _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
-  } else {
-    // Bestehende Installation — Migrationen anwenden ohne user-curated
-    // Eintraege zu beruehren.
+  {
+    // Kanonische Pre-Population-Eintraege mit ihren Default-Bboxen.
+    struct PrepopEntry {
+      const char* name;
+      float lat_min, lat_max, lon_min, lon_max;
+    };
+    static const PrepopEntry prepop[] = {
+      { "de-bebb",      CR_BBOX_BEBB_LAT_MIN,  CR_BBOX_BEBB_LAT_MAX,
+                        CR_BBOX_BEBB_LON_MIN,  CR_BBOX_BEBB_LON_MAX  },
+      { "de-be",        CR_BBOX_DE_BE_LAT_MIN, CR_BBOX_DE_BE_LAT_MAX,
+                        CR_BBOX_DE_BE_LON_MIN, CR_BBOX_DE_BE_LON_MAX },
+      { "ostfriesland", CR_BBOX_OSTFR_LAT_MIN, CR_BBOX_OSTFR_LAT_MAX,
+                        CR_BBOX_OSTFR_LON_MIN, CR_BBOX_OSTFR_LON_MAX },
+    };
     bool migrated = false;
-    // 1) Alter Bug: "bebb" war falsch (es heisst "de-bebb"). In-Place-
-    //    Rename + Key-Neuberechnung, damit alle User-Flags erhalten
-    //    bleiben aber der Hash zum richtigen Wire-Namen "#de-bebb"
-    //    passt. Falls "de-bebb" schon existiert (z.B. weil User selbst
-    //    angelegt), lassen wir "bebb" stehen — der User entscheidet
-    //    selbst was er damit macht.
+
+    // Alter Bug: "bebb" war falsch (es heisst "de-bebb"). In-Place-
+    // Rename + Key-Neuberechnung, damit alle User-Flags erhalten bleiben
+    // aber der Hash zum richtigen Wire-Namen passt. Falls "de-bebb" schon
+    // existiert (z.B. weil User selbst angelegt), lassen wir "bebb" in
+    // Ruhe — der User entscheidet selbst was er damit macht.
     int idx_old = findScopeRegistryByName("bebb");
     if (idx_old >= 0 && findScopeRegistryByName("de-bebb") < 0) {
       ScopeRegEntry& e = _prefs.scope_registry[idx_old];
@@ -1329,14 +1328,34 @@ void MyMesh::begin(bool has_display) {
       memcpy(e.key, k.key, sizeof(e.key));
       migrated = true;
     }
-    // 2) Ensure "de-be" exists (war im ersten Roll-Out nicht dabei).
-    if (findScopeRegistryByName("de-be") < 0
-        && _prefs.scope_registry_count < SCOPE_REG_SLOTS) {
-      addScopeRegistryDefault("de-be",
-        CR_BBOX_DE_BE_LAT_MIN, CR_BBOX_DE_BE_LAT_MAX,
-        CR_BBOX_DE_BE_LON_MIN, CR_BBOX_DE_BE_LON_MAX);
-      migrated = true;
+
+    // Kanonische Eintraege:
+    //   - fehlt komplett        -> hinzufuegen (mit Default-Bbox)
+    //   - existiert OHNE Bbox   -> Default-Bbox nachtragen + HAS_GEO_BOX-
+    //                              Flag setzen. Use-Case: User hat per
+    //                              'scope add <name>' ohne geo-Argument
+    //                              angelegt. Custom-Bbox (HAS_GEO_BOX
+    //                              gesetzt) bleibt unangetastet.
+    for (size_t i = 0; i < sizeof(prepop)/sizeof(prepop[0]); i++) {
+      const PrepopEntry& p = prepop[i];
+      int idx = findScopeRegistryByName(p.name);
+      if (idx < 0) {
+        if (_prefs.scope_registry_count < SCOPE_REG_SLOTS) {
+          addScopeRegistryDefault(p.name,
+                                  p.lat_min, p.lat_max, p.lon_min, p.lon_max);
+          migrated = true;
+        }
+      } else if (!(_prefs.scope_registry[idx].flags & SCOPE_FLAG_HAS_GEO_BOX)) {
+        ScopeRegEntry& e = _prefs.scope_registry[idx];
+        e.flags         |= SCOPE_FLAG_HAS_GEO_BOX;
+        e.bbox_lat_min  = p.lat_min;
+        e.bbox_lat_max  = p.lat_max;
+        e.bbox_lon_min  = p.lon_min;
+        e.bbox_lon_max  = p.lon_max;
+        migrated = true;
+      }
     }
+
     if (migrated) _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
@@ -6036,6 +6055,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         has_geo = true;
       }
+      // Wenn User keine 'geo'-Option mitgegeben hat aber der Name einer
+      // kanonischen Pre-Population-Region entspricht (de-bebb / de-be /
+      // ostfriesland), uebernehmen wir die hartcodierte Default-Bbox.
+      // 'scope add de-be' soll fuer den User direkt funktionieren ohne
+      // dass er die Koordinaten selbst kennen muss.
+      const char* auto_src = NULL;
+      if (!has_geo) {
+        if (strcmp(name, "de-bebb") == 0) {
+          lat_min = CR_BBOX_BEBB_LAT_MIN;  lat_max = CR_BBOX_BEBB_LAT_MAX;
+          lon_min = CR_BBOX_BEBB_LON_MIN;  lon_max = CR_BBOX_BEBB_LON_MAX;
+          has_geo = true; auto_src = " (Default-Bbox Berlin+Brandenburg)";
+        } else if (strcmp(name, "de-be") == 0) {
+          lat_min = CR_BBOX_DE_BE_LAT_MIN; lat_max = CR_BBOX_DE_BE_LAT_MAX;
+          lon_min = CR_BBOX_DE_BE_LON_MIN; lon_max = CR_BBOX_DE_BE_LON_MAX;
+          has_geo = true; auto_src = " (Default-Bbox Berlin)";
+        } else if (strcmp(name, "ostfriesland") == 0) {
+          lat_min = CR_BBOX_OSTFR_LAT_MIN; lat_max = CR_BBOX_OSTFR_LAT_MAX;
+          lon_min = CR_BBOX_OSTFR_LON_MIN; lon_max = CR_BBOX_OSTFR_LON_MAX;
+          has_geo = true; auto_src = " (Default-Bbox Ostfriesland)";
+        }
+      }
+
       int slot = _prefs.scope_registry_count;
       ScopeRegEntry& e = _prefs.scope_registry[slot];
       memset(&e, 0, sizeof(e));
@@ -6051,9 +6092,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       _prefs.scope_registry_count++;
       savePrefs();
-      char r[120];
-      snprintf(r, sizeof(r), "OK - #%s in Registry (Slot %d%s).",
-               e.name, slot, has_geo ? ", mit Bbox" : "");
+      char r[140];
+      snprintf(r, sizeof(r), "OK - #%s in Registry (Slot %d%s%s).",
+               e.name, slot,
+               has_geo ? ", mit Bbox" : "",
+               auto_src ? auto_src : "");
       pushCompanionMessage(r);
       return;
     }
