@@ -392,6 +392,48 @@ private:
   // einen Eintrag mit IN_REPEAT_LIST-Flag). Aufrufer hat bereits
   // hasTransportCodes()-Check gemacht.
   bool scopeAllowedForRepeat(const mesh::Packet* packet) const;
+
+  // ----- Scope-Architektur-Pivot Helpers (Wunschliste 11 Schritt 4) -----
+  // Cross-Storage Lookup-Identifier. SCOPE_BUILDIN: idx ist Position in
+  // dl9sau_regions-Tabelle. SCOPE_EXTRAS: idx ist Position in
+  // _prefs.scope_extras[]. SCOPE_NONE: nichts gefunden.
+  enum ScopeStorage { SCOPE_NONE = 0, SCOPE_BUILDIN, SCOPE_EXTRAS };
+  struct ScopeRef {
+    ScopeStorage storage;
+    int          idx;
+  };
+
+  // Sucht den Eintrag in beiden Storages. Build-in zuerst.
+  ScopeRef findScopeByName(const char* name) const;
+
+  // Effektiver Status-Byte fuer einen Build-in-Eintrag (idx = Position
+  // in dl9sau_regions-Tabelle). Sucht in scope_buildin_status[] nach
+  // dem Name-Hash; wenn nicht gefunden, returns 0 (Default).
+  uint8_t getBuildinStatus(int buildin_idx) const;
+
+  // Setzt Status fuer einen Build-in-Eintrag. status==0 entfernt einen
+  // ggf. vorhandenen Sparse-Slot (Storage-Defragmentierung). status!=0
+  // legt einen neuen Slot an wenn keiner existiert. Returns false wenn
+  // alle Slots belegt sind (max SCOPE_BUILDIN_STATUS_MAX).
+  bool    setBuildinStatus(int buildin_idx, uint8_t status);
+
+  // Effektiver Status fuer einen ScopeRef. Bei BUILDIN: via
+  // getBuildinStatus(). Bei EXTRAS: aus scope_extras[idx].flags
+  // (gleiches Bit-Layout wie Build-in-Status; alte SCOPE_FLAG_*-Bits
+  // sind in dieser Phase noch in extras.flags drin und werden in
+  // Schritt 5+ migriert).
+  uint8_t getScopeStatus(const ScopeRef& ref) const;
+  bool    setScopeStatus(const ScopeRef& ref, uint8_t status);
+
+  // TransportKey fuer einen ScopeRef. BUILDIN: aus _buildin_keys[]-
+  // Cache. EXTRAS: aus scope_extras[idx].key. Returns NULL bei
+  // SCOPE_NONE oder out-of-range.
+  const uint8_t* getScopeKey(const ScopeRef& ref) const;
+
+  // Bbox fuer einen ScopeRef. Returns true wenn Bbox vorhanden ist.
+  bool getScopeBbox(const ScopeRef& ref,
+                    double* lat_min, double* lat_max,
+                    double* lon_min, double* lon_max) const;
   // Iteriert Scope-Registry, vergleicht aktuelle (lat,lon) gegen die Bbox
   // aller Eintraege mit SCOPE_FLAG_GEO_MANAGED + SCOPE_FLAG_HAS_GEO_BOX
   // und setzt/loescht SCOPE_FLAG_IN_REPEAT_LIST entsprechend. Hysterese
@@ -546,6 +588,15 @@ private:
   uint32_t      _bt_connect_count;           // app/BT connect events (rising edges)
   bool          _last_serial_connected;      // edge-detector state
   uint32_t      _last_observed_rtc;          // for detecting external RTC corrections
+
+  // Key-Cache fuer Build-in-Region-Eintraege (Wunschliste 11 Schritt 4).
+  // Wird in begin() einmalig befuellt: TransportKey pro Build-in-Name aus
+  // dl9sau_geo_recommendations-Tabelle (SHA-256("#name")). Size ist obere
+  // Schranke fuer die Build-in-Tabellen-Groesse — aktuell ~25 Eintraege,
+  // capacity bis 64.
+  static constexpr int SCOPE_BUILDIN_KEY_CACHE_MAX = 64;
+  TransportKey  _buildin_keys[SCOPE_BUILDIN_KEY_CACHE_MAX];
+  int           _buildin_keys_count;          // tatsaechliche Anzahl belegter Slots
 
 public:
   uint32_t getTxAdvertCount()  const { return _tx_advert_count; }

@@ -1130,6 +1130,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _bt_connect_count = 0;
   _last_serial_connected = false;
   _last_observed_rtc = 0;
+  _buildin_keys_count = 0;
   _last_millis_seen = 0;
   _millis_wraps = 0;
 #if DL9SAU_REGIONS_AVAILABLE
@@ -1485,6 +1486,23 @@ void MyMesh::begin(bool has_display) {
       _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
       pushDebugLog("[scope-pivot] migrated %d to status, %d to extras, %d dropped\n",
                    migrated_to_status, migrated_to_extras, dropped_full);
+    }
+  }
+
+  // ----- Key-Cache fuer Build-in-Region-Eintraege (Wunschliste 11, Schritt 4)
+  // Computed once at boot. Wird von scopeAllowedForRepeat() etc. verwendet
+  // um TransportKey::calcTransportCode() ohne SHA-256-Recomputation aufzurufen.
+  {
+    size_t n = dl9sau_region_count();
+    if (n > (size_t)SCOPE_BUILDIN_KEY_CACHE_MAX) n = SCOPE_BUILDIN_KEY_CACHE_MAX;
+    _buildin_keys_count = (int)n;
+    TransportKeyStore tmp;
+    for (size_t i = 0; i < n; i++) {
+      const char* name = NULL;
+      if (!dl9sau_get_region(i, &name, NULL, NULL, NULL, NULL)) continue;
+      char tag[40];
+      snprintf(tag, sizeof(tag), "#%s", name);
+      tmp.getAutoKeyFor(0, tag, _buildin_keys[i]);
     }
   }
 
@@ -3259,6 +3277,149 @@ void MyMesh::evaluateGeoManagedEntries(double lat, double lon) {
     }
   }
   if (dirty) savePrefs();
+}
+
+// ----- Cross-Storage Helpers (Wunschliste 11 Schritt 4) -------------------
+
+MyMesh::ScopeRef MyMesh::findScopeByName(const char* name) const {
+  ScopeRef r = { SCOPE_NONE, -1 };
+  if (!name || !*name) return r;
+  int idx = dl9sau_find_region_index(name);
+  if (idx >= 0) { r.storage = SCOPE_BUILDIN; r.idx = idx; return r; }
+  for (int i = 0; i < _prefs.scope_extras_count && i < SCOPE_EXTRAS_SLOTS; i++) {
+    if (strncmp(_prefs.scope_extras[i].name, name,
+                sizeof(_prefs.scope_extras[i].name)) == 0) {
+      r.storage = SCOPE_EXTRAS; r.idx = i; return r;
+    }
+  }
+  return r;
+}
+
+uint8_t MyMesh::getBuildinStatus(int buildin_idx) const {
+  if (buildin_idx < 0) return 0;
+  const char* name = NULL;
+  if (!dl9sau_get_region((size_t)buildin_idx, &name, NULL, NULL, NULL, NULL)) return 0;
+  uint8_t want[4];
+  dl9sau_compute_name_hash(name, want);
+  for (int i = 0; i < _prefs.scope_buildin_status_count
+                   && i < SCOPE_BUILDIN_STATUS_MAX; i++) {
+    if (memcmp(_prefs.scope_buildin_status[i].name_hash, want, 4) == 0) {
+      return _prefs.scope_buildin_status[i].status;
+    }
+  }
+  return 0;  // default
+}
+
+bool MyMesh::setBuildinStatus(int buildin_idx, uint8_t status) {
+  if (buildin_idx < 0) return false;
+  const char* name = NULL;
+  if (!dl9sau_get_region((size_t)buildin_idx, &name, NULL, NULL, NULL, NULL)) return false;
+  uint8_t want[4];
+  dl9sau_compute_name_hash(name, want);
+
+  // Existierender Slot? -> update oder loeschen
+  for (int i = 0; i < _prefs.scope_buildin_status_count
+                   && i < SCOPE_BUILDIN_STATUS_MAX; i++) {
+    if (memcmp(_prefs.scope_buildin_status[i].name_hash, want, 4) == 0) {
+      if (status == 0) {
+        // Default -> Slot entfernen (Compaction: letzten Slot drueber kopieren)
+        int last = _prefs.scope_buildin_status_count - 1;
+        if (i != last) {
+          _prefs.scope_buildin_status[i] = _prefs.scope_buildin_status[last];
+        }
+        memset(&_prefs.scope_buildin_status[last], 0,
+               sizeof(_prefs.scope_buildin_status[last]));
+        _prefs.scope_buildin_status_count--;
+      } else {
+        _prefs.scope_buildin_status[i].status = status;
+      }
+      return true;
+    }
+  }
+  // Kein Slot — bei status==0 ist nix zu tun
+  if (status == 0) return true;
+  if (_prefs.scope_buildin_status_count >= SCOPE_BUILDIN_STATUS_MAX) return false;
+  BuildinStatusEntry& e =
+      _prefs.scope_buildin_status[_prefs.scope_buildin_status_count];
+  memcpy(e.name_hash, want, 4);
+  e.status = status;
+  memset(e._reserved, 0, sizeof(e._reserved));
+  _prefs.scope_buildin_status_count++;
+  return true;
+}
+
+uint8_t MyMesh::getScopeStatus(const ScopeRef& ref) const {
+  if (ref.storage == SCOPE_BUILDIN) return getBuildinStatus(ref.idx);
+  if (ref.storage == SCOPE_EXTRAS
+      && ref.idx >= 0 && ref.idx < _prefs.scope_extras_count) {
+    // Extras tragen das alte ScopeRegEntry-Flag-Layout — wir mappen
+    // beim Zugriff auf das neue Status-Byte-Layout.
+    uint8_t old = _prefs.scope_extras[ref.idx].flags;
+    uint8_t s = 0;
+    bool in_list  = (old & SCOPE_FLAG_IN_REPEAT_LIST) != 0;
+    bool geo_mgd  = (old & SCOPE_FLAG_GEO_MANAGED)   != 0;
+    bool disabled = (old & SCOPE_FLAG_DISABLED)      != 0;
+    if (geo_mgd)        s |= SCOPE_STATUS_REPEAT_AUTO;  // = 0
+    else if (in_list)   s |= SCOPE_STATUS_REPEAT_ON;
+    else                s |= SCOPE_STATUS_REPEAT_OFF;
+    if (disabled)       s |= SCOPE_STATUS_DISABLED;
+    return s;
+  }
+  return 0;
+}
+
+bool MyMesh::setScopeStatus(const ScopeRef& ref, uint8_t status) {
+  if (ref.storage == SCOPE_BUILDIN) return setBuildinStatus(ref.idx, status);
+  if (ref.storage == SCOPE_EXTRAS
+      && ref.idx >= 0 && ref.idx < _prefs.scope_extras_count) {
+    // Auf alte ScopeRegEntry-Flags zurueck-mappen waehrend dual-storage-
+    // Phase. Schritt 8 (Cleanup) wird scope_extras auf das neue Layout
+    // umstellen.
+    ScopeRegEntry& e = _prefs.scope_extras[ref.idx];
+    e.flags &= ~(SCOPE_FLAG_IN_REPEAT_LIST | SCOPE_FLAG_GEO_MANAGED
+                 | SCOPE_FLAG_DISABLED);
+    uint8_t rm = status & SCOPE_STATUS_REPEAT_MASK;
+    if (rm == SCOPE_STATUS_REPEAT_AUTO) {
+      e.flags |= SCOPE_FLAG_GEO_MANAGED;  // hat HAS_GEO_BOX schon
+    } else if (rm == SCOPE_STATUS_REPEAT_ON) {
+      e.flags |= SCOPE_FLAG_IN_REPEAT_LIST;
+    }
+    if (status & SCOPE_STATUS_DISABLED) e.flags |= SCOPE_FLAG_DISABLED;
+    return true;
+  }
+  return false;
+}
+
+const uint8_t* MyMesh::getScopeKey(const ScopeRef& ref) const {
+  if (ref.storage == SCOPE_BUILDIN
+      && ref.idx >= 0 && ref.idx < _buildin_keys_count) {
+    return _buildin_keys[ref.idx].key;
+  }
+  if (ref.storage == SCOPE_EXTRAS
+      && ref.idx >= 0 && ref.idx < _prefs.scope_extras_count) {
+    return _prefs.scope_extras[ref.idx].key;
+  }
+  return NULL;
+}
+
+bool MyMesh::getScopeBbox(const ScopeRef& ref,
+                          double* lat_min, double* lat_max,
+                          double* lon_min, double* lon_max) const {
+  if (ref.storage == SCOPE_BUILDIN) {
+    return dl9sau_get_region((size_t)ref.idx, NULL,
+                             lat_min, lat_max, lon_min, lon_max);
+  }
+  if (ref.storage == SCOPE_EXTRAS
+      && ref.idx >= 0 && ref.idx < _prefs.scope_extras_count) {
+    const ScopeRegEntry& e = _prefs.scope_extras[ref.idx];
+    if (!(e.flags & SCOPE_FLAG_HAS_GEO_BOX)) return false;
+    if (lat_min) *lat_min = (double)e.bbox_lat_min;
+    if (lat_max) *lat_max = (double)e.bbox_lat_max;
+    if (lon_min) *lon_min = (double)e.bbox_lon_min;
+    if (lon_max) *lon_max = (double)e.bbox_lon_max;
+    return true;
+  }
+  return false;
 }
 
 bool MyMesh::scopeAllowedForRepeat(const mesh::Packet* packet) const {
