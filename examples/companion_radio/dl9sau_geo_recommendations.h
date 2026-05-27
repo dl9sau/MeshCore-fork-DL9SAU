@@ -35,3 +35,9 @@ bool   dl9sau_get_region(size_t idx,
 bool dl9sau_lookup_region_bbox(const char* name,
                                double* lat_min, double* lat_max,
                                double* lon_min, double* lon_max);
+
+// Index-Lookup: Returns position (0..count-1) der Region in der internen
+// Tabelle, oder -1 wenn name nicht gefunden. Wird vom Scope-Architektur-
+// Pivot (Wunschliste 11) verwendet — der Status-Byte fuer einen Build-in-
+// Eintrag wird ueber diesen Index in scope_buildin_status[] adressiert.
+int  dl9sau_find_region_index(const char* name);

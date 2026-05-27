@@ -1386,6 +1386,97 @@ void MyMesh::begin(bool has_display) {
 
     if (migrated) _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
+
+  // ----- Scope-Architektur-Pivot Migration (Wunschliste 11, Schritt 3) -----
+  // Kopiert alte scope_registry-Eintraege in die neuen Storages:
+  //   - Name in Build-in-Tabelle gefunden -> Status-Byte in
+  //     scope_buildin_status[idx] berechnet (Flag-Mapping unten).
+  //   - Name nicht in Build-in -> als User-Extra eingefuegt (max 16 Slots).
+  //
+  // WICHTIG: bis die Consumer (scopeAllowedForRepeat, evaluateGeoManagedEntries,
+  // CLI) auf die neue Storage umgestellt sind, BLEIBT die alte scope_registry
+  // erhalten und ist Quelle der Wahrheit fuer User-Edits. Die neue Storage
+  // wird nur durch diese Migration befuellt — Migration laeuft idempotent
+  // bei jedem Boot. Schritt 7 schaltet die CLI-Writes um, dann wird das
+  // anders.
+  //
+  // Flag-Mapping alt -> neu:
+  //   IN_REPEAT_LIST + GEO_MANAGED -> repeat_mode = AUTO
+  //   IN_REPEAT_LIST + !GEO_MANAGED -> repeat_mode = ON (manual pin)
+  //   !IN_REPEAT_LIST + GEO_MANAGED -> repeat_mode = AUTO (Auto-Tick
+  //                                     entscheidet ueber Bbox-Match)
+  //   !IN_REPEAT_LIST + !GEO_MANAGED -> repeat_mode = OFF
+  //   DISABLED -> status DISABLED gesetzt (zusaetzlich)
+  {
+    // Snapshot der neuen Storage vor Migration — damit wir nur savePrefs
+    // schreiben wenn sich tatsaechlich etwas geaendert hat.
+    uint8_t old_status[SCOPE_BUILDIN_STATUS_SLOTS];
+    memcpy(old_status, _prefs.scope_buildin_status, sizeof(old_status));
+    uint8_t old_extras_count = _prefs.scope_extras_count;
+    ScopeRegEntry old_extras_snap[SCOPE_EXTRAS_SLOTS];
+    memcpy(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap));
+
+    // Reset target (wir uebernehmen aus alter Registry, nicht aufaddieren)
+    memset(_prefs.scope_buildin_status, 0, sizeof(_prefs.scope_buildin_status));
+    _prefs.scope_extras_count = 0;
+    memset(_prefs.scope_extras, 0, sizeof(_prefs.scope_extras));
+
+    int migrated_to_status = 0;
+    int migrated_to_extras = 0;
+    int dropped_full = 0;
+
+    for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
+      const ScopeRegEntry& src = _prefs.scope_registry[i];
+      if (src.name[0] == 0) continue;
+
+      uint8_t status = 0;
+      bool old_in_list   = (src.flags & SCOPE_FLAG_IN_REPEAT_LIST) != 0;
+      bool old_geo_mgd   = (src.flags & SCOPE_FLAG_GEO_MANAGED)   != 0;
+      bool old_disabled  = (src.flags & SCOPE_FLAG_DISABLED)      != 0;
+
+      if (old_geo_mgd) {
+        status |= SCOPE_STATUS_REPEAT_AUTO;   // = 0, no-op
+      } else if (old_in_list) {
+        status |= SCOPE_STATUS_REPEAT_ON;
+      } else {
+        status |= SCOPE_STATUS_REPEAT_OFF;
+      }
+      if (old_disabled) status |= SCOPE_STATUS_DISABLED;
+
+      int idx = dl9sau_find_region_index(src.name);
+      if (idx >= 0 && idx < SCOPE_BUILDIN_STATUS_SLOTS) {
+        // Build-in-Match: Status-Byte schreiben. Bbox + Key kommen
+        // beim Lookup aus der Build-in-Tabelle (read-only).
+        _prefs.scope_buildin_status[idx] = status;
+        migrated_to_status++;
+      } else {
+        // User-Extra: vollstaendigen Eintrag kopieren. Flags wandeln
+        // wir nicht — alte Bitmuster bleiben in scope_extras[].flags
+        // erhalten (Konsumenten der neuen Storage muessen sie genauso
+        // lesen). Wenn voll: drop.
+        if (_prefs.scope_extras_count < SCOPE_EXTRAS_SLOTS) {
+          _prefs.scope_extras[_prefs.scope_extras_count] = src;
+          _prefs.scope_extras_count++;
+          migrated_to_extras++;
+        } else {
+          dropped_full++;
+        }
+      }
+    }
+
+    // savePrefs nur wenn sich etwas geaendert hat (Flash-Wear-Schutz).
+    bool changed =
+        (memcmp(old_status, _prefs.scope_buildin_status, sizeof(old_status)) != 0)
+     || (old_extras_count != _prefs.scope_extras_count)
+     || (memcmp(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap)) != 0);
+
+    if (changed) {
+      _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
+      pushDebugLog("[scope-pivot] migrated %d to status, %d to extras, %d dropped\n",
+                   migrated_to_status, migrated_to_extras, dropped_full);
+    }
+  }
+
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
   _prefs.bw = constrain(_prefs.bw, 7.8f, 500.0f);

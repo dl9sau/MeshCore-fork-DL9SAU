@@ -152,3 +152,11 @@ bool dl9sau_lookup_region_bbox(const char* name,
   }
   return false;
 }
+
+int dl9sau_find_region_index(const char* name) {
+  if (!name || !*name) return -1;
+  for (size_t i = 0; i < REGION_COUNT; i++) {
+    if (strcmp(regions[i].name, name) == 0) return (int)i;
+  }
+  return -1;
+}
