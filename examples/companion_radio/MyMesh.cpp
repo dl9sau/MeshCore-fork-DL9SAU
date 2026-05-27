@@ -3486,27 +3486,63 @@ bool MyMesh::scopeAllowedForRepeat(const mesh::Packet* packet) const {
   return false;
 }
 
+// Wunschliste 11 Schritt 6: Geo-Fallback aus Registry statt hartcodierter
+// Liste. Iteriert Build-in + Extras, waehlt die ENGSTE Bbox die die
+// aktuelle Position enthaelt (= kleinste Flaeche).
+//
+// Filter pro Eintrag:
+//   - HAS_GEO_BOX (sonst kein bbox-Check moeglich)
+//   - Build-in: !ADVERT_OFF, !DISABLED, !USER_DELETED
+//   - Extras: !SCOPE_FLAG_DISABLED (advert_off und user_deleted gibt's
+//             im alten Flag-Layout noch nicht — Schritt 8 Cleanup wird
+//             auch Extras auf das neue Status-Byte-Layout umstellen)
+//
+// Bei mehreren passenden Eintraegen gewinnt der mit der kleinsten
+// Bbox-Flaeche. Tie-Breaker: erster Treffer (stabil, Build-in vor
+// Extras, dann nach Position in der jeweiligen Storage).
 bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
   double lat, lon;
   if (!getEffectiveLatLon(lat, lon)) return false;
 
-  // Reihenfolge: kleinere/engere Box zuerst (de-be ist Teilmenge von
-  // de-bebb), damit ein User in Berlin den spezifischeren Scope bekommt.
-  const char* tag = NULL;
-  if (lat >= CR_BBOX_DE_BE_LAT_MIN && lat <= CR_BBOX_DE_BE_LAT_MAX &&
-      lon >= CR_BBOX_DE_BE_LON_MIN && lon <= CR_BBOX_DE_BE_LON_MAX) {
-    tag = "#de-be";
-  } else if (lat >= CR_BBOX_BEBB_LAT_MIN && lat <= CR_BBOX_BEBB_LAT_MAX &&
-             lon >= CR_BBOX_BEBB_LON_MIN && lon <= CR_BBOX_BEBB_LON_MAX) {
-    tag = "#de-bebb";
-  } else if (lat >= CR_BBOX_OSTFR_LAT_MIN && lat <= CR_BBOX_OSTFR_LAT_MAX &&
-             lon >= CR_BBOX_OSTFR_LON_MIN && lon <= CR_BBOX_OSTFR_LON_MAX) {
-    tag = "#ostfriesland";
-  }
-  if (tag == NULL) return false;
+  ScopeRef winner = { SCOPE_NONE, -1 };
+  double   winner_area = 0;
 
-  TransportKeyStore tmp;
-  tmp.getAutoKeyFor(0, tag, out_key);
+  auto consider = [&](ScopeStorage storage, int idx,
+                      double lat1, double lat2, double lon1, double lon2) {
+    if (lat < lat1 || lat > lat2 || lon < lon1 || lon > lon2) return;
+    double area = (lat2 - lat1) * (lon2 - lon1);
+    if (winner.storage == SCOPE_NONE || area < winner_area) {
+      winner.storage = storage;
+      winner.idx = idx;
+      winner_area = area;
+    }
+  };
+
+  // Build-in
+  for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
+    uint8_t status = getBuildinStatus(i);
+    if (status & (SCOPE_STATUS_ADVERT_OFF
+                  | SCOPE_STATUS_DISABLED
+                  | SCOPE_STATUS_USER_DELETED)) continue;
+    double lat1, lat2, lon1, lon2;
+    if (!dl9sau_get_region((size_t)i, NULL, &lat1, &lat2, &lon1, &lon2)) continue;
+    consider(SCOPE_BUILDIN, i, lat1, lat2, lon1, lon2);
+  }
+
+  // Extras
+  for (int i = 0; i < _prefs.scope_extras_count && i < SCOPE_EXTRAS_SLOTS; i++) {
+    const ScopeRegEntry& e = _prefs.scope_extras[i];
+    if (!(e.flags & SCOPE_FLAG_HAS_GEO_BOX)) continue;
+    if (e.flags & SCOPE_FLAG_DISABLED) continue;
+    consider(SCOPE_EXTRAS, i,
+             (double)e.bbox_lat_min, (double)e.bbox_lat_max,
+             (double)e.bbox_lon_min, (double)e.bbox_lon_max);
+  }
+
+  if (winner.storage == SCOPE_NONE) return false;
+  const uint8_t* k = getScopeKey(winner);
+  if (!k) return false;
+  memcpy(out_key.key, k, sizeof(out_key.key));
   return true;
 }
 
