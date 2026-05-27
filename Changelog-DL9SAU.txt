@@ -1586,6 +1586,248 @@ Verzahnung mit Wunschliste-5 (scope geo-prefers):
   beide Use-Cases bedienen.
 
 ================================================================================
+14u. Companion-CLI: geo_managed-Auto-Trigger (Wunschliste 4d Sub-Punkt)
+================================================================================
+
+Anlass:
+  Nach Punkt 14t (Scope-Registry + Repeat-Allowlist) war das Flag
+  SCOPE_FLAG_GEO_MANAGED persistiert und per CLI ein-/ausschaltbar,
+  aber der Auto-Trigger bei Bbox-Eintritt/-Austritt fehlte noch.
+
+Lösung (commit 3af10bc8):
+  Neue Methode evaluateGeoManagedEntries(lat, lon) iteriert die
+  Scope-Registry, prüft für jeden Eintrag mit HAS_GEO_BOX +
+  GEO_MANAGED die Bbox-Membership und toggelt SCOPE_FLAG_IN_REPEAT_
+  LIST entsprechend. Bei Flag-Wechsel: savePrefs + TRACE_SCOPE-Log
+  ("#<name> entered/left bbox -> repeat ON/OFF").
+
+Hooks in updateMotionTracking():
+  a) First-Fix-Anker-Seed — beim ersten gültigen GPS-Fix nach Boot
+  b) Anker-Update-Tick (alle CR_MOTION_WINDOW_MS = 10 min, wenn
+     Distanz > CR_MOTION_RADIUS_M = 370m)
+
+Zusätzlicher Hook in CLI 'scope repeater geo <name> on': sofortige
+Evaluation gegen getEffectiveLatLon(), damit User nicht auf den
+nächsten Motion-Tick warten muss um den richtigen Status zu sehen.
+
+Hysterese implizit aus dem bestehenden Motion-Tracking (370m / 10min
+Anker-Update, commit 20177a0d / Changelog Punkt 8) — keine
+zusätzliche Bbox-Hysterese nötig.
+
+Damit ist Wunschliste 4d komplett ERLEDIGT.
+
+
+================================================================================
+14v. Companion-CLI: 'get' / 'get all' Vollständigkeit + [default]-Markierung
+================================================================================
+
+Drei Iterationen seit 14r (commit dc2e06aa hatte das Basis-'set/get').
+
+Iteration 1 (commit b63d19d8): [default]-Markierung
+  'get all' zeigte bisher nur die Werte. Analog zu 'prefs'/'prefs all'
+  bekommen Settings jetzt eine Markierung:
+    - on default       -> " [default]"      am Zeilenende
+    - geändert         -> " (default: X)"   am Zeilenende
+  Zusätzlich neue Variante 'get' (ohne Argument):
+    -> zeigt nur die geänderten Settings (analog 'prefs' ohne all)
+
+  Default-Quellen:
+    freq/sf/bw/cr/tx_power -> LORA_*-Build-Flags
+    airtime_factor 1.0, txdelay 0.5, direct_txdelay 0.2 (setDefaults)
+    rx_boosted_gain        -> SX126X_RX_BOOSTED_GAIN_DEFAULT = 1
+    alle anderen           -> 0 / 0.0 (uninitialisiert ist Default)
+
+  node_name bekommt KEINEN Marker — Default ist build-/identity-
+  abhängig (LORA_NAME-Flag oder Pubkey-Hex-Suffix); eindeutiger
+  Vergleich wäre unzuverlässig.
+
+Iteration 2 (commit b2bf5acf): fehlende NodePrefs-Keys
+  Nachgezogen — sind alle in NodePrefs persistiert und ueber die
+  App konfigurierbar:
+    multi_acks            (App: message-ack count)
+    path_hash_mode        (0..3 = 1..4 Byte path-hash)
+    autoadd_config        (bitmask für auto-add Verhalten)
+    autoadd_max_hops      (0 = unlimited; sonst N-1 hops)
+    gps_interval          (App-seitige Poll-Frequenz in s)
+    telemetry_mode_base   (TELEM_MODE_DENY/ALLOW_FLAGS/ALLOW_ALL)
+    telemetry_mode_loc
+    telemetry_mode_env
+    buzzer_quiet
+
+  ble_pin bewusst NICHT exposiert (security — soll nicht
+  versehentlich im Backup auftauchen).
+
+Iteration 3 (commit ae3bf2da): prefs scope-Repeater-Felder
+  'prefs' / 'prefs all' nun erweitert um:
+    repeat_scope_mode = all | allowlist     (Default: all)
+    scope_registry    = N/16  + Liste mit Flags pro Eintrag
+                                R=in repeat-list, G=geo_managed,
+                                b=has bbox, D=disabled (s. 14z)
+
+  'prefs reset' beruecksichtigt die neuen Felder:
+    repeat_scope_mode -> ALL (Default)
+    pro Registry-Eintrag werden IN_REPEAT_LIST + GEO_MANAGED-Flags
+    gecleared. Name + key + bbox bleiben erhalten — pre-populated
+    und user-curated Einträge sollen nicht durch prefs-reset
+    verloren gehen.
+
+  Zusätzlich (kleiner Bug-Fix): status-Output zeigte "repeater=on(force)"
+  ohne Leerzeichen zwischen on und (force). Korrigiert.
+
+
+================================================================================
+14w. Companion-CLI: 'scope regions' — Build-in Geo-Tabelle read-only
+================================================================================
+
+Anlass:
+  Die in dl9sau_geo_recommendations.cpp hartcodierte Tabelle
+  (16 Bundesländer + 5 Aggregate + 2 Top-Level + 2 lokale Specials)
+  war bisher nur intern für chooseGeoFallbackScope() und
+  maybePushGeoRecommendation() verwendet — keine User-Sicht.
+
+Lösung (commit 2783fa41):
+  Read-only Accessor im Header:
+    size_t dl9sau_region_count();
+    bool   dl9sau_get_region(idx, name, lat_min, lat_max,
+                             lon_min, lon_max);
+
+  Companion-CLI 'scope regions' iteriert und gibt aus:
+    '#name lat[X.XX..Y.YY] lon[X.XX..Y.YY]'
+
+Abgegrenzt von 'scope list':
+  - scope list:    USER's NodePrefs-Registry (Liste A, 16 Slots,
+                   editierbar per scope add/remove)
+  - scope regions: FIRMWARE's Build-in Geo-Tabelle (read-only,
+                   Quelle fuer Geo-Recommendations)
+
+Beide Konzepte sind getrennt, weil das Registry-Schema (TransportKey
++ Flags + Bbox) andere Felder hat als die reine Recommendation-
+Tabelle.
+
+
+================================================================================
+14x. Companion-CLI: Pre-Population Naming-Fix (bebb -> de-bebb) + Berlin
+================================================================================
+
+Anlass:
+  User-Test fand, dass die Scope-Registry-Pre-Population (commit
+  224e89de) den Namen 'bebb' verwendete — aber im DL9SAU-Naming-
+  Schema heisst der Berlin/Brandenburg-Scope 'de-bebb' (analog
+  de-be für Berlin, de-bb für Brandenburg). 'bebb' war fehlerhaft.
+
+  Bundesländer bekommen den 'de-'-Prefix:
+    de-be    Berlin (Stadtstaat)
+    de-bb    Brandenburg
+    de-bebb  Berlin+Brandenburg Brücke
+
+  Geografisch/kulturell übergreifende Regionen behalten bare Namen
+  (analog ostfriesland, harz, hansemesh, franken).
+
+Lösung (commit a9062e22):
+  Naming + Migration im begin():
+    1) Falls 'bebb' in Registry vorhanden UND 'de-bebb' nicht:
+       in-place Rename + Key-Neuberechnung (SHA-256("#de-bebb"))
+       User-Flags (IN_REPEAT_LIST, GEO_MANAGED) bleiben erhalten.
+    2) Falls 'de-be' nicht in Registry: addScopeRegistryDefault
+       mit Berlin-Bbox (52.30..52.70 / 13.05..13.80).
+    3) Fresh installs (count == 0) bekommen direkt alle drei
+       Defaults: de-bebb, de-be, ostfriesland.
+
+  Pre-Population in Reihenfolge fest, damit chooseGeoFallbackScope()
+  bei User in Berlin den engeren Scope (#de-be) statt #de-bebb
+  liefert.
+
+  dl9sau_geo_recommendations.cpp: 'bebb' → 'de-bebb' in der lokalen
+  specials-Liste (Konsistenz).
+
+Folge-Korrektur (commit 2777d989): CR_BBOX_BEBB_* in MyMesh.cpp
+  war leicht grosszuegiger als der dl9sau_geo_recommendations-
+  Eintrag (51.40-53.60 / 11.20-14.80 vs 51.36-53.56 / 11.27-14.77).
+  Auf den genaueren Brandenburg-Extent vereinheitlicht.
+
+
+================================================================================
+14y. Companion-CLI Polish — Truncation, Usage, Hilfetexte, trace-Wording
+================================================================================
+
+Mehrere Polish-Iterationen aus User-Tests (Spaziergang-Tests am
+Heltec Wireless Tracker).
+
+Iteration 1 (commit 8b3bffca):
+  - 160-Byte-Truncation in akkumuliertem Output (prefs / get / scope
+    list). Wire-Frame MAX_TEXT_LEN ist 160. add_line/gflush prueften
+    bisher nur ob der Puffer 'fast voll' war — eine spaete Zeile
+    konnte ihn ueber 160 treiben. Fix: VOR jedem Append pruefen ob
+    die Summe > Threshold wuerde — dann flushen. (Threshold spaeter
+    in 14y-Iteration 2 korrigiert.)
+  - scope repeater Usage-Syntax war einzeilig und las sich wie ein
+    einziger Befehl 'scope repeater mode allowlist add name'. Neu
+    mehrzeilig mit klarer Trennung.
+  - trace-Messages umformuliert: 'active' und 'persistent' waren
+    interne Variablen-Namen, fuer User kryptisch. Neu 'aktiv' und
+    'gespeicherte Auswahl'.
+  - help scope ueberarbeitet: alte Behauptung 'scope steuert NUR
+    nightly bake/advert flood' war falsch. Neu strukturiert die drei
+    Bereiche (Send-Policy / Registry / Repeat-Policy).
+  - help scope repeater als eigener Topic. topic_prefix_match sieht
+    nur das erste Wort — deshalb wird 'scope repeater' ueber
+    starts_with_word VOR der 'scope'-Pruefung gehandhabt.
+
+Iteration 2 (commit 2777d989):
+  - Truncation-Fix war noch nicht voll: pushCompanionMessage prefixt
+    mit Sender-Name ('Generic ESP32: ', ~15 Byte). Effektives Text-
+    Budget ist nur ~145 Byte. Threshold auf 130 gesenkt (sichere
+    Reserve auch fuer laengere Sender-Namen).
+  - Help-Texte nochmal neu strukturiert: kein Spalten-Alignment mit
+    vielen Spaces (kostet Bytes), stattdessen kurze Saetze pro
+    pushCompanionMessage, jeweils <130 Zeichen. 'scope' (ohne
+    Argument) explizit erklaert. scope geo-Feature (in 'scope
+    repeater geo') hervorgehoben.
+  - scope info bei Eintrag ohne Bbox: explizit '(keine) —
+    geo_managed nicht moeglich' + Migration-Tipp.
+  - prefs (ohne 'all') zeigt jetzt IMMER die Scope-Registry (mit
+    Flags pro Eintrag), nicht nur wenn ein Eintrag IN_REPEAT_LIST
+    oder GEO_MANAGED hat. Pre-populated Eintraege sind ja auch
+    Konfiguration.
+  - trace-Wording: 'wiederhergestellt' (klang nach 'irgendwas wurde
+    geloescht und wieder hergestellt') -> 'wird verwendet'.
+
+
+================================================================================
+14z. Companion-CLI: scope repeater enable / disable
+================================================================================
+
+User-Wunsch (Spaziergang-Test 2): einzelne Eintraege der Repeat-
+Liste voruebergehend inaktivieren ohne sie aus der Liste zu
+entfernen — Name, Hash, Bbox, geo_managed-Flag bleiben erhalten.
+
+Lösung (commit d2326758):
+  Neues Flag SCOPE_FLAG_DISABLED (0x08) in NodePrefs.h.
+  scopeAllowedForRepeat() ueberspringt Eintraege mit gesetztem
+  Disabled-Bit. IN_REPEAT_LIST bleibt — Eintrag bleibt in der Liste,
+  ist nur inaktiv.
+
+  CLI:
+    scope repeater enable <name>   Aktiv (Default beim Add)
+    scope repeater disable <name>  Inaktiv, bleibt in Liste
+
+  Sichtbar in:
+    scope list                       Flag 'D' wird angezeigt
+    scope info <name>                in_repeat_list = 'yes (disabled)'
+                                                   / 'yes (active)' / 'no'
+    scope repeater                   count zeigt 'N (aktiv: M)';
+                                     Liste markiert disabled mit '(D)'
+    prefs / prefs all                Registry zeigt 'D'-Flag
+
+  Beim 'scope repeater add' (re-add) wird SCOPE_FLAG_DISABLED
+  automatisch gecleared — vermeidet stille Uebernahme alten
+  Zustands.
+
+  'prefs reset' clears auch SCOPE_FLAG_DISABLED bei allen
+  Eintraegen.
+
+
+================================================================================
 15. Konstanten-Übersicht (in MyMesh.h)
 ================================================================================
 
