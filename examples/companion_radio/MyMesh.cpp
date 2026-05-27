@@ -6277,11 +6277,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       first_word[fl] = 0;
       while (*p == ' ' || *p == '\t') p++;
 
+      // ? — Top-Level-Hilfe
+      if (first_word[0] == '?' && first_word[1] == 0) {
+        pushCompanionMessage("scope — Sub-Befehle:");
+        pushCompanionMessage("  scope default | bake | override <...>");
+        pushCompanionMessage("  scope list | add | remove | info | regions");
+        pushCompanionMessage("  scope repeater [...]   ('scope rep ?')");
+        pushCompanionMessage("  scope <name> repeat|advert|disable|delete|info");
+        return;
+      }
+
       char name[16];
       if (!normalizeScopeName(first_word, name, sizeof(name))) {
-        pushCompanionMessage(
-          "Usage: scope [default|bake|override|list|add|remove|info|repeater|regions]\n"
-          "       scope <name> repeat|advert|disable|enable|delete|undelete|info");
+        pushCompanionMessage("Unbekannter Befehl. 'scope ?' fuer Sub-Befehle.");
         return;
       }
       ScopeRef ref = findScopeByName(name);
@@ -6293,13 +6301,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      if (!*p) {
-        pushCompanionMessage(
-          "Usage: scope <name> repeat auto|on|off\n"
-          "       scope <name> advert auto|off\n"
-          "       scope <name> disable | enable\n"
-          "       scope <name> delete | undelete   (no_abbrev fuer delete)\n"
-          "       scope <name> info");
+      if (!*p || (p[0] == '?' && (p[1] == 0 || p[1] == ' '))) {
+        char head[80]; snprintf(head, sizeof(head), "scope #%s — Aktionen:", name);
+        pushCompanionMessage(head);
+        pushCompanionMessage("  repeat auto|on|off\n    auto bei Bbox-Match, on=pin, off=nie");
+        pushCompanionMessage("  advert auto|off\n    Geo-Send-Fallback ein/aus");
+        pushCompanionMessage("  disable | enable\n    temporaer inaktiv / aktiv");
+        pushCompanionMessage("  delete | undelete\n    permanent verstecken (Build-in)");
+        pushCompanionMessage("  info\n    aktuellen Status anzeigen");
         return;
       }
 
@@ -6734,6 +6743,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (sub_idx == 7) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
+      // ? -> Kurzhilfe (vor dem Status-Check, sonst greift no-arg=status).
+      if (sub && sub[0] == '?'
+          && (sub[1] == 0 || sub[1] == ' ' || sub[1] == '\t')) {
+        pushCompanionMessage("scope repeater — Sub-Befehle:");
+        pushCompanionMessage("  scope repeater\n    Status (Mode + Liste)");
+        pushCompanionMessage("  scope repeater mode all|allowlist\n    Policy umschalten");
+        pushCompanionMessage("  scope repeater add <name>\n    in Repeat-Liste");
+        pushCompanionMessage("  scope repeater remove <name>\n    aus Repeat-Liste (no_abbrev)");
+        pushCompanionMessage("  scope repeater geo <name> on|off\n    geo_managed-Flag");
+        pushCompanionMessage("  scope repeater enable|disable <name>\n    Repeat-Flag temporaer aktiv/inaktiv");
+        return;
+      }
       if (!sub || *sub == 0) {
         // Status — Header + Liste als getrennte Messages damit wire-Limit
         // bei vielen Eintraegen nicht reisst.
@@ -6792,13 +6813,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r); return;
       }
       if (rs < 0) {
-        pushCompanionMessage(
-          "Usage:\n"
-          "  scope repeater                       Status\n"
-          "  scope repeater mode all|allowlist    Policy umschalten\n"
-          "  scope repeater add <name>            Eintrag in Repeat-Liste\n"
-          "  scope repeater remove <name>         Eintrag entfernen\n"
-          "  scope repeater geo <name> on|off     geo_managed-Flag setzen");
+        pushCompanionMessage("Unbekannte Sub-Aktion. 'scope rep ?' fuer Sub-Befehle.");
         return;
       }
 
