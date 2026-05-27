@@ -3112,8 +3112,8 @@ bool MyMesh::syncScopePivotFromLegacy() {
   _prefs.scope_extras_count = 0;
   memset(_prefs.scope_extras, 0, sizeof(_prefs.scope_extras));
 
-  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
-    const ScopeRegEntry& src = _prefs.scope_registry[i];
+  for (int i = 0; i < _prefs._legacy_scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
+    const ScopeRegEntry& src = _prefs._legacy_scope_registry[i];
     if (src.name[0] == 0) continue;
 
     uint8_t status = 0;
@@ -3162,9 +3162,9 @@ bool MyMesh::syncScopePivotFromLegacy() {
   // nichts mehr "verwirren". Das raeumt den frueheren Bug aus, dass dieser
   // Sync USER_DELETED/Repeat-Aenderungen aus scope_buildin_status
   // weggewischt hat.
-  if (_prefs.scope_registry_count > 0) {
-    _prefs.scope_registry_count = 0;
-    memset(_prefs.scope_registry, 0, sizeof(_prefs.scope_registry));
+  if (_prefs._legacy_scope_registry_count > 0) {
+    _prefs._legacy_scope_registry_count = 0;
+    memset(_prefs._legacy_scope_registry, 0, sizeof(_prefs._legacy_scope_registry));
     changed = true;
   }
 

@@ -678,20 +678,47 @@ chooseGeoFallbackScope() Refactor:
   - TransportKey aus dem Key-Cache (Build-in) oder Eintrag (User-Extras).
 
 Implementations-Reihenfolge (auf feat/nearly-real-repeater-Branch):
-   1. NodePrefs-Schema: Status-Array + User-Extras-Liste + Count
-   2. DataStore Read/Write (append at end fuer Backward-Compat)
-   3. Migration im begin(): alt → neu
-   4. Key-Cache + Lookup-Helpers (by name in beiden Storages)
-   5. scopeAllowedForRepeat() / evaluateGeoManagedEntries() umstellen
-   6. chooseGeoFallbackScope() Registry-iterierend
-   7. CLI 'scope <name> repeat|advert|disable|delete'
-   8. CLI 'scope add' Syntax-Vereinfachung (kein 'geo'-Keyword)
-   9. CLI 'scope list' / 'scope list all' / 'scope info'
-  10. Build-in Tabelle um local/lokal/region/regional erweitern
-  11. allowPacketForward Special-Logik fuer local/lokal
-  12. allowPacketForward Special-Logik fuer region/regional + Pref
+   1. NodePrefs-Schema: Status-Array + User-Extras-Liste + Count       ERLEDIGT
+   2. DataStore Read/Write (append at end fuer Backward-Compat)        ERLEDIGT
+   3. Migration im begin(): alt → neu                                  ERLEDIGT
+   4. Key-Cache + Lookup-Helpers (by name in beiden Storages)          ERLEDIGT
+   5. scopeAllowedForRepeat() umstellen                                ERLEDIGT
+   6. chooseGeoFallbackScope() Registry-iterierend                     ERLEDIGT
+   7. CLI 'scope <name> repeat|advert|disable|delete'                  ERLEDIGT
+   8. Cleanup: alte scope_registry aus aktivem Pfad raus               ERLEDIGT
+      (Sub-Commits: a) scope add -> scope_extras direkt,
+       b) scope remove -> beide Storages, c) Migration one-shot
+       (Drain), d) Dead-Code raus / Helpers entfernt.)
+   9. CLI 'scope list' / 'scope list all' / 'scope info'               ERLEDIGT
+  10. Build-in Tabelle um local/lokal/region/regional erweitern        ERLEDIGT
+  11. allowPacketForward Special-Logik fuer local/lokal                ERLEDIGT
+  12. allowPacketForward Special-Logik fuer region/regional + Pref     ERLEDIGT
+      (Pref umbenannt: region_hop_limit -> scope_regional_hop_limit;
+       CLI: set/get scope_regional_hops 1..16, Default 3.)
+
+Plus nachtraegliche Verbesserungen aus User-Test-Feedback:
+  - 'scope rep' Filter & Legende: Repeat-Set statt customized-only;
+    (A)=aktiv (auto Bbox), (A-)=inaktiv (auto Bbox), (P)=pin, (D).
+  - 'scope <name> delete' raeumt jetzt auch den Pin mit weg
+    (USER_DELETED + REPEAT_OFF zusammen).
+  - 'scope rep geo/add/remove/enable/disable' entfernt — durch
+    'scope <name> <verb>' ersetzt.
+  - Verben pin/geo/off als Top-Level (statt repeat auto|on|off):
+    'scope <name> pin' / 'geo' / 'off'. 'repeat <verb>' bleibt mit
+    pin/geo als Aliasen.
+  - scope_registry-Feld umbenannt zu _legacy_scope_registry (drain-
+    pad). Echtes Entfernen in spaeterem Format-Bump-Commit.
 
 Jeder Schritt ein eigener Commit mit Build-Check. Pause-Punkte fuer
 User-Tests dazwischen.
 
 Quelle: User-Anregung in dieser Session, 2026-05-28.
+
+
+12. flood_max + loop.detect Companion-CLI Mirror (NEU OFFEN)
+--------------------------------------------------------------------------------
+Siehe Punkt 6 oben — die Voraussetzungen sind geklaert. _prefs.flood_max
++ set/get CLI noch nicht eingebaut; CR_MAX_REPEAT_PATH_LEN bleibt
+hartcodiert auf 16 in MyMesh.cpp:641. Konsens: kein per-Scope-Limit
+(zu verwirrend); 3-stufige Reichweite reicht (local=1 hop, regional=
+scope_regional_hops, alles andere=flood_max).
