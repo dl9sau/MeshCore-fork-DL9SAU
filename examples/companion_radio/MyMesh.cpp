@@ -4132,7 +4132,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              "autoadv: zerohop=%s nightly=%s  repeater=%s%s",
              zh, nl,
              _prefs.client_repeat ? "on" : "off",
-             _prefs.client_repeat_force ? "(force)" : "");
+             _prefs.client_repeat_force ? " (force)" : "");
     pushCompanionMessage(line);
     return;
   }
@@ -4543,9 +4543,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.trace_flags_persistent = 0;
       _prefs.gps_power_mode = 0;
       _prefs.gps_lead_min = 5;
+      // repeat_scope_mode auf ALL (Default). Registry-Inhalte bleiben
+      // erhalten — pre-populated + user-curated Namen sollen nicht durch
+      // einen prefs-reset verloren gehen. Aber die Policy-Flags pro
+      // Eintrag (IN_REPEAT_LIST, GEO_MANAGED) werden gecleared, damit
+      // der reset auch das Repeat-Verhalten neutralisiert.
+      _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
+      for (int i = 0; i < _prefs.scope_registry_count; i++) {
+        _prefs.scope_registry[i].flags &= ~(SCOPE_FLAG_IN_REPEAT_LIST
+                                             | SCOPE_FLAG_GEO_MANAGED);
+      }
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
-      pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.");
+      pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt. "
+                           "Registry-Eintraege bleiben, Repeat-Flags gecleared.");
       return;
     }
 
@@ -4669,6 +4680,45 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                lead == 5 ? " [default]" : " (default: 5)");
       add_line(tmp);
       if (lead != 5) non_default_count++;
+    }
+    // repeat_scope_mode (Liste B Policy)
+    if (show_all || _prefs.repeat_scope_mode != REPEAT_SCOPE_MODE_ALL) {
+      const char* mode = (_prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALLOWLIST)
+                         ? "allowlist" : "all";
+      snprintf(tmp, sizeof(tmp), "  repeat_scope_mode = %s%s", mode,
+               _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL ? " [default]" : " (default: all)");
+      add_line(tmp);
+      if (_prefs.repeat_scope_mode != REPEAT_SCOPE_MODE_ALL) non_default_count++;
+    }
+    // scope_registry: Anzahl + Eintraege mit nicht-Default-Flags hervorheben.
+    // Pre-Population schreibt 2 Eintraege beim ersten Boot, Default-Zustand
+    // im engen Sinne (gleich nach setDefaults) ist count==0; wir behandeln
+    // die pre-populated Defaults aber wie 'normal' und zeigen non-default
+    // nur die Eintraege mit IN_REPEAT_LIST oder GEO_MANAGED.
+    {
+      int n_marked = 0;
+      for (int i = 0; i < _prefs.scope_registry_count; i++) {
+        if (_prefs.scope_registry[i].flags
+            & (SCOPE_FLAG_IN_REPEAT_LIST | SCOPE_FLAG_GEO_MANAGED)) n_marked++;
+      }
+      if (show_all || n_marked > 0) {
+        snprintf(tmp, sizeof(tmp), "  scope_registry = %u/%u (siehe 'scope list')",
+                 (unsigned)_prefs.scope_registry_count, (unsigned)SCOPE_REG_SLOTS);
+        add_line(tmp);
+        // Bei nicht-Default-Flag pro Eintrag eine kurze Zeile mit Marker.
+        for (int i = 0; i < _prefs.scope_registry_count; i++) {
+          const ScopeRegEntry& e = _prefs.scope_registry[i];
+          uint8_t marks = e.flags & (SCOPE_FLAG_IN_REPEAT_LIST | SCOPE_FLAG_GEO_MANAGED);
+          if (!show_all && marks == 0) continue;
+          char flagstr[10] = "";
+          if (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) strcat(flagstr, "R");
+          if (e.flags & SCOPE_FLAG_GEO_MANAGED)   strcat(flagstr, "G");
+          if (e.flags & SCOPE_FLAG_HAS_GEO_BOX)   strcat(flagstr, "b");
+          snprintf(tmp, sizeof(tmp), "    #%s  [%s]", e.name, flagstr[0] ? flagstr : "-");
+          add_line(tmp);
+        }
+        if (n_marked > 0) non_default_count++;
+      }
     }
 
     if (!show_all && non_default_count == 0) {
