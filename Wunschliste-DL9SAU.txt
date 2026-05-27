@@ -576,3 +576,122 @@ Use-Cases:
 
 Quelle: User-Anregung in dieser Session, 2026-05-28. Erste
 Ueberlegung, Details noch offen.
+
+
+--------------------------------------------------------------------------------
+11. Scope-Architektur-Pivot: Build-in-Tabelle + Status-Array + User-Extras
+--------------------------------------------------------------------------------
+
+Anlass (User-Erkenntnis 2026-05-28):
+  Die Two-Table-Trennung aus Punkt 4d (Liste A = NodePrefs-Registry mit
+  16 Slots, Liste B = IN_REPEAT_LIST-Flag in der gleichen Registry) hat
+  drei Probleme:
+    - Doppel-Pflege: User muss Daten aus der Build-in dl9sau_regions-
+      Tabelle ins NodePrefs-Registry kopieren (via 'scope add')
+    - 16-Slot-Limit: dl9sau_regions hat schon ~25 Eintraege, koennen
+      nicht alle gleichzeitig genutzt werden
+    - Future-Skalierung: wenn die Build-in-Tabelle auf 40+ waechst,
+      profitiert der User beim Auto-Roaming nicht ohne manuelles
+      Nacharbeiten
+
+Soll-Architektur:
+
+  Build-in-Tabelle (in Flash, read-only):
+    name + bbox je Eintrag. Erweitert um position-unabhaengige Scopes
+    'local', 'lokal', 'region', 'regional' (mit no-bbox-Flag).
+    Heute ~25 Eintraege, kann auf 40+ wachsen.
+
+  Status-Array (in NodePrefs, 1 Byte pro Build-in-Eintrag):
+    bits 0-1: repeat_mode (00=auto, 01=on, 10=off, 11=reserved)
+    bit  2:   advert_geo_off
+    bit  3:   disabled       (temporaer inaktiv, zeigt mit D-Flag)
+    bit  4:   user_deleted   (User hat Eintrag versteckt)
+    bits 5-7: reserved
+    Default 0x00 = auto/auto/aktiv. Speicher: 64 Byte reserviert
+    (Reserve fuer Build-in-Wachstum bis 64 Eintraege).
+
+  User-Extras-Liste (in NodePrefs, 16 Slots):
+    name + key + bbox + flags. Fuer Eintraege die NICHT in der
+    Build-in-Tabelle stehen (eigener Vereins-Scope, Kiez-Scope,
+    voruebergehende Region die noch kein Standard ist).
+    16 Slots: User-Geraete sind portabel, sehen mehr Region-Wechsel
+    als ortsfeste Repeater.
+
+  Key-Cache (RAM, beim Boot berechnet):
+    TransportKey pro Build-in-Eintrag (SHA-256("#name")).
+    25 x 16 = ~400 B RAM.
+
+  Speicher-Vergleich:
+    Alt: 832 B NodePrefs (16 Slots Registry) + 0 RAM-Cache
+    Neu: ~900 B NodePrefs (64 Status + 832 User-Extras + Overhead) +
+         400 B RAM. Vorteil: skaliert mit Build-in-Wachstum.
+
+CLI (vereinfacht, Modelle merged):
+
+  scope list                       nur non-default (analog 'prefs')
+  scope list all                   alle Eintraege (Build-in + User-Extras)
+  scope regions                    bleibt fuer reine Build-in-Tabelle
+
+  scope <name> repeat auto|on|off  repeat-mode pro Eintrag
+  scope <name> advert auto|off     advert-geo-Fallback ein/aus
+  scope <name> disable | enable    temporaerer Override
+  scope <name> delete | undelete   permanent verstecken (Build-in)
+  scope <name> info                Details
+
+  scope add <name>                                    (User-Extras nur
+                                                       wenn Name nicht
+                                                       in Build-in)
+  scope add <name> <lat_min>,<lon_min>,<lat_max>,<lon_max>
+                                                      mit Bbox
+  scope remove <name>              nur User-Extras (no_abbrev)
+
+  Alte 'scope repeater'-Subcommands entfallen — Pin/Mode via
+  'scope <name> repeat'. 'scope repeater mode all|allowlist' bleibt
+  (Master-Switch ob Liste ueberhaupt gilt).
+
+Migration vom Modell aus 4d:
+  - Bestehende Registry-Eintraege mit Name-Match in Build-in:
+      Flags ins Status-Array kopieren, Eintrag aus alter Registry
+      entfernen (alte Registry kapazitaet bleibt vorerst als Legacy-
+      Slot in NodePrefs reserviert).
+  - Bestehende Registry-Eintraege ohne Build-in-Match: in User-Extras
+      umkopieren. Wenn voll: Warnung loggen, ueberzaehlige Eintraege
+      werden verworfen.
+  - Old SCOPE_FLAG_IN_REPEAT_LIST + GEO_MANAGED → repeat_mode=auto.
+    SCOPE_FLAG_DISABLED → disabled=on. Etc.
+
+Spezial-Scopes als Build-in-Eintraege:
+  local, lokal     repeat_mode=on (pin), advert_geo_off=on, no-bbox
+  region, regional repeat_mode=on (pin), advert_geo_off=on, no-bbox
+  Special-Logik in allowPacketForward:
+    - local/lokal: nur repeaten wenn path_hash_count==0; vor TX
+      Scope-Rewrite zu 'local-discard' (Sentinel)
+    - region/regional: nur repeaten wenn path_hash_count <
+      _prefs.region_hop_limit (neuer Pref, Default 3)
+    - 'local-discard' (auch in Build-in, mit repeat_mode=off default):
+      explizit ablehnen falls reinkommt
+
+chooseGeoFallbackScope() Refactor:
+  - Iteriert Build-in-Status-Array + User-Extras
+  - Filter: HAS_GEO_BOX && advert_geo_off==0 && !user_deleted && !disabled
+  - Position in Bbox → Kandidat. Engster Bbox-Match gewinnt.
+  - TransportKey aus dem Key-Cache (Build-in) oder Eintrag (User-Extras).
+
+Implementations-Reihenfolge (auf feat/nearly-real-repeater-Branch):
+   1. NodePrefs-Schema: Status-Array + User-Extras-Liste + Count
+   2. DataStore Read/Write (append at end fuer Backward-Compat)
+   3. Migration im begin(): alt → neu
+   4. Key-Cache + Lookup-Helpers (by name in beiden Storages)
+   5. scopeAllowedForRepeat() / evaluateGeoManagedEntries() umstellen
+   6. chooseGeoFallbackScope() Registry-iterierend
+   7. CLI 'scope <name> repeat|advert|disable|delete'
+   8. CLI 'scope add' Syntax-Vereinfachung (kein 'geo'-Keyword)
+   9. CLI 'scope list' / 'scope list all' / 'scope info'
+  10. Build-in Tabelle um local/lokal/region/regional erweitern
+  11. allowPacketForward Special-Logik fuer local/lokal
+  12. allowPacketForward Special-Logik fuer region/regional + Pref
+
+Jeder Schritt ein eigener Commit mit Build-Check. Pause-Punkte fuer
+User-Tests dazwischen.
+
+Quelle: User-Anregung in dieser Session, 2026-05-28.
