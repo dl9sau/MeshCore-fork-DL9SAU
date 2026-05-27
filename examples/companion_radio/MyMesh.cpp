@@ -1304,7 +1304,13 @@ void MyMesh::begin(bool has_display) {
       float lat_min, lat_max, lon_min, lon_max;
     };
     static const PrepopEntry prepop[] = {
+      // de-bebb (Bridge Berlin+Brandenburg) und de-bb (Brandenburg) teilen
+      // die Bbox — Berlin liegt geografisch ganz in Brandenburg. Beide
+      // pre-populiert, damit der User je nach Sende-Absicht (broad vs.
+      // strictly-Brandenburg) den richtigen Scope-Namen verwendet.
       { "de-bebb",      CR_BBOX_BEBB_LAT_MIN,  CR_BBOX_BEBB_LAT_MAX,
+                        CR_BBOX_BEBB_LON_MIN,  CR_BBOX_BEBB_LON_MAX  },
+      { "de-bb",        CR_BBOX_BEBB_LAT_MIN,  CR_BBOX_BEBB_LAT_MAX,
                         CR_BBOX_BEBB_LON_MIN,  CR_BBOX_BEBB_LON_MAX  },
       { "de-be",        CR_BBOX_DE_BE_LAT_MIN, CR_BBOX_DE_BE_LAT_MAX,
                         CR_BBOX_DE_BE_LON_MIN, CR_BBOX_DE_BE_LON_MAX },
@@ -6056,16 +6062,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         has_geo = true;
       }
       // Wenn User keine 'geo'-Option mitgegeben hat aber der Name einer
-      // kanonischen Pre-Population-Region entspricht (de-bebb / de-be /
-      // ostfriesland), uebernehmen wir die hartcodierte Default-Bbox.
-      // 'scope add de-be' soll fuer den User direkt funktionieren ohne
-      // dass er die Koordinaten selbst kennen muss.
+      // kanonischen Pre-Population-Region entspricht, uebernehmen wir die
+      // hartcodierte Default-Bbox. 'scope add de-be' soll fuer den User
+      // direkt funktionieren ohne dass er die Koordinaten selbst kennen
+      // muss.
+      //
+      // Hinweis: de-bb (Brandenburg) und de-bebb (Berlin+Brandenburg
+      // Bridge) haben dieselbe Bbox — Berlin liegt geografisch ganz in
+      // Brandenburg, der Unterschied ist rein semantisch (in Brandenburg
+      // funken vs. ueber die Bruecke nach Berlin funken).
       const char* auto_src = NULL;
       if (!has_geo) {
-        if (strcmp(name, "de-bebb") == 0) {
+        if (strcmp(name, "de-bebb") == 0 || strcmp(name, "de-bb") == 0) {
           lat_min = CR_BBOX_BEBB_LAT_MIN;  lat_max = CR_BBOX_BEBB_LAT_MAX;
           lon_min = CR_BBOX_BEBB_LON_MIN;  lon_max = CR_BBOX_BEBB_LON_MAX;
-          has_geo = true; auto_src = " (Default-Bbox Berlin+Brandenburg)";
+          has_geo = true;
+          auto_src = (strcmp(name, "de-bebb") == 0)
+                     ? " (Default-Bbox Berlin+Brandenburg)"
+                     : " (Default-Bbox Brandenburg)";
         } else if (strcmp(name, "de-be") == 0) {
           lat_min = CR_BBOX_DE_BE_LAT_MIN; lat_max = CR_BBOX_DE_BE_LAT_MAX;
           lon_min = CR_BBOX_DE_BE_LON_MIN; lon_max = CR_BBOX_DE_BE_LON_MAX;
