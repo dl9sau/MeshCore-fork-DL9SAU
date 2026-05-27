@@ -6516,8 +6516,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // -- list (Registry / Liste A) --
+    // -- list / list all (Wunschliste 11 Schritt 9) --
+    // Iteriert Build-in + Extras, zeigt pro Eintrag den effektiven Status.
+    // 'scope list'      -> nur non-default Eintraege (kompakt)
+    // 'scope list all'  -> auch Default-Eintraege (komplettes Bild)
+    // Deleted (USER_DELETED) wird nur in 'list all' angezeigt.
     if (sub_idx == 3) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      bool show_all = (sub && strncmp(sub, "all", 3) == 0
+                       && (sub[3] == 0 || sub[3] == ' '));
+
       char gb[200]; size_t gu = 0;
       auto gflush = [&]() {
         if (gu == 0) return;
@@ -6530,25 +6539,80 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (gu > 0) gb[gu++] = '\n';
         for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
       };
-      char head[60];
-      snprintf(head, sizeof(head), "scope list (%u/%u, mode=%s):",
-               (unsigned)_prefs.scope_registry_count, (unsigned)SCOPE_REG_SLOTS,
-               _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL ? "all" : "allowlist");
+
+      // Format-Helper: status-Byte + in_bbox + has_bbox -> Flag-String
+      auto fmtFlags = [&](uint8_t status, bool in_bbox, bool has_bbox,
+                          char* out, size_t out_size) {
+        size_t k = 0;
+        auto put = [&](char c) { if (k + 1 < out_size) out[k++] = c; };
+        uint8_t mode = status & SCOPE_STATUS_REPEAT_MASK;
+        // R = aktiv: ON immer, AUTO wenn in_bbox, OFF nie. Plus DISABLED/
+        // USER_DELETED schalten ab.
+        bool effectively_active = false;
+        if (!(status & (SCOPE_STATUS_DISABLED | SCOPE_STATUS_USER_DELETED))) {
+          if      (mode == SCOPE_STATUS_REPEAT_ON)   effectively_active = true;
+          else if (mode == SCOPE_STATUS_REPEAT_AUTO) effectively_active = in_bbox;
+        }
+        if (effectively_active) put('R');
+        if (mode == SCOPE_STATUS_REPEAT_AUTO) put('A');
+        if (mode == SCOPE_STATUS_REPEAT_ON)   put('P');
+        if (status & SCOPE_STATUS_DISABLED)      put('D');
+        if (status & SCOPE_STATUS_USER_DELETED)  put('X');
+        if (status & SCOPE_STATUS_ADVERT_OFF)    put('!');
+        if (has_bbox)                            put('b');
+        out[k] = 0;
+      };
+
+      // Count first (Header)
+      int total = 0, shown = 0;
+      for (int i = 0; i < _buildin_keys_count; i++) {
+        uint8_t st = getBuildinStatus(i);
+        if (!show_all && (st & SCOPE_STATUS_USER_DELETED)) continue;
+        if (!show_all && st == 0) continue;  // default = nicht-customisiert
+        total++;
+      }
+      for (int i = 0; i < _prefs.scope_extras_count; i++) total++;
+      shown = total;
+
+      char head[100];
+      snprintf(head, sizeof(head), "scope list%s (mode=%s):",
+               show_all ? " all" : "",
+               _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL
+                   ? "all" : "allowlist");
       gline(head);
-      for (int i = 0; i < _prefs.scope_registry_count; i++) {
-        const ScopeRegEntry& e = _prefs.scope_registry[i];
-        char flagstr[24] = "";
-        if (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) strcat(flagstr, " R");
-        if (e.flags & SCOPE_FLAG_DISABLED)      strcat(flagstr, " D");
-        if (e.flags & SCOPE_FLAG_GEO_MANAGED)   strcat(flagstr, " G");
-        if (e.flags & SCOPE_FLAG_HAS_GEO_BOX)   strcat(flagstr, " b");
+
+      // Build-in
+      for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
+        uint8_t st = getBuildinStatus(i);
+        if (!show_all && (st & SCOPE_STATUS_USER_DELETED)) continue;
+        if (!show_all && st == 0) continue;
+        const char* nm = NULL;
+        if (!dl9sau_get_region((size_t)i, &nm, NULL, NULL, NULL, NULL)) continue;
+        char flagstr[16];
+        fmtFlags(st, _buildin_in_bbox[i], true, flagstr, sizeof(flagstr));
         char tmp[80];
-        snprintf(tmp, sizeof(tmp), "  #%s%s", e.name, flagstr);
+        snprintf(tmp, sizeof(tmp), "  #%s  [%s] (b-in)",
+                 nm, flagstr[0] ? flagstr : "-");
         gline(tmp);
       }
-      if (_prefs.scope_registry_count == 0) gline("  (leer)");
-      gline("Flags: R=in repeat-list, D=disabled, G=geo_managed, b=has bbox");
+      // Extras (immer alle anzeigen — User hat sie explizit angelegt)
+      for (int i = 0; i < _prefs.scope_extras_count && i < SCOPE_EXTRAS_SLOTS; i++) {
+        const ScopeRegEntry& e = _prefs.scope_extras[i];
+        ScopeRef r = { SCOPE_EXTRAS, i };
+        uint8_t st = getScopeStatus(r);
+        bool has_bbox = (e.flags & SCOPE_FLAG_HAS_GEO_BOX) != 0;
+        char flagstr[16];
+        fmtFlags(st, _extras_in_bbox[i], has_bbox, flagstr, sizeof(flagstr));
+        char tmp[80];
+        snprintf(tmp, sizeof(tmp), "  #%s  [%s] (ext)",
+                 e.name, flagstr[0] ? flagstr : "-");
+        gline(tmp);
+      }
+      if (shown == 0) gline("  (alles default — 'list all' fuer komplette Sicht)");
       gflush();
+      pushCompanionMessage(
+        "Flags: R=aktiv jetzt, A=auto-mode, P=pin, D=disabled,\n"
+        "X=deleted, !=advert-off, b=hat bbox; (b-in)=Build-in, (ext)=Extras");
       return;
     }
 
@@ -6699,42 +6763,65 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("Name ungueltig.");
         return;
       }
-      int idx = findScopeRegistryByName(name);
-      if (idx < 0) {
-        char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
-        pushCompanionMessage(r); return;
+      ScopeRef r = findScopeByName(name);
+      if (r.storage == SCOPE_NONE) {
+        char m[80]; snprintf(m, sizeof(m), "#%s nicht bekannt.", name);
+        pushCompanionMessage(m); return;
       }
-      const ScopeRegEntry& e = _prefs.scope_registry[idx];
-      const char* rl_str;
-      if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) rl_str = "no";
-      else if (e.flags & SCOPE_FLAG_DISABLED)     rl_str = "yes (disabled)";
-      else                                         rl_str = "yes (active)";
+      uint8_t st = getScopeStatus(r);
+      const uint8_t* key = getScopeKey(r);
+      double lat1=0, lat2=0, lon1=0, lon2=0;
+      bool has_bbox = getScopeBbox(r, &lat1, &lat2, &lon1, &lon2);
+      bool in_bbox = (r.storage == SCOPE_BUILDIN)
+                     ? (r.idx >= 0 && r.idx < SCOPE_BUILDIN_KEY_CACHE_MAX
+                        && _buildin_in_bbox[r.idx])
+                     : (r.idx >= 0 && r.idx < SCOPE_EXTRAS_SLOTS
+                        && _extras_in_bbox[r.idx]);
+
+      // Effective state
+      uint8_t mode = st & SCOPE_STATUS_REPEAT_MASK;
+      const char* mode_str = (mode == SCOPE_STATUS_REPEAT_ON) ? "on (pin)"
+                           : (mode == SCOPE_STATUS_REPEAT_OFF) ? "off"
+                           : "auto";
+      bool eff_active = false;
+      if (!(st & (SCOPE_STATUS_DISABLED | SCOPE_STATUS_USER_DELETED))) {
+        if      (mode == SCOPE_STATUS_REPEAT_ON)   eff_active = true;
+        else if (mode == SCOPE_STATUS_REPEAT_AUTO) eff_active = in_bbox;
+      }
+
       char block[160];
       snprintf(block, sizeof(block),
-               "#%s (slot %d):\n"
+               "#%s [%s]:\n"
                "  hash = %02X%02X%02X%02X\n"
-               "  in_repeat_list = %s\n"
-               "  geo_managed = %s",
-               e.name, idx,
-               e.key[0], e.key[1], e.key[2], e.key[3],
-               rl_str,
-               (e.flags & SCOPE_FLAG_GEO_MANAGED)    ? "yes" : "no");
+               "  repeat = %s -> %s",
+               name,
+               (r.storage == SCOPE_BUILDIN) ? "Build-in" : "Extras",
+               key ? key[0] : 0, key ? key[1] : 0, key ? key[2] : 0, key ? key[3] : 0,
+               mode_str,
+               eff_active ? "AKTIV" : "inaktiv");
       pushCompanionMessage(block);
-      // Bbox-Status als separate Message (sonst Wire-Limit knapp).
-      if (e.flags & SCOPE_FLAG_HAS_GEO_BOX) {
-        char bbox[120];
+
+      char line2[160];
+      snprintf(line2, sizeof(line2),
+               "  advert = %s\n"
+               "  disabled = %s\n"
+               "  user_deleted = %s",
+               (st & SCOPE_STATUS_ADVERT_OFF)    ? "off" : "auto",
+               (st & SCOPE_STATUS_DISABLED)      ? "yes" : "no",
+               (st & SCOPE_STATUS_USER_DELETED)  ? "yes" : "no");
+      pushCompanionMessage(line2);
+
+      if (has_bbox) {
+        char bbox[140];
         snprintf(bbox, sizeof(bbox),
-                 "  bbox = lat[%.3f..%.3f] lon[%.3f..%.3f]",
-                 (double)e.bbox_lat_min, (double)e.bbox_lat_max,
-                 (double)e.bbox_lon_min, (double)e.bbox_lon_max);
+                 "  bbox = lat[%.3f..%.3f] lon[%.3f..%.3f]\n"
+                 "  in_bbox = %s",
+                 lat1, lat2, lon1, lon2,
+                 in_bbox ? "yes" : "no");
         pushCompanionMessage(bbox);
       } else {
         pushCompanionMessage(
-          "  bbox = (keine) - geo_managed nicht moeglich");
-        pushCompanionMessage(
-          "Bbox nachtragen:\n"
-          "  scope remove <name>\n"
-          "  scope add <name> geo <lat_min,lon_min,lat_max,lon_max>");
+          "  bbox = (keine) - 'repeat auto' wirkt wie 'off'");
       }
       return;
     }
