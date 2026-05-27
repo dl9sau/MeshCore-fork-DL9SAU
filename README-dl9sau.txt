@@ -402,3 +402,111 @@ Klarstellung zur Begrifflichkeit "1/3-byte-Hash":
   - path_hash_size = 1/2/3/4 Byte (Multi-Hop-Trail im Packet-Header,
     NICHT De-Dup; haengt mit Routing-Reichweite zusammen)
   Die zwei sind orthogonal.
+
+
+
+================================================================================
+Companion-CLI — Uebersicht (Stand 2026-05-28)
+================================================================================
+
+Der Companion hat eine textbasierte Konfig-Schnittstelle ueber den lokalen
+"companion"-Channel (Changelog 14q). Befehle werden als TXT-Message in
+diesen Channel geschickt, Antworten kommen als synthetische incoming-
+Channel-Messages zurueck. Erreichbar via App (BLE oder USB-Frame-Bridge).
+Befehle und ihre Top-Level-Argumente sind per Prefix abkuerzbar
+(match_choice, 14r); zerstoerende Aktionen (reset, remove, clear) muessen
+voll ausgeschrieben werden (no_abbrev-Schutz).
+
+System-Befehle:
+  help / help <topic>     Hilfe-Index bzw. Detail zu einem Befehl
+  status                  Firmware-Version, Uptime, GPS, Adv/Digi-Counter
+  uptime                  nur Uptime
+  stats                   detaillierte Stats nach Pkt-Typ + Airtime
+  reboot                  Deferred reboot (3s delay fuer Frame-Auslieferung)
+  clock / time <epoch>    RTC anzeigen / setzen
+  gps [on|off|sync]       GPS-Modul-Kontrolle
+  gps power [...]         GPS Power-Cycle-Mode (Wunschliste-1 verwandt)
+  neighbors               Contacts mit Advert <48h, sortiert nach hop+SNR
+  tempradio <f,b,s,c>     Temporaere Radio-Parameter (kein savePrefs)
+  ver / board             (existieren noch nicht — Wunschliste-folgende)
+
+App-Settings (CommonCLI-Mirror, Changelog 14r/14v):
+  set <key> <value>       persistente Settings setzen
+  get <key>               Einzelwert lesen
+  get                     nur geaenderte Settings (analog 'prefs')
+  get all                 alle Settings mit [default]-Marker
+
+  Keys: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps,
+  gps_interval, advert_loc_policy, airtime_factor, rx_boosted_gain,
+  manual_add_contacts, multi_acks, path_hash_mode, autoadd_config,
+  autoadd_max_hops, telemetry_mode_base/loc/env, buzzer_quiet, rxdelay,
+  txdelay, direct_txdelay. (ble_pin bewusst NICHT exposiert.)
+
+DL9SAU-spezifische Settings:
+  prefs                   nur veraenderte DL9SAU-Vars (inkl. Registry)
+  prefs all               alle DL9SAU-Vars mit [default]-Marker
+  prefs reset             alle DL9SAU-Vars auf Default; Registry-Eintraege
+                          bleiben, nur deren Repeat-/Geo-Flags werden
+                          gecleared
+
+Trace (RAM-only Live-Logging + persistente Auswahl, Changelog 14r):
+  trace [list]            Kategorien-Uebersicht
+  trace <cat> on|off      Kategorie ein/aus (in Auswahl + aktiv)
+  trace on / trace off    aktiv = gespeicherte Auswahl / pausiert
+  trace all on|off        beide auf alle/keine
+
+Repeater + Duty-Cycle:
+  repeater [on|off] [force]   client_repeat-Master-Schalter + ISM-Check
+  duty [soft|hard <N>|reset]  Duty-Cycle-Schwellen (80% / 100% Default)
+  duty                        Status (current/soft/hard + blocked counter)
+  autoadv [on|off|zerohop|nightly] periodische Auto-Adverts (15min/1h/3h)
+  chatname [default|N|custom|hex]  Sendername-Modus fuer Group-Channels
+
+Advert (Manual + Status):
+  advert [zero-hop|flood]    sofort senden (Default zero-hop)
+
+Scope-System (Changelog 14t + 14v..14z):
+  scope                       Status der drei Send-Quellen (default/bake/
+                              override) + Registry-Count
+  scope default <name>|clear  Send-Default (wirkt auch fuer regulaere
+                              Sends, gleich App-Default)
+  scope bake <name>|clear     Nightly-Bake-Scope (darf weiter sein als
+                              default, z.B. de-be -> de-bebb)
+  scope override <name> [12h|3d]|clear  Hoechste Send-Prioritaet,
+                              persistent ueber Reboots, max 30d TTL
+
+  Registry (Liste A, 16 Slots):
+    scope list                Eintraege mit Flags (R/D/G/b)
+    scope add <name> [geo <lat_min,lon_min,lat_max,lon_max>]
+                              Eintrag anlegen; '#'-Prefix optional
+    scope remove <name>       Eintrag loeschen (kein Prefix-Match)
+    scope info <name>         hash, in_repeat_list, geo_managed, bbox
+    scope regions             Build-in Geo-Tabelle (read-only, fuer
+                              Recommendations)
+
+  Repeat-Policy (Liste B):
+    scope repeater                       Status + Liste
+    scope repeater mode all|allowlist    Policy umschalten
+    scope repeater add <name>            in Repeat-Liste (Eintrag muss in
+                                         Registry sein)
+    scope repeater remove <name>         aus Repeat-Liste
+    scope repeater enable / disable <name>  Aktiv-Zustand toggeln (bleibt
+                                         in Liste). 14z.
+    scope repeater geo <name> on|off     geo_managed-Flag — bei on
+                                         togglet IN_REPEAT_LIST automa-
+                                         tisch beim Bbox-Eintritt/Austritt
+                                         (Hysterese aus 370m/10min Motion-
+                                         Anker, 14u)
+
+  Flags in scope list:
+    R = in Repeat-Liste
+    D = disabled (in Liste, aber inaktiv)
+    G = geo_managed
+    b = has bbox
+
+Wire-Frame-Limit:
+  pushCompanionMessage prefixt mit Sender-Name (z.B. 'Generic ESP32: ',
+  ~15 Byte); MAX_TEXT_LEN = 160. Effektives Text-Budget ~145 Byte pro
+  Message. Multi-Output-Befehle (prefs all, get all, scope list, scope
+  regions) flushen vor jedem Append bei Threshold 130 — keine Wire-
+  Truncation, mehrere Messages werden geschickt. (14y)
