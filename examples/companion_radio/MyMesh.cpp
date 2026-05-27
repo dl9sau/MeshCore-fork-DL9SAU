@@ -3452,6 +3452,30 @@ static bool starts_with_word(const char* text, const char* word) {
   return c == 0 || c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
+// Argument-Prefix-Match fuer on/off (User-Wunsch Wunschliste-4).
+// Returns:
+//    1 = "on"  (exakt oder eindeutiger Prefix)
+//    0 = "off" (exakt oder eindeutiger Prefix)
+//   -1 = ambiguous (z.B. nur "o" -> on UND off matchen)
+//   -2 = not found / leer
+static int match_on_off(const char* arg) {
+  if (!arg) return -2;
+  while (*arg == ' ' || *arg == '\t') arg++;
+  size_t alen = 0;
+  while (arg[alen] && arg[alen] != ' ' && arg[alen] != '\t') alen++;
+  if (alen == 0) return -2;
+  // exact wins
+  if (alen == 2 && strncmp(arg, "on", 2) == 0)  return 1;
+  if (alen == 3 && strncmp(arg, "off", 3) == 0) return 0;
+  // prefix
+  bool on_pre  = (alen < 2 && strncmp(arg, "on",  alen) == 0);
+  bool off_pre = (alen < 3 && strncmp(arg, "off", alen) == 0);
+  if (on_pre && off_pre) return -1;
+  if (on_pre)  return 1;
+  if (off_pre) return 0;
+  return -2;
+}
+
 // Prüft ob das erste Wort von `input` ein Prefix von `keyword` ist
 // (Tipparbeit sparen). "chat" matcht "chatname", "stat" matcht "status".
 // Nur fürs help-Topic-Matching benutzen — bei Top-Level-Befehlen würden
@@ -3724,7 +3748,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "get")) {
         pushCompanionMessage(
-          "get <key>: liest persistente Settings. "
+          "get <key>: liest persistente Settings. 'get all' listet alle "
+          "App-Settings in einem Rutsch (USB-Backup-tauglich)."
+        );
+        pushCompanionMessage(
           "Keys: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps, "
           "advert_loc_policy, airtime_factor, rx_boosted_gain, manual_add_contacts."
         );
@@ -4085,11 +4112,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    if (starts_with_word(arg, "on")) {
+    int m = match_on_off(arg);
+    if (m == -1) {
+      pushCompanionMessage("Mehrdeutig: on off");
+      return;
+    }
+    if (m == 1) {
       _prefs.gps_enabled = 1;
       savePrefs();
       pushCompanionMessage("OK - GPS enabled.");
-    } else if (starts_with_word(arg, "off")) {
+    } else if (m == 0) {
       _prefs.gps_enabled = 0;
       savePrefs();
       pushCompanionMessage("OK - GPS disabled.");
@@ -4625,6 +4657,45 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     char key[24];
     memcpy(key, p, klen); key[klen] = 0;
 
+    // 'get all' -> alle App-Settings in einem Rutsch (akkumulierender Buffer
+    // wie bei prefs). Praktisch fuer USB-only Backup.
+    if (strcmp(key, "all") == 0) {
+      char gb[200];
+      size_t gu = 0;
+      auto gflush = [&](bool force) {
+        if (gu == 0) return;
+        if (!force && gu < 130) return;
+        gb[gu] = 0;
+        pushCompanionMessage(gb);
+        gu = 0;
+      };
+      auto gline = [&](const char* line) {
+        size_t len = strlen(line);
+        if (gu + len + 2 >= sizeof(gb)) gflush(true);
+        if (gu > 0) gb[gu++] = '\n';
+        for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
+        gflush(false);
+      };
+      char tmp[160];
+      gline("get all (App-Settings):");
+      snprintf(tmp, sizeof(tmp), "  name = \"%s\"", _prefs.node_name);                gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  freq = %.4f MHz", _prefs.freq);                   gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  sf = %u", (unsigned)_prefs.sf);                   gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  bw = %.1f kHz", _prefs.bw);                       gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  cr = %u", (unsigned)_prefs.cr);                   gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  tx_power = %d dBm", (int)_prefs.tx_power_dbm);    gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  lat = %.6f", sensors.node_lat);                   gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  lon = %.6f", sensors.node_lon);                   gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  repeat = %u", (unsigned)_prefs.client_repeat);    gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  gps = %u", (unsigned)_prefs.gps_enabled);         gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  advert_loc_policy = %u", (unsigned)_prefs.advert_loc_policy); gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  airtime_factor = %.3f", _prefs.airtime_factor);   gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  rx_boosted_gain = %u", (unsigned)_prefs.rx_boosted_gain); gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  manual_add_contacts = %u", (unsigned)_prefs.manual_add_contacts); gline(tmp);
+      gflush(true);
+      return;
+    }
+
     char r[160];
     if      (strcmp(key, "name") == 0)     snprintf(r, sizeof(r), "name = \"%s\"", _prefs.node_name);
     else if (strcmp(key, "freq") == 0)     snprintf(r, sizeof(r), "freq = %.4f MHz", _prefs.freq);
@@ -4641,7 +4712,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "rx_boosted_gain") == 0)   snprintf(r, sizeof(r), "rx_boosted_gain = %u", (unsigned)_prefs.rx_boosted_gain);
     else if (strcmp(key, "manual_add_contacts") == 0) snprintf(r, sizeof(r), "manual_add_contacts = %u", (unsigned)_prefs.manual_add_contacts);
     else {
-      snprintf(r, sizeof(r), "Unbekannter key '%s'. Beispiele: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps.", key);
+      snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
     }
     pushCompanionMessage(r);
     return;
@@ -4900,29 +4971,34 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // 'trace on' -> active = persistent (Wiederherstellen)
-    if (strcmp(arg, "on") == 0) {
-      _trace_flags = _prefs.trace_flags_persistent;
-      pushCompanionMessage("OK - trace resumed (active = persistent).");
-      return;
-    }
-    // 'trace off' -> active = 0, persistent BLEIBT (Pause)
-    if (strcmp(arg, "off") == 0) {
-      _trace_flags = 0;
-      pushCompanionMessage("OK - trace paused (persistent untouched).");
-      return;
+    // 'trace on/off' -> active = persistent (resume) / active = 0 (pause)
+    {
+      int tm = match_on_off(arg);
+      if (tm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+      if (tm == 1) {
+        _trace_flags = _prefs.trace_flags_persistent;
+        pushCompanionMessage("OK - trace resumed (active = persistent).");
+        return;
+      }
+      if (tm == 0) {
+        _trace_flags = 0;
+        pushCompanionMessage("OK - trace paused (persistent untouched).");
+        return;
+      }
     }
 
     // 'trace all on/off' -> active UND persistent
     if (starts_with_word(arg, "all")) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
-      if (sub && strcmp(sub, "on") == 0) {
+      int am = match_on_off(sub);
+      if (am == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+      if (am == 1) {
         _trace_flags = TRACE_ALL_MASK;
         _prefs.trace_flags_persistent = TRACE_ALL_MASK;
         savePrefs();
         pushCompanionMessage("OK - alle traces an (active + persistent).");
-      } else if (sub && strcmp(sub, "off") == 0) {
+      } else if (am == 0) {
         _trace_flags = 0;
         _prefs.trace_flags_persistent = 0;
         savePrefs();
@@ -4938,13 +5014,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (starts_with_word(arg, trace_cats[k].name)) {
         const char* sub = strchr(arg, ' ');
         if (sub) { while (*sub == ' ') sub++; }
-        if (sub && strcmp(sub, "on") == 0) {
+        int cm = match_on_off(sub);
+        if (cm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+        if (cm == 1) {
           _trace_flags |= trace_cats[k].flag;
           _prefs.trace_flags_persistent |= trace_cats[k].flag;
           savePrefs();
           char r[80]; snprintf(r, sizeof(r), "OK - trace %s an.", trace_cats[k].name);
           pushCompanionMessage(r);
-        } else if (sub && strcmp(sub, "off") == 0) {
+        } else if (cm == 0) {
           _trace_flags &= ~trace_cats[k].flag;
           _prefs.trace_flags_persistent &= ~trace_cats[k].flag;
           savePrefs();
@@ -5257,19 +5335,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(line);
       return;
     }
-    if (strcmp(arg, "off") == 0) {
+    int rm = match_on_off(arg);
+    if (rm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+    if (rm == 0) {
       _prefs.client_repeat = 0;
       _prefs.client_repeat_force = 0;  // Force-Modus mit "off" beenden
       savePrefs();
       pushCompanionMessage("OK - repeater off.");
       return;
     }
-    if (starts_with_word(arg, "on")) {
+    if (rm == 1) {
       // "force"-Keyword erkennen (iOS-Tastatur macht aus "--force" einen
       // em-dash — daher ein einzelnes lowercase Wort statt Doppel-Hyphen).
       bool force = false;
-      const char* rest = arg + 2;  // hinter "on"
-      while (*rest == ' ') rest++;
+      const char* rest = arg;
+      while (*rest && *rest != ' ' && *rest != '\t') rest++;  // skip on-Prefix
+      while (*rest == ' ' || *rest == '\t') rest++;
       if (starts_with_word(rest, "force")) force = true;
       // Sicherheitsgate 1: signalFitsInIsmBand (immer aktiv, auch mit force)
       uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
@@ -5327,36 +5408,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     if (!arg || *arg == 0) { print_status(); return; }
 
-    // "on" / "off" -> beide Flags
-    if (strcmp(arg, "on") == 0) {
-      _prefs.auto_advert_enabled = AUTO_ADV_ALL;
-      savePrefs();
-      trigger_zerohop_now();
-      trigger_nightly_reschedule();
-      pushCompanionMessage("OK - autoadv zerohop=on, nightly=on (sofort + reschedule).");
-      return;
-    }
-    if (strcmp(arg, "off") == 0) {
-      _prefs.auto_advert_enabled = 0;
-      savePrefs();
-      pushCompanionMessage("OK - autoadv zerohop=off, nightly=off.");
-      return;
-    }
-
-    // "zerohop on/off" / "nightly on/off"
+    // Erst zerohop/nightly als Sub-Bereich pruefen — sonst wuerde
+    // match_on_off bei "n" auf nightly statt on/off matchen.
     bool is_zh = starts_with_word(arg, "zerohop");
     bool is_nl = starts_with_word(arg, "nightly");
     if (is_zh || is_nl) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
-      if (!sub || (strcmp(sub, "on") != 0 && strcmp(sub, "off") != 0)) {
+      int sm = match_on_off(sub);
+      if (sm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+      if (sm < 0) {
         pushCompanionMessage(is_zh
           ? "Usage: autoadv zerohop on|off"
           : "Usage: autoadv nightly on|off");
         return;
       }
       uint8_t mask = is_zh ? AUTO_ADV_ZEROHOP : AUTO_ADV_NIGHTLY;
-      bool on = (strcmp(sub, "on") == 0);
+      bool on = (sm == 1);
       if (on) {
         _prefs.auto_advert_enabled |= mask;
         if (is_zh) trigger_zerohop_now();
@@ -5369,6 +5437,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(r, sizeof(r), "OK - autoadv %s %s.",
                is_zh ? "zerohop" : "nightly", on ? "on" : "off");
       pushCompanionMessage(r);
+      return;
+    }
+
+    // Top-Level on/off -> beide Flags
+    int am = match_on_off(arg);
+    if (am == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+    if (am == 1) {
+      _prefs.auto_advert_enabled = AUTO_ADV_ALL;
+      savePrefs();
+      trigger_zerohop_now();
+      trigger_nightly_reschedule();
+      pushCompanionMessage("OK - autoadv zerohop=on, nightly=on (sofort + reschedule).");
+      return;
+    }
+    if (am == 0) {
+      _prefs.auto_advert_enabled = 0;
+      savePrefs();
+      pushCompanionMessage("OK - autoadv zerohop=off, nightly=off.");
       return;
     }
 
