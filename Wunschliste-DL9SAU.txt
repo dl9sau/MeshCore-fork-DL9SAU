@@ -527,3 +527,52 @@ Warum aufgeschoben:
     aus Punkt 7 fertig sind und der User einen 'echten Server' will.
 
 Quelle: User-Anregung in dieser Session, 2026-05-28.
+
+
+--------------------------------------------------------------------------------
+10. USB-Serial Plain-Text CLI (Terminal-Mode)
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  Companion-CLI-Befehle (scope/prefs/get/set/repeater/...) sind nur
+  ueber den Companion-Channel erreichbar — die App muss eine TXT-
+  Message auf den Channel "companion" senden, handleCompanionCommand()
+  faengt das ab. Pures Plain-Text-USB-Terminal (z.B. screen/minicom)
+  funktioniert NICHT — die USB-Schiene erwartet das Frame-Protokoll
+  (writeFrame/checkRecvFrame, MAX_FRAME_SIZE=172, CMD/RESP-Codes).
+
+  simple_repeater hat dagegen ein klassisches Text-CLI direkt ueber
+  Serial — fuer Backup, Konfig, Diagnose ohne App.
+
+Soll-Verhalten:
+  Plain-Text-Terminal-Modus auf der USB-Schiene, koexistierend mit
+  dem Frame-Protokoll der App. Magic-Key zum Umschalten — Auto-
+  Detection per erstem Byte (Frame-Magic vs ASCII), bei Modus-Wechsel
+  ggf. expliziter Trigger wie Enter-mehrfach oder ein definiertes
+  Magic-Pattern.
+
+  Im Text-Modus:
+    - Alle vorhandenen Companion-CLI-Befehle direkt eingebar
+      (prefs, get, set, scope, repeater, trace, neighbors, ...)
+    - Antworten als Klartext zurueck (statt PUSH_CODE_-Frames)
+    - Backup-Workflow: 'get all' / 'prefs all' / 'scope list'
+      output via Copy-Paste sichern; spaeter via 'set <key>',
+      'scope add', etc. wiederherstellen
+    - Idealfall: IRC-aehnliche Chat-Kommandos:
+        /msg <channel> <text>   einmalige Nachricht in Channel
+        /msg <userid> <text>    einmalige DM
+        /join <channel>         in Channel wechseln (alle folgenden
+                                Zeilen ohne / gehen dorthin)
+        /join <userid>          mit User chatten (DM-Mode)
+        /scope <name> <text>    Channel-Nachricht mit explizitem
+                                Scope (override fuer eine Message)
+        Befehle abkuerzbar (Prefix-Match analog match_choice)
+
+Use-Cases:
+  - Backup ohne App ("kann ich die Konfig vom Laptop aus sichern?")
+  - Erste Boot-Konfig (Frequenz, Namen, Scopes) ohne App-Pairing
+  - Chat-zugriff vom Laptop fuer User die kein Smartphone benutzen
+  - Diagnose: trace-Output direkt im Terminal verfolgen
+
+Quelle: User-Anregung in dieser Session, 2026-05-28. Erste
+Ueberlegung, Details noch offen.
