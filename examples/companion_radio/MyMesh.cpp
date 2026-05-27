@@ -270,11 +270,15 @@ int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
 }
 
 uint32_t MyMesh::getRetransmitDelay(const mesh::Packet *packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * 0.5f);
+  // Faktor analog zum simple_repeater (_prefs.tx_delay_factor). 0.5f bleibt
+  // der bisherige hartcodierte Default — wird in begin() als Fallback gesetzt.
+  float f = _prefs.tx_delay_factor;
+  uint32_t t = (uint32_t)(_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * f);
   return getRNG()->nextInt(0, 5*t + 1);
 }
 uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * 0.2f);
+  float f = _prefs.direct_tx_delay_factor;
+  uint32_t t = (uint32_t)(_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * f);
   return getRNG()->nextInt(0, 5*t + 1);
 }
 
@@ -1236,6 +1240,15 @@ void MyMesh::begin(bool has_display) {
 
   // sanitise bad pref values
   _prefs.rx_delay_base = constrain(_prefs.rx_delay_base, 0, 20.0f);
+  // tx_delay_factor / direct_tx_delay_factor: 0 wird als uninitialisiert
+  // gewertet (bisher hartcodiert in MyMesh::getRetransmitDelay) und
+  // einmalig auf den Companion-Default gesetzt. Obergrenze wie simple_repeater.
+  if (_prefs.tx_delay_factor <= 0.0f || _prefs.tx_delay_factor > 2.0f) {
+    _prefs.tx_delay_factor = 0.5f;
+  }
+  if (_prefs.direct_tx_delay_factor <= 0.0f || _prefs.direct_tx_delay_factor > 2.0f) {
+    _prefs.direct_tx_delay_factor = 0.2f;
+  }
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
   _prefs.bw = constrain(_prefs.bw, 7.8f, 500.0f);
@@ -3797,11 +3810,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "set")) {
         pushCompanionMessage(
           "set <key> <value>: persistente Settings setzen. "
-          "Keys: name, lat, lon, freq, sf, bw, cr, tx_power."
+          "Keys: name, lat, lon, freq, sf, bw, cr, tx_power, "
+          "rxdelay, txdelay, direct_txdelay."
         );
         pushCompanionMessage(
           "Sued/West negativ (z.B. 'set lat -10.5'). freq in MHz, bw in kHz. "
-          "Aenderungen werden sofort applied + savePrefs."
+          "Delays sind Faktoren x Airtime (txdelay/direct_txdelay 0..2, "
+          "rxdelay 0..20; 0 = off). Aenderungen sofort applied + savePrefs."
         );
         return;
       }
@@ -3812,7 +3827,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         pushCompanionMessage(
           "Keys: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps, "
-          "advert_loc_policy, airtime_factor, rx_boosted_gain, manual_add_contacts."
+          "advert_loc_policy, airtime_factor, rx_boosted_gain, manual_add_contacts, "
+          "rxdelay, txdelay, direct_txdelay."
         );
         return;
       }
@@ -4712,10 +4728,43 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Repeater-style Delay-Knöpfe (analog simple_repeater CommonCLI).
+    // txdelay/rxdelay sind Faktoren multipliziert mit Pkt-Airtime; siehe
+    // getRetransmitDelay() / calcRxDelay().
+    if (strcmp(key, "txdelay") == 0 || strcmp(key, "rxdelay") == 0
+        || strcmp(key, "direct_txdelay") == 0) {
+      float v = (float)atof(value_lc);
+      if (v < 0.0f || v > 20.0f) {
+        pushCompanionMessage("Wert ausserhalb 0..20.0");
+        return;
+      }
+      if (strcmp(key, "rxdelay") == 0) {
+        _prefs.rx_delay_base = v;
+        savePrefs();
+        char r[60]; snprintf(r, sizeof(r), "OK - rxdelay = %.3f", v);
+        pushCompanionMessage(r);
+      } else if (strcmp(key, "txdelay") == 0) {
+        if (v > 2.0f) { pushCompanionMessage("txdelay max 2.0"); return; }
+        if (v == 0.0f) v = 0.5f;   // 0 wird als uninit gewertet, siehe begin()
+        _prefs.tx_delay_factor = v;
+        savePrefs();
+        char r[60]; snprintf(r, sizeof(r), "OK - txdelay = %.3f", v);
+        pushCompanionMessage(r);
+      } else {  // direct_txdelay
+        if (v > 2.0f) { pushCompanionMessage("direct_txdelay max 2.0"); return; }
+        if (v == 0.0f) v = 0.2f;
+        _prefs.direct_tx_delay_factor = v;
+        savePrefs();
+        char r[60]; snprintf(r, sizeof(r), "OK - direct_txdelay = %.3f", v);
+        pushCompanionMessage(r);
+      }
+      return;
+    }
+
     // Unbekannter key
     char r[120];
     snprintf(r, sizeof(r),
-             "Unbekannter set-key '%s'. Bekannt: name, lat, lon, freq, sf, bw, cr, tx_power.", key);
+             "Unbekannter set-key '%s'. 'help set' fuer Liste.", key);
     pushCompanionMessage(r);
     return;
   }
@@ -4769,6 +4818,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(tmp, sizeof(tmp), "  airtime_factor = %.3f", _prefs.airtime_factor);   gline(tmp);
       snprintf(tmp, sizeof(tmp), "  rx_boosted_gain = %u", (unsigned)_prefs.rx_boosted_gain); gline(tmp);
       snprintf(tmp, sizeof(tmp), "  manual_add_contacts = %u", (unsigned)_prefs.manual_add_contacts); gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  rxdelay = %.3f", _prefs.rx_delay_base);           gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  txdelay = %.3f", _prefs.tx_delay_factor);         gline(tmp);
+      snprintf(tmp, sizeof(tmp), "  direct_txdelay = %.3f", _prefs.direct_tx_delay_factor); gline(tmp);
       gflush(true);
       return;
     }
@@ -4788,6 +4840,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "airtime_factor") == 0)    snprintf(r, sizeof(r), "airtime_factor = %.3f", _prefs.airtime_factor);
     else if (strcmp(key, "rx_boosted_gain") == 0)   snprintf(r, sizeof(r), "rx_boosted_gain = %u", (unsigned)_prefs.rx_boosted_gain);
     else if (strcmp(key, "manual_add_contacts") == 0) snprintf(r, sizeof(r), "manual_add_contacts = %u", (unsigned)_prefs.manual_add_contacts);
+    else if (strcmp(key, "rxdelay") == 0)           snprintf(r, sizeof(r), "rxdelay = %.3f", _prefs.rx_delay_base);
+    else if (strcmp(key, "txdelay") == 0)           snprintf(r, sizeof(r), "txdelay = %.3f", _prefs.tx_delay_factor);
+    else if (strcmp(key, "direct_txdelay") == 0)    snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
     }

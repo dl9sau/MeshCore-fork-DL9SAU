@@ -249,6 +249,8 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.trace_flags_persistent, sizeof(_prefs.trace_flags_persistent)); // 272
     file.read((uint8_t *)&_prefs.gps_power_mode, sizeof(_prefs.gps_power_mode));                   // 274
     file.read((uint8_t *)&_prefs.gps_lead_min, sizeof(_prefs.gps_lead_min));                       // 275
+    file.read((uint8_t *)&_prefs.tx_delay_factor, sizeof(_prefs.tx_delay_factor));                 // 276
+    file.read((uint8_t *)&_prefs.direct_tx_delay_factor, sizeof(_prefs.direct_tx_delay_factor));   // 280
 
     file.close();
   }
@@ -303,6 +305,8 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.trace_flags_persistent, sizeof(_prefs.trace_flags_persistent)); // 272
     file.write((uint8_t *)&_prefs.gps_power_mode, sizeof(_prefs.gps_power_mode));                   // 274
     file.write((uint8_t *)&_prefs.gps_lead_min, sizeof(_prefs.gps_lead_min));                       // 275
+    file.write((uint8_t *)&_prefs.tx_delay_factor, sizeof(_prefs.tx_delay_factor));                 // 276
+    file.write((uint8_t *)&_prefs.direct_tx_delay_factor, sizeof(_prefs.direct_tx_delay_factor));   // 280
 
     file.close();
   }

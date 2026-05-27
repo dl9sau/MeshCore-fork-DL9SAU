@@ -95,4 +95,10 @@ struct NodePrefs {  // persisted to file
   //                                         hardcoded 15-min Motion-Check-Cycle.
   uint8_t gps_power_mode;
   uint8_t gps_lead_min;
+  // Retransmit-Delay-Faktoren (analog simple_repeater / CommonCLI txdelay/
+  // direct_txdelay). Faktor multipliziert mit Pkt-Airtime, +/- 5x RNG-Spread.
+  // 0 wird in MyMesh::begin() als uninitialisiert gewertet und einmalig auf
+  // den Companion-Default (0.5 / 0.2 — die alten hartcodierten Werte) gesetzt.
+  float tx_delay_factor;
+  float direct_tx_delay_factor;
 };
