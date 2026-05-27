@@ -4070,7 +4070,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         pushCompanionMessage(
           "Keys: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps, "
-          "advert_loc_policy, airtime_factor, rx_boosted_gain, manual_add_contacts, "
+          "gps_interval, advert_loc_policy, airtime_factor, rx_boosted_gain, "
+          "manual_add_contacts, multi_acks, path_hash_mode, autoadd_config, "
+          "autoadd_max_hops, telemetry_mode_base/loc/env, buzzer_quiet, "
           "rxdelay, txdelay, direct_txdelay."
         );
         return;
@@ -5174,10 +5176,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_double("lon",                 sensors.node_lon,             0.0,                    6);
       emit_uint  ("repeat",              _prefs.client_repeat,         0);
       emit_uint  ("gps",                 _prefs.gps_enabled,           0);
+      emit_uint  ("gps_interval",        _prefs.gps_interval,          0);
       emit_uint  ("advert_loc_policy",   _prefs.advert_loc_policy,     0);
       emit_float ("airtime_factor",      _prefs.airtime_factor,        1.0f,                   "",     3);
       emit_uint  ("rx_boosted_gain",     _prefs.rx_boosted_gain,       (unsigned)SX126X_RX_BOOSTED_GAIN_DEFAULT);
       emit_uint  ("manual_add_contacts", _prefs.manual_add_contacts,   0);
+      emit_uint  ("multi_acks",          _prefs.multi_acks,            0);
+      emit_uint  ("path_hash_mode",      _prefs.path_hash_mode,        0);
+      emit_uint  ("autoadd_config",      _prefs.autoadd_config,        0);
+      emit_uint  ("autoadd_max_hops",    _prefs.autoadd_max_hops,      0);
+      emit_uint  ("telemetry_mode_base", _prefs.telemetry_mode_base,   0);
+      emit_uint  ("telemetry_mode_loc",  _prefs.telemetry_mode_loc,    0);
+      emit_uint  ("telemetry_mode_env",  _prefs.telemetry_mode_env,    0);
+      emit_uint  ("buzzer_quiet",        _prefs.buzzer_quiet,          0);
       emit_float ("rxdelay",             _prefs.rx_delay_base,         0.0f,                   "",     3);
       emit_float ("txdelay",             _prefs.tx_delay_factor,       0.5f,                   "",     3);
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
@@ -5202,6 +5213,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "airtime_factor") == 0)    snprintf(r, sizeof(r), "airtime_factor = %.3f", _prefs.airtime_factor);
     else if (strcmp(key, "rx_boosted_gain") == 0)   snprintf(r, sizeof(r), "rx_boosted_gain = %u", (unsigned)_prefs.rx_boosted_gain);
     else if (strcmp(key, "manual_add_contacts") == 0) snprintf(r, sizeof(r), "manual_add_contacts = %u", (unsigned)_prefs.manual_add_contacts);
+    else if (strcmp(key, "multi_acks") == 0)        snprintf(r, sizeof(r), "multi_acks = %u", (unsigned)_prefs.multi_acks);
+    else if (strcmp(key, "path_hash_mode") == 0)    snprintf(r, sizeof(r), "path_hash_mode = %u", (unsigned)_prefs.path_hash_mode);
+    else if (strcmp(key, "autoadd_config") == 0)    snprintf(r, sizeof(r), "autoadd_config = %u", (unsigned)_prefs.autoadd_config);
+    else if (strcmp(key, "autoadd_max_hops") == 0)  snprintf(r, sizeof(r), "autoadd_max_hops = %u", (unsigned)_prefs.autoadd_max_hops);
+    else if (strcmp(key, "gps_interval") == 0)      snprintf(r, sizeof(r), "gps_interval = %u", (unsigned)_prefs.gps_interval);
+    else if (strcmp(key, "telemetry_mode_base") == 0) snprintf(r, sizeof(r), "telemetry_mode_base = %u", (unsigned)_prefs.telemetry_mode_base);
+    else if (strcmp(key, "telemetry_mode_loc") == 0) snprintf(r, sizeof(r), "telemetry_mode_loc = %u", (unsigned)_prefs.telemetry_mode_loc);
+    else if (strcmp(key, "telemetry_mode_env") == 0) snprintf(r, sizeof(r), "telemetry_mode_env = %u", (unsigned)_prefs.telemetry_mode_env);
+    else if (strcmp(key, "buzzer_quiet") == 0)      snprintf(r, sizeof(r), "buzzer_quiet = %u", (unsigned)_prefs.buzzer_quiet);
     else if (strcmp(key, "rxdelay") == 0)           snprintf(r, sizeof(r), "rxdelay = %.3f", _prefs.rx_delay_base);
     else if (strcmp(key, "txdelay") == 0)           snprintf(r, sizeof(r), "txdelay = %.3f", _prefs.tx_delay_factor);
     else if (strcmp(key, "direct_txdelay") == 0)    snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
