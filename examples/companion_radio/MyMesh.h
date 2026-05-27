@@ -551,6 +551,8 @@ public:
   uint32_t getTxAdvertCount()  const { return _tx_advert_count; }
   uint32_t getTxDigiCount()    const { return _tx_digi_count; }
   uint32_t getBtConnectCount() const { return _bt_connect_count; }
+  // Reset aller RAM-Statistik-Counter (Companion-CLI 'clear stats')
+  void clearStats();
   uint32_t getMillisWraps()    const { return _millis_wraps; }   // >0 means uptime > ~49 days
   bool     isClientRepeatOn()  const { return _prefs.client_repeat != 0; }
 };

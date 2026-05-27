@@ -3615,6 +3615,35 @@ void MyMesh::setupCompanionChannel() {
   saveChannels(); // persistieren, damit der Index über Reboots stabil bleibt
 }
 
+// Setzt alle RAM-Statistik-Counter zurueck (analog simple_repeater
+// clearStats(), plus Companion-spezifische). Nicht zurueckgesetzt:
+// Uptime-Wrap-Tracking (_millis_wraps), RTC-Jump-Detector
+// (_last_observed_rtc), Lifecycle-State (next_advert, _is_moving,
+// _gps_had_fix_ever). User-Konfig in _prefs bleibt komplett unberuehrt.
+void MyMesh::clearStats() {
+  // Standard MeshCore Reset (Radio + Mesh + dup-Tables)
+  radio_driver.resetStats();
+  resetStats();
+  ((SimpleMeshTables *)getTables())->resetStats();
+  // Companion-spezifische Counter
+  _tx_advert_count = 0;
+  _tx_digi_count = 0;
+  _bt_connect_count = 0;
+  _duty_blocked_count = 0;
+  _tx_repeat_airtime_ms = 0;
+  memset(_rx_flood_by_ptype, 0, sizeof(_rx_flood_by_ptype));
+  memset(_repeat_by_ptype,   0, sizeof(_repeat_by_ptype));
+  memset(_tx_total_by_ptype, 0, sizeof(_tx_total_by_ptype));
+  memset(_heard_direct,      0, sizeof(_heard_direct));
+  memset(_heard_quality,     0, sizeof(_heard_quality));
+  memset(_rx_advert_total,   0, sizeof(_rx_advert_total));
+  // Duty-Sliding-Window — symmetrisch zur simple_repeater-Logik. Wirkt
+  // wie ein 'Duty-Reset bei Stats-Clear', der User hat damit nach
+  // 'clear stats' wieder volle 10%/h verfuegbar (was auch unfair sein
+  // koennte gegenueber dem Mesh, aber explizite User-Aktion).
+  memset(_duty_air_ms_per_minute, 0, sizeof(_duty_air_ms_per_minute));
+}
+
 void MyMesh::pushCompanionMessage(const char* text) {
   if (_companion_channel_idx == 0xFF) return;
   if (text == NULL || text[0] == 0) return;
@@ -3899,6 +3928,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "help", "?", "status", "stats", "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "time",
+    "clear",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -4487,8 +4517,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // (gleicher Mechanismus wie der app-toggle-Override). Nicht-persistent.
       _gps_user_override_until_advert = true;
       pushCompanionMessage("OK - GPS sync request (wach bis naechster Advert).");
+    } else if (strcmp(arg, "setloc") == 0) {
+      // Aktuelle GPS-Position in sensors.node_lat/lon persistieren. Sinn:
+      // EnvironmentSensorManager schreibt zwar laufend node_lat/lon aus
+      // dem Live-Fix, savePrefs wird dabei aber nicht getriggert. Bei
+      // GPS-off oder Cycle-Sleep bleibt dann irgendwann ein stale Wert
+      // im Flash. 'gps setloc' macht aus der aktuellen Position einen
+      // expliziten persistenten Anker.
+      double cur_lat, cur_lon;
+      if (!getEffectiveLatLon(cur_lat, cur_lon)) {
+        pushCompanionMessage("Keine gueltige Position (GPS aus, kein Fix, "
+                             "und keine fixe Position konfiguriert).");
+        return;
+      }
+      sensors.node_lat = cur_lat;
+      sensors.node_lon = cur_lon;
+      savePrefs();
+      char line[100];
+      snprintf(line, sizeof(line), "OK - position persistiert: %.6f, %.6f",
+               cur_lat, cur_lon);
+      pushCompanionMessage(line);
+      // Geo-Recommendation neu auswerten (analog CMD_SET_ADVERT_LATLON)
+      maybePushGeoRecommendation(cur_lat, cur_lon);
     } else {
-      pushCompanionMessage("Usage: gps [on | off | sync | power ...]  (ohne Arg -> Status)");
+      pushCompanionMessage("Usage: gps [on | off | sync | setloc | power ...]  (ohne Arg -> Status)");
     }
     return;
   }
@@ -5256,6 +5308,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Detail-Statistik mit Aufschluesselung nach Node-Typ, Pakettyp und
   // Airtime. Alle Counter sind RAM-only (reset bei Reboot). Pro-Stunde/
   // Pro-Tag wird aus dem Session-Total und der Uptime berechnet.
+  // ---------- clear stats ----------------------------------------------
+  // Setzt RAM-Statistik-Counter zurueck. Analog zu simple_repeater
+  // clearStats(). 'stats' ist no_abbrev — Tippfehler wuerden alle
+  // Test-Counter killen.
+  if (starts_with_word(cmd, "clear")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    if (!arg || strcmp(arg, "stats") != 0) {
+      pushCompanionMessage("Usage: clear stats   (no_abbrev — 'stats' muss voll ausgeschrieben sein)");
+      return;
+    }
+    clearStats();
+    pushCompanionMessage("OK - alle Statistik-Counter zurueckgesetzt.");
+    return;
+  }
+
   if (starts_with_word(cmd, "stats")) {
     uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
     if (total_ms == 0) total_ms = 1;
