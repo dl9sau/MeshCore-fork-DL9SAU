@@ -1351,6 +1351,241 @@ der User sehen "Repeater an, noch nichts repeated" statt "Zeile fehlt,
 hmm, ist das überhaupt aktiv?".
 
 ================================================================================
+14r. Companion-CLI: Argument-Prefix-Match (match_choice + no_abbrev)
+================================================================================
+
+Anlass:
+  Top-Level-Befehle (status, autoadv, repeater, ...) konnten per
+  Prefix abgekürzt werden ("stat" mehrdeutig, "up" -> uptime).
+  Argumente innerhalb der Sub-Handler wurden noch per
+  starts_with_word/strcmp gematcht — "trace gp on" funktionierte
+  nicht, weil starts_with_word(arg, "gps") prüft ob arg MIT "gps"
+  beginnt (also "gps...") und nicht ob das erste Wort von arg ein
+  Prefix von "gps" ist.
+
+Schritt 1 (commit 27eaefc2): match_on_off()
+  Erster zielgerichteter Helper für die häufigste Site: on/off-Args.
+
+    static int match_on_off(const char* arg);
+      1  = "on"  (exakt oder eindeutiger Prefix)
+      0  = "off" (exakt oder eindeutiger Prefix)
+     -1  = ambiguous ("o" matched beide)
+     -2  = leer / nicht gefunden
+
+  Sites: autoadv/gps/repeater on/off, trace on/off + trace all on/off
+  + trace <cat> on/off. Plus 'get all' für USB-Backup (alle App-
+  Settings in einem Rutsch, akkumulierender Buffer wie bei 'prefs').
+
+Schritt 2 (commit c756b36e): match_choice() — generisch
+  Verallgemeinerung: beliebige Auswahl-Liste mit Per-Eintrag-Flag
+  no_abbrev für destruktive Aktionen.
+
+    struct CompanionChoice { const char* name; bool no_abbrev; };
+    int match_choice(const char* arg,
+                     const CompanionChoice* choices, int n,
+                     char* out_ambig, size_t out_size);
+      >=0  = Index des eindeutigen Treffers
+      -1   = ambiguous (Liste der matchenden Namen in out_ambig)
+      -2   = leer
+      -3   = nicht gefunden
+
+  match_on_off bleibt als Wrapper über match_choice für Source-
+  Kompatibilität.
+
+Umgestellte Sites:
+  advert [zero-hop | flood]    "zerohop" als Alias normalisiert
+                                (-> "zero-hop" vor match_choice)
+  duty   [reset | soft | hard]  reset = no_abbrev (zerstörend)
+  chatname [default | N | custom | hex]
+                                N numerisch vor match_choice;
+                                "d"/"h"/"c" eindeutig
+  trace <cat> on/off            trace_cats[] -> CompanionChoice[],
+                                "gp" -> gps, "r" mehrdeutig
+                                (repeat/rtc) -> Warnung mit Liste
+
+  Mit dem Scope-Registry-Block (14t) wurde auch der scope-Sub-
+  Dispatcher (default/bake/override + neue list/add/remove/info/
+  repeater) auf match_choice umgestellt — remove = no_abbrev.
+
+Erwägungen:
+  - no_abbrev statt Whitelist: jede Choice kennt selbst ihre
+    Gefährlichkeit. Reset/Clear/Remove sind die typischen
+    Kandidaten — Tippfehler-Schutz, nicht Bedienungs-Komfort.
+  - Exact-Match gewinnt immer (auch über no_abbrev) — der User
+    der das volle "reset" tippt kommt durch.
+  - Ambiguity-Liste in out_ambig hilft beim Erkennen: "Mehrdeutig:
+    repeat, rtc" ist informativer als nur "Mehrdeutig".
+
+Wunschliste-4 -> ERLEDIGT (im Begleit-Commit eingetragen).
+
+================================================================================
+14s. Companion-CLI: txdelay/rxdelay aus _prefs (war hartcodiert)
+================================================================================
+
+Anlass:
+  simple_repeater hat seit Jahren konfigurierbare LBT-Delays über
+  _prefs.tx_delay_factor / _prefs.direct_tx_delay_factor /
+  _prefs.rx_delay_base. Der Companion (eigene NodePrefs-Struktur)
+  hatte diese Felder GAR NICHT — getRetransmitDelay() und
+  getDirectRetransmitDelay() benutzten hartcodierte 0.5f / 0.2f.
+  calcRxDelay() las _prefs.rx_delay_base (= immer 0 da nie gesetzt
+  und in CommonCLI initialisiert) korrekt, war also de facto off.
+
+Lösung (commit 2d2efd4c):
+  1) Companion-NodePrefs erweitert um tx_delay_factor und
+     direct_tx_delay_factor (am Ende angehängt für Backward-Compat-
+     Load — file.read auf EOF lässt memset(0)-Defaults stehen).
+  2) getRetransmitDelay() / getDirectRetransmitDelay() lesen jetzt
+     _prefs.tx_delay_factor / _prefs.direct_tx_delay_factor statt
+     der hartcodierten Werte.
+  3) Migration in begin(): Werte <= 0 oder > 2.0 werden einmalig
+     auf 0.5 / 0.2 gesetzt — damit existierende Installs mit 0-
+     initialisierten Feldern weiterhin das alte Verhalten zeigen.
+  4) set <key> <value> und get <key> erweitert um rxdelay (0..20),
+     txdelay (0..2), direct_txdelay (0..2). 'get all' nimmt die
+     drei mit. Help-Texte angepasst.
+
+Persistenz:
+  DataStore offset 276 (tx_delay_factor, 4 Byte) und 280
+  (direct_tx_delay_factor, 4 Byte). Bestehende prefs-Files lesen
+  bis 275 (gps_lead_min), file.read(0 Bytes) für die neuen Felder
+  lässt die memset(0)-Defaults stehen, Migration in begin() setzt
+  dann auf 0.5/0.2.
+
+Erwägungen "warum nicht 0 = User-Default":
+  Wir behandeln 0 als "uninitialisiert" und überschreiben einmalig
+  in begin(). Wenn jemand bewusst "kein Delay" haben wollte,
+  müsste er einen kleinen positiven Wert setzen (z.B. 0.01). Die
+  Wahrscheinlichkeit dass das jemand will ist gering — saubere
+  Default-Migration ist wichtiger.
+
+  rx_delay_base bleibt explizit bei 0 (off) als Default —
+  Kommentar im Code "enable once new algo fixed" bleibt
+  unangetastet. Die Erweiterung greift ohne Einfluss auf das RX-
+  Verhalten.
+
+Wunschliste:
+  Nicht explizit gelistet (war eine direkte User-Frage zu
+  txdelay/rxdelay/int.thresh-Übernahme aus dem Standard-Repeater).
+  int.thresh bleibt vertagt bis Wunschliste-1 (CAD für SX126x).
+
+================================================================================
+14t. Companion-CLI: Scope-Registry + Repeat-Allowlist + geo_managed
+================================================================================
+
+Anlass:
+  Companion-Repeater sollte selektiv repeaten können — nicht jedes
+  scoped Paket, sondern nur bestimmte Regionen. Analog zu
+  'region allowf/denyf' beim Standard-Repeater. Beispiel: "ich bin
+  in Berlin, fahre nach Ostfriesland; #de-bebb soll nicht mehr
+  repeated werden, #ostfriesland schon".
+
+Design: zwei verknüpfte Listen
+  Liste A — Registry (bekannte Scopes):
+    - Name (ohne '#', 16 Byte) + voller 16-Byte TransportKey
+      (SHA-256("#name")) + Flags + optionale Geo-Bbox (4 floats).
+    - Pre-populated beim ersten Boot mit #bebb und #ostfriesland
+      aus den hartcodierten CR_BBOX_*-defines.
+    - User-erweiterbar per 'scope add <name> [geo <bbox>]'.
+
+  Liste B — Repeat-Allowlist:
+    - Teilmenge von A, gekennzeichnet durch SCOPE_FLAG_IN_REPEAT_LIST
+      pro Eintrag (nicht als eigene Tabelle — spart Synchronisation).
+    - Repeat-Modus _prefs.repeat_scope_mode:
+        ALL       = jeden scoped repeaten (Default, alt-Verhalten)
+        ALLOWLIST = nur Einträge mit IN_REPEAT_LIST-Flag
+
+Hash-Konvention:
+  Wire-kompatibel zu lookupRegionByTransportCode() und den anderen
+  bestehenden Aufrufstellen (MyMesh.cpp:1204, 2932, 2935): SHA-256
+  vom Tag-String MIT '#'-Prefix. Companion-CLI 'scope add' nimmt
+  den Namen mit oder ohne '#' und canonicalisiert intern.
+
+Pre-Population beim ersten Boot (commit 224e89de):
+  In begin(): wenn scope_registry_count == 0, addScopeRegistryDefault()
+  schreibt #bebb und #ostfriesland mit ihren hartcodierten Bboxen.
+  Default-Flags: HAS_GEO_BOX (sticky, NICHT geo_managed, NICHT im
+  Repeat-Set). Damit ist das Wissen über die beiden Regionen nach
+  Boot da, aber kein Repeating aktiv — User muss explizit
+  'scope repeater add bebb' (oder geo on, siehe unten) machen.
+
+Datenstruktur:
+  struct ScopeRegEntry {        // 52 Byte/Slot
+    char     name[16];
+    uint8_t  key[16];           // = TransportKey
+    uint8_t  flags;             // HAS_GEO_BOX | GEO_MANAGED | IN_REPEAT_LIST
+    uint8_t  _reserved[3];      // Alignment für die 4 floats
+    float    bbox_lat_min, bbox_lat_max;
+    float    bbox_lon_min, bbox_lon_max;
+  };
+  ScopeRegEntry scope_registry[16];   // = 832 Byte
+  uint8_t       scope_registry_count;
+  uint8_t       repeat_scope_mode;
+
+  Beide neuen Felder im DataStore am Ende angehängt (offsets
+  284/285/286), Backward-Compat-Load wie üblich.
+
+Forward-Hook in allowPacketForward():
+  Nach hasTransportCodes()-Check zusätzlich scopeAllowedForRepeat()
+  fragen. Bei Mode=ALL: immer true. Bei Mode=ALLOWLIST: Registry
+  iterieren, für jeden Eintrag mit IN_REPEAT_LIST-Flag mit
+  TransportKey::calcTransportCode(packet) den Wire-2-Byte-Wert
+  berechnen und gegen packet->transport_codes[0] vergleichen.
+  Match -> true. Reject-Reason "scope-not-allowed" landet bei
+  TRACE_FILTER (existierende Trace-Kategorie).
+
+  Kosten: bis zu N HMAC-Operationen pro Repeat-Entscheidung (N =
+  Einträge mit IN_REPEAT_LIST). Bei realistisch 5-10 Einträgen
+  liegen wir bei ~250-500us auf ESP32-S3 — akzeptabel.
+
+CLI:
+  scope list / add / remove (no_abbrev) / info
+  scope repeater [mode all|allowlist | add | remove (no_abbrev)
+                  | geo <name> on|off]
+
+  scope-Dispatcher auf match_choice umgestellt — sowohl die alten
+  default/bake/override als auch die neuen list/add/remove/info/
+  repeater sind jetzt per Prefix abkürzbar. 'remove' bewusst
+  no_abbrev (würde sonst mit 'repeater' kollidieren — "r" ist
+  jetzt eindeutig auf 'repeater', "rem" auf 'remove' nur wenn
+  voll getippt).
+
+geo_managed-Auto-Trigger (commit 3af10bc8):
+  Das Flag SCOPE_FLAG_GEO_MANAGED bewirkt, dass IN_REPEAT_LIST
+  automatisch gesetzt/gelöscht wird wenn die aktuelle Position in
+  die Bbox eintritt bzw. sie verlässt. Implementiert in:
+
+    void MyMesh::evaluateGeoManagedEntries(double lat, double lon)
+
+  Hooks:
+    a) updateMotionTracking(), First-Fix-Anker-Seed — sobald wir
+       nach Boot zum ersten Mal eine gültige GPS-Position haben
+    b) updateMotionTracking(), Anker-Update-Tick (alle
+       CR_MOTION_WINDOW_MS = 10 min, wenn Distanz > 370m)
+    c) CLI 'scope repeater geo <name> on' — sofortige Evaluation
+       gegen getEffectiveLatLon(), damit der User nicht erst auf
+       den nächsten Motion-Tick warten muss
+
+  Hysterese ist implizit: das 370m-Anker-Update aus Punkt 8
+  (responsive motion tracking, commit 20177a0d) wackelt nicht im
+  Sekundentakt. Hooks an genau diesen Stellen anhängen reicht —
+  keine zusätzliche Bbox-Hysterese nötig.
+
+  TRACE_SCOPE-Log bei Übergang: "#<name> entered bbox -> repeat ON"
+  bzw. "left bbox -> repeat OFF".
+
+Wunschliste-4d -> ERLEDIGT (gesamter Block).
+
+Verzahnung mit Wunschliste-5 (scope geo-prefers):
+  chooseGeoFallbackScope() ist noch hartcodiert auf #bebb/
+  #ostfriesland. Mit der Registry ist eine natürliche
+  Folgearbeit: iteriere stattdessen alle Einträge mit HAS_GEO_BOX
+  und nimm den ersten Match. Dann ließe sich Punkt 5 als
+  zusätzlicher Hierarchie-Schalter realisieren — und der gleiche
+  Bbox-Membership-Code wie in evaluateGeoManagedEntries würde
+  beide Use-Cases bedienen.
+
+================================================================================
 15. Konstanten-Übersicht (in MyMesh.h)
 ================================================================================
 
