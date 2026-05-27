@@ -3981,22 +3981,64 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      // 'help scope repeater' VOR 'help scope' pruefen — topic_prefix_match
+      // sieht nur das erste Wort, deshalb wuerde 'scope' sonst gewinnen.
+      if (starts_with_word(topic, "scope repeater")
+          || starts_with_word(topic, "scoperepeater")) {
+        pushCompanionMessage(
+          "scope repeater steuert WELCHE scoped Pakete der Repeater weiterleitet. "
+          "Standard: alle (Mode all). Mit allowlist-Mode wird nur Traffic der "
+          "in der Repeat-Liste markierten Scopes geforwarded."
+        );
+        pushCompanionMessage(
+          "  scope repeater                       Status (Mode + Liste)\n"
+          "  scope repeater mode all|allowlist    Policy umschalten\n"
+          "  scope repeater add <name>            in Repeat-Liste (muss in\n"
+          "                                       Registry sein, siehe 'scope add')\n"
+          "  scope repeater remove <name>         aus Repeat-Liste\n"
+          "  scope repeater geo <name> on|off     geo_managed-Flag — bei on\n"
+          "                                       wird IN_REPEAT_LIST automa-\n"
+          "                                       tisch bei Bbox-Eintritt/-Austritt\n"
+          "                                       gesetzt/geloescht"
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "scope")) {
         pushCompanionMessage(
-          "scope steuert NUR die nightly bake / 'advert flood' Reichweite, "
-          "nicht regulaere Sends. Hierarchie: override > bake > default > geo."
+          "scope umfasst drei Bereiche:\n"
+          "  1) eigene Send-Policy (override/bake/default)\n"
+          "  2) Region-Registry (list/add/remove/info)\n"
+          "  3) Repeat-Policy fuer den Repeater (scope repeater ...).\n"
+          "Siehe 'help scope repeater' fuer Punkt 3."
         );
         pushCompanionMessage(
-          "scope                              -> Status aller 4 Quellen. "
-          "scope default <name>|clear         -> persistent (auch fuer normale Sends als Fallback)."
+          "Send-Hierarchie (nightly bake / 'advert flood'):\n"
+          "  override > bake > default > geo-fallback"
         );
         pushCompanionMessage(
-          "scope bake <name>|clear            -> persistent, NUR nightly. "
-          "Bewusst weiter als default moeglich (z.B. default=#de-be, bake=#de-bebb)."
+          "  scope                Status aller drei Send-Quellen + Registry-Count\n"
+          "  scope default <name> persistent. Wirkt auch fuer regulaere\n"
+          "                       Sends (gleich dem App-Default-Scope)\n"
+          "  scope default clear  loescht default"
         );
         pushCompanionMessage(
-          "scope override <name> [12h|3d]|clear -> persistent ueber Reboots "
-          "(default 12h, max 30d). Suffix h oder d. Hoechste Prio."
+          "  scope bake <name>    persistent, NUR fuer nightly. Darf weiter\n"
+          "                       als default sein (z.B. default=#de-be,\n"
+          "                       bake=#de-bebb)\n"
+          "  scope bake clear     loescht bake"
+        );
+        pushCompanionMessage(
+          "  scope override <name> [12h|3d]   persistent ueber Reboots\n"
+          "                       (default 12h, max 30d, Suffix h oder d).\n"
+          "                       Hoechste Prio.\n"
+          "  scope override clear loescht override"
+        );
+        pushCompanionMessage(
+          "Registry (Liste A — bekannte Scopes):\n"
+          "  scope list                       alle Eintraege + Flags\n"
+          "  scope add <name> [geo <bbox>]    Eintrag anlegen\n"
+          "  scope remove <name>              loeschen (kein Prefix-Match)\n"
+          "  scope info <name>                Details"
         );
         return;
       }
@@ -4109,15 +4151,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "trace")) {
         pushCompanionMessage(
           "trace: selektives Live-Logging in den Companion-Chat. "
-          "Active (RAM, reset bei Reboot) + Persistent (User-Selektion)."
+          "Es gibt eine *gespeicherte Auswahl* (Reboot-fest) und einen "
+          "*aktiven* Zustand im RAM (startet bei Boot leer)."
         );
         pushCompanionMessage(
-          "list = Kategorien-Uebersicht. <cat> on/off = setzt bit in beiden. "
-          "on = active wird persistent wiederhergestellt. off = pausiert."
+          "  trace list           Kategorien-Uebersicht\n"
+          "  trace <cat> on|off   Kategorie ein/aus (in Auswahl + aktiv)\n"
+          "  trace on             aktiv = gespeicherte Auswahl (resume)\n"
+          "  trace off            aktiv = leer (pause; Auswahl bleibt)\n"
+          "  trace all on|off     setzt aktiv UND Auswahl auf alle/keine"
         );
         pushCompanionMessage(
-          "all on/off = beide auf alle/keine. Ohne Arg -> Status (active + ggf. persistent). "
-          "Nach Reboot: active = 0, 'trace on' aktiviert die Selektion wieder."
+          "Nach Reboot ist aktiv = 0 (keine Logs), bis 'trace on' die "
+          "gespeicherte Auswahl wiederherstellt."
         );
         return;
       }
@@ -4612,24 +4658,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // Akkumulierender Buffer der bei ~140 Zeichen autom. pusht.
+    // Akkumulierender Buffer. MAX_TEXT_LEN = 160 (Wire-Frame-Limit fuer
+    // channel messages). Wir flushen VOR jedem Append wenn die Summe sonst
+    // > 155 wuerde — damit kein einzelner Push abgeschnitten wird.
     char prefs_buf[200];
     size_t buf_used = 0;
-    auto flush_buf = [&](bool force) {
+    auto flush_buf = [&]() {
       if (buf_used == 0) return;
-      if (!force && buf_used < 130) return;
       prefs_buf[buf_used] = 0;
       pushCompanionMessage(prefs_buf);
       buf_used = 0;
     };
     auto add_line = [&](const char* line) {
       size_t len = strlen(line);
-      if (buf_used + len + 2 >= sizeof(prefs_buf)) flush_buf(true);
+      if (len > 155) len = 155;
+      // Wuerde die naechste Zeile (mit '\n'-Separator) das Wire-Limit
+      // sprengen? Dann erst flushen.
+      if (buf_used > 0 && buf_used + 1 + len > 155) flush_buf();
       if (buf_used > 0) prefs_buf[buf_used++] = '\n';
       for (size_t i = 0; i < len && buf_used < sizeof(prefs_buf) - 1; i++) {
         prefs_buf[buf_used++] = line[i];
       }
-      flush_buf(false);
     };
 
     // Erste Zeile = Header
@@ -4776,7 +4825,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (!show_all && non_default_count == 0) {
       add_line("  (alle Werte auf Default)");
     }
-    flush_buf(true);
+    flush_buf();
     return;
   }
 
@@ -5044,19 +5093,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (list_changed || list_all) {
       char gb[200];
       size_t gu = 0;
-      auto gflush = [&](bool force) {
+      auto gflush = [&]() {
         if (gu == 0) return;
-        if (!force && gu < 130) return;
         gb[gu] = 0;
         pushCompanionMessage(gb);
         gu = 0;
       };
       auto gline = [&](const char* line) {
         size_t len = strlen(line);
-        if (gu + len + 2 >= sizeof(gb)) gflush(true);
+        if (len > 155) len = 155;
+        if (gu > 0 && gu + 1 + len > 155) gflush();
         if (gu > 0) gb[gu++] = '\n';
         for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
-        gflush(false);
       };
       char tmp[160];
       int changed = 0;
@@ -5135,7 +5183,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
 
       if (list_changed && changed == 0) gline("  (keine Aenderungen — alle Werte auf Default)");
-      gflush(true);
+      gflush();
       return;
     }
 
@@ -5423,12 +5471,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (tm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
       if (tm == 1) {
         _trace_flags = _prefs.trace_flags_persistent;
-        pushCompanionMessage("OK - trace resumed (active = persistent).");
+        pushCompanionMessage("OK - trace an (gespeicherte Auswahl wiederhergestellt).");
         return;
       }
       if (tm == 0) {
         _trace_flags = 0;
-        pushCompanionMessage("OK - trace paused (persistent untouched).");
+        pushCompanionMessage("OK - trace pausiert (Auswahl bleibt gespeichert).");
         return;
       }
     }
@@ -5443,12 +5491,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         _trace_flags = TRACE_ALL_MASK;
         _prefs.trace_flags_persistent = TRACE_ALL_MASK;
         savePrefs();
-        pushCompanionMessage("OK - alle traces an (active + persistent).");
+        pushCompanionMessage("OK - alle traces an (und gespeichert).");
       } else if (am == 0) {
         _trace_flags = 0;
         _prefs.trace_flags_persistent = 0;
         savePrefs();
-        pushCompanionMessage("OK - alle traces aus (active + persistent).");
+        pushCompanionMessage("OK - alle traces aus (und gespeichert).");
       } else {
         pushCompanionMessage("Usage: trace all on | trace all off");
       }
@@ -5802,17 +5850,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // -- list (Registry / Liste A) --
     if (sub_idx == 3) {
       char gb[200]; size_t gu = 0;
-      auto gflush = [&](bool force) {
+      auto gflush = [&]() {
         if (gu == 0) return;
-        if (!force && gu < 130) return;
         gb[gu] = 0; pushCompanionMessage(gb); gu = 0;
       };
       auto gline = [&](const char* line) {
         size_t len = strlen(line);
-        if (gu + len + 2 >= sizeof(gb)) gflush(true);
+        if (len > 155) len = 155;
+        if (gu > 0 && gu + 1 + len > 155) gflush();
         if (gu > 0) gb[gu++] = '\n';
         for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
-        gflush(false);
       };
       char head[60];
       snprintf(head, sizeof(head), "scope list (%u/%u, mode=%s):",
@@ -5831,7 +5878,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (_prefs.scope_registry_count == 0) gline("  (leer)");
       gline("Flags: R=in repeat-list, G=geo_managed, b=has bbox");
-      gflush(true);
+      gflush();
       return;
     }
 
@@ -6000,7 +6047,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r); return;
       }
       if (rs < 0) {
-        pushCompanionMessage("Usage: scope repeater [mode all|allowlist | add <name> | remove <name> | geo <name> on|off]");
+        pushCompanionMessage(
+          "Usage:\n"
+          "  scope repeater                       Status\n"
+          "  scope repeater mode all|allowlist    Policy umschalten\n"
+          "  scope repeater add <name>            Eintrag in Repeat-Liste\n"
+          "  scope repeater remove <name>         Eintrag entfernen\n"
+          "  scope repeater geo <name> on|off     geo_managed-Flag setzen");
         return;
       }
 
@@ -6112,7 +6165,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
     }
 
-    pushCompanionMessage("Usage: scope [default|bake|override|list|add|remove|info|repeater]");
+    pushCompanionMessage(
+      "Usage (siehe 'help scope'):\n"
+      "  scope default|bake|override <name>|clear    eigene Send-Policy\n"
+      "  scope list | add <name> | remove <name> | info <name>   Registry\n"
+      "  scope repeater [...]                         Repeat-Policy");
     return;
   }
 
