@@ -229,7 +229,7 @@ schon mal auf github angesprochen).
 
 
 --------------------------------------------------------------------------------
-4d. Scope-Registry + Repeat-Allowlist - TEILS ERLEDIGT
+4d. Scope-Registry + Repeat-Allowlist - ERLEDIGT
 --------------------------------------------------------------------------------
 
 Hintergrund:
@@ -265,30 +265,24 @@ Loesung (commit 224e89de):
     scope list / add / remove (no_abbrev) / info
     scope repeater [mode all|allowlist | add | remove | geo <name> on/off]
 
-Offen (Sub-Punkt):
-  geo_managed-Auto-Trigger. Das Flag SCOPE_FLAG_GEO_MANAGED ist im
-  Schema, persistiert, und per CLI ein-/ausschaltbar pro Eintrag —
-  aber die Logik bei Bbox-Eintritt/Austritt fehlt noch:
-  - Position-Update prueft fuer geo_managed-Eintraege ob lat/lon
-    innerhalb bbox liegt
-  - Bei Eintritt: SCOPE_FLAG_IN_REPEAT_LIST setzen + savePrefs + trace
-  - Bei Austritt: SCOPE_FLAG_IN_REPEAT_LIST loeschen + savePrefs + trace
-  - Trace-Kategorie TRACE_SCOPE (existiert bereits) reicht
+Sub-Punkt geo_managed-Auto-Trigger: ERLEDIGT.
 
-  Hysterese kommt natuerlich aus dem schon existierenden Motion-
-  Tracking: GPS-Position wird nur alle CR_MOTION_WINDOW_MS (10 min)
-  als neuer Anker uebernommen wenn die Distanz > CR_MOTION_RADIUS_M
-  (370m) ist (siehe Changelog Punkt 8, "responsive motion tracking
-  under static advert schedule" / commit 20177a0d). Damit wackelt
-  lat/lon nicht im Sekundentakt — geo_managed-Trigger an genau
-  diesen Punkten anhaengen reicht; keine zusaetzliche Bbox-
-  Hysterese noetig.
+  evaluateGeoManagedEntries(lat, lon) iteriert die Registry, prueft fuer
+  jeden Eintrag mit HAS_GEO_BOX + GEO_MANAGED die Bbox-Membership und
+  toggelt SCOPE_FLAG_IN_REPEAT_LIST. Bei Flag-Wechsel: savePrefs +
+  TRACE_SCOPE-Log ("entered/left bbox -> repeat ON/OFF").
 
-  Hook-Stelle: vermutlich in updateMotionTracking() bzw. die
-  Position-Update-Pfade in loop(). Eine Funktion
-  evaluateGeoManagedEntries() iteriert die Registry, fuer jeden
-  Eintrag mit HAS_GEO_BOX + GEO_MANAGED prueft sie membership und
-  toggelt IN_REPEAT_LIST entsprechend.
+  Hooks:
+    a) updateMotionTracking() — First-Fix-Anker-Seed
+    b) updateMotionTracking() — alle CR_MOTION_WINDOW_MS (10 min)
+       wenn der Anker neu gesetzt wird
+    c) scope repeater geo <name> on — sofort gegen aktuelle Position
+       evaluieren via getEffectiveLatLon()
+
+  Hysterese kommt aus dem existierenden Motion-Tracking (370m / 10min
+  Anker-Update, commit 20177a0d). Wir hooken an die Stellen, an denen
+  der Anker frisch gesetzt wird — also greift exakt dort die Toleranz.
+  Keine zusaetzliche Bbox-Hysterese noetig.
 
 Quelle: User-Anregung in dieser Session, 2026-05-27.
 

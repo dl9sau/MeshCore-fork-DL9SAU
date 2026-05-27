@@ -392,6 +392,13 @@ private:
   // einen Eintrag mit IN_REPEAT_LIST-Flag). Aufrufer hat bereits
   // hasTransportCodes()-Check gemacht.
   bool scopeAllowedForRepeat(const mesh::Packet* packet) const;
+  // Iteriert Scope-Registry, vergleicht aktuelle (lat,lon) gegen die Bbox
+  // aller Eintraege mit SCOPE_FLAG_GEO_MANAGED + SCOPE_FLAG_HAS_GEO_BOX
+  // und setzt/loescht SCOPE_FLAG_IN_REPEAT_LIST entsprechend. Hysterese
+  // kommt aus dem Aufruf-Zeitpunkt — wir hooken in updateMotionTracking()
+  // an die Stellen, an denen der 370m-Motion-Anker frisch gesetzt wird.
+  // Bei Flag-Wechsel: savePrefs + TRACE_SCOPE-Log.
+  void evaluateGeoManagedEntries(double lat, double lon);
   void scheduleNextNightFlood();
   void doPeriodicZeroHopAdvert();
   void doNightFloodAdvert();

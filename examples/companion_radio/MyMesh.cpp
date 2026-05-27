@@ -3040,6 +3040,28 @@ int MyMesh::addScopeRegistryDefault(const char* name, float lat_min, float lat_m
   return slot;
 }
 
+void MyMesh::evaluateGeoManagedEntries(double lat, double lon) {
+  bool dirty = false;
+  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
+    ScopeRegEntry& e = _prefs.scope_registry[i];
+    if (!(e.flags & SCOPE_FLAG_GEO_MANAGED)) continue;
+    if (!(e.flags & SCOPE_FLAG_HAS_GEO_BOX)) continue;
+    bool inside = (lat >= e.bbox_lat_min && lat <= e.bbox_lat_max
+                   && lon >= e.bbox_lon_min && lon <= e.bbox_lon_max);
+    bool was_in = (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) != 0;
+    if (inside && !was_in) {
+      e.flags |= SCOPE_FLAG_IN_REPEAT_LIST;
+      dirty = true;
+      traceCompanion(TRACE_SCOPE, "[scope] #%s entered bbox -> repeat ON", e.name);
+    } else if (!inside && was_in) {
+      e.flags &= ~SCOPE_FLAG_IN_REPEAT_LIST;
+      dirty = true;
+      traceCompanion(TRACE_SCOPE, "[scope] #%s left bbox -> repeat OFF", e.name);
+    }
+  }
+  if (dirty) savePrefs();
+}
+
 bool MyMesh::scopeAllowedForRepeat(const mesh::Packet* packet) const {
   if (_prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL) return true;
   if (!packet || !packet->hasTransportCodes()) return false;
@@ -3248,6 +3270,9 @@ void MyMesh::updateMotionTracking() {
     _pos_anchor_lat = cur_lat;
     _pos_anchor_lon = cur_lon;
     _pos_anchor_millis = now;
+    // Wir wissen jetzt erstmalig wo wir sind — geo_managed-Eintraege
+    // gegen die aktuelle Position evaluieren (Wunschliste 4d Sub-Punkt).
+    evaluateGeoManagedEntries(cur_lat, cur_lon);
     return;
   }
 
@@ -3269,6 +3294,10 @@ void MyMesh::updateMotionTracking() {
     if (!was_moving && _is_moving) {
       next_periodic_advert_at = millis();
     }
+    // Position-Anker wurde gerade frisch gesetzt — geo_managed-Eintraege
+    // neu bewerten. Das 370m-Anker-Update wirkt als Hysterese; ohne
+    // signifikante Distanz wird hier sowieso nicht reingegangen.
+    evaluateGeoManagedEntries(cur_lat, cur_lon);
   }
 #else
   _is_moving = false;
@@ -5900,6 +5929,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (gm == 1) _prefs.scope_registry[idx].flags |= SCOPE_FLAG_GEO_MANAGED;
         else         _prefs.scope_registry[idx].flags &= ~SCOPE_FLAG_GEO_MANAGED;
         savePrefs();
+        // Beim Einschalten sofort gegen aktuelle Position evaluieren —
+        // damit der User nicht erst auf den naechsten Motion-Tick warten
+        // muss. Falls keine Position bekannt: bleibt der Eintrag im
+        // bisherigen IN_REPEAT_LIST-Zustand, bis updateMotionTracking()
+        // beim ersten GPS-Fix evaluiert.
+        if (gm == 1) {
+          double cur_lat, cur_lon;
+          if (getEffectiveLatLon(cur_lat, cur_lon)) {
+            evaluateGeoManagedEntries(cur_lat, cur_lon);
+          }
+        }
         char r[80]; snprintf(r, sizeof(r), "OK - #%s geo_managed = %s", name, gm == 1 ? "on" : "off");
         pushCompanionMessage(r);
         return;
