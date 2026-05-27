@@ -34,6 +34,38 @@
 #define REPEAT_SCOPE_MODE_ALL        0      // heute: jeden scoped repeaten
 #define REPEAT_SCOPE_MODE_ALLOWLIST  1      // nur Eintraege mit IN_REPEAT_LIST
 
+
+// ---- Scope-Architektur-Pivot (Wunschliste 11) ---------------------------
+// Ab diesem Punkt: Build-in-Tabelle (in Flash, dl9sau_geo_recommendations.cpp)
+// wird zur Quelle der bekannten Regionen. Pro Build-in-Eintrag liegt ein
+// Status-Byte hier in NodePrefs (= scope_buildin_status[]). Selbst-erfundene
+// Namen die NICHT in der Build-in-Tabelle stehen kommen in scope_extras[]
+// als vollwertige Eintraege.
+//
+// Status-Byte-Layout:
+//   bits 0-1: repeat_mode (00=auto, 01=on, 10=off, 11=reserved)
+//   bit  2:   advert_geo_off    (0 = darf als Geo-Fallback fuer eigenen
+//                                    scoped flood advert dienen,
+//                                1 = aus dem Auto-Geo-Send ausgeschlossen)
+//   bit  3:   disabled          (temporaer inaktiv, zeigt in 'scope list'
+//                                mit D-Flag, reversibel)
+//   bit  4:   user_deleted      (User hat Eintrag versteckt, fliegt aus
+//                                'scope list' raus, nur in 'scope list all'
+//                                noch sichtbar)
+//   bits 5-7: reserved
+//
+// Default = 0x00 = auto / Geo-Send aktiv / nicht disabled / nicht deleted.
+#define SCOPE_BUILDIN_STATUS_SLOTS   64    // Reserve fuer Build-in-Wachstum
+#define SCOPE_EXTRAS_SLOTS           16    // User-erfundene Namen
+
+#define SCOPE_STATUS_REPEAT_MASK     0x03  // bits 0-1
+#define SCOPE_STATUS_REPEAT_AUTO     0x00
+#define SCOPE_STATUS_REPEAT_ON       0x01
+#define SCOPE_STATUS_REPEAT_OFF      0x02
+#define SCOPE_STATUS_ADVERT_OFF      0x04  // bit 2
+#define SCOPE_STATUS_DISABLED        0x08  // bit 3
+#define SCOPE_STATUS_USER_DELETED    0x10  // bit 4
+
 struct ScopeRegEntry {
   char     name[16];          // ohne fuehrendes '#', null-terminated
   uint8_t  key[16];           // SHA-256("#" + name) (= TransportKey-Bytes)
@@ -138,10 +170,21 @@ struct NodePrefs {  // persisted to file
   // den Companion-Default (0.5 / 0.2 — die alten hartcodierten Werte) gesetzt.
   float tx_delay_factor;
   float direct_tx_delay_factor;
-  // Scope-Registry (Liste A) + Repeat-Policy (Mode + IN_REPEAT_LIST-Flag
-  // pro Eintrag). scope_registry_count == 0 triggert in begin() einmalige
-  // Pre-Population mit den hartcodierten Geo-Boxen (#bebb, #ostfriesland).
+  // LEGACY Scope-Registry (Liste A) — wird nach Migration in
+  // scope_buildin_status[] + scope_extras[] geleert. Bleibt zunaechst
+  // im NodePrefs-Schema fuer Backward-Compat-Persistenz.
   uint8_t        scope_registry_count;
   uint8_t        repeat_scope_mode;          // REPEAT_SCOPE_MODE_*
   ScopeRegEntry  scope_registry[SCOPE_REG_SLOTS];
+
+  // Status-Array pro Build-in-Eintrag (siehe SCOPE_STATUS_* in NodePrefs.h).
+  // Index entspricht der Position in der Build-in-Tabelle
+  // (dl9sau_geo_recommendations.cpp). Reserve fuer bis zu 64 Build-in-
+  // Eintraege; aktuelle Tabelle hat ~25 Eintraege.
+  uint8_t        scope_buildin_status[SCOPE_BUILDIN_STATUS_SLOTS];
+
+  // User-Extras: Eintraege fuer Namen die NICHT in der Build-in-Tabelle
+  // stehen (eigener Vereins-Scope, Kiez-Scope, voruebergehende Region).
+  uint8_t        scope_extras_count;
+  ScopeRegEntry  scope_extras[SCOPE_EXTRAS_SLOTS];
 };
