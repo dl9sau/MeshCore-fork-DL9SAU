@@ -1,5 +1,6 @@
 #pragma once
 #include <stddef.h>
+#include <stdbool.h>
 
 // Compute a comma-separated list of MeshCore region/scope names that
 // reasonably apply to the given GPS position. Walks a hardcoded table of
@@ -17,3 +18,11 @@
 // `dest` is written as a null-terminated string up to `dest_size` bytes.
 // Empty output if no box matches.
 void dl9sau_recommend_scopes(double lat, double lon, char* dest, size_t dest_size);
+
+// Read-only Zugriff auf die eingebaute Region-Tabelle ('scope regions'
+// CLI). Lat/Lon in Dezimalgrad (positiv = N / E).
+size_t dl9sau_region_count();
+bool   dl9sau_get_region(size_t idx,
+                         const char** name_out,
+                         double* lat_min, double* lat_max,
+                         double* lon_min, double* lon_max);

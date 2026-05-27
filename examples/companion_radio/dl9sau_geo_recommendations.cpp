@@ -119,3 +119,20 @@ void dl9sau_recommend_scopes(double lat, double lon, char* dest, size_t dest_siz
     first = false;
   }
 }
+
+size_t dl9sau_region_count() {
+  return REGION_COUNT;
+}
+
+bool dl9sau_get_region(size_t idx,
+                       const char** name_out,
+                       double* lat_min, double* lat_max,
+                       double* lon_min, double* lon_max) {
+  if (idx >= REGION_COUNT) return false;
+  if (name_out) *name_out = regions[idx].name;
+  if (lat_min)  *lat_min  = regions[idx].lat_min;
+  if (lat_max)  *lat_max  = regions[idx].lat_max;
+  if (lon_min)  *lon_min  = regions[idx].lon_min;
+  if (lon_max)  *lon_max  = regions[idx].lon_max;
+  return true;
+}

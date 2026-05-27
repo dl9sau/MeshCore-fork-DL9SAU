@@ -4038,7 +4038,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  scope list                       alle Eintraege + Flags\n"
           "  scope add <name> [geo <bbox>]    Eintrag anlegen\n"
           "  scope remove <name>              loeschen (kein Prefix-Match)\n"
-          "  scope info <name>                Details"
+          "  scope info <name>                Details\n"
+          "  scope regions                    Build-in Geo-Tabelle (RO)"
         );
         return;
       }
@@ -5763,6 +5764,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       { "remove",   true  },  // 5  - Registry-Eintrag loeschen (no_abbrev!)
       { "info",     false },  // 6  - Detail-Anzeige fuer einen Eintrag
       { "repeater", false },  // 7  - Sub-Namespace: Repeat-Policy (Liste B)
+      { "regions",  false },  // 8  - Built-in Region-Tabelle (read-only)
     };
     char scope_ambig[80];
     int sub_idx = match_choice(arg, scope_subs,
@@ -5773,7 +5775,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r); return;
     }
     if (sub_idx < 0) {
-      pushCompanionMessage("Usage: scope [default|bake|override|list|add|remove|info|repeater]");
+      pushCompanionMessage("Usage: scope [default|bake|override|list|add|remove|info|repeater|regions]");
       return;
     }
 
@@ -6185,10 +6187,44 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
     }
 
+    // -- regions (read-only built-in geo-table) --
+    if (sub_idx == 8) {
+      char gb[200]; size_t gu = 0;
+      auto gflush = [&]() {
+        if (gu == 0) return;
+        gb[gu] = 0; pushCompanionMessage(gb); gu = 0;
+      };
+      auto gline = [&](const char* line) {
+        size_t len = strlen(line);
+        if (len > 155) len = 155;
+        if (gu > 0 && gu + 1 + len > 155) gflush();
+        if (gu > 0) gb[gu++] = '\n';
+        for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
+      };
+      char head[80];
+      snprintf(head, sizeof(head), "scope regions (built-in: %u Eintraege):",
+               (unsigned)dl9sau_region_count());
+      gline(head);
+      char tmp[160];
+      for (size_t i = 0; i < dl9sau_region_count(); i++) {
+        const char* nm = NULL;
+        double lat1, lat2, lon1, lon2;
+        if (!dl9sau_get_region(i, &nm, &lat1, &lat2, &lon1, &lon2)) continue;
+        snprintf(tmp, sizeof(tmp), "  #%-15s lat[%.2f..%.2f] lon[%.2f..%.2f]",
+                 nm, lat1, lat2, lon1, lon2);
+        gline(tmp);
+      }
+      gline("Hinweis: read-only; aus dl9sau_geo_recommendations.cpp "
+            "im Build-Prozess befuellt.");
+      gflush();
+      return;
+    }
+
     pushCompanionMessage(
       "Usage (siehe 'help scope'):\n"
       "  scope default|bake|override <name>|clear    eigene Send-Policy\n"
       "  scope list | add <name> | remove <name> | info <name>   Registry\n"
+      "  scope regions                                Build-in Geo-Tabelle\n"
       "  scope repeater [...]                         Repeat-Policy");
     return;
   }
