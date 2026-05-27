@@ -294,12 +294,6 @@ protected:
   }
 
 public:
-  // Wunschliste 11 Schritt 8: savePrefs ist jetzt thin-wrapper. Die alte
-  // scope_registry wird ausschliesslich noch in begin() als one-shot-
-  // Migration gelesen (syncScopePivotFromLegacy drain ihren count auf 0).
-  // CLI-Aenderungen schreiben direkt in scope_buildin_status / scope_extras,
-  // sodass kein post-save Resync mehr noetig ist — er wuerde sogar Schaden
-  // anrichten (USER_DELETED, repeat-Modus etc. ueberschreiben).
   void savePrefs() {
     _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
@@ -393,13 +387,6 @@ private:
   // einen Eintrag mit IN_REPEAT_LIST-Flag). Aufrufer hat bereits
   // hasTransportCodes()-Check gemacht.
   bool scopeAllowedForRepeat(const mesh::Packet* packet) const;
-
-  // Wunschliste 11 Schritt 5: synchronisiert die alte scope_registry-
-  // Storage in die neuen Storages (scope_buildin_status + scope_extras).
-  // Idempotent. Wird beim Boot (in begin) UND nach jeder CLI-Modifikation
-  // der alten Storage aufgerufen, damit Reads aus der neuen Storage
-  // stets aktuell sind. Returns true wenn etwas geaendert + persistiert.
-  bool syncScopePivotFromLegacy();
 
   // Updated _buildin_in_bbox[] und _extras_in_bbox[] basierend auf der
   // angegebenen Position. Wird vom Motion-Tracking gerufen wenn der

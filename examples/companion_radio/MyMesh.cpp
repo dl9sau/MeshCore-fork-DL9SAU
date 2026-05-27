@@ -1336,19 +1336,12 @@ void MyMesh::begin(bool has_display) {
     _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
   }
 
-  // ----- Scope-Architektur-Pivot Migration (Wunschliste 11, Schritt 8) -----
-  // One-shot: kopiert eventuell-noch-vorhandene scope_registry-Daten in
-  // die neuen Storages und draint danach scope_registry_count = 0. Auf
-  // nachfolgenden Boots ist count=0 und dieser Helper ist no-op.
-  //
   // Kanonische Region-Eintraege (de, de-by, ..., de-bebb, ostfriesland,
-  // local, region usw.) brauchen keine Pre-Population mehr — sie kommen
-  // aus der Build-in-Tabelle (dl9sau_geo_recommendations.cpp) und sind
-  // out-of-the-box im Repeat-Set (Default-Status AUTO bzw. Pin fuer
-  // local/lokal/region/regional).
-  if (syncScopePivotFromLegacy()) {
-    _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
-  }
+  // local, region usw.) kommen aus der Build-in-Tabelle
+  // (dl9sau_geo_recommendations.cpp) und sind out-of-the-box im
+  // Repeat-Set (Default-Status AUTO bzw. Pin fuer local/lokal/
+  // region/regional). User-Customizations leben in
+  // scope_buildin_status[] (sparse) + scope_extras[].
 
   // ----- Key-Cache fuer Build-in-Region-Eintraege (Wunschliste 11, Schritt 4)
   // Computed once at boot. Wird von scopeAllowedForRepeat() etc. verwendet
@@ -3078,100 +3071,6 @@ void MyMesh::computeScopeHash(const char* name, uint8_t out_hash[4]) const {
   TransportKeyStore tmp;
   tmp.getAutoKeyFor(0, tag, k);
   memcpy(out_hash, k.key, 4);
-}
-
-// ----- Scope-Pivot Migration Helper (Wunschliste 11 Schritt 5) -------------
-//
-// Idempotente Migration: kopiert alte scope_registry in
-// scope_buildin_status[] + scope_extras[]. Wird beim Boot UND nach
-// CLI-Aenderungen an der alten Storage aufgerufen, damit die neuen
-// Konsumenten stets aktuelle Daten sehen.
-//
-// Flag-Mapping alt -> neu:
-//   IN_REPEAT_LIST + GEO_MANAGED -> repeat_mode = AUTO
-//   IN_REPEAT_LIST + !GEO_MANAGED -> repeat_mode = ON (manual pin)
-//   !IN_REPEAT_LIST + GEO_MANAGED -> repeat_mode = AUTO
-//   !IN_REPEAT_LIST + !GEO_MANAGED -> repeat_mode = OFF
-//   DISABLED -> SCOPE_STATUS_DISABLED zusaetzlich
-//
-// Returns true wenn sich gegenueber dem vorherigen Sync etwas geaendert
-// hat und savePrefs aufgerufen wurde.
-bool MyMesh::syncScopePivotFromLegacy() {
-  // Snapshot — damit wir nur savePrefs schreiben wenn sich tatsaechlich
-  // etwas geaendert hat (Flash-Wear-Schutz).
-  uint8_t old_status_count = _prefs.scope_buildin_status_count;
-  BuildinStatusEntry old_status_snap[SCOPE_BUILDIN_STATUS_MAX];
-  memcpy(old_status_snap, _prefs.scope_buildin_status, sizeof(old_status_snap));
-  uint8_t old_extras_count = _prefs.scope_extras_count;
-  ScopeRegEntry old_extras_snap[SCOPE_EXTRAS_SLOTS];
-  memcpy(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap));
-
-  // Reset target (wir uebernehmen aus alter Registry, nicht aufaddieren).
-  _prefs.scope_buildin_status_count = 0;
-  memset(_prefs.scope_buildin_status, 0, sizeof(_prefs.scope_buildin_status));
-  _prefs.scope_extras_count = 0;
-  memset(_prefs.scope_extras, 0, sizeof(_prefs.scope_extras));
-
-  for (int i = 0; i < _prefs._legacy_scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
-    const ScopeRegEntry& src = _prefs._legacy_scope_registry[i];
-    if (src.name[0] == 0) continue;
-
-    uint8_t status = 0;
-    bool old_in_list   = (src.flags & SCOPE_FLAG_IN_REPEAT_LIST) != 0;
-    bool old_geo_mgd   = (src.flags & SCOPE_FLAG_GEO_MANAGED)   != 0;
-    bool old_disabled  = (src.flags & SCOPE_FLAG_DISABLED)      != 0;
-
-    if (old_geo_mgd) {
-      status |= SCOPE_STATUS_REPEAT_AUTO;   // = 0, no-op
-    } else if (old_in_list) {
-      status |= SCOPE_STATUS_REPEAT_ON;
-    } else {
-      status |= SCOPE_STATUS_REPEAT_OFF;
-    }
-    if (old_disabled) status |= SCOPE_STATUS_DISABLED;
-
-    bool is_buildin = (dl9sau_find_region_index(src.name) >= 0);
-    if (is_buildin) {
-      if (status != 0
-          && _prefs.scope_buildin_status_count < SCOPE_BUILDIN_STATUS_MAX) {
-        BuildinStatusEntry& e =
-            _prefs.scope_buildin_status[_prefs.scope_buildin_status_count];
-        dl9sau_compute_name_hash(src.name, e.name_hash);
-        e.status = status;
-        memset(e._reserved, 0, sizeof(e._reserved));
-        _prefs.scope_buildin_status_count++;
-      }
-    } else {
-      if (_prefs.scope_extras_count < SCOPE_EXTRAS_SLOTS) {
-        _prefs.scope_extras[_prefs.scope_extras_count] = src;
-        _prefs.scope_extras_count++;
-      }
-    }
-  }
-
-  bool changed =
-      (old_status_count != _prefs.scope_buildin_status_count)
-   || (memcmp(old_status_snap, _prefs.scope_buildin_status, sizeof(old_status_snap)) != 0)
-   || (old_extras_count != _prefs.scope_extras_count)
-   || (memcmp(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap)) != 0);
-
-  // Wunschliste 11 Schritt 8: nach Erfolg legacy scope_registry drainen.
-  // Damit ist die Migration one-shot — auf naechstem Boot ist count=0 und
-  // dieser Helper macht nichts. CLI-Aenderungen schreiben nicht mehr nach
-  // scope_registry (siehe 'scope add'/'remove'), also kann uns hier auch
-  // nichts mehr "verwirren". Das raeumt den frueheren Bug aus, dass dieser
-  // Sync USER_DELETED/Repeat-Aenderungen aus scope_buildin_status
-  // weggewischt hat.
-  if (_prefs._legacy_scope_registry_count > 0) {
-    _prefs._legacy_scope_registry_count = 0;
-    memset(_prefs._legacy_scope_registry, 0, sizeof(_prefs._legacy_scope_registry));
-    changed = true;
-  }
-
-  // Hinweis: kein internes _store->savePrefs() — der Aufrufer entscheidet
-  // ob/wann gespeichert wird (vermeidet Doppel-Saves wenn aus savePrefs()
-  // selbst heraus aufgerufen).
-  return changed;
 }
 
 // ----- Bbox-Membership-Update -----

@@ -18,7 +18,6 @@
 // direkt: transport_codes[0] in Paketen ist ein 2-Byte HMAC-Wert. Wir
 // nutzen TransportKey::calcTransportCode(packet) wie in
 // lookupRegionByTransportCode() — daher das Speichern der vollen 16 Byte.
-#define SCOPE_REG_SLOTS              16
 #define SCOPE_FLAG_HAS_GEO_BOX       0x01   // bbox_* sind gueltig
 #define SCOPE_FLAG_GEO_MANAGED       0x02   // bei Geo-Eintritt/Austritt
                                             //   IN_REPEAT_LIST automatisch
@@ -183,20 +182,7 @@ struct NodePrefs {  // persisted to file
   // den Companion-Default (0.5 / 0.2 — die alten hartcodierten Werte) gesetzt.
   float tx_delay_factor;
   float direct_tx_delay_factor;
-  // DRAIN-PAD — frueher: scope_registry (Liste A). Nach Wunschliste 11
-  // Schritt 8 ist die Registry one-shot beim Boot in
-  // scope_buildin_status[] + scope_extras[] migriert und danach
-  // permanent auf 0 gedraint. Nur noch syncScopePivotFromLegacy()
-  // (in MyMesh.cpp) liest diese Felder fuer den first-boot-after-
-  // upgrade Use-Case. Sonst NIEMAND mehr.
-  //
-  // Felder bleiben aus Flash-Format-Kompatibilitaet im Schema —
-  // sie kosten 833 Byte RAM (aus 65 KB Companion-Heap) und 833 Byte
-  // Flash-Persistenz. Aufraeumen mit explizitem Format-Bump in
-  // einem spaeteren Commit.
-  uint8_t        _legacy_scope_registry_count;
-  uint8_t        repeat_scope_mode;          // REPEAT_SCOPE_MODE_* (real, used)
-  ScopeRegEntry  _legacy_scope_registry[SCOPE_REG_SLOTS];
+  uint8_t        repeat_scope_mode;          // REPEAT_SCOPE_MODE_*
 
   // Sparse-Status fuer Build-in-Eintraege mit non-default Settings.
   // Indexiert via FNV-1a-Hash des Region-Namens (NICHT Position) — damit

@@ -251,21 +251,15 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.gps_lead_min, sizeof(_prefs.gps_lead_min));                       // 275
     file.read((uint8_t *)&_prefs.tx_delay_factor, sizeof(_prefs.tx_delay_factor));                 // 276
     file.read((uint8_t *)&_prefs.direct_tx_delay_factor, sizeof(_prefs.direct_tx_delay_factor));   // 280
-    // DRAIN-PAD: 1+832 Byte legacy scope_registry. Nach Wunschliste 11
-    // Schritt 8 immer 0 — bleibt im Schema fuer Flash-Format-Compat.
-    // Aufraeumen mit Format-Bump in spaeterem Commit.
-    file.read((uint8_t *)&_prefs._legacy_scope_registry_count, sizeof(_prefs._legacy_scope_registry_count));       // 284
-    file.read((uint8_t *)&_prefs.repeat_scope_mode, sizeof(_prefs.repeat_scope_mode));             // 285
-    file.read((uint8_t *)_prefs._legacy_scope_registry, sizeof(_prefs._legacy_scope_registry));                    // 286 (52*16=832 Byte, drain-pad)
-    // Scope-Architektur-Pivot: Build-in-Status-Array + User-Extras.
-    // Bei alten persistierten Files liefert file.read 0 Bytes und
-    // memset(0)-Defaults bleiben stehen — Migration laeuft beim
-    // ersten Boot.
-    file.read((uint8_t *)&_prefs.scope_buildin_status_count, sizeof(_prefs.scope_buildin_status_count)); // 1118
-    file.read((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 1119 (8*32=256 Byte)
-    file.read((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 1375
-    file.read((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 1376 (52*16=832 Byte)
-    file.read((uint8_t *)&_prefs.scope_regional_hop_limit, sizeof(_prefs.scope_regional_hop_limit));                  // 2208
+    file.read((uint8_t *)&_prefs.repeat_scope_mode, sizeof(_prefs.repeat_scope_mode));             // 284
+    // Scope-Architektur (Wunschliste 11): Build-in-Status-Array sparse-
+    // indexiert via FNV-1a Hash + User-Extras-Liste. Bei alten Files
+    // liefert file.read 0 Bytes und memset(0)-Defaults bleiben stehen.
+    file.read((uint8_t *)&_prefs.scope_buildin_status_count, sizeof(_prefs.scope_buildin_status_count)); // 285
+    file.read((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 286 (8*32=256 Byte)
+    file.read((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 542
+    file.read((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 543 (52*16=832 Byte)
+    file.read((uint8_t *)&_prefs.scope_regional_hop_limit, sizeof(_prefs.scope_regional_hop_limit));                  // 1375
 
     file.close();
   }
@@ -322,15 +316,12 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.gps_lead_min, sizeof(_prefs.gps_lead_min));                       // 275
     file.write((uint8_t *)&_prefs.tx_delay_factor, sizeof(_prefs.tx_delay_factor));                 // 276
     file.write((uint8_t *)&_prefs.direct_tx_delay_factor, sizeof(_prefs.direct_tx_delay_factor));   // 280
-    // DRAIN-PAD (siehe load oben): 1+832 Byte, immer 0 nach Schritt 8.
-    file.write((uint8_t *)&_prefs._legacy_scope_registry_count, sizeof(_prefs._legacy_scope_registry_count));       // 284
-    file.write((uint8_t *)&_prefs.repeat_scope_mode, sizeof(_prefs.repeat_scope_mode));             // 285
-    file.write((uint8_t *)_prefs._legacy_scope_registry, sizeof(_prefs._legacy_scope_registry));                    // 286 (52*16=832 Byte, drain-pad)
-    file.write((uint8_t *)&_prefs.scope_buildin_status_count, sizeof(_prefs.scope_buildin_status_count)); // 1118
-    file.write((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 1119 (8*32=256 Byte)
-    file.write((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 1375
-    file.write((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 1376 (52*16=832 Byte)
-    file.write((uint8_t *)&_prefs.scope_regional_hop_limit, sizeof(_prefs.scope_regional_hop_limit));                  // 2208
+    file.write((uint8_t *)&_prefs.repeat_scope_mode, sizeof(_prefs.repeat_scope_mode));             // 284
+    file.write((uint8_t *)&_prefs.scope_buildin_status_count, sizeof(_prefs.scope_buildin_status_count)); // 285
+    file.write((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 286 (8*32=256 Byte)
+    file.write((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 542
+    file.write((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 543 (52*16=832 Byte)
+    file.write((uint8_t *)&_prefs.scope_regional_hop_limit, sizeof(_prefs.scope_regional_hop_limit));                  // 1375
 
     file.close();
   }
