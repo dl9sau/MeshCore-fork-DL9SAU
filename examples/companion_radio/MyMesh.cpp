@@ -1185,11 +1185,14 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 // Fallback in chooseGeoFallbackScope() verwendet (fuer Installs ohne
 // Registry-Eintrag — kann eigentlich nicht mehr passieren nach
 // Pre-Population, aber als Defense-in-Depth bleibt der Pfad).
+// Werte konsistent mit dl9sau_geo_recommendations.cpp Eintraegen "de-bb"
+// und "de-bebb" — beide haben dieselbe Box (Berlin liegt geografisch ganz
+// innerhalb von Brandenburg, daher identische Aussen-Bbox).
 #ifndef CR_BBOX_BEBB_LAT_MIN
-#define CR_BBOX_BEBB_LAT_MIN  51.40
-#define CR_BBOX_BEBB_LAT_MAX  53.60
-#define CR_BBOX_BEBB_LON_MIN  11.20
-#define CR_BBOX_BEBB_LON_MAX  14.80
+#define CR_BBOX_BEBB_LAT_MIN  51.36
+#define CR_BBOX_BEBB_LAT_MAX  53.56
+#define CR_BBOX_BEBB_LON_MIN  11.27
+#define CR_BBOX_BEBB_LON_MAX  14.77
 #endif
 #ifndef CR_BBOX_OSTFR_LAT_MIN
 #define CR_BBOX_OSTFR_LAT_MIN 53.10
@@ -3986,61 +3989,68 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (starts_with_word(topic, "scope repeater")
           || starts_with_word(topic, "scoperepeater")) {
         pushCompanionMessage(
-          "scope repeater steuert WELCHE scoped Pakete der Repeater weiterleitet. "
-          "Standard: alle (Mode all). Mit allowlist-Mode wird nur Traffic der "
-          "in der Repeat-Liste markierten Scopes geforwarded."
-        );
+          "scope repeater steuert welche scoped Pakete repeated werden.");
         pushCompanionMessage(
-          "  scope repeater                       Status (Mode + Liste)\n"
-          "  scope repeater mode all|allowlist    Policy umschalten\n"
-          "  scope repeater add <name>            in Repeat-Liste (muss in\n"
-          "                                       Registry sein, siehe 'scope add')\n"
-          "  scope repeater remove <name>         aus Repeat-Liste\n"
-          "  scope repeater geo <name> on|off     geo_managed-Flag — bei on\n"
-          "                                       wird IN_REPEAT_LIST automa-\n"
-          "                                       tisch bei Bbox-Eintritt/-Austritt\n"
-          "                                       gesetzt/geloescht"
-        );
+          "Mode 'all' (Default): alle scoped. Mode 'allowlist': nur die in\n"
+          "der Repeat-Liste markierten Eintraege.");
+        pushCompanionMessage(
+          "scope repeater\n"
+          "  Status (Mode + Liste)");
+        pushCompanionMessage(
+          "scope repeater mode all|allowlist\n"
+          "  Policy umschalten");
+        pushCompanionMessage(
+          "scope repeater add <name>\n"
+          "  in Repeat-Liste (Name muss in Registry sein, 'scope add')");
+        pushCompanionMessage(
+          "scope repeater remove <name>\n"
+          "  aus Repeat-Liste (kein Prefix-Match — Tippschutz)");
+        pushCompanionMessage(
+          "scope repeater geo <name> on|off\n"
+          "  geo_managed-Flag. Wenn on, wird der Repeat-Listen-Status\n"
+          "  automatisch bei Eintritt/Austritt der Bbox getoggelt.");
         return;
       }
       if (topic_prefix_match(topic, "scope")) {
         pushCompanionMessage(
-          "scope umfasst drei Bereiche:\n"
-          "  1) eigene Send-Policy (override/bake/default)\n"
-          "  2) Region-Registry (list/add/remove/info)\n"
-          "  3) Repeat-Policy fuer den Repeater (scope repeater ...).\n"
-          "Siehe 'help scope repeater' fuer Punkt 3."
-        );
+          "scope: drei Bereiche.");
+        pushCompanionMessage(
+          "1) eigene Send-Policy (default/bake/override)\n"
+          "2) Registry (Liste bekannter Scopes)\n"
+          "3) Repeater-Policy ('scope repeater', 'help scope repeater')");
         pushCompanionMessage(
           "Send-Hierarchie (nightly bake / 'advert flood'):\n"
-          "  override > bake > default > geo-fallback"
-        );
+          "override > bake > default > geo-fallback");
         pushCompanionMessage(
-          "  scope                Status aller drei Send-Quellen + Registry-Count\n"
-          "  scope default <name> persistent. Wirkt auch fuer regulaere\n"
-          "                       Sends (gleich dem App-Default-Scope)\n"
-          "  scope default clear  loescht default"
-        );
+          "scope            ohne Argument: Status der drei Send-Quellen\n"
+          "                 + Registry-Count");
         pushCompanionMessage(
-          "  scope bake <name>    persistent, NUR fuer nightly. Darf weiter\n"
-          "                       als default sein (z.B. default=#de-be,\n"
-          "                       bake=#de-bebb)\n"
-          "  scope bake clear     loescht bake"
-        );
+          "scope default <name>\n"
+          "  persistent. Wirkt auch fuer regulaere Sends (App-Default).");
         pushCompanionMessage(
-          "  scope override <name> [12h|3d]   persistent ueber Reboots\n"
-          "                       (default 12h, max 30d, Suffix h oder d).\n"
-          "                       Hoechste Prio.\n"
-          "  scope override clear loescht override"
-        );
+          "scope default clear   loescht den default");
         pushCompanionMessage(
-          "Registry (Liste A — bekannte Scopes):\n"
-          "  scope list                       alle Eintraege + Flags\n"
-          "  scope add <name> [geo <bbox>]    Eintrag anlegen\n"
-          "  scope remove <name>              loeschen (kein Prefix-Match)\n"
-          "  scope info <name>                Details\n"
-          "  scope regions                    Build-in Geo-Tabelle (RO)"
-        );
+          "scope bake <name>\n"
+          "  persistent, NUR fuer nightly. Darf weiter sein als default\n"
+          "  (z.B. default=#de-be, bake=#de-bebb).");
+        pushCompanionMessage(
+          "scope bake clear      loescht bake");
+        pushCompanionMessage(
+          "scope override <name> [12h|3d]\n"
+          "  persistent ueber Reboots, hoechste Prio.\n"
+          "  Default-TTL 12h, max 30d, Suffix h oder d.");
+        pushCompanionMessage(
+          "scope override clear  loescht override");
+        pushCompanionMessage(
+          "Registry (Liste A — bekannte Scopes):");
+        pushCompanionMessage(
+          "scope list                       alle Eintraege + Flags\n"
+          "scope add <name> [geo <bbox>]    Eintrag anlegen");
+        pushCompanionMessage(
+          "scope remove <name>              loeschen (kein Prefix-Match)\n"
+          "scope info <name>                Details (auch ob Bbox da)");
+        pushCompanionMessage(
+          "scope regions                    Build-in Geo-Tabelle (RO)");
         return;
       }
       if (topic_prefix_match(topic, "neighbors")) {
@@ -4674,10 +4684,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     };
     auto add_line = [&](const char* line) {
       size_t len = strlen(line);
-      if (len > 155) len = 155;
+      if (len > 130) len = 130;
       // Wuerde die naechste Zeile (mit '\n'-Separator) das Wire-Limit
       // sprengen? Dann erst flushen.
-      if (buf_used > 0 && buf_used + 1 + len > 155) flush_buf();
+      if (buf_used > 0 && buf_used + 1 + len > 130) flush_buf();
       if (buf_used > 0) prefs_buf[buf_used++] = '\n';
       for (size_t i = 0; i < len && buf_used < sizeof(prefs_buf) - 1; i++) {
         prefs_buf[buf_used++] = line[i];
@@ -4794,34 +4804,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.repeat_scope_mode != REPEAT_SCOPE_MODE_ALL) non_default_count++;
     }
-    // scope_registry: Anzahl + Eintraege mit nicht-Default-Flags hervorheben.
-    // Pre-Population schreibt 2 Eintraege beim ersten Boot, Default-Zustand
-    // im engen Sinne (gleich nach setDefaults) ist count==0; wir behandeln
-    // die pre-populated Defaults aber wie 'normal' und zeigen non-default
-    // nur die Eintraege mit IN_REPEAT_LIST oder GEO_MANAGED.
-    {
-      int n_marked = 0;
+    // scope_registry: immer anzeigen (pre-populated Eintraege gehoeren auch
+    // zur Konfiguration und sind editierbar). show_all zusaetzlich macht
+    // keinen Unterschied — die Liste ist immer komplett.
+    if (_prefs.scope_registry_count > 0) {
+      snprintf(tmp, sizeof(tmp), "  scope_registry = %u/%u (siehe 'scope list')",
+               (unsigned)_prefs.scope_registry_count, (unsigned)SCOPE_REG_SLOTS);
+      add_line(tmp);
       for (int i = 0; i < _prefs.scope_registry_count; i++) {
-        if (_prefs.scope_registry[i].flags
-            & (SCOPE_FLAG_IN_REPEAT_LIST | SCOPE_FLAG_GEO_MANAGED)) n_marked++;
-      }
-      if (show_all || n_marked > 0) {
-        snprintf(tmp, sizeof(tmp), "  scope_registry = %u/%u (siehe 'scope list')",
-                 (unsigned)_prefs.scope_registry_count, (unsigned)SCOPE_REG_SLOTS);
+        const ScopeRegEntry& e = _prefs.scope_registry[i];
+        uint8_t marks = e.flags & (SCOPE_FLAG_IN_REPEAT_LIST | SCOPE_FLAG_GEO_MANAGED);
+        char flagstr[10] = "";
+        if (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) strcat(flagstr, "R");
+        if (e.flags & SCOPE_FLAG_GEO_MANAGED)   strcat(flagstr, "G");
+        if (e.flags & SCOPE_FLAG_HAS_GEO_BOX)   strcat(flagstr, "b");
+        snprintf(tmp, sizeof(tmp), "    #%s  [%s]", e.name, flagstr[0] ? flagstr : "-");
         add_line(tmp);
-        // Bei nicht-Default-Flag pro Eintrag eine kurze Zeile mit Marker.
-        for (int i = 0; i < _prefs.scope_registry_count; i++) {
-          const ScopeRegEntry& e = _prefs.scope_registry[i];
-          uint8_t marks = e.flags & (SCOPE_FLAG_IN_REPEAT_LIST | SCOPE_FLAG_GEO_MANAGED);
-          if (!show_all && marks == 0) continue;
-          char flagstr[10] = "";
-          if (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) strcat(flagstr, "R");
-          if (e.flags & SCOPE_FLAG_GEO_MANAGED)   strcat(flagstr, "G");
-          if (e.flags & SCOPE_FLAG_HAS_GEO_BOX)   strcat(flagstr, "b");
-          snprintf(tmp, sizeof(tmp), "    #%s  [%s]", e.name, flagstr[0] ? flagstr : "-");
-          add_line(tmp);
-        }
-        if (n_marked > 0) non_default_count++;
+        if (marks != 0) non_default_count++;
       }
     }
 
@@ -5104,8 +5103,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       };
       auto gline = [&](const char* line) {
         size_t len = strlen(line);
-        if (len > 155) len = 155;
-        if (gu > 0 && gu + 1 + len > 155) gflush();
+        if (len > 130) len = 130;
+        if (gu > 0 && gu + 1 + len > 130) gflush();
         if (gu > 0) gb[gu++] = '\n';
         for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
       };
@@ -5492,7 +5491,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (tm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
       if (tm == 1) {
         _trace_flags = _prefs.trace_flags_persistent;
-        pushCompanionMessage("OK - trace an (gespeicherte Auswahl wiederhergestellt).");
+        pushCompanionMessage("OK - trace an (gespeicherte Auswahl wird verwendet).");
         return;
       }
       if (tm == 0) {
@@ -5878,8 +5877,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       };
       auto gline = [&](const char* line) {
         size_t len = strlen(line);
-        if (len > 155) len = 155;
-        if (gu > 0 && gu + 1 + len > 155) gflush();
+        if (len > 130) len = 130;
+        if (gu > 0 && gu + 1 + len > 130) gflush();
         if (gu > 0) gb[gu++] = '\n';
         for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
       };
@@ -6007,23 +6006,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r); return;
       }
       const ScopeRegEntry& e = _prefs.scope_registry[idx];
-      char block[280];
-      int p_off = snprintf(block, sizeof(block),
-                           "#%s (slot %d):\n"
-                           "  hash = %02X%02X%02X%02X\n"
-                           "  in_repeat_list = %s\n"
-                           "  geo_managed = %s",
-                           e.name, idx,
-                           e.key[0], e.key[1], e.key[2], e.key[3],
-                           (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) ? "yes" : "no",
-                           (e.flags & SCOPE_FLAG_GEO_MANAGED)    ? "yes" : "no");
+      char block[160];
+      snprintf(block, sizeof(block),
+               "#%s (slot %d):\n"
+               "  hash = %02X%02X%02X%02X\n"
+               "  in_repeat_list = %s\n"
+               "  geo_managed = %s",
+               e.name, idx,
+               e.key[0], e.key[1], e.key[2], e.key[3],
+               (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) ? "yes" : "no",
+               (e.flags & SCOPE_FLAG_GEO_MANAGED)    ? "yes" : "no");
+      pushCompanionMessage(block);
+      // Bbox-Status als separate Message (sonst Wire-Limit knapp).
       if (e.flags & SCOPE_FLAG_HAS_GEO_BOX) {
-        snprintf(block + p_off, sizeof(block) - p_off,
-                 "\n  bbox = lat[%.3f..%.3f] lon[%.3f..%.3f]",
+        char bbox[120];
+        snprintf(bbox, sizeof(bbox),
+                 "  bbox = lat[%.3f..%.3f] lon[%.3f..%.3f]",
                  (double)e.bbox_lat_min, (double)e.bbox_lat_max,
                  (double)e.bbox_lon_min, (double)e.bbox_lon_max);
+        pushCompanionMessage(bbox);
+      } else {
+        pushCompanionMessage(
+          "  bbox = (keine) — geo_managed nicht moeglich.\n"
+          "  Bbox nachtragen: 'scope remove <name>' + 'scope add <name>\n"
+          "                   geo <lat_min,lon_min,lat_max,lon_max>'.");
       }
-      pushCompanionMessage(block);
       return;
     }
 
@@ -6196,8 +6203,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       };
       auto gline = [&](const char* line) {
         size_t len = strlen(line);
-        if (len > 155) len = 155;
-        if (gu > 0 && gu + 1 + len > 155) gflush();
+        if (len > 130) len = 130;
+        if (gu > 0 && gu + 1 + len > 130) gflush();
         if (gu > 0) gb[gu++] = '\n';
         for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = line[i];
       };
