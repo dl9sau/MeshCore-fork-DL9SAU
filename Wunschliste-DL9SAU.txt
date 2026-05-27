@@ -128,28 +128,34 @@ Quelle: Diskussion in dieser Session, 2026-05-26.
 
 
 --------------------------------------------------------------------------------
-4. Companion-CLI: Argument-Prefix-Matching mit Ambiguity-Warnung
+4. Companion-CLI: Argument-Prefix-Matching mit Ambiguity-Warnung - ERLEDIGT
 --------------------------------------------------------------------------------
 
-Ist-Zustand:
-  Top-Level-Befehle (status, autoadv, repeater, ...) sind per Prefix
-  abkuerzbar (z.B. "stat" matched mehrdeutig "status"/"stats" -> Warning;
-  "up" eindeutig zu "uptime"). Argumente innerhalb der Sub-Handler
-  matchen jedoch noch per starts_with_word/strcmp (Whole-Word/Exact).
+Loesung:
+  Schritt 1 (27eaefc2): match_on_off() Helper fuer alle on/off-Sites
+  (autoadv/gps/repeater/trace). 'o' meldet mehrdeutig, 'on'/'of' geht.
 
-Soll-Verhalten:
-  Generischer Helper analog zum Top-Level Prefix-Match: Argument gegen
-  bekannte Auswahl-Liste matchen, exact-match wins, eindeutiger Prefix
-  expand, mehrdeutig -> "Mehrdeutig: <liste>".
+  Schritt 2 (c756b36e): generischer match_choice() Helper mit
+  no_abbrev-Flag pro Eintrag:
 
-Beispiel-Sites:
-  autoadv on/off (mehrdeutig bei "o")
-  gps on/off (mehrdeutig bei "o")
-  repeater on/off (mehrdeutig bei "o")
-  advert zero-hop/flood (verlangt noch f/z-Alias-Liste)
-  duty soft/hard/reset (eindeutig per "s"/"h"/"r")
-  scope default/override/bake (eindeutig per Prefix)
-  chatname default/N/custom/hex (eindeutig)
+    struct CompanionChoice { const char* name; bool no_abbrev; };
+    int match_choice(arg, choices, n, out_ambig, out_size);
+
+  no_abbrev=true: nur exakter Match (fuer 'reset', 'clear', 'remove'
+  u.ae. wo Tippfehler Daten kosten wuerden).
+
+  Umgestellte Sites:
+    advert [zero-hop | flood]    ("zerohop" als Alias normalisiert)
+    duty   [reset | soft | hard] (reset = no_abbrev)
+    chatname [default | hex | custom | N]
+    trace <category> on/off       (mit Prefix-Match auf alle 10 cats)
+
+  Damit funktioniert 'tra gp on' = 'trace gps on'. 'r' bei trace ist
+  mehrdeutig (repeat/rtc) -> Warnung mit kommagetrennter Liste.
+
+  Spaeter (mit Scope-Registry 4d): scope default/bake/override per
+  match_choice dispatched + neue Sub-Befehle list/add/remove/info/
+  repeater. 'remove' = no_abbrev.
 
 Quelle: User-Anfrage in dieser Session, 2026-05-26.
 
@@ -223,6 +229,71 @@ schon mal auf github angesprochen).
 
 
 --------------------------------------------------------------------------------
+4d. Scope-Registry + Repeat-Allowlist - TEILS ERLEDIGT
+--------------------------------------------------------------------------------
+
+Hintergrund:
+  Companion-Repeater wollte selektiv repeaten — nicht jedes scoped
+  Paket, sondern nur bestimmte Regionen ("ich bin in Berlin, fahre nach
+  Ostfriesland: Berlin-Scopes brauche ich dann nicht zu wiederholen").
+  Analog zu 'region allowf/denyf' beim Standard-Repeater (CommonCLI).
+
+Loesung (commit 224e89de):
+  Zwei verknuepfte Listen:
+
+    Liste A — Registry: bekannte Scopes (Name + 16-Byte TransportKey =
+    SHA-256("#name") + optionale Geo-Bbox). Pre-populated beim ersten
+    Boot mit #bebb und #ostfriesland (sticky, NICHT im Repeat-Set).
+    User-erweiterbar per 'scope add'.
+
+    Liste B — Repeat-Allowlist: Teilmenge von A, ueber SCOPE_FLAG_
+    IN_REPEAT_LIST pro Eintrag. Nur diese Scopes werden geforwarded
+    wenn _prefs.repeat_scope_mode == ALLOWLIST. Default ALL (Verhalten
+    wie vor diesem Commit).
+
+  Datenstruktur in NodePrefs (am Ende angehaengt fuer Backward-Compat):
+    ScopeRegEntry scope_registry[16]   // 52 Byte/Slot = 832 Byte
+      name[16], key[16] (TransportKey), flags, bbox_*
+
+  Forward-Hook in allowPacketForward(): nach hasTransportCodes()-Check
+  fragt scopeAllowedForRepeat(). Bei ALLOWLIST: iteriert Registry,
+  prueft IN_REPEAT_LIST-Flag, vergleicht TransportKey::calcTransport-
+  Code(packet) == packet->transport_codes[0]. Reject-Reason
+  "scope-not-allowed" -> TRACE_FILTER.
+
+  CLI:
+    scope list / add / remove (no_abbrev) / info
+    scope repeater [mode all|allowlist | add | remove | geo <name> on/off]
+
+Offen (Sub-Punkt):
+  geo_managed-Auto-Trigger. Das Flag SCOPE_FLAG_GEO_MANAGED ist im
+  Schema, persistiert, und per CLI ein-/ausschaltbar pro Eintrag —
+  aber die Logik bei Bbox-Eintritt/Austritt fehlt noch:
+  - Position-Update prueft fuer geo_managed-Eintraege ob lat/lon
+    innerhalb bbox liegt
+  - Bei Eintritt: SCOPE_FLAG_IN_REPEAT_LIST setzen + savePrefs + trace
+  - Bei Austritt: SCOPE_FLAG_IN_REPEAT_LIST loeschen + savePrefs + trace
+  - Trace-Kategorie TRACE_SCOPE (existiert bereits) reicht
+
+  Hysterese kommt natuerlich aus dem schon existierenden Motion-
+  Tracking: GPS-Position wird nur alle CR_MOTION_WINDOW_MS (10 min)
+  als neuer Anker uebernommen wenn die Distanz > CR_MOTION_RADIUS_M
+  (370m) ist (siehe Changelog Punkt 8, "responsive motion tracking
+  under static advert schedule" / commit 20177a0d). Damit wackelt
+  lat/lon nicht im Sekundentakt — geo_managed-Trigger an genau
+  diesen Punkten anhaengen reicht; keine zusaetzliche Bbox-
+  Hysterese noetig.
+
+  Hook-Stelle: vermutlich in updateMotionTracking() bzw. die
+  Position-Update-Pfade in loop(). Eine Funktion
+  evaluateGeoManagedEntries() iteriert die Registry, fuer jeden
+  Eintrag mit HAS_GEO_BOX + GEO_MANAGED prueft sie membership und
+  toggelt IN_REPEAT_LIST entsprechend.
+
+Quelle: User-Anregung in dieser Session, 2026-05-27.
+
+
+--------------------------------------------------------------------------------
 5. scope geo-prefers <on/off> - Auto-Geo statt Default-Scope wenn fern
 --------------------------------------------------------------------------------
 
@@ -238,5 +309,15 @@ Soll-Verhalten:
     - Wenn diese Region != Default-Region: Geo gewinnt VOR Default
     - Begruendung: "User ist offensichtlich nicht zu Hause"
   Default: off (Auto-Magic kann nervig sein, User entscheidet bewusst).
+
+Verzahnung mit 4d:
+  Geo-Fallback war bisher hartcodiert auf #bebb und #ostfriesland
+  (CR_BBOX_*-defines). Nach 4d sind diese als Registry-Eintraege mit
+  Bbox vorhanden — chooseGeoFallbackScope() koennte/sollte spaeter die
+  Registry iterieren statt der hartcodierten Boxen. Dann waere Punkt 5
+  ein flag-basierter Hierarchie-Switch auf dem Registry-Mechanismus,
+  und 'scope geo-prefers' liesse sich problemlos mit dem schon
+  bestehenden 'scope repeater geo <name> on|off' (geo_managed-Flag)
+  verzahnen — beides nutzt dann denselben Bbox-Membership-Check.
 
 Quelle: User-Anfrage in dieser Session, 2026-05-26.
