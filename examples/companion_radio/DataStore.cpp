@@ -263,6 +263,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 1119 (8*32=256 Byte)
     file.read((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 1375
     file.read((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 1376 (52*16=832 Byte)
+    file.read((uint8_t *)&_prefs.region_hop_limit, sizeof(_prefs.region_hop_limit));                  // 2208
 
     file.close();
   }
@@ -326,6 +327,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 1119 (8*32=256 Byte)
     file.write((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 1375
     file.write((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 1376 (52*16=832 Byte)
+    file.write((uint8_t *)&_prefs.region_hop_limit, sizeof(_prefs.region_hop_limit));                  // 2208
 
     file.close();
   }

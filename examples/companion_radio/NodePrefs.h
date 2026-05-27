@@ -200,4 +200,9 @@ struct NodePrefs {  // persisted to file
   // stehen (eigener Vereins-Scope, Kiez-Scope, voruebergehende Region).
   uint8_t        scope_extras_count;
   ScopeRegEntry  scope_extras[SCOPE_EXTRAS_SLOTS];
+
+  // Hop-Cap fuer #region- / #regional-scoped Pakete (Wunschliste 11
+  // Schritt 12). Pakete mit path_hash_count >= region_hop_limit werden
+  // nicht repeated. 0 wird beim Boot auf Default 3 gehoben.
+  uint8_t        region_hop_limit;
 };

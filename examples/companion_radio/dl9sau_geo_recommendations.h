@@ -48,3 +48,8 @@ int  dl9sau_find_region_index(const char* name);
 // User-Customisierungen auch Reorder/Insert/Remove in der Build-in-
 // Tabelle. Schreibt die 4 Hash-Bytes (Little-Endian) in out[0..3].
 void dl9sau_compute_name_hash(const char* name, uint8_t out[4]);
+
+// Liest Meta-Felder eines Build-in-Eintrags: has_bbox (false fuer
+// position-unabhaengige Special-Scopes) und default_status (SCOPE_STATUS_*
+// bei abwesendem sparse-Slot in scope_buildin_status[]).
+bool dl9sau_get_region_meta(size_t idx, bool* has_bbox, uint8_t* default_status);

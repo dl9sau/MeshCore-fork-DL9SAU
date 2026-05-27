@@ -653,6 +653,52 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     else if (!scopeAllowedForRepeat(packet)) {
       decision = false;
       reject_reason = "scope-not-allowed";
+    } else {
+      // Wunschliste 11 Schritte 11+12: Special-Scope-Handling.
+      // local/lokal: single-hop, beim Repeat Scope-Rewrite zu local-discard.
+      // region/regional: konfigurierbares Hop-Limit (_prefs.region_hop_limit).
+      // local-discard: wird durch default-REPEAT_OFF schon abgelehnt; falls
+      // doch (User hat es manuell gepinnt) -> Sentinel, hier hart blocken.
+      uint16_t target = packet->transport_codes[0];
+      uint8_t hops = packet->getPathHashCount();
+      int idx_local         = dl9sau_find_region_index("local");
+      int idx_lokal         = dl9sau_find_region_index("lokal");
+      int idx_region        = dl9sau_find_region_index("region");
+      int idx_regional      = dl9sau_find_region_index("regional");
+      int idx_local_discard = dl9sau_find_region_index("local-discard");
+      auto codeMatches = [&](int idx) -> bool {
+        return idx >= 0 && idx < _buildin_keys_count
+               && _buildin_keys[idx].calcTransportCode(packet) == target;
+      };
+      bool is_local         = codeMatches(idx_local) || codeMatches(idx_lokal);
+      bool is_region        = codeMatches(idx_region) || codeMatches(idx_regional);
+      bool is_local_discard = codeMatches(idx_local_discard);
+
+      if (is_local_discard) {
+        decision = false;
+        reject_reason = "local-discard";
+      } else if (is_local) {
+        if (hops > 0) {
+          decision = false;
+          reject_reason = "local-multihop-drop";
+        } else if (idx_local_discard >= 0
+                   && idx_local_discard < _buildin_keys_count) {
+          // Erst-Repeat: Scope auf local-discard umschreiben, sodass kein
+          // weiterer Repeater drueber geht. const_cast OK weil Mesh.cpp
+          // den Caller mit non-const Packet* hat.
+          mesh::Packet* p = const_cast<mesh::Packet*>(packet);
+          p->transport_codes[0] =
+              _buildin_keys[idx_local_discard].calcTransportCode(packet);
+          // decision bleibt true
+        }
+        // (idx_local_discard nicht gefunden: einfach normal weiterleiten —
+        // sollte nicht passieren da local-discard im Build-in-Table steht.)
+      } else if (is_region) {
+        if (hops >= _prefs.region_hop_limit) {
+          decision = false;
+          reject_reason = "region-hop-limit";
+        }
+      }
     }
   } else if (ptype == PAYLOAD_TYPE_PATH) {
     // PATH discovery: only repeat for local nodes (heard < 48h OR known contact < 48h)
@@ -1415,6 +1461,11 @@ void MyMesh::begin(bool has_display) {
     }
   }
 
+  // region_hop_limit: 0 = uninitialisiert -> Companion-Default 3.
+  // Range 1..16 (max 16 entspricht unserem CR_MAX_REPEAT_PATH_LEN).
+  if (_prefs.region_hop_limit == 0 || _prefs.region_hop_limit > 16) {
+    _prefs.region_hop_limit = 3;
+  }
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
   _prefs.bw = constrain(_prefs.bw, 7.8f, 500.0f);
@@ -3279,6 +3330,9 @@ bool MyMesh::syncScopePivotFromLegacy() {
 void MyMesh::evaluateScopeBboxes(double lat, double lon) {
   // Build-in
   for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
+    bool has_bbox = false;
+    dl9sau_get_region_meta((size_t)i, &has_bbox, NULL);
+    if (!has_bbox) { _buildin_in_bbox[i] = false; continue; }
     double lat1, lat2, lon1, lon2;
     if (!dl9sau_get_region((size_t)i, NULL, &lat1, &lat2, &lon1, &lon2)) {
       _buildin_in_bbox[i] = false;
@@ -3326,7 +3380,11 @@ uint8_t MyMesh::getBuildinStatus(int buildin_idx) const {
       return _prefs.scope_buildin_status[i].status;
     }
   }
-  return 0;  // default
+  // Kein User-Override -> Build-in Default-Status (z.B. REPEAT_ON fuer
+  // local/lokal/region/regional). Default fuer normale Geo-Regionen = 0.
+  uint8_t def = 0;
+  dl9sau_get_region_meta((size_t)buildin_idx, NULL, &def);
+  return def;
 }
 
 bool MyMesh::setBuildinStatus(int buildin_idx, uint8_t status) {
@@ -3524,6 +3582,9 @@ bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
     if (status & (SCOPE_STATUS_ADVERT_OFF
                   | SCOPE_STATUS_DISABLED
                   | SCOPE_STATUS_USER_DELETED)) continue;
+    bool has_bbox = false;
+    dl9sau_get_region_meta((size_t)i, &has_bbox, NULL);
+    if (!has_bbox) continue;     // local/lokal/region/regional kein Geo-Fallback
     double lat1, lat2, lon1, lon2;
     if (!dl9sau_get_region((size_t)i, NULL, &lat1, &lat2, &lon1, &lon2)) continue;
     consider(SCOPE_BUILDIN, i, lat1, lat2, lon1, lon2);
