@@ -1197,6 +1197,15 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 #define CR_BBOX_OSTFR_LON_MIN  6.50
 #define CR_BBOX_OSTFR_LON_MAX  8.50
 #endif
+// Berlin (Bundesland, eigenes ISO-Kuerzel be); enthalten in CR_BBOX_BEBB.
+// Stadtgebiet rund 52.34..52.68 N / 13.09..13.76 E — leicht erweitert
+// damit der Rand nicht knapp wird.
+#ifndef CR_BBOX_DE_BE_LAT_MIN
+#define CR_BBOX_DE_BE_LAT_MIN 52.30
+#define CR_BBOX_DE_BE_LAT_MAX 52.70
+#define CR_BBOX_DE_BE_LON_MIN 13.05
+#define CR_BBOX_DE_BE_LON_MAX 13.80
+#endif
 
 void MyMesh::begin(bool has_display) {
   BaseChatMesh::begin();
@@ -1271,23 +1280,61 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.direct_tx_delay_factor <= 0.0f || _prefs.direct_tx_delay_factor > 2.0f) {
     _prefs.direct_tx_delay_factor = 0.2f;
   }
-  // Scope-Registry Pre-Population beim ersten Boot (Liste A).
-  // Triggert solange Registry leer (count==0); existierende Eintraege werden
-  // nicht angefasst, der User darf #bebb/#ostfriesland auch loeschen.
+  // Scope-Registry Pre-Population (Liste A).
+  //
+  // Bundeslaender (zwei-Buchstaben-ISO) bekommen "de-"-Prefix:
+  //   de-be    Berlin
+  //   de-bebb  Berlin+Brandenburg (kombinierter Scope)
+  // Geografisch/kulturell uebergreifende Regionen bleiben ohne Prefix:
+  //   ostfriesland  (analog zu harz, hansemesh, franken usw.)
+  //
   // Default-Flags: sticky (kein geo_managed) und NICHT in Repeat-Liste.
   // Damit ist nach Boot zwar das Wissen ueber die Regionen da, aber kein
   // Repeating aktiv bis der User explizit 'scope repeater add <name>' macht.
+  if (_prefs.repeat_scope_mode > REPEAT_SCOPE_MODE_ALLOWLIST) {
+    _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
+  }
   if (_prefs.scope_registry_count == 0) {
-    if (_prefs.repeat_scope_mode > REPEAT_SCOPE_MODE_ALLOWLIST) {
-      _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
-    }
-    addScopeRegistryDefault("bebb",
+    // Fresh install — Default-Einträge schreiben.
+    addScopeRegistryDefault("de-bebb",
       CR_BBOX_BEBB_LAT_MIN, CR_BBOX_BEBB_LAT_MAX,
       CR_BBOX_BEBB_LON_MIN, CR_BBOX_BEBB_LON_MAX);
+    addScopeRegistryDefault("de-be",
+      CR_BBOX_DE_BE_LAT_MIN, CR_BBOX_DE_BE_LAT_MAX,
+      CR_BBOX_DE_BE_LON_MIN, CR_BBOX_DE_BE_LON_MAX);
     addScopeRegistryDefault("ostfriesland",
       CR_BBOX_OSTFR_LAT_MIN, CR_BBOX_OSTFR_LAT_MAX,
       CR_BBOX_OSTFR_LON_MIN, CR_BBOX_OSTFR_LON_MAX);
     _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  } else {
+    // Bestehende Installation — Migrationen anwenden ohne user-curated
+    // Eintraege zu beruehren.
+    bool migrated = false;
+    // 1) Alter Bug: "bebb" war falsch (es heisst "de-bebb"). In-Place-
+    //    Rename + Key-Neuberechnung, damit alle User-Flags erhalten
+    //    bleiben aber der Hash zum richtigen Wire-Namen "#de-bebb"
+    //    passt. Falls "de-bebb" schon existiert (z.B. weil User selbst
+    //    angelegt), lassen wir "bebb" stehen — der User entscheidet
+    //    selbst was er damit macht.
+    int idx_old = findScopeRegistryByName("bebb");
+    if (idx_old >= 0 && findScopeRegistryByName("de-bebb") < 0) {
+      ScopeRegEntry& e = _prefs.scope_registry[idx_old];
+      strncpy(e.name, "de-bebb", sizeof(e.name) - 1);
+      e.name[sizeof(e.name) - 1] = 0;
+      char tag[40]; snprintf(tag, sizeof(tag), "#%s", e.name);
+      TransportKey k; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, k);
+      memcpy(e.key, k.key, sizeof(e.key));
+      migrated = true;
+    }
+    // 2) Ensure "de-be" exists (war im ersten Roll-Out nicht dabei).
+    if (findScopeRegistryByName("de-be") < 0
+        && _prefs.scope_registry_count < SCOPE_REG_SLOTS) {
+      addScopeRegistryDefault("de-be",
+        CR_BBOX_DE_BE_LAT_MIN, CR_BBOX_DE_BE_LAT_MAX,
+        CR_BBOX_DE_BE_LON_MIN, CR_BBOX_DE_BE_LON_MAX);
+      migrated = true;
+    }
+    if (migrated) _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
@@ -3080,10 +3127,15 @@ bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
   double lat, lon;
   if (!getEffectiveLatLon(lat, lon)) return false;
 
+  // Reihenfolge: kleinere/engere Box zuerst (de-be ist Teilmenge von
+  // de-bebb), damit ein User in Berlin den spezifischeren Scope bekommt.
   const char* tag = NULL;
-  if (lat >= CR_BBOX_BEBB_LAT_MIN && lat <= CR_BBOX_BEBB_LAT_MAX &&
-      lon >= CR_BBOX_BEBB_LON_MIN && lon <= CR_BBOX_BEBB_LON_MAX) {
-    tag = "#bebb";
+  if (lat >= CR_BBOX_DE_BE_LAT_MIN && lat <= CR_BBOX_DE_BE_LAT_MAX &&
+      lon >= CR_BBOX_DE_BE_LON_MIN && lon <= CR_BBOX_DE_BE_LON_MAX) {
+    tag = "#de-be";
+  } else if (lat >= CR_BBOX_BEBB_LAT_MIN && lat <= CR_BBOX_BEBB_LAT_MAX &&
+             lon >= CR_BBOX_BEBB_LON_MIN && lon <= CR_BBOX_BEBB_LON_MAX) {
+    tag = "#de-bebb";
   } else if (lat >= CR_BBOX_OSTFR_LAT_MIN && lat <= CR_BBOX_OSTFR_LAT_MAX &&
              lon >= CR_BBOX_OSTFR_LON_MIN && lon <= CR_BBOX_OSTFR_LON_MAX) {
     tag = "#ostfriesland";

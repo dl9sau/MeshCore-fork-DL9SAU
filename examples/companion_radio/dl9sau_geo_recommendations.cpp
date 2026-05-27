@@ -47,7 +47,7 @@ static const GeoRegion regions[] = {
   { "de-th", 50.20, 51.65,  9.87, 12.66 },   // Thüringen
 
   // Local specials (DL9SAU's two geo-fence regions, see chooseGeoFallbackScope)
-  { "bebb",         51.36, 53.56, 11.27, 14.77 },  // Berlin/Brandenburg combined (=de-bb box)
+  { "de-bebb",      51.36, 53.56, 11.27, 14.77 },  // Berlin/Brandenburg bridge (=de-bb box)
   { "ostfriesland", 53.10, 53.80,  6.50,  8.50 },
 };
 static const size_t REGION_COUNT = sizeof(regions) / sizeof(regions[0]);
