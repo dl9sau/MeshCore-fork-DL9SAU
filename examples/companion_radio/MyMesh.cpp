@@ -4484,8 +4484,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "scope list\n"
           "  alle Eintraege + Flags");
         pushCompanionMessage(
-          "scope add <name> [geo <bbox>]\n"
-          "  Eintrag anlegen");
+          "scope add <name> [<lat_min,lon_min,lat_max,lon_max>]\n"
+          "  Eintrag anlegen. Bekannte Namen (siehe 'scope regions')\n"
+          "  bekommen die Bbox automatisch.");
         pushCompanionMessage(
           "scope remove <name>\n"
           "  loeschen (kein Prefix-Match)");
@@ -6399,7 +6400,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (sub_idx == 4) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ') p++; }
-      if (!p || *p == 0) { pushCompanionMessage("Usage: scope add <name> [geo <lat_min,lon_min,lat_max,lon_max>]"); return; }
+      if (!p || *p == 0) {
+        pushCompanionMessage(
+          "Usage: scope add <name> [<lat_min,lon_min,lat_max,lon_max>]\n"
+          "Bekannte Namen aus der Build-in-Tabelle bekommen die Bbox\n"
+          "automatisch (siehe 'scope regions').");
+        return;
+      }
       char name[16];
       if (!normalizeScopeName(p, name, sizeof(name))) {
         pushCompanionMessage("Name ungueltig: erlaubt [a-z0-9-_], 1..15 Zeichen, kein '##'.");
@@ -6419,16 +6426,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* q = p;
       while (*q && *q != ' ' && *q != '\t') q++;
       while (*q == ' ' || *q == '\t') q++;
+      // Vereinfachte Syntax: 'scope add <name> <lat_min,lon_min,lat_max,lon_max>'
+      // (kein 'geo'-Keyword mehr noetig). Altes 'scope add <name> geo <bbox>'
+      // bleibt aus Backward-Compat erkannt — wir strippen das geo-Wort
+      // einfach und parsen die folgenden vier Floats.
       if (starts_with_word(q, "geo")) {
         q = strchr(q, ' ');
         if (q) { while (*q == ' ') q++; }
-        if (!q || sscanf(q, "%f,%f,%f,%f", &lat_min, &lon_min, &lat_max, &lon_max) != 4) {
-          pushCompanionMessage("Usage: scope add <name> geo <lat_min,lon_min,lat_max,lon_max>");
+      }
+      if (q && *q != 0) {
+        if (sscanf(q, "%f,%f,%f,%f", &lat_min, &lon_min, &lat_max, &lon_max) != 4) {
+          pushCompanionMessage(
+            "Usage: scope add <name> [<lat_min,lon_min,lat_max,lon_max>]\n"
+            "Vier kommagetrennte Floats. Sued/West negativ.");
           return;
         }
         if (lat_min > lat_max || lon_min > lon_max
             || lat_min < -90 || lat_max > 90 || lon_min < -180 || lon_max > 180) {
-          pushCompanionMessage("geo: lat_min<=lat_max, lon_min<=lon_max, lat -90..90, lon -180..180.");
+          pushCompanionMessage("Bbox ungueltig: lat_min<=lat_max, lon_min<=lon_max,\n"
+                               "lat in -90..90, lon in -180..180.");
           return;
         }
         has_geo = true;
