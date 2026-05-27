@@ -1131,6 +1131,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _last_serial_connected = false;
   _last_observed_rtc = 0;
   _buildin_keys_count = 0;
+  memset(_buildin_in_bbox, 0, sizeof(_buildin_in_bbox));
+  memset(_extras_in_bbox,  0, sizeof(_extras_in_bbox));
   _last_millis_seen = 0;
   _millis_wraps = 0;
 #if DL9SAU_REGIONS_AVAILABLE
@@ -1389,104 +1391,11 @@ void MyMesh::begin(bool has_display) {
   }
 
   // ----- Scope-Architektur-Pivot Migration (Wunschliste 11, Schritt 3) -----
-  // Kopiert alte scope_registry-Eintraege in die neuen Storages:
-  //   - Name in Build-in-Tabelle gefunden -> Status-Byte in
-  //     scope_buildin_status[idx] berechnet (Flag-Mapping unten).
-  //   - Name nicht in Build-in -> als User-Extra eingefuegt (max 16 Slots).
-  //
-  // WICHTIG: bis die Consumer (scopeAllowedForRepeat, evaluateGeoManagedEntries,
-  // CLI) auf die neue Storage umgestellt sind, BLEIBT die alte scope_registry
-  // erhalten und ist Quelle der Wahrheit fuer User-Edits. Die neue Storage
-  // wird nur durch diese Migration befuellt — Migration laeuft idempotent
-  // bei jedem Boot. Schritt 7 schaltet die CLI-Writes um, dann wird das
-  // anders.
-  //
-  // Flag-Mapping alt -> neu:
-  //   IN_REPEAT_LIST + GEO_MANAGED -> repeat_mode = AUTO
-  //   IN_REPEAT_LIST + !GEO_MANAGED -> repeat_mode = ON (manual pin)
-  //   !IN_REPEAT_LIST + GEO_MANAGED -> repeat_mode = AUTO (Auto-Tick
-  //                                     entscheidet ueber Bbox-Match)
-  //   !IN_REPEAT_LIST + !GEO_MANAGED -> repeat_mode = OFF
-  //   DISABLED -> status DISABLED gesetzt (zusaetzlich)
-  {
-    // Snapshot der neuen Storage vor Migration — damit wir nur savePrefs
-    // schreiben wenn sich tatsaechlich etwas geaendert hat.
-    uint8_t old_status_count = _prefs.scope_buildin_status_count;
-    BuildinStatusEntry old_status_snap[SCOPE_BUILDIN_STATUS_MAX];
-    memcpy(old_status_snap, _prefs.scope_buildin_status, sizeof(old_status_snap));
-    uint8_t old_extras_count = _prefs.scope_extras_count;
-    ScopeRegEntry old_extras_snap[SCOPE_EXTRAS_SLOTS];
-    memcpy(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap));
-
-    // Reset target (wir uebernehmen aus alter Registry, nicht aufaddieren)
-    _prefs.scope_buildin_status_count = 0;
-    memset(_prefs.scope_buildin_status, 0, sizeof(_prefs.scope_buildin_status));
-    _prefs.scope_extras_count = 0;
-    memset(_prefs.scope_extras, 0, sizeof(_prefs.scope_extras));
-
-    int migrated_to_status = 0;
-    int migrated_to_extras = 0;
-    int dropped_full = 0;
-
-    for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
-      const ScopeRegEntry& src = _prefs.scope_registry[i];
-      if (src.name[0] == 0) continue;
-
-      uint8_t status = 0;
-      bool old_in_list   = (src.flags & SCOPE_FLAG_IN_REPEAT_LIST) != 0;
-      bool old_geo_mgd   = (src.flags & SCOPE_FLAG_GEO_MANAGED)   != 0;
-      bool old_disabled  = (src.flags & SCOPE_FLAG_DISABLED)      != 0;
-
-      if (old_geo_mgd) {
-        status |= SCOPE_STATUS_REPEAT_AUTO;   // = 0, no-op
-      } else if (old_in_list) {
-        status |= SCOPE_STATUS_REPEAT_ON;
-      } else {
-        status |= SCOPE_STATUS_REPEAT_OFF;
-      }
-      if (old_disabled) status |= SCOPE_STATUS_DISABLED;
-
-      bool is_buildin = (dl9sau_find_region_index(src.name) >= 0);
-      if (is_buildin) {
-        // Build-in-Eintrag: nur speichern wenn non-default Status.
-        // Sparse-Storage: jedes Slot kostet 8 Byte, wir speichern nur
-        // was abweicht.
-        if (status != 0
-            && _prefs.scope_buildin_status_count < SCOPE_BUILDIN_STATUS_MAX) {
-          BuildinStatusEntry& e =
-              _prefs.scope_buildin_status[_prefs.scope_buildin_status_count];
-          dl9sau_compute_name_hash(src.name, e.name_hash);
-          e.status = status;
-          memset(e._reserved, 0, sizeof(e._reserved));
-          _prefs.scope_buildin_status_count++;
-          migrated_to_status++;
-        }
-        // status==0 = Default; kein Slot noetig.
-      } else {
-        // User-Extra: vollstaendigen Eintrag kopieren. Flags bleiben
-        // alte Bitmuster — Konsumenten muessen sie weiter lesen koennen.
-        if (_prefs.scope_extras_count < SCOPE_EXTRAS_SLOTS) {
-          _prefs.scope_extras[_prefs.scope_extras_count] = src;
-          _prefs.scope_extras_count++;
-          migrated_to_extras++;
-        } else {
-          dropped_full++;
-        }
-      }
-    }
-
-    // savePrefs nur wenn sich etwas geaendert hat (Flash-Wear-Schutz).
-    bool changed =
-        (old_status_count != _prefs.scope_buildin_status_count)
-     || (memcmp(old_status_snap, _prefs.scope_buildin_status, sizeof(old_status_snap)) != 0)
-     || (old_extras_count != _prefs.scope_extras_count)
-     || (memcmp(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap)) != 0);
-
-    if (changed) {
-      _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
-      pushDebugLog("[scope-pivot] migrated %d to status, %d to extras, %d dropped\n",
-                   migrated_to_status, migrated_to_extras, dropped_full);
-    }
+  // Kopiert alte scope_registry in die neuen Storages. Wird in den Helper
+  // syncScopePivotFromLegacy() ausgelagert damit die Migration auch nach
+  // CLI-Aenderungen an scope_registry (alte Pfade) erneut laufen kann.
+  if (syncScopePivotFromLegacy()) {
+    _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
 
   // ----- Key-Cache fuer Build-in-Region-Eintraege (Wunschliste 11, Schritt 4)
@@ -3279,6 +3188,116 @@ void MyMesh::evaluateGeoManagedEntries(double lat, double lon) {
   if (dirty) savePrefs();
 }
 
+// ----- Scope-Pivot Migration Helper (Wunschliste 11 Schritt 5) -------------
+//
+// Idempotente Migration: kopiert alte scope_registry in
+// scope_buildin_status[] + scope_extras[]. Wird beim Boot UND nach
+// CLI-Aenderungen an der alten Storage aufgerufen, damit die neuen
+// Konsumenten stets aktuelle Daten sehen.
+//
+// Flag-Mapping alt -> neu:
+//   IN_REPEAT_LIST + GEO_MANAGED -> repeat_mode = AUTO
+//   IN_REPEAT_LIST + !GEO_MANAGED -> repeat_mode = ON (manual pin)
+//   !IN_REPEAT_LIST + GEO_MANAGED -> repeat_mode = AUTO
+//   !IN_REPEAT_LIST + !GEO_MANAGED -> repeat_mode = OFF
+//   DISABLED -> SCOPE_STATUS_DISABLED zusaetzlich
+//
+// Returns true wenn sich gegenueber dem vorherigen Sync etwas geaendert
+// hat und savePrefs aufgerufen wurde.
+bool MyMesh::syncScopePivotFromLegacy() {
+  // Snapshot — damit wir nur savePrefs schreiben wenn sich tatsaechlich
+  // etwas geaendert hat (Flash-Wear-Schutz).
+  uint8_t old_status_count = _prefs.scope_buildin_status_count;
+  BuildinStatusEntry old_status_snap[SCOPE_BUILDIN_STATUS_MAX];
+  memcpy(old_status_snap, _prefs.scope_buildin_status, sizeof(old_status_snap));
+  uint8_t old_extras_count = _prefs.scope_extras_count;
+  ScopeRegEntry old_extras_snap[SCOPE_EXTRAS_SLOTS];
+  memcpy(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap));
+
+  // Reset target (wir uebernehmen aus alter Registry, nicht aufaddieren).
+  _prefs.scope_buildin_status_count = 0;
+  memset(_prefs.scope_buildin_status, 0, sizeof(_prefs.scope_buildin_status));
+  _prefs.scope_extras_count = 0;
+  memset(_prefs.scope_extras, 0, sizeof(_prefs.scope_extras));
+
+  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
+    const ScopeRegEntry& src = _prefs.scope_registry[i];
+    if (src.name[0] == 0) continue;
+
+    uint8_t status = 0;
+    bool old_in_list   = (src.flags & SCOPE_FLAG_IN_REPEAT_LIST) != 0;
+    bool old_geo_mgd   = (src.flags & SCOPE_FLAG_GEO_MANAGED)   != 0;
+    bool old_disabled  = (src.flags & SCOPE_FLAG_DISABLED)      != 0;
+
+    if (old_geo_mgd) {
+      status |= SCOPE_STATUS_REPEAT_AUTO;   // = 0, no-op
+    } else if (old_in_list) {
+      status |= SCOPE_STATUS_REPEAT_ON;
+    } else {
+      status |= SCOPE_STATUS_REPEAT_OFF;
+    }
+    if (old_disabled) status |= SCOPE_STATUS_DISABLED;
+
+    bool is_buildin = (dl9sau_find_region_index(src.name) >= 0);
+    if (is_buildin) {
+      if (status != 0
+          && _prefs.scope_buildin_status_count < SCOPE_BUILDIN_STATUS_MAX) {
+        BuildinStatusEntry& e =
+            _prefs.scope_buildin_status[_prefs.scope_buildin_status_count];
+        dl9sau_compute_name_hash(src.name, e.name_hash);
+        e.status = status;
+        memset(e._reserved, 0, sizeof(e._reserved));
+        _prefs.scope_buildin_status_count++;
+      }
+    } else {
+      if (_prefs.scope_extras_count < SCOPE_EXTRAS_SLOTS) {
+        _prefs.scope_extras[_prefs.scope_extras_count] = src;
+        _prefs.scope_extras_count++;
+      }
+    }
+  }
+
+  bool changed =
+      (old_status_count != _prefs.scope_buildin_status_count)
+   || (memcmp(old_status_snap, _prefs.scope_buildin_status, sizeof(old_status_snap)) != 0)
+   || (old_extras_count != _prefs.scope_extras_count)
+   || (memcmp(old_extras_snap, _prefs.scope_extras, sizeof(old_extras_snap)) != 0);
+
+  // Hinweis: kein internes _store->savePrefs() — der Aufrufer entscheidet
+  // ob/wann gespeichert wird (vermeidet Doppel-Saves wenn aus savePrefs()
+  // selbst heraus aufgerufen).
+  return changed;
+}
+
+// ----- Bbox-Membership-Update fuer neue Storage (Wunschliste 11 Schritt 5) -
+//
+// Iteriert beide Storages, prueft fuer jeden Eintrag mit Bbox ob die
+// aktuelle Position drin liegt, schreibt das Ergebnis in
+// _buildin_in_bbox[] / _extras_in_bbox[]. Komplement zu
+// evaluateGeoManagedEntries() (welche das alte IN_REPEAT_LIST-Flag
+// pflegt) — beide laufen parallel waehrend der dual-storage-Phase.
+void MyMesh::evaluateScopeBboxes(double lat, double lon) {
+  // Build-in
+  for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
+    double lat1, lat2, lon1, lon2;
+    if (!dl9sau_get_region((size_t)i, NULL, &lat1, &lat2, &lon1, &lon2)) {
+      _buildin_in_bbox[i] = false;
+      continue;
+    }
+    _buildin_in_bbox[i] = (lat >= lat1 && lat <= lat2 && lon >= lon1 && lon <= lon2);
+  }
+  // Extras
+  for (int i = 0; i < _prefs.scope_extras_count && i < SCOPE_EXTRAS_SLOTS; i++) {
+    const ScopeRegEntry& e = _prefs.scope_extras[i];
+    if (!(e.flags & SCOPE_FLAG_HAS_GEO_BOX)) {
+      _extras_in_bbox[i] = false;
+      continue;
+    }
+    _extras_in_bbox[i] = ((double)e.bbox_lat_min <= lat && lat <= (double)e.bbox_lat_max
+                       && (double)e.bbox_lon_min <= lon && lon <= (double)e.bbox_lon_max);
+  }
+}
+
 // ----- Cross-Storage Helpers (Wunschliste 11 Schritt 4) -------------------
 
 MyMesh::ScopeRef MyMesh::findScopeByName(const char* name) const {
@@ -3422,16 +3441,46 @@ bool MyMesh::getScopeBbox(const ScopeRef& ref,
   return false;
 }
 
+// Pruefe ob ein einzelnes Status-Byte einen Repeat erlaubt, gegeben
+// der "in_bbox"-Hint (Position liegt in der Bbox des Eintrags).
+//   - DISABLED oder USER_DELETED -> nie
+//   - repeat_mode = OFF           -> nie
+//   - repeat_mode = ON  (pin)     -> immer
+//   - repeat_mode = AUTO          -> nur wenn in_bbox
+static inline bool scopeStatusAllowsRepeat(uint8_t status, bool in_bbox) {
+  if (status & (SCOPE_STATUS_DISABLED | SCOPE_STATUS_USER_DELETED)) return false;
+  uint8_t mode = status & SCOPE_STATUS_REPEAT_MASK;
+  if (mode == SCOPE_STATUS_REPEAT_OFF) return false;
+  if (mode == SCOPE_STATUS_REPEAT_ON)  return true;
+  return in_bbox;  // AUTO
+}
+
+// Wunschliste 11 Schritt 5: liest aus der neuen Storage
+// (scope_buildin_status sparse + scope_extras) statt der alten
+// scope_registry. Verwendet _buildin_in_bbox / _extras_in_bbox die
+// von evaluateScopeBboxes() in updateMotionTracking() aktualisiert
+// werden.
 bool MyMesh::scopeAllowedForRepeat(const mesh::Packet* packet) const {
   if (_prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL) return true;
   if (!packet || !packet->hasTransportCodes()) return false;
   uint16_t target = packet->transport_codes[0];
-  for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
-    const ScopeRegEntry& e = _prefs.scope_registry[i];
-    if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) continue;
-    if (e.flags & SCOPE_FLAG_DISABLED) continue;   // configured but inactive
+
+  // Build-in: iteriere alle bekannten Regionen.
+  for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
+    uint8_t status = getBuildinStatus(i);
+    if (!scopeStatusAllowsRepeat(status, _buildin_in_bbox[i])) continue;
+    // calcTransportCode ist eine member-Methode auf TransportKey.
+    // _buildin_keys[] ist als TransportKey-Array deklariert, also
+    // direkt aufrufbar.
+    if (_buildin_keys[i].calcTransportCode(packet) == target) return true;
+  }
+  // Extras: iteriere User-erfundene Eintraege.
+  for (int i = 0; i < _prefs.scope_extras_count && i < SCOPE_EXTRAS_SLOTS; i++) {
+    ScopeRef ref = { SCOPE_EXTRAS, i };
+    uint8_t status = getScopeStatus(ref);
+    if (!scopeStatusAllowsRepeat(status, _extras_in_bbox[i])) continue;
     TransportKey k;
-    memcpy(k.key, e.key, sizeof(k.key));
+    memcpy(k.key, _prefs.scope_extras[i].key, sizeof(k.key));
     if (k.calcTransportCode(packet) == target) return true;
   }
   return false;
@@ -3639,6 +3688,7 @@ void MyMesh::updateMotionTracking() {
     // Wir wissen jetzt erstmalig wo wir sind — geo_managed-Eintraege
     // gegen die aktuelle Position evaluieren (Wunschliste 4d Sub-Punkt).
     evaluateGeoManagedEntries(cur_lat, cur_lon);
+    evaluateScopeBboxes(cur_lat, cur_lon);
     return;
   }
 
@@ -3664,6 +3714,7 @@ void MyMesh::updateMotionTracking() {
     // neu bewerten. Das 370m-Anker-Update wirkt als Hysterese; ohne
     // signifikante Distanz wird hier sowieso nicht reingegangen.
     evaluateGeoManagedEntries(cur_lat, cur_lon);
+    evaluateScopeBboxes(cur_lat, cur_lon);
   }
 #else
   _is_moving = false;
@@ -6390,6 +6441,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         double cur_lat, cur_lon;
         if (getEffectiveLatLon(cur_lat, cur_lon)) {
           evaluateGeoManagedEntries(cur_lat, cur_lon);
+    evaluateScopeBboxes(cur_lat, cur_lon);
         }
       }
       char r[160];
@@ -6656,6 +6708,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             in_bbox = (cur_lat >= e.bbox_lat_min && cur_lat <= e.bbox_lat_max
                        && cur_lon >= e.bbox_lon_min && cur_lon <= e.bbox_lon_max);
             evaluateGeoManagedEntries(cur_lat, cur_lon);
+    evaluateScopeBboxes(cur_lat, cur_lon);
           }
         }
         char r[160];

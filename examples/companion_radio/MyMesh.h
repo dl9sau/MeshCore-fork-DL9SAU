@@ -294,7 +294,16 @@ protected:
   }
 
 public:
-  void savePrefs() { _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon); }
+  // Wunschliste 11 Schritt 5: vor jedem flash-Write synchronisiert die
+  // alte scope_registry in die neuen Storages (sparse-status + extras).
+  // Migration ist idempotent + leicht (~2KB memcpy + 16 hash-rechnungen);
+  // kostet ein paar Mikrosekunden pro savePrefs, dafuer sind die neuen
+  // Konsumenten (scopeAllowedForRepeat, chooseGeoFallbackScope etc.) nach
+  // jeder CLI-Aenderung sofort up-to-date — kein reboot noetig.
+  void savePrefs() {
+    syncScopePivotFromLegacy();
+    _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  }
 
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {
@@ -392,6 +401,18 @@ private:
   // einen Eintrag mit IN_REPEAT_LIST-Flag). Aufrufer hat bereits
   // hasTransportCodes()-Check gemacht.
   bool scopeAllowedForRepeat(const mesh::Packet* packet) const;
+
+  // Wunschliste 11 Schritt 5: synchronisiert die alte scope_registry-
+  // Storage in die neuen Storages (scope_buildin_status + scope_extras).
+  // Idempotent. Wird beim Boot (in begin) UND nach jeder CLI-Modifikation
+  // der alten Storage aufgerufen, damit Reads aus der neuen Storage
+  // stets aktuell sind. Returns true wenn etwas geaendert + persistiert.
+  bool syncScopePivotFromLegacy();
+
+  // Updated _buildin_in_bbox[] und _extras_in_bbox[] basierend auf der
+  // angegebenen Position. Komplement zu evaluateGeoManagedEntries
+  // (welche das alte IN_REPEAT_LIST-Flag setzt). Aufruf-Sites parallel.
+  void evaluateScopeBboxes(double lat, double lon);
 
   // ----- Scope-Architektur-Pivot Helpers (Wunschliste 11 Schritt 4) -----
   // Cross-Storage Lookup-Identifier. SCOPE_BUILDIN: idx ist Position in
@@ -597,6 +618,13 @@ private:
   static constexpr int SCOPE_BUILDIN_KEY_CACHE_MAX = 64;
   TransportKey  _buildin_keys[SCOPE_BUILDIN_KEY_CACHE_MAX];
   int           _buildin_keys_count;          // tatsaechliche Anzahl belegter Slots
+
+  // Bbox-Tracking RAM-Arrays (Wunschliste 11 Schritt 5). Pro Eintrag:
+  // ist die aktuelle Position innerhalb der Bbox? Wird von
+  // evaluateScopeBboxes() gesetzt; von scopeAllowedForRepeat() gelesen
+  // wenn repeat_mode == AUTO. Default false (out-of-bbox / no-bbox).
+  bool          _buildin_in_bbox[SCOPE_BUILDIN_KEY_CACHE_MAX];
+  bool          _extras_in_bbox[SCOPE_EXTRAS_SLOTS];
 
 public:
   uint32_t getTxAdvertCount()  const { return _tx_advert_count; }
