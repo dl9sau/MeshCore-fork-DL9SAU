@@ -4037,8 +4037,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "scope repeater remove <name>\n"
           "  aus Repeat-Liste (kein Prefix-Match — Tippschutz)");
         pushCompanionMessage(
-          "scope repeater enable <name>   Aktiv setzen (Default)\n"
-          "scope repeater disable <name>  Inaktiv setzen, bleibt in Liste");
+          "scope repeater enable <name>\n"
+          "  Aktiv setzen (Default)");
+        pushCompanionMessage(
+          "scope repeater disable <name>\n"
+          "  Inaktiv setzen, bleibt in Liste");
         pushCompanionMessage(
           "scope repeater geo <name> on|off\n"
           "  geo_managed-Flag. Wenn on, wird der Repeat-Listen-Status\n"
@@ -4056,35 +4059,45 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Send-Hierarchie (nightly bake / 'advert flood'):\n"
           "override > bake > default > geo-fallback");
         pushCompanionMessage(
-          "scope            ohne Argument: Status der drei Send-Quellen\n"
-          "                 + Registry-Count");
+          "scope\n"
+          "  ohne Argument: Status der drei Send-Quellen + Registry-Count");
         pushCompanionMessage(
           "scope default <name>\n"
           "  persistent. Wirkt auch fuer regulaere Sends (App-Default).");
         pushCompanionMessage(
-          "scope default clear   loescht den default");
+          "scope default clear\n"
+          "  loescht den default");
         pushCompanionMessage(
           "scope bake <name>\n"
           "  persistent, NUR fuer nightly. Darf weiter sein als default\n"
           "  (z.B. default=#de-be, bake=#de-bebb).");
         pushCompanionMessage(
-          "scope bake clear      loescht bake");
+          "scope bake clear\n"
+          "  loescht bake");
         pushCompanionMessage(
           "scope override <name> [12h|3d]\n"
           "  persistent ueber Reboots, hoechste Prio.\n"
           "  Default-TTL 12h, max 30d, Suffix h oder d.");
         pushCompanionMessage(
-          "scope override clear  loescht override");
+          "scope override clear\n"
+          "  loescht override");
         pushCompanionMessage(
-          "Registry (Liste A — bekannte Scopes):");
+          "Registry (Liste A - bekannte Scopes):");
         pushCompanionMessage(
-          "scope list                       alle Eintraege + Flags\n"
-          "scope add <name> [geo <bbox>]    Eintrag anlegen");
+          "scope list\n"
+          "  alle Eintraege + Flags");
         pushCompanionMessage(
-          "scope remove <name>              loeschen (kein Prefix-Match)\n"
-          "scope info <name>                Details (auch ob Bbox da)");
+          "scope add <name> [geo <bbox>]\n"
+          "  Eintrag anlegen");
         pushCompanionMessage(
-          "scope regions                    Build-in Geo-Tabelle (RO)");
+          "scope remove <name>\n"
+          "  loeschen (kein Prefix-Match)");
+        pushCompanionMessage(
+          "scope info <name>\n"
+          "  Details (auch ob Bbox da)");
+        pushCompanionMessage(
+          "scope regions\n"
+          "  Build-in Geo-Tabelle (RO)");
         return;
       }
       if (topic_prefix_match(topic, "neighbors")) {
@@ -4109,10 +4122,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "get")) {
         pushCompanionMessage(
-          "get          -> nur veraenderte App-Settings (analog 'prefs').\n"
-          "get all      -> alle Settings mit [default] / (default: X) Markierung.\n"
-          "get <key>    -> einzelner Wert."
-        );
+          "get\n  nur veraenderte App-Settings (analog 'prefs')");
+        pushCompanionMessage(
+          "get all\n  alle Settings mit [default] / (default: X) Markierung");
+        pushCompanionMessage(
+          "get <key>\n  einzelner Wert");
         pushCompanionMessage(
           "Keys: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps, "
           "gps_interval, advert_loc_policy, airtime_factor, rx_boosted_gain, "
@@ -4146,10 +4160,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "App-Settings (node_name, freq, ...) sind NICHT betroffen."
         );
         pushCompanionMessage(
-          "prefs        -> nur Non-Default-Werte. "
-          "prefs all    -> alle mit [default]-Markierung. "
-          "prefs reset  -> alle DL9SAU-Vars auf Default."
-        );
+          "prefs\n  nur Non-Default-Werte");
+        pushCompanionMessage(
+          "prefs all\n  alle mit [default]-Markierung");
+        pushCompanionMessage(
+          "prefs reset\n  alle DL9SAU-Vars auf Default");
         return;
       }
       if (topic_prefix_match(topic, "duty")) {
@@ -4202,12 +4217,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "*aktiven* Zustand im RAM (startet bei Boot leer)."
         );
         pushCompanionMessage(
-          "  trace list           Kategorien-Uebersicht\n"
-          "  trace <cat> on|off   Kategorie ein/aus (in Auswahl + aktiv)\n"
-          "  trace on             aktiv = gespeicherte Auswahl (resume)\n"
-          "  trace off            aktiv = leer (pause; Auswahl bleibt)\n"
-          "  trace all on|off     setzt aktiv UND Auswahl auf alle/keine"
-        );
+          "trace list\n  Kategorien-Uebersicht");
+        pushCompanionMessage(
+          "trace <cat> on|off\n  Kategorie ein/aus (in Auswahl + aktiv)");
+        pushCompanionMessage(
+          "trace on\n  aktiv = gespeicherte Auswahl (resume)");
+        pushCompanionMessage(
+          "trace off\n  aktiv = leer (pause; Auswahl bleibt)");
+        pushCompanionMessage(
+          "trace all on|off\n  setzt aktiv UND Auswahl auf alle/keine");
         pushCompanionMessage(
           "Nach Reboot ist aktiv = 0 (keine Logs), bis 'trace on' die "
           "gespeicherte Auswahl wiederherstellt."
@@ -4474,7 +4492,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         const char* num = strchr(sub, ' ');
         if (num) { while (*num == ' ') num++; }
         if (!num || !(num[0] >= '0' && num[0] <= '9')) {
-          pushCompanionMessage("Usage: gps power lead <N>  (1..14 Minuten)");
+          pushCompanionMessage("Usage: gps power lead <N>\nN = 1..14 Minuten");
           return;
         }
         int n = atoi(num);
@@ -4540,7 +4558,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Geo-Recommendation neu auswerten (analog CMD_SET_ADVERT_LATLON)
       maybePushGeoRecommendation(cur_lat, cur_lon);
     } else {
-      pushCompanionMessage("Usage: gps [on | off | sync | setloc | power ...]  (ohne Arg -> Status)");
+      pushCompanionMessage("Usage: gps [on | off | sync | setloc | power ...]\n"
+                           "ohne Arg -> Status");
     }
     return;
   }
@@ -4928,7 +4947,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
     if (!arg || !(arg[0] >= '0' && arg[0] <= '9')) {
-      pushCompanionMessage("Usage: time <unix-epoch-sec>  (post-2017, < 4 Mrd)");
+      pushCompanionMessage("Usage: time <unix-epoch-sec>\npost-2017, < 4 Mrd");
       return;
     }
     uint32_t epoch = (uint32_t)atoll(arg);
@@ -4955,7 +4974,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Hinweis Lat/Lon: South negativ, West negativ. Z.B. 53.5172 oder -10.123.
   if (starts_with_word(cmd, "set")) {
     const char* p = strchr(cmd, ' ');
-    if (!p) { pushCompanionMessage("Usage: set <key> <value>  (help set fuer keys)"); return; }
+    if (!p) { pushCompanionMessage("Usage: set <key> <value>\n'help set' fuer keys"); return; }
     while (*p == ' ') p++;
     if (!*p) { pushCompanionMessage("Usage: set <key> <value>"); return; }
 
@@ -5316,7 +5335,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
     if (!arg || strcmp(arg, "stats") != 0) {
-      pushCompanionMessage("Usage: clear stats   (no_abbrev — 'stats' muss voll ausgeschrieben sein)");
+      pushCompanionMessage("Usage: clear stats\n"
+                           "no_abbrev - 'stats' muss voll ausgeschrieben sein");
       return;
     }
     clearStats();
@@ -5781,13 +5801,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool default_set = is_set(_prefs.default_scope_key, sizeof(_prefs.default_scope_key));
 
       char def_line[80], bake_line[80], ovr_line[120];
-      if (default_set) snprintf(def_line, sizeof(def_line), "default  = #%s",
+      if (default_set) snprintf(def_line, sizeof(def_line), "default = #%s",
                _prefs.default_scope_name[0] ? _prefs.default_scope_name : "?");
-      else snprintf(def_line, sizeof(def_line), "default  = (none)");
+      else snprintf(def_line, sizeof(def_line), "default = (none)");
 
-      if (bake_set) snprintf(bake_line, sizeof(bake_line), "bake     = #%s",
+      if (bake_set) snprintf(bake_line, sizeof(bake_line), "bake = #%s",
                _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
-      else snprintf(bake_line, sizeof(bake_line), "bake     = (none)");
+      else snprintf(bake_line, sizeof(bake_line), "bake = (none)");
 
       if (override_active) {
         uint32_t remaining = _prefs.override_expiry - now;
@@ -6106,9 +6126,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(bbox);
       } else {
         pushCompanionMessage(
-          "  bbox = (keine) — geo_managed nicht moeglich.\n"
-          "  Bbox nachtragen: 'scope remove <name>' + 'scope add <name>\n"
-          "                   geo <lat_min,lon_min,lat_max,lon_max>'.");
+          "  bbox = (keine) - geo_managed nicht moeglich");
+        pushCompanionMessage(
+          "Bbox nachtragen:\n"
+          "  scope remove <name>\n"
+          "  scope add <name> geo <lat_min,lon_min,lat_max,lon_max>");
       }
       return;
     }
@@ -6670,7 +6692,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(reply);
       return;
     }
-    pushCompanionMessage("Usage: chatname [default | N | custom <Name>]  (N = 1..253)");
+    pushCompanionMessage("Usage: chatname [default | N | custom <Name>]\nN = 1..253");
     return;
   }
 
