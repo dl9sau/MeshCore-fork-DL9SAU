@@ -1353,11 +1353,33 @@ void MyMesh::begin(bool has_display) {
         }
       } else if (!(_prefs.scope_registry[idx].flags & SCOPE_FLAG_HAS_GEO_BOX)) {
         ScopeRegEntry& e = _prefs.scope_registry[idx];
-        e.flags         |= SCOPE_FLAG_HAS_GEO_BOX;
+        // Bbox + GEO_MANAGED zusammen setzen (Opt-Out-Modell). User
+        // kann GEO_MANAGED danach explizit per 'scope repeater geo
+        // <name> off' wieder ausschalten.
+        e.flags         |= SCOPE_FLAG_HAS_GEO_BOX | SCOPE_FLAG_GEO_MANAGED;
         e.bbox_lat_min  = p.lat_min;
         e.bbox_lat_max  = p.lat_max;
         e.bbox_lon_min  = p.lon_min;
         e.bbox_lon_max  = p.lon_max;
+        migrated = true;
+      }
+    }
+
+    // Erweiterte Migration: ALLE existierenden Registry-Eintraege ohne
+    // HAS_GEO_BOX gegen die Build-in dl9sau_regions-Tabelle pruefen. Wenn
+    // dort ein Match nach Name -> Bbox + GEO_MANAGED nachtragen. Damit
+    // werden auch User-Eintraege wie 'scope add de-ni' (vor diesem Commit
+    // ohne Bbox angelegt) one-shot upgradet, ohne dass der User remove
+    // und re-add machen muss.
+    for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
+      ScopeRegEntry& e = _prefs.scope_registry[i];
+      if (e.flags & SCOPE_FLAG_HAS_GEO_BOX) continue;
+      double a_lat1, a_lat2, a_lon1, a_lon2;
+      if (dl9sau_lookup_region_bbox(e.name,
+                                    &a_lat1, &a_lat2, &a_lon1, &a_lon2)) {
+        e.flags |= SCOPE_FLAG_HAS_GEO_BOX | SCOPE_FLAG_GEO_MANAGED;
+        e.bbox_lat_min = (float)a_lat1; e.bbox_lat_max = (float)a_lat2;
+        e.bbox_lon_min = (float)a_lon1; e.bbox_lon_max = (float)a_lon2;
         migrated = true;
       }
     }
@@ -6061,33 +6083,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         has_geo = true;
       }
-      // Wenn User keine 'geo'-Option mitgegeben hat aber der Name einer
-      // kanonischen Pre-Population-Region entspricht, uebernehmen wir die
-      // hartcodierte Default-Bbox. 'scope add de-be' soll fuer den User
-      // direkt funktionieren ohne dass er die Koordinaten selbst kennen
-      // muss.
-      //
-      // Hinweis: de-bb (Brandenburg) und de-bebb (Berlin+Brandenburg
-      // Bridge) haben dieselbe Bbox — Berlin liegt geografisch ganz in
-      // Brandenburg, der Unterschied ist rein semantisch (in Brandenburg
-      // funken vs. ueber die Bruecke nach Berlin funken).
+      // Wenn User keine 'geo'-Option mitgegeben hat: in der Build-in-
+      // Region-Tabelle (dl9sau_geo_recommendations.cpp) lookuppen.
+      // Bundeslaender (de-by, de-ni, de-nw, ...), Aggregate (de-nord,
+      // de-west, de-ost, ...), top-level (de, europe) und specials
+      // (de-bebb, de-bb, ostfriesland) sind dort definiert.
+      // 'scope add <name>' soll fuer den User direkt funktionieren ohne
+      // dass er die Koordinaten selbst kennen muss.
       const char* auto_src = NULL;
       if (!has_geo) {
-        if (strcmp(name, "de-bebb") == 0 || strcmp(name, "de-bb") == 0) {
-          lat_min = CR_BBOX_BEBB_LAT_MIN;  lat_max = CR_BBOX_BEBB_LAT_MAX;
-          lon_min = CR_BBOX_BEBB_LON_MIN;  lon_max = CR_BBOX_BEBB_LON_MAX;
+        double a_lat1, a_lat2, a_lon1, a_lon2;
+        if (dl9sau_lookup_region_bbox(name, &a_lat1, &a_lat2, &a_lon1, &a_lon2)) {
+          lat_min = (float)a_lat1; lat_max = (float)a_lat2;
+          lon_min = (float)a_lon1; lon_max = (float)a_lon2;
           has_geo = true;
-          auto_src = (strcmp(name, "de-bebb") == 0)
-                     ? " (Default-Bbox Berlin+Brandenburg)"
-                     : " (Default-Bbox Brandenburg)";
-        } else if (strcmp(name, "de-be") == 0) {
-          lat_min = CR_BBOX_DE_BE_LAT_MIN; lat_max = CR_BBOX_DE_BE_LAT_MAX;
-          lon_min = CR_BBOX_DE_BE_LON_MIN; lon_max = CR_BBOX_DE_BE_LON_MAX;
-          has_geo = true; auto_src = " (Default-Bbox Berlin)";
-        } else if (strcmp(name, "ostfriesland") == 0) {
-          lat_min = CR_BBOX_OSTFR_LAT_MIN; lat_max = CR_BBOX_OSTFR_LAT_MAX;
-          lon_min = CR_BBOX_OSTFR_LON_MIN; lon_max = CR_BBOX_OSTFR_LON_MAX;
-          has_geo = true; auto_src = " (Default-Bbox Ostfriesland)";
+          auto_src = " (Default-Bbox aus Build-in-Tabelle)";
         }
       }
 
@@ -6100,16 +6110,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memcpy(e.key, k.key, sizeof(e.key));
       e.flags = 0;
       if (has_geo) {
-        e.flags |= SCOPE_FLAG_HAS_GEO_BOX;
+        // Bbox + GEO_MANAGED gleichzeitig setzen (Opt-Out-Modell):
+        // Sobald ein Eintrag eine Bbox hat, ist er per Default auto-
+        // managed. User kann via 'scope repeater geo <name> off' das
+        // Auto-Add unterdruecken (z.B. Traffic-Kontrolle).
+        e.flags |= SCOPE_FLAG_HAS_GEO_BOX | SCOPE_FLAG_GEO_MANAGED;
         e.bbox_lat_min = lat_min; e.bbox_lat_max = lat_max;
         e.bbox_lon_min = lon_min; e.bbox_lon_max = lon_max;
       }
       _prefs.scope_registry_count++;
       savePrefs();
-      char r[140];
-      snprintf(r, sizeof(r), "OK - #%s in Registry (Slot %d%s%s).",
+      // Sofort gegen aktuelle Position evaluieren — analog zur Logik
+      // in 'scope repeater geo <name> on'. Bei Treffer landet der Eintrag
+      // direkt in der Repeat-Liste.
+      if (has_geo) {
+        double cur_lat, cur_lon;
+        if (getEffectiveLatLon(cur_lat, cur_lon)) {
+          evaluateGeoManagedEntries(cur_lat, cur_lon);
+        }
+      }
+      char r[160];
+      snprintf(r, sizeof(r), "OK - #%s in Registry (Slot %d%s%s%s).",
                e.name, slot,
                has_geo ? ", mit Bbox" : "",
+               has_geo ? ", auto-managed" : "",
                auto_src ? auto_src : "");
       pushCompanionMessage(r);
       return;
@@ -6357,18 +6381,36 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (gm == 1) _prefs.scope_registry[idx].flags |= SCOPE_FLAG_GEO_MANAGED;
         else         _prefs.scope_registry[idx].flags &= ~SCOPE_FLAG_GEO_MANAGED;
         savePrefs();
-        // Beim Einschalten sofort gegen aktuelle Position evaluieren —
-        // damit der User nicht erst auf den naechsten Motion-Tick warten
-        // muss. Falls keine Position bekannt: bleibt der Eintrag im
-        // bisherigen IN_REPEAT_LIST-Zustand, bis updateMotionTracking()
-        // beim ersten GPS-Fix evaluiert.
+        // Sofortige Position-Evaluation (analog zu scope add) — damit
+        // der User nicht auf den naechsten Motion-Tick warten muss.
+        bool pos_known = false;
+        bool in_bbox = false;
         if (gm == 1) {
           double cur_lat, cur_lon;
           if (getEffectiveLatLon(cur_lat, cur_lon)) {
+            pos_known = true;
+            const ScopeRegEntry& e = _prefs.scope_registry[idx];
+            in_bbox = (cur_lat >= e.bbox_lat_min && cur_lat <= e.bbox_lat_max
+                       && cur_lon >= e.bbox_lon_min && cur_lon <= e.bbox_lon_max);
             evaluateGeoManagedEntries(cur_lat, cur_lon);
           }
         }
-        char r[80]; snprintf(r, sizeof(r), "OK - #%s geo_managed = %s", name, gm == 1 ? "on" : "off");
+        char r[160];
+        if (gm == 1) {
+          if (!pos_known) {
+            snprintf(r, sizeof(r), "OK - #%s geo_managed=on\n"
+                     "  keine Position bekannt - Auto-Add beim naechsten GPS-Fix", name);
+          } else if (in_bbox) {
+            snprintf(r, sizeof(r), "OK - #%s geo_managed=on\n"
+                     "  in Bbox -> jetzt in repeat-list", name);
+          } else {
+            snprintf(r, sizeof(r), "OK - #%s geo_managed=on\n"
+                     "  ausserhalb Bbox -> nicht in repeat-list (Auto-Add bei Eintritt)", name);
+          }
+        } else {
+          snprintf(r, sizeof(r), "OK - #%s geo_managed=off\n"
+                   "  Auto-Add deaktiviert; repeat-list-Zustand unveraendert", name);
+        }
         pushCompanionMessage(r);
         return;
       }

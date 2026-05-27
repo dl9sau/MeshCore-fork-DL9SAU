@@ -26,3 +26,12 @@ bool   dl9sau_get_region(size_t idx,
                          const char** name_out,
                          double* lat_min, double* lat_max,
                          double* lon_min, double* lon_max);
+
+// Lookup-Helper: schreibt Bbox-Koordinaten in die out-Parameter wenn
+// 'name' (case-sensitive, ohne '#') in der Region-Tabelle gefunden wird.
+// Returns true bei Treffer, false sonst. Erlaubt 'scope add <name>'
+// (ohne explizites geo-Argument) automatisch die Default-Bbox aus der
+// Build-in-Tabelle zu uebernehmen.
+bool dl9sau_lookup_region_bbox(const char* name,
+                               double* lat_min, double* lat_max,
+                               double* lon_min, double* lon_max);

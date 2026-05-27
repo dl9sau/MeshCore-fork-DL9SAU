@@ -136,3 +136,19 @@ bool dl9sau_get_region(size_t idx,
   if (lon_max)  *lon_max  = regions[idx].lon_max;
   return true;
 }
+
+bool dl9sau_lookup_region_bbox(const char* name,
+                               double* lat_min, double* lat_max,
+                               double* lon_min, double* lon_max) {
+  if (!name || !*name) return false;
+  for (size_t i = 0; i < REGION_COUNT; i++) {
+    if (strcmp(regions[i].name, name) == 0) {
+      if (lat_min) *lat_min = regions[i].lat_min;
+      if (lat_max) *lat_max = regions[i].lat_max;
+      if (lon_min) *lon_min = regions[i].lon_min;
+      if (lon_max) *lon_max = regions[i].lon_max;
+      return true;
+    }
+  }
+  return false;
+}
