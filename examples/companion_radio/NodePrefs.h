@@ -24,6 +24,12 @@
                                             //   IN_REPEAT_LIST automatisch
                                             //   setzen/loeschen
 #define SCOPE_FLAG_IN_REPEAT_LIST    0x04   // Liste B (Repeat-Policy)
+#define SCOPE_FLAG_DISABLED          0x08   // in repeat-list konfiguriert,
+                                            //   aber inaktiv (nicht repeated).
+                                            //   Damit kann der User einzelne
+                                            //   Eintraege voruebergehend
+                                            //   stilllegen ohne sie zu
+                                            //   verlieren.
 
 #define REPEAT_SCOPE_MODE_ALL        0      // heute: jeden scoped repeaten
 #define REPEAT_SCOPE_MODE_ALLOWLIST  1      // nur Eintraege mit IN_REPEAT_LIST

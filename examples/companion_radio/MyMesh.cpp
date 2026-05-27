@@ -3119,6 +3119,7 @@ bool MyMesh::scopeAllowedForRepeat(const mesh::Packet* packet) const {
   for (int i = 0; i < _prefs.scope_registry_count && i < SCOPE_REG_SLOTS; i++) {
     const ScopeRegEntry& e = _prefs.scope_registry[i];
     if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) continue;
+    if (e.flags & SCOPE_FLAG_DISABLED) continue;   // configured but inactive
     TransportKey k;
     memcpy(k.key, e.key, sizeof(k.key));
     if (k.calcTransportCode(packet) == target) return true;
@@ -4006,6 +4007,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "scope repeater remove <name>\n"
           "  aus Repeat-Liste (kein Prefix-Match — Tippschutz)");
         pushCompanionMessage(
+          "scope repeater enable <name>   Aktiv setzen (Default)\n"
+          "scope repeater disable <name>  Inaktiv setzen, bleibt in Liste");
+        pushCompanionMessage(
           "scope repeater geo <name> on|off\n"
           "  geo_managed-Flag. Wenn on, wird der Repeat-Listen-Status\n"
           "  automatisch bei Eintritt/Austritt der Bbox getoggelt.");
@@ -4662,7 +4666,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
       for (int i = 0; i < _prefs.scope_registry_count; i++) {
         _prefs.scope_registry[i].flags &= ~(SCOPE_FLAG_IN_REPEAT_LIST
-                                             | SCOPE_FLAG_GEO_MANAGED);
+                                             | SCOPE_FLAG_GEO_MANAGED
+                                             | SCOPE_FLAG_DISABLED);
       }
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
@@ -4814,8 +4819,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       for (int i = 0; i < _prefs.scope_registry_count; i++) {
         const ScopeRegEntry& e = _prefs.scope_registry[i];
         uint8_t marks = e.flags & (SCOPE_FLAG_IN_REPEAT_LIST | SCOPE_FLAG_GEO_MANAGED);
-        char flagstr[10] = "";
+        char flagstr[12] = "";
         if (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) strcat(flagstr, "R");
+        if (e.flags & SCOPE_FLAG_DISABLED)      strcat(flagstr, "D");
         if (e.flags & SCOPE_FLAG_GEO_MANAGED)   strcat(flagstr, "G");
         if (e.flags & SCOPE_FLAG_HAS_GEO_BOX)   strcat(flagstr, "b");
         snprintf(tmp, sizeof(tmp), "    #%s  [%s]", e.name, flagstr[0] ? flagstr : "-");
@@ -5889,8 +5895,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       gline(head);
       for (int i = 0; i < _prefs.scope_registry_count; i++) {
         const ScopeRegEntry& e = _prefs.scope_registry[i];
-        char flagstr[20] = "";
+        char flagstr[24] = "";
         if (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) strcat(flagstr, " R");
+        if (e.flags & SCOPE_FLAG_DISABLED)      strcat(flagstr, " D");
         if (e.flags & SCOPE_FLAG_GEO_MANAGED)   strcat(flagstr, " G");
         if (e.flags & SCOPE_FLAG_HAS_GEO_BOX)   strcat(flagstr, " b");
         char tmp[80];
@@ -5898,7 +5905,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         gline(tmp);
       }
       if (_prefs.scope_registry_count == 0) gline("  (leer)");
-      gline("Flags: R=in repeat-list, G=geo_managed, b=has bbox");
+      gline("Flags: R=in repeat-list, D=disabled, G=geo_managed, b=has bbox");
       gflush();
       return;
     }
@@ -6006,6 +6013,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r); return;
       }
       const ScopeRegEntry& e = _prefs.scope_registry[idx];
+      const char* rl_str;
+      if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) rl_str = "no";
+      else if (e.flags & SCOPE_FLAG_DISABLED)     rl_str = "yes (disabled)";
+      else                                         rl_str = "yes (active)";
       char block[160];
       snprintf(block, sizeof(block),
                "#%s (slot %d):\n"
@@ -6014,7 +6025,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                "  geo_managed = %s",
                e.name, idx,
                e.key[0], e.key[1], e.key[2], e.key[3],
-               (e.flags & SCOPE_FLAG_IN_REPEAT_LIST) ? "yes" : "no",
+               rl_str,
                (e.flags & SCOPE_FLAG_GEO_MANAGED)    ? "yes" : "no");
       pushCompanionMessage(block);
       // Bbox-Status als separate Message (sonst Wire-Limit knapp).
@@ -6039,38 +6050,58 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) {
-        // Status
-        int n_in_list = 0;
+        // Status — Header + Liste als getrennte Messages damit wire-Limit
+        // bei vielen Eintraegen nicht reisst.
+        int n_in_list = 0, n_disabled = 0;
         for (int i = 0; i < _prefs.scope_registry_count; i++) {
-          if (_prefs.scope_registry[i].flags & SCOPE_FLAG_IN_REPEAT_LIST) n_in_list++;
-        }
-        char block[280]; size_t bo = 0;
-        bo += snprintf(block + bo, sizeof(block) - bo,
-                       "scope repeater:\n  mode = %s\n  count = %d",
-                       _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL ? "all" : "allowlist",
-                       n_in_list);
-        if (n_in_list > 0 && bo + 4 < sizeof(block)) {
-          bo += snprintf(block + bo, sizeof(block) - bo, "\n  list:");
-          for (int i = 0; i < _prefs.scope_registry_count && bo + 12 < sizeof(block); i++) {
-            const ScopeRegEntry& e = _prefs.scope_registry[i];
-            if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) continue;
-            bo += snprintf(block + bo, sizeof(block) - bo,
-                           " #%s%s", e.name,
-                           (e.flags & SCOPE_FLAG_GEO_MANAGED) ? "(G)" : "");
+          uint8_t f = _prefs.scope_registry[i].flags;
+          if (f & SCOPE_FLAG_IN_REPEAT_LIST) {
+            n_in_list++;
+            if (f & SCOPE_FLAG_DISABLED) n_disabled++;
           }
         }
-        pushCompanionMessage(block);
+        char head[140];
+        snprintf(head, sizeof(head),
+                 "scope repeater:\n  mode = %s\n  count = %d (aktiv: %d)",
+                 _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL ? "all" : "allowlist",
+                 n_in_list, n_in_list - n_disabled);
+        pushCompanionMessage(head);
+        if (n_in_list > 0) {
+          char gb[140]; size_t gu = 0;
+          auto gflush = [&]() {
+            if (gu == 0) return;
+            gb[gu] = 0; pushCompanionMessage(gb); gu = 0;
+          };
+          auto gappend = [&](const char* s) {
+            size_t len = strlen(s);
+            if (gu + len > 130) gflush();
+            for (size_t i = 0; i < len && gu < sizeof(gb) - 1; i++) gb[gu++] = s[i];
+          };
+          gappend("  list:");
+          for (int i = 0; i < _prefs.scope_registry_count; i++) {
+            const ScopeRegEntry& e = _prefs.scope_registry[i];
+            if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) continue;
+            char tag[40];
+            const char* state = (e.flags & SCOPE_FLAG_DISABLED) ? "(D)"
+                              : (e.flags & SCOPE_FLAG_GEO_MANAGED) ? "(G)" : "";
+            snprintf(tag, sizeof(tag), " #%s%s", e.name, state);
+            gappend(tag);
+          }
+          gflush();
+        }
         return;
       }
 
       static const CompanionChoice rep_subs[] = {
-        { "mode",   false },  // 0
-        { "add",    false },  // 1
-        { "remove", true  },  // 2 no_abbrev
-        { "geo",    false },  // 3
+        { "mode",    false },  // 0
+        { "add",     false },  // 1
+        { "remove",  true  },  // 2 no_abbrev
+        { "geo",     false },  // 3
+        { "enable",  false },  // 4
+        { "disable", false },  // 5 (Tippfehler kostet hier nichts — nur Flag-Toggle)
       };
       char rep_ambig[60];
-      int rs = match_choice(sub, rep_subs, 4, rep_ambig, sizeof(rep_ambig));
+      int rs = match_choice(sub, rep_subs, 6, rep_ambig, sizeof(rep_ambig));
       if (rs == -1) {
         char r[100]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rep_ambig);
         pushCompanionMessage(r); return;
@@ -6122,6 +6153,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           pushCompanionMessage(r); return;
         }
         _prefs.scope_registry[idx].flags |= SCOPE_FLAG_IN_REPEAT_LIST;
+        // Beim (Re-)Add aktiv setzen — Disabled wuerde sonst silent uebernommen.
+        _prefs.scope_registry[idx].flags &= ~SCOPE_FLAG_DISABLED;
         savePrefs();
         char r[80]; snprintf(r, sizeof(r), "OK - #%s in repeat-list aufgenommen.", name);
         pushCompanionMessage(r);
@@ -6189,6 +6222,40 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           }
         }
         char r[80]; snprintf(r, sizeof(r), "OK - #%s geo_managed = %s", name, gm == 1 ? "on" : "off");
+        pushCompanionMessage(r);
+        return;
+      }
+
+      // -- repeater enable/disable <name> (Flag SCOPE_FLAG_DISABLED togglen) --
+      if (rs == 4 || rs == 5) {
+        const char* nv = strchr(sub, ' ');
+        if (nv) { while (*nv == ' ') nv++; }
+        if (!nv || *nv == 0) {
+          pushCompanionMessage(rs == 4 ? "Usage: scope repeater enable <name>"
+                                       : "Usage: scope repeater disable <name>");
+          return;
+        }
+        char name[16];
+        if (!normalizeScopeName(nv, name, sizeof(name))) {
+          pushCompanionMessage("Name ungueltig."); return;
+        }
+        int idx = findScopeRegistryByName(name);
+        if (idx < 0) {
+          char r[80]; snprintf(r, sizeof(r), "#%s nicht in Registry.", name);
+          pushCompanionMessage(r); return;
+        }
+        ScopeRegEntry& e = _prefs.scope_registry[idx];
+        if (!(e.flags & SCOPE_FLAG_IN_REPEAT_LIST)) {
+          char r[100]; snprintf(r, sizeof(r),
+                   "#%s nicht in Repeat-Liste. Erst 'scope repeater add %s'.",
+                   name, name);
+          pushCompanionMessage(r); return;
+        }
+        if (rs == 4) e.flags &= ~SCOPE_FLAG_DISABLED;
+        else         e.flags |=  SCOPE_FLAG_DISABLED;
+        savePrefs();
+        char r[80]; snprintf(r, sizeof(r), "OK - #%s ist jetzt %s.",
+                 name, rs == 4 ? "aktiv" : "inaktiv (disabled)");
         pushCompanionMessage(r);
         return;
       }
