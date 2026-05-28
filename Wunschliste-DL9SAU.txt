@@ -839,3 +839,69 @@ local-discard Sentinel hard-block:
   allowPacketForward blockt local-discard explizit auch im
   'repeat all'-Modus (nicht nur in allowlist). Code-Kommentar
   ausdruecklich geschaerft.
+
+
+--------------------------------------------------------------------------------
+15. REQ_TYPE_GET_NEIGHBOURS Implementierung
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  In Wunschliste 7 wurde fuer die anderen Discovery-Queries
+  (GET_STATUS, GET_OWNER_INFO, GET_TELEMETRY_DATA) Role-gegated
+  geantwortet, aber GET_NEIGHBOURS wurde ausgespart. simple_repeater
+  hat eine separate NeighbourInfo[]-Tabelle mit pub_key-Eintraegen,
+  Companion hat das nicht -- nur eine 1-Byte-Hash-HeardList.
+
+Diskussion (User-Session 2026-05-29):
+  Wir wollen das so bauen wie simple_repeater es konzeptuell macht,
+  aber als RAM-only-Datenquelle. Die Auth-Achse (anon vs
+  authenticated REQ) ist orthogonal zur Datenquelle (zero-hop heard).
+
+Plan -- Punkt a) Haupt-Implementation:
+
+  Neue RAM-only Neighbour-Tabelle in MyMesh.cpp:
+    struct RuntimeNeighbour {
+      uint8_t  pub_key[32];     // PUB_KEY_SIZE
+      uint32_t advert_timestamp; // aus dem advert
+      uint32_t heard_timestamp;  // millis() oder RTC time
+      int8_t   snr;              // x 4 wie simple_repeater
+      uint8_t  adv_type;         // ADV_TYPE_*
+    };
+    static RuntimeNeighbour _neighbours[32];
+    static uint8_t _neighbours_count;
+    LRU-Verdraengung wenn voll.
+
+  Erfassung:
+    In MyMesh::onAdvertRecv hooken. Bedingung: getPathHashCount()==0
+    (= zero-hop gehoert, direkt). KEIN Filter nach adv_type --
+    "liberal", alle Typen rein.
+
+  Antwort:
+    In onContactRequest erweitern um REQ_TYPE_GET_NEIGHBOURS.
+    Gating: nur wenn effectiveAdvertRole() == ADV_TYPE_REPEATER.
+    Wire-Layout identisch zu simple_repeater (Sort-Order, prefix-
+    Bytes, etc.).
+
+  RTC-Independence:
+    Tabelle funktioniert ab Boot ohne RTC. heard_timestamp kann
+    millis()-basiert sein wenn RTC nicht gesetzt; Aufrufer
+    interpretiert "Sekunden seit gehoert" relativ.
+
+Plan -- Punkt b) Add-on (spaeter, optional):
+
+  Ergaenzung der Antwort um juengere Contacts aus _contacts[].
+  Bedingung: RTC gesetzt (getCurrentTime() > 1500000000) UND
+  ContactInfo.lastmod jung genug (z.B. < 1 Woche alt).
+  Use-Case: User mit aktivem Auto-Add hat eine reichere Sicht auf
+  die Umgebung als nur zero-hop-Adverts. Aus Companion-Sicht
+  wertvoll.
+
+  Falls RTC nicht gesetzt: Add-on faellt weg, Antwort kommt nur
+  aus der Runtime-Tabelle. Wir warten NICHT auf GPS-Time-Fix
+  (waere konfusing wenn die Antwort 10 Min lang ausbleibt).
+
+Reihenfolge:
+  6b (loop_detect) zuerst (User-Wunsch).
+  Danach 15a, dann 15b.
+
+Quelle: Diskussion 2026-05-29 nach Test-Runde.
