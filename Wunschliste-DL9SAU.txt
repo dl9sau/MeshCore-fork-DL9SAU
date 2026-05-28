@@ -842,7 +842,7 @@ local-discard Sentinel hard-block:
 
 
 --------------------------------------------------------------------------------
-15. REQ_TYPE_GET_NEIGHBOURS Implementierung — 15a ERLEDIGT, 15b OFFEN
+15. REQ_TYPE_GET_NEIGHBOURS Implementierung — ERLEDIGT (15a + 15b)
 --------------------------------------------------------------------------------
 
 Ist-Zustand:

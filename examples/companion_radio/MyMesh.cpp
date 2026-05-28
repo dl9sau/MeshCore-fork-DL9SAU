@@ -1270,34 +1270,117 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
       }
     }
 
-    // Header: total + result_count placeholder
+    // Wunschliste 15b: Recent Contacts als Augmentation. Nur wenn RTC
+    // gesetzt -- ContactInfo.lastmod ist Unix-Sekunde, ohne RTC nicht
+    // interpretierbar. Gefiltert auf lastmod < 1 Woche, dedupliziert
+    // gegen die Runtime-Tabelle.
+    uint32_t now_rtc = getRTCClock()->getCurrentTime();
+    uint32_t now_ms  = millis();
+    bool rtc_ok = (now_rtc > 1500000000UL);
+
+    // Sammeln und Sortieren der "recent contacts" -- analog zu sorted[],
+    // aber kompakt mit einem Lookup-Array von ContactInfo-Pointern.
+    const ContactInfo* recent_contacts[MAX_RUNTIME_NEIGHBOURS];
+    int recent_count = 0;
+    if (rtc_ok) {
+      uint32_t week_ago = (now_rtc > 7UL * 86400UL) ? (now_rtc - 7UL * 86400UL) : 0;
+      int n_contacts = getNumContacts();
+      for (int ci = 0; ci < n_contacts && recent_count < MAX_RUNTIME_NEIGHBOURS; ci++) {
+        ContactInfo c;
+        if (!getContactByIdx(ci, c)) continue;
+        if (c.lastmod < week_ago) continue;
+        // Dedup gegen _neighbours[]
+        bool dup = false;
+        for (int j = 0; j < _neighbours_count; j++) {
+          if (memcmp(_neighbours[j].pub_key, c.id.pub_key, 32) == 0) {
+            dup = true; break;
+          }
+        }
+        if (dup) continue;
+        // Bereits in recent_contacts?
+        bool already = false;
+        for (int j = 0; j < recent_count; j++) {
+          if (memcmp(recent_contacts[j]->id.pub_key, c.id.pub_key, 32) == 0) {
+            already = true; break;
+          }
+        }
+        if (already) continue;
+        // Slot in TLS-statische Kopie -- nicht moeglich da getContactByIdx
+        // ContactInfo lokal kopiert. Wir muessen direkt vom Storage lesen
+        // koennen. ALTERNATIVE: ContactInfo lokal cachen.
+        // Wir cachen die Pointer indirekt via Index nicht (Race bei
+        // Mutationen). Stattdessen: separate static cache fuer recent.
+        // Trick: ContactInfo ist klein (~96 Byte); statisches Array von
+        // Kopien ist OK.
+        static ContactInfo recent_cache[MAX_RUNTIME_NEIGHBOURS];
+        recent_cache[recent_count] = c;
+        recent_contacts[recent_count] = &recent_cache[recent_count];
+        recent_count++;
+      }
+      // Sortiere recent_contacts (gleiches Kriterium wie sorted[]).
+      if (recent_count > 1) {
+        for (int i = 1; i < recent_count; i++) {
+          const ContactInfo* key = recent_contacts[i];
+          int j = i - 1;
+          while (j >= 0) {
+            bool key_before = false;
+            switch (order_by) {
+              case 0: key_before = key->lastmod > recent_contacts[j]->lastmod; break;
+              case 1: key_before = key->lastmod < recent_contacts[j]->lastmod; break;
+              case 2: case 3: key_before = false; break;  // contacts haben kein SNR
+              default: key_before = false; break;
+            }
+            if (!key_before) break;
+            recent_contacts[j + 1] = recent_contacts[j];
+            j--;
+          }
+          recent_contacts[j + 1] = key;
+        }
+      }
+    }
+
+    // Header: total + result_count placeholder. total = Runtime + Recent.
     int16_t result_count = 0;
-    int16_t total_w = total;
+    int16_t total_w = total + (int16_t)recent_count;
     memcpy(&reply[reply_off], &total_w, 2); reply_off += 2;
     int header_results_off = reply_off; reply_off += 2;  // fill later
 
-    // Entries
-    uint32_t now_rtc = getRTCClock()->getCurrentTime();
-    uint32_t now_ms  = millis();
-    for (int idx = 0; idx < want_count && idx + want_offset < total; idx++) {
-      RuntimeNeighbour* n = sorted[idx + want_offset];
+    // Entries: erst Runtime-Neighbours, dann Recent Contacts.
+    int produced = 0;       // Position im kombinierten virtuellen Stream
+    int total_produce = total + recent_count;
+    for (int idx = 0; idx < want_count && idx + want_offset < total_produce; idx++) {
+      int pos = idx + want_offset;
       int entry_size = pubkey_prefix_len + 4 + 1;
-      // 160 ist defensive Annahme fuer reply-Buffer-Size in BaseChatMesh
       if (reply_off + entry_size > 150) break;
-      memcpy(&reply[reply_off], n->pub_key, pubkey_prefix_len);
-      reply_off += pubkey_prefix_len;
-      // heard_seconds_ago: aus RTC wenn gesetzt, sonst aus millis()-Delta.
+      const uint8_t* pk;
       uint32_t heard_secs;
-      if (now_rtc > 1500000000UL && n->heard_timestamp > 0) {
-        heard_secs = (now_rtc > n->heard_timestamp)
-                     ? (now_rtc - n->heard_timestamp) : 0;
+      int8_t snr_b;
+      if (pos < total) {
+        // Runtime
+        RuntimeNeighbour* n = sorted[pos];
+        pk = n->pub_key;
+        if (rtc_ok && n->heard_timestamp > 0) {
+          heard_secs = (now_rtc > n->heard_timestamp)
+                       ? (now_rtc - n->heard_timestamp) : 0;
+        } else {
+          heard_secs = (now_ms - n->heard_millis) / 1000;
+        }
+        snr_b = n->snr;
       } else {
-        heard_secs = (now_ms - n->heard_millis) / 1000;
+        // Recent contact
+        const ContactInfo* c = recent_contacts[pos - total];
+        pk = c->id.pub_key;
+        heard_secs = (now_rtc > c->lastmod) ? (now_rtc - c->lastmod) : 0;
+        snr_b = 0;  // ContactInfo hat keinen SNR
       }
+      memcpy(&reply[reply_off], pk, pubkey_prefix_len);
+      reply_off += pubkey_prefix_len;
       memcpy(&reply[reply_off], &heard_secs, 4); reply_off += 4;
-      reply[reply_off++] = (uint8_t)n->snr;
+      reply[reply_off++] = (uint8_t)snr_b;
       result_count++;
+      produced++;
     }
+    (void)produced;
     memcpy(&reply[header_results_off], &result_count, 2);
     return (uint8_t)reply_off;
   }
