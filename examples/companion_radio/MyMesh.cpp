@@ -3668,7 +3668,7 @@ bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
 // Geo-vs-Default Send-Hierarchie. _prefs.scope_advert_auto entscheidet:
 //   1 (off):    Nur Default. Geo wird nie verwendet.
 //   2 (on):     Geo als Fallback, wenn Default leer ist.
-//   3 (prefer): Geo gewinnt vor Default wenn ortliche Region != Default.
+//   3 (prefer): Geo gewinnt vor Default wenn oertliche Region != Default.
 // Returns false wenn weder Default noch Geo etwas liefern.
 bool MyMesh::resolveDefaultOrGeo(TransportKey& out_key) const {
   TransportKey configured;
@@ -4660,7 +4660,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "      kein Default gesetzt ist.");
         pushCompanionMessage(
           "    prefer:\n"
-          "      Geo schlaegt Default, wenn die ortliche Region eine\n"
+          "      Geo schlaegt Default, wenn die oertliche Region eine\n"
           "      andere ist als das Default. ('User ist nicht zu Hause')");
         pushCompanionMessage(
           "    off:\n"
@@ -7228,7 +7228,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "      kein Default gesetzt ist.");
         pushCompanionMessage(
           "    prefer:\n"
-          "      Geo schlaegt Default, wenn die ortliche Region eine\n"
+          "      Geo schlaegt Default, wenn die oertliche Region eine\n"
           "      andere ist als das Default. ('User ist nicht zu Hause')");
         pushCompanionMessage(
           "    off:\n"
@@ -7283,7 +7283,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         const char* desc =
             (vi == 0) ? "Geo wird nie verwendet"
           : (vi == 1) ? "Geo als Fallback wenn Default leer"
-                      : "Geo schlaegt Default wenn ortlich andere Region";
+                      : "Geo schlaegt Default wenn oertlich andere Region";
         char r[160]; snprintf(r, sizeof(r), "OK - scope advert auto = %s\n  %s", name_str, desc);
         pushCompanionMessage(r);
         return;

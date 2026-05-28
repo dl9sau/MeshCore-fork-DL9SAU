@@ -743,7 +743,7 @@ Soll-Architektur:
     scope send override <name> [TTL] | clear
     scope send follow on|off            (= scope_geo_prefers; "follow
                                          GPS for sending", Geo gewinnt
-                                         vor Default wenn ortlich
+                                         vor Default wenn oertlich
                                          anders)
 
   Global Repeat-Policy (existing, umbenannt):
