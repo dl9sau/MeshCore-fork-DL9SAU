@@ -4319,15 +4319,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "set")) {
         pushCompanionMessage(
-          "set <key> <value>: persistente Settings setzen. "
-          "Keys: name, lat, lon, freq, sf, bw, cr, tx_power, "
-          "rxdelay, txdelay, direct_txdelay."
-        );
+          "set <key> <value>: persistente Settings setzen.");
         pushCompanionMessage(
-          "Sued/West negativ (z.B. 'set lat -10.5'). freq in MHz, bw in kHz. "
-          "Delays sind Faktoren x Airtime (txdelay/direct_txdelay 0..2, "
-          "rxdelay 0..20; 0 = off). Aenderungen sofort applied + savePrefs."
-        );
+          "Radio:  freq sf bw cr tx_power\n"
+          "Position: lat lon gps gps_interval advert_loc_policy");
+        pushCompanionMessage(
+          "Repeat:   repeat flood_max scope_regional_hops\n"
+          "Delays:   rxdelay txdelay direct_txdelay\n"
+          "Telemetry: telemetry_mode_base loc env\n"
+          "          airtime_factor rx_boosted_gain");
+        pushCompanionMessage(
+          "App:    name manual_add_contacts multi_acks autoadd_config\n"
+          "        autoadd_max_hops path_hash_mode buzzer_quiet");
+        pushCompanionMessage(
+          "Hinweise: Sued/West negativ (lat -10.5). freq MHz, bw kHz. "
+          "Delays = Faktor*Airtime (tx/direct 0..2, rx 0..20). "
+          "Aenderungen sofort applied + savePrefs.");
         return;
       }
       if (topic_prefix_match(topic, "get")) {
@@ -4338,12 +4345,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "get <key>\n  einzelner Wert");
         pushCompanionMessage(
-          "Keys: name, freq, sf, bw, cr, tx_power, lat, lon, repeat, gps, "
-          "gps_interval, advert_loc_policy, airtime_factor, rx_boosted_gain, "
-          "manual_add_contacts, multi_acks, path_hash_mode, autoadd_config, "
-          "autoadd_max_hops, telemetry_mode_base/loc/env, buzzer_quiet, "
-          "rxdelay, txdelay, direct_txdelay."
-        );
+          "Keys: identisch zu 'set' (siehe 'help set'). Plus:\n"
+          "  flood.max (alias flood_max), scope_regional_hops");
         return;
       }
       if (topic_prefix_match(topic, "clock") || topic_prefix_match(topic, "time")) {
