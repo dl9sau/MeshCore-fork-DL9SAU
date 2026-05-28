@@ -1004,3 +1004,82 @@ Test-Interesse (verfuegbar wenn User Zeit hat):
       Receive-Filter anwenden?'
 
   Quelle: User-Beobachtung 2026-05-30 nach App-Doku-Lektuere.
+
+
+--------------------------------------------------------------------------------
+18. BBS / Personal Message System (Alternative zu Room-Server)
+--------------------------------------------------------------------------------
+
+Diskussion 2026-05-30 mit DL9SAU. User-Vorschlag als Alternativmodell
+zu Punkt 16 (ROOM-Server) -- konzeptuell aehnlich zum TNC2 PMS aus
+den Packet-Radio 80er-Jahren: wenn das Hostsystem (App) nicht
+verbunden ist, fungiert der Companion als kleine Mailbox.
+
+Analogie zum TNC2 PMS:
+  Der Companion bietet eine 'Mailbox-Persoenlichkeit' wenn die App
+  offline ist -- andere Nodes koennen Direct-Messages senden, die
+  zwischengespeichert werden, und der Owner kann sie nach App-
+  Connect abrufen. Aehnlich PMS in TNC2, mit Personal Message System
+  via AX.25.
+
+Was Companion heute schon hat (Teilfunktion):
+  offline_queue (MyMesh.h:62-63, OFFLINE_QUEUE_SIZE=16).
+  - 16 Slots TOTAL (direct + channel msgs gemischt).
+  - Drop-Verhalten bei voll: suche AELTESTEN channel-msg im Queue,
+    drop, neue dahinter. Wenn kein channel-msg drin -> NEUE silent
+    gedroppt. Direct-msgs sind faktisch Prio-Class 'nie auto-drop'.
+  - NICHT persistent -- Reboot leert Queue.
+
+Probleme der jetzigen offline_queue:
+  a) 16 Slots ist sehr wenig fuer einen User der 1-2 Tage offline
+     ist und mehrere Kontakte hat.
+  b) Silent-Drop bei voll = Datenverlust. Sender hat ACK schon
+     bekommen (ACK geht raus BEVOR queueMessage laeuft) -> Sender
+     denkt zugestellt, Empfaenger sieht nie.
+  c) Reboot-Verlust mit gleichem ACK-Konflikt: Sender glaubt
+     zugestellt, message ist weg.
+
+Soll-Verhalten BBS-Modus:
+  - Configurable Queue-Size (z.B. 50-100 Slots).
+  - Persistent auf Flash. Beim Boot wieder eingelesen.
+  - Bei queue-voll: Reply 'Mailbox voll, retry later' an Sender
+    statt ACK -> Sender koennte retry. Oder NACK-Variante.
+  - Owner-CLI: 'mailbox list' / 'mailbox read N' / 'mailbox delete N'
+    / 'mailbox clear'.
+  - App-Integration: bei App-Connect normal flush (wie heute).
+  - Optional: PSK-gated 'public mailbox' -- jeder kann reinschreiben,
+    Owner liest. Aehnlich Pin-Board, weniger als ROOM-Server.
+
+Aufwand (vs. ROOM-Server ~800 LoC):
+  - Persistenz auf Flash                                  ~80 LoC
+  - Groessere Queue (50-100)                              minimal
+  - 'Mailbox voll' Reply statt silent-drop                ~30 LoC
+  - Owner-CLI: list / read / delete                       ~100 LoC
+  - Optional: PSK-gated public mailbox                   ~150 LoC
+  Total ~400 LoC, ~1.5 Tage. ETWA HALB SO VIEL wie ROOM-Server.
+
+Vorteile gegenueber ROOM-Server (Punkt 16):
+  - Kein Push-Retry-Loop noetig (Owner pullt selbst per App-Connect)
+  - Kein ACL/Permissions (Mailbox ist 'mein Briefkasten', nicht
+    Broadcast)
+  - Kein ADV_TYPE_ROOM noetig -- Companion bleibt CHAT (oder REPEATER
+    je nach Profile)
+  - Lastsparend: keine Push-Vervielfachung (= N Subscriber x M Posts)
+  - Wenn Sender retry macht (Mailbox voll Antwort), kann Sender
+    selbst entscheiden ob er warten will
+
+Zu durchdenken (Open Questions, vom User vorgemerkt):
+  a) Wann wird gelöscht? FIFO bei voll, oder Owner muss explizit?
+  b) Werden Channel-Msgs auch gequeuet, oder nur Direct?
+  c) Sender-Feedback: extra Reply 'in Mailbox' oder nur normaler ACK?
+  d) App-Integration: zeigt App 'Mailbox-Tab' oder verschmilzt das mit
+     normalem Inbox?
+
+User-Status: 'diesen Gedanken werde ich weiter verfolgen'.
+
+Empfehlung: bevor Implementation, user-test bei der App ob Mailbox-
+Sicht ueberhaupt unterstuetzt waere oder Companion die Daten in den
+normalen App-Inbox-Stream einspeisen muesste (= existierender Pfad,
+deutlich weniger App-Side-Aenderung).
+
+Quelle: User-Idee 2026-05-30 als Reaktion auf ROOM-Server-Diskussion.
