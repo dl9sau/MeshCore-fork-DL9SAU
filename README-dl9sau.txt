@@ -475,34 +475,69 @@ Scope-System (Changelog 14t + 14v..14z):
   scope override <name> [12h|3d]|clear  Hoechste Send-Prioritaet,
                               persistent ueber Reboots, max 30d TTL
 
-  Registry (Liste A, 16 Slots):
-    scope list                Eintraege mit Flags (R/D/G/b)
-    scope add <name> [geo <lat_min,lon_min,lat_max,lon_max>]
-                              Eintrag anlegen; '#'-Prefix optional
-    scope remove <name>       Eintrag loeschen (kein Prefix-Match)
-    scope info <name>         hash, in_repeat_list, geo_managed, bbox
-    scope regions             Build-in Geo-Tabelle (read-only, fuer
-                              Recommendations)
+  Scope-Storage (Schritt 11 Pivot, ab 2026-05):
+    Build-in-Tabelle (read-only): ~30 Eintraege, kommen aus
+      dl9sau_geo_recommendations.cpp — Bundeslaender, Aggregate, plus
+      Special-Scopes local/lokal/region/regional/local-discard.
+    Build-in-Status-Array (sparse, max 32 Slots): User-Override eines
+      Build-in-Eintrags. Indexiert via FNV-1a Hash des Namens, nicht
+      via Position — ueberlebt Tabellen-Reorder.
+    User-Extras (max 16 Slots): Eintraege mit Namen die NICHT in der
+      Build-in-Tabelle stehen (Kiez-Scope, eigener Vereins-Scope).
 
-  Repeat-Policy (Liste B):
+  Browsing:
+    scope list                Eintraege mit Repeat-Mode != off
+    scope list all            ALLE Eintraege (auch off/deleted)
+    scope info <name>         hash, mode, advert, bbox, in_bbox, etc.
+    scope regions             Build-in Geo-Tabelle (read-only)
+
+  Anlegen (nur fuer Namen NICHT in Build-in-Tabelle):
+    scope add <name> [<lat_min,lon_min,lat_max,lon_max>]
+                              Eintrag in User-Extras; mit Bbox -> per
+                              Default auto-managed (geo). '#'-optional
+    scope remove <name>       Extras: Eintrag loeschen; Build-in:
+                              user_deleted + repeat=off (no_abbrev)
+
+  Per-Eintrag Aktion:
+    scope <name> pin          immer aktiv (Tag P)
+    scope <name> geo          aktiv wenn GPS in Bbox (Tag A, ausserhalb A-)
+    scope <name> off          nie aktiv
+    scope <name> disable      temporaer aus (Mode bleibt erhalten)
+    scope <name> enable       temporaer wieder an
+    scope <name> delete       dauerhaft verstecken (nur Build-in)
+    scope <name> undelete     wieder herstellen
+    scope <name> advert auto|off  Geo-Send-Fallback ein/aus
+    scope <name> info         Details
+    'repeat <verb>' bleibt als alter Pfad erlaubt (verb = on/off/auto/pin/geo).
+
+  Globale Policy:
     scope repeater                       Status + Liste
-    scope repeater mode all|allowlist    Policy umschalten
-    scope repeater add <name>            in Repeat-Liste (Eintrag muss in
-                                         Registry sein)
-    scope repeater remove <name>         aus Repeat-Liste
-    scope repeater enable / disable <name>  Aktiv-Zustand toggeln (bleibt
-                                         in Liste). 14z.
-    scope repeater geo <name> on|off     geo_managed-Flag — bei on
-                                         togglet IN_REPEAT_LIST automa-
-                                         tisch beim Bbox-Eintritt/Austritt
-                                         (Hysterese aus 370m/10min Motion-
-                                         Anker, 14u)
+    scope repeater mode all|allowlist    all = jeden scoped repeaten,
+                                         allowlist = nur Eintraege im
+                                         Repeat-Set
 
   Flags in scope list:
-    R = in Repeat-Liste
-    D = disabled (in Liste, aber inaktiv)
-    G = geo_managed
-    b = has bbox
+    R = aktiv jetzt  (Mode-aktiv UND nicht disabled)
+    A = auto-mode (geo)
+    P = pin (immer aktiv)
+    D = disabled (temporaer)
+    X = deleted (versteckt)
+    ! = advert off
+    b = hat bbox
+
+  Flags in scope rep:
+    (A)  aktiv (auto Bbox)
+    (A-) inaktiv (auto Bbox — ausserhalb)
+    (P)  pin (immer aktiv)
+    (D)  disabled
+
+  Special-Scopes (Build-in, position-unabhaengig, Default-Pin):
+    #local / #lokal           single-hop. Beim Repeat wird der Scope
+                              zu #local-discard umgeschrieben, damit
+                              kein zweiter Repeater drueber geht.
+    #region / #regional       konfigurierbarer Hop-Cap; Default 3.
+                              CLI: set scope_regional_hops <1..flood_max>
+    #local-discard            sentinel; default off, wird nie repeated.
 
 Wire-Frame-Limit:
   pushCompanionMessage prefixt mit Sender-Name (z.B. 'Generic ESP32: ',

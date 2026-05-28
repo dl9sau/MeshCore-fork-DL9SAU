@@ -1883,6 +1883,120 @@ Lösung (commit d2326758):
   Override greifen weiterhin.
 
 ================================================================================
+17. Scope-Architektur-Pivot (Wunschliste 11, Mai 2026)
+================================================================================
+
+Anlass:
+  Die Two-Table-Trennung aus Punkt 14u (NodePrefs-Registry 16 Slots +
+  IN_REPEAT_LIST-Flag) skaliert nicht: Build-in-Tabelle hat ~25 Eintraege,
+  passen nicht alle gleichzeitig in 16 Slots. Wenn die Tabelle waechst,
+  muss der User manuell nachziehen. Plus: zwei Storages fuer dieselbe
+  Information (Build-in-Tabelle + NodePrefs-Registry) sind Doppel-Pflege.
+
+Neue Architektur:
+  Build-in-Tabelle (Flash, read-only)         dl9sau_geo_recommendations.cpp
+    - ~25 geo Eintraege + 5 Special-Scopes (local, lokal, region,
+      regional, local-discard).
+    - Macro-Helper: GEO(...), NOGEO_PIN(...), NOGEO_OFF(...)
+    - Pro Eintrag: name, has_bbox, default_status.
+  Build-in-Status (NodePrefs, sparse, 32 Slots)   scope_buildin_status[]
+    - Nur User-Overrides — Eintrag nur wenn != default.
+    - Indexiert via FNV-1a Hash(name), NICHT Position. Damit ueberleben
+      User-Customs auch wenn die Tabelle reordered wird.
+    - Status-Byte: bits 0-1 repeat_mode (00=auto, 01=on, 10=off),
+      bit 2 advert_off, bit 3 disabled, bit 4 user_deleted.
+  User-Extras (NodePrefs, 16 Slots)           scope_extras[]
+    - Eintraege mit Namen NICHT in der Build-in-Tabelle.
+    - ScopeRegEntry-Layout (gleiches Struct wie frueher).
+  Key-Cache (RAM, Boot-time)                  _buildin_keys[64]
+    - SHA-256("#name") fuer Build-in-Eintraege, vermeidet pro-Paket-
+      Recompute in scopeAllowedForRepeat.
+
+Schritte (1 Commit pro Schritt mit Build-Check):
+  1+2  NodePrefs-Schema + DataStore Persistenz       d27787a5
+  3    Migration alt -> neu (idempotent dual-storage) ff19cd84
+  3'   Sparse FNV-1a Hash-Indexierung (Option B)     2788c0b5
+  4    Key-Cache + Cross-Storage Lookup-Helpers      c65b204f
+  5    scopeAllowedForRepeat auf neue Storage        e82574e5
+  6    chooseGeoFallbackScope Registry-iterierend    0f1259b2
+  7    CLI 'scope <name> repeat|advert|disable|...'  b861df8a
+  +    scope add Syntax vereinfacht                  e3fa29c5
+  +    '?'-Hilfe pro Befehlsebene                    cb440eae
+  9    'scope list' / 'list all' / 'info' neue Storage 921ee32a
+ 10-12 Special-Scopes local/lokal/region/regional   9c5c1d54
+  +    Display-Fix scope list + scope rep Legende   a26d6d2d
+  +    region_hop_limit -> scope_regional_hop_limit  7c7b6c58
+
+Cleanup-Pass (Schritt 8):                            c0aa09bc
+  - 'scope add' schreibt direkt nach scope_extras (nicht mehr
+    ueber Legacy-Buffer + Migration).
+  - 'scope remove' fuer Extras: Slot loeschen + kompaktieren.
+    Fuer Build-in: USER_DELETED + REPEAT_OFF setzen.
+  - syncScopePivotFromLegacy() draint scope_registry_count=0 nach
+    Erfolg. savePrefs ist wieder thin-wrapper.
+  - Pre-Pop in begin() entfernt — Build-in-Tabelle ist die Wahrheit.
+  - 'scope repeater add/remove/geo/enable/disable' entfernt — durch
+    per-Eintrag CLI ersetzt.
+  - Helper findScopeRegistryBy* + addScopeRegistryDefault entfernt.
+  - 'scope <name> delete' raeumt jetzt auch den Pin: USER_DELETED
+    UND REPEAT_OFF zusammen. War der Bug-Ausloeser fuer diesen
+    Cleanup-Schritt (Resync ueberschrieb USER_DELETED).
+
+UX-Verben pin/geo/off als Top-Level (User-Feedback):         fdb703d5
+  scope <name> pin     immer aktiv (Tag P)
+  scope <name> geo     aktiv wenn GPS in Bbox (Tag A / A-)
+  scope <name> off     nie aktiv
+  scope <name> disable | enable    temporaer (Mode bleibt)
+  scope <name> delete  | undelete  dauerhaft verstecken (Build-in)
+  'repeat <verb>' bleibt mit pin/geo als Aliasen erlaubt.
+
+Storage-Bereinigung:
+  Weiche Removal: scope_registry_* -> _legacy_scope_registry_*    7c39ddbf
+    Felder bleiben aus Flash-Format-Compat im Schema, klar als
+    drain-pad benannt.
+  Format-Bump: _legacy_* hart entfernt                            af943fc7
+    NodePrefs ~834 Byte kleiner, syncScopePivotFromLegacy weg.
+    BREAKING: alte Flash-Files inkompatibel; NVS-Reset noetig
+    beim Flash dieses Stands.
+
+scope list / scope rep Legende:
+  R = aktiv jetzt, A = auto-mode, P = pin, D = disabled,
+  X = deleted, ! = advert off, b = hat bbox; (b-in) / (ext) Storage.
+  scope rep zeigt zusaetzlich (A) / (A-) / (P) / (D) pro Eintrag.
+
+Special-Scopes (Schritt 10-12):
+  - local / lokal: single-hop; allowPacketForward laesst Pakete mit
+    path_hash_count==0 durch, repeated mit Scope-Rewrite auf
+    'local-discard' (Sentinel — andere Repeater repeaten dann nicht).
+    Pakete mit hops > 0 werden verworfen.
+  - region / regional: Hop-Cap aus _prefs.scope_regional_hop_limit
+    (CLI: set scope_regional_hops <1..flood_max>, Default 3).
+    Scope bleibt unveraendert beim Repeat — andere Repeater
+    respektieren das Limit selbst.
+  - local-discard: default-OFF Sentinel; markiert das Ende der
+    single-hop-Reichweite.
+
+CLI-Befehle hinzugekommen:
+  scope <name> pin|geo|off|disable|enable|delete|undelete|advert|info
+  scope <name> repeat pin|geo|off (Alias: on|auto)
+  scope add <name> [<lat,lon,lat,lon>]   nur User-Extras
+  scope remove <name>                    Extras: loeschen,
+                                          Build-in: user_deleted+off
+  scope list | scope list all
+  scope info <name>
+  scope regions                          Build-in-Tabelle (read-only)
+  set scope_regional_hops <1..flood_max> | get scope_regional_hops
+
+flood_max konfigurierbar (Wunschliste 6, erste Haelfte):      a7450b24
+  Frueher: CR_MAX_REPEAT_PATH_LEN hartcodiert auf 16 in MyMesh.h.
+  Jetzt: _prefs.flood_max (1..64), Default 16, analog CommonCLI/
+  simple_repeater 'flood.max'.
+  CLI: set flood_max <N> (auch 'flood.max'), get flood_max.
+  Konsumiert in allowPacketForward; scope_regional_hop_limit
+  wird gegen flood_max gecappt.
+  loop_detect (zweite Haelfte) noch nicht gebaut.
+
+================================================================================
 Build-Status
 ================================================================================
 
