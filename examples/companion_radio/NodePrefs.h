@@ -205,4 +205,11 @@ struct NodePrefs {  // persisted to file
   // repeater 'flood.max'. 0 wird beim Boot auf Default 16 gehoben. Range
   // 1..64. CLI: set flood_max <N> (oder flood.max).
   uint8_t        flood_max;
+
+  // Wenn 1: Geo-Region (chooseGeoFallbackScope) gewinnt VOR Default-
+  // Scope, sofern sie eine ANDERE Region liefert als das Default. "User
+  // ist offensichtlich nicht zu Hause -- nimm den lokalen Scope statt
+  // dem Home-Scope". Default 0 (off). Wirkt sowohl auf reguläre
+  // sendFloodScoped-Pfade als auch auf chooseNightFloodScope.
+  uint8_t        scope_geo_prefers;
 };

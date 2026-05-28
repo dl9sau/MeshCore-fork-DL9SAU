@@ -762,19 +762,24 @@ void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint3
 
 void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis) {
   // TODO: dynamic send_scope, depending on recipient and current 'home' Region
-  TransportKey default_scope;
-  memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
-
-  auto scope = send_scope.isNull() ? &default_scope : &send_scope;
-  sendFloodScoped(*scope, pkt, delay_millis);
+  TransportKey eff_scope;
+  if (!send_scope.isNull()) {
+    eff_scope = send_scope;
+  } else if (!resolveDefaultOrGeo(eff_scope)) {
+    // weder Default noch geo_prefers haben gegriffen -> null Scope
+    memset(eff_scope.key, 0, sizeof(eff_scope.key));
+  }
+  sendFloodScoped(eff_scope, pkt, delay_millis);
 }
 void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis) {
   // TODO: have per-channel send_scope
-  TransportKey default_scope;
-  memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
-
-  auto scope = send_scope.isNull() ? &default_scope : &send_scope;
-  sendFloodScoped(*scope, pkt, delay_millis);
+  TransportKey eff_scope;
+  if (!send_scope.isNull()) {
+    eff_scope = send_scope;
+  } else if (!resolveDefaultOrGeo(eff_scope)) {
+    memset(eff_scope.key, 0, sizeof(eff_scope.key));
+  }
+  sendFloodScoped(eff_scope, pkt, delay_millis);
 }
 
 void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
@@ -1366,6 +1371,8 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.flood_max == 0 || _prefs.flood_max > 64) {
     _prefs.flood_max = 16;
   }
+  // scope_geo_prefers: 0 = off (Default), 1 = Geo gewinnt vor Default
+  if (_prefs.scope_geo_prefers > 1) _prefs.scope_geo_prefers = 0;
   // scope_regional_hop_limit: 0 = uninitialisiert -> Companion-Default 3.
   // Range 1..flood_max (sonst widerspruechlich — flood_max ist die harte
   // Obergrenze, regional muss drunter liegen).
@@ -1956,9 +1963,11 @@ void MyMesh::handleCmdFrame(size_t len) {
     if (pkt) {
       if (len >= 2 && cmd_frame[1] == 1) { // optional param (1 = flood, 0 = zero hop)
         unsigned long delay_millis = 0;
-        TransportKey default_scope;
-        memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
-        sendFloodScoped(default_scope, pkt, delay_millis);
+        TransportKey eff_scope;
+        if (!resolveDefaultOrGeo(eff_scope)) {
+          memset(eff_scope.key, 0, sizeof(eff_scope.key));
+        }
+        sendFloodScoped(eff_scope, pkt, delay_millis);
       } else {
         sendZeroHop(pkt);
       }
@@ -3366,12 +3375,42 @@ bool MyMesh::chooseGeoFallbackScope(TransportKey& out_key) const {
   return true;
 }
 
+// Wunschliste 5 (scope_geo_prefers):
+// Wenn _prefs.scope_geo_prefers=1 UND chooseGeoFallbackScope eine
+// Region liefert die NICHT dem Default-Scope entspricht -> Geo.
+// Use-Case: User mit Default #de-be sitzt in Ostfriesland, Geo
+// matched #ostfriesland -> #ostfriesland gewinnt; "User ist nicht zu
+// Hause". Sonst (geo_prefers=off, oder keine Geo-Region, oder Geo ==
+// Default): Default. Returns false wenn weder Default noch (geo &&
+// geo_prefers) etwas liefern.
+bool MyMesh::resolveDefaultOrGeo(TransportKey& out_key) const {
+  TransportKey configured;
+  memcpy(configured.key, _prefs.default_scope_key, sizeof(configured.key));
+  bool has_default = !configured.isNull();
+
+  if (_prefs.scope_geo_prefers) {
+    TransportKey geo;
+    if (chooseGeoFallbackScope(geo)) {
+      if (!has_default
+          || memcmp(geo.key, configured.key, sizeof(geo.key)) != 0) {
+        out_key = geo;
+        return true;
+      }
+    }
+  }
+  if (has_default) {
+    out_key = configured;
+    return true;
+  }
+  return false;
+}
+
 bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
-  // Neue 4-stufige Hierarchie:
+  // Hierarchie:
   //   1) override (persistent, expiry-basiert)
   //   2) bake-scope (persistent, explizit fuer nightly)
-  //   3) default-scope (persistent, fuer regulaere Sends)
-  //   4) geo-fallback (Position-basiert)
+  //   3) resolveDefaultOrGeo (Default ODER Geo wenn scope_geo_prefers)
+  //   4) geo-fallback (Position-basiert, wenn nichts anderes)
   uint32_t now = getRTCClock()->getCurrentTime();
   // 1) override: aktiv solange now < expiry
   if (_prefs.override_expiry != 0 && now < _prefs.override_expiry) {
@@ -3389,14 +3428,9 @@ bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
     out_key = bake;
     return true;
   }
-  // 3) default-scope
-  TransportKey configured;
-  memcpy(configured.key, _prefs.default_scope_key, sizeof(configured.key));
-  if (!configured.isNull()) {
-    out_key = configured;
-    return true;
-  }
-  // 4) geo fallback
+  // 3) Default oder Geo (je nach scope_geo_prefers)
+  if (resolveDefaultOrGeo(out_key)) return true;
+  // 4) geo fallback (wenn weder Default noch geo_prefers gegriffen hat)
   return chooseGeoFallbackScope(out_key);
 }
 
@@ -4325,6 +4359,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
           "Repeat:   repeat flood_max scope_regional_hops\n"
+          "Scope-Send: scope_geo_prefers (on|off)\n"
           "Delays:   rxdelay txdelay direct_txdelay\n"
           "Telemetry: telemetry_mode_base loc env\n"
           "          airtime_factor rx_boosted_gain");
@@ -5354,6 +5389,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Geo-vor-Default Send-Hierarchie-Schalter (Wunschliste 5).
+    if (strcmp(key, "scope_geo_prefers") == 0) {
+      int v = match_on_off(value_lc);
+      if (v < 0) {
+        // auch Zahlen 0/1 zulassen
+        if (strcmp(value_lc, "0") == 0) v = 0;
+        else if (strcmp(value_lc, "1") == 0) v = 1;
+        else { pushCompanionMessage("Wert: on|off (oder 0|1)"); return; }
+      }
+      _prefs.scope_geo_prefers = (uint8_t)v;
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r),
+        "OK - scope_geo_prefers = %s\n"
+        "  Geo gewinnt %s Default-Scope wenn aktuelle Region != Default.",
+        v ? "on" : "off",
+        v ? "VOR" : "NICHT vor");
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Globale Repeat-Hop-Obergrenze. Range 1..64 analog CommonCLI flood.max.
     // 'flood.max' (CommonCLI-Stil) als Alias erlaubt.
     if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) {
@@ -5507,6 +5562,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
       emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
+      emit_uint  ("scope_geo_prefers",   _prefs.scope_geo_prefers,      0);
 
       if (list_changed && changed == 0) gline("  (keine Aenderungen — alle Werte auf Default)");
       gflush();
@@ -5542,6 +5598,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "direct_txdelay") == 0)    snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
     else if (strcmp(key, "scope_regional_hops") == 0) snprintf(r, sizeof(r), "scope_regional_hops = %u", (unsigned)_prefs.scope_regional_hop_limit);
     else if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) snprintf(r, sizeof(r), "flood_max = %u", (unsigned)_prefs.flood_max);
+    else if (strcmp(key, "scope_geo_prefers") == 0) snprintf(r, sizeof(r), "scope_geo_prefers = %s", _prefs.scope_geo_prefers ? "on" : "off");
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
     }

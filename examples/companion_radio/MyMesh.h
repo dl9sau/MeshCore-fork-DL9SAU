@@ -377,6 +377,11 @@ private:
   bool getEffectiveLatLon(double& lat, double& lon) const;
   bool chooseGeoFallbackScope(TransportKey& out_key) const;
   bool chooseNightFloodScope(TransportKey& out_key) const;
+  // "Default-oder-Geo" Helper fuer Sende-Pfade. Wenn
+  // _prefs.scope_geo_prefers=1 UND die ortliche Geo-Region eine andere
+  // ist als das Default-Scope, gewinnt Geo. Sonst Default. Returns
+  // true wenn out_key non-null geschrieben wurde.
+  bool resolveDefaultOrGeo(TransportKey& out_key) const;
   // Scope-Helper.
   // normalize: strippt fuehrendes '#', lowercase, lehnt leer/"##"/zu-lang ab.
   bool normalizeScopeName(const char* in, char* out, size_t out_size) const;

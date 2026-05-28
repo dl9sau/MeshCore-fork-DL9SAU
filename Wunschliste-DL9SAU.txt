@@ -288,7 +288,7 @@ Quelle: User-Anregung in dieser Session, 2026-05-27.
 
 
 --------------------------------------------------------------------------------
-5. scope geo-prefers <on/off> - Auto-Geo statt Default-Scope wenn fern
+5. scope geo-prefers <on/off> - Auto-Geo statt Default-Scope wenn fern  ERLEDIGT
 --------------------------------------------------------------------------------
 
 Ist-Zustand:
