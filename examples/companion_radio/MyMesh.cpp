@@ -3890,7 +3890,9 @@ void MyMesh::doPeriodicZeroHopAdvert() {
     _tx_advert_count++;
     _gps_user_override_until_advert = false;   // user-on override expires with this advert
     pushDebugLog("[ADV-DBG] periodic, millis=%lu moving=%d\n", millis(), (int)_is_moving);
-    traceCompanion(TRACE_ADVERTS, "[adv] periodic zero-hop moving=%d",
+    // D4: scope-Info mit ausgeben. Zero-hop ist normalerweise unscoped
+    // (sendZeroHop) -- machen wir explizit klar.
+    traceCompanion(TRACE_ADVERTS, "[adv] periodic zero-hop moving=%d scope=unscoped",
                    (int)_is_moving);
   }
 }
@@ -3926,7 +3928,26 @@ void MyMesh::doNightFloodAdvert() {
     _tx_advert_count++;
     pushDebugLog("[ADV-DBG] nightly-flood (3B path), millis=%lu rtc=%lu\n",
                   millis(), (unsigned long)getRTCClock()->getCurrentTime());
-    traceCompanion(TRACE_ADVERTS, "[adv] nightly-flood (3B path)");
+    // D4: scope-Info mit ausgeben. Welcher Slot der Send-Hierarchie
+    // tatsaechlich genommen wurde (override/bake/default/geo).
+    const char* src = "geo-fallback";
+    const char* nm  = "?";
+    auto keyNotNull = [](const uint8_t* k, size_t n) {
+      for (size_t i = 0; i < n; i++) if (k[i]) return true;
+      return false;
+    };
+    if (keyNotNull(_prefs.override_scope_key, 16)
+        && memcmp(scope.key, _prefs.override_scope_key, 16) == 0) {
+      src = "override"; nm = _prefs.override_scope_name;
+    } else if (keyNotNull(_prefs.bake_scope_key, 16)
+        && memcmp(scope.key, _prefs.bake_scope_key, 16) == 0) {
+      src = "bake"; nm = _prefs.bake_scope_name;
+    } else if (keyNotNull(_prefs.default_scope_key, 16)
+        && memcmp(scope.key, _prefs.default_scope_key, 16) == 0) {
+      src = "default"; nm = _prefs.default_scope_name;
+    }
+    traceCompanion(TRACE_ADVERTS, "[adv] nightly-flood scope=#%s (%s) code=%04X",
+                   nm[0] ? nm : "?", src, (unsigned)codes[0]);
   }
 }
 
@@ -4492,12 +4513,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "gps")) {
         pushCompanionMessage(
           "gps on/off: Modul ein/aus. Off behaelt letzte Position im Advert. "
-          "Ohne Arg -> Status. gps sync: einmaliger Wake-Trigger (RTC/Position)."
-        );
+          "Ohne Arg -> Status. gps sync: einmaliger Wake-Trigger (RTC/Position).");
+        // D6: Hilfe fuer 'gps power' klarer (User-Feedback: 'lead' ist
+        // Teil des cycle-Modus, nicht ein eigener Mode).
         pushCompanionMessage(
-          "gps power [always-on | cycle | lead <N> | reset]: "
-          "Power-Management. Default cycle, lead=5 -> Sleep=10 im 15-min-Cycle."
-        );
+          "gps power: Power-Management-Konfig.");
+        pushCompanionMessage(
+          "  gps power always-on\n"
+          "    GPS-Chip permanent eingeschaltet (mehr Strom, schneller Fix).");
+        pushCompanionMessage(
+          "  gps power cycle\n"
+          "    Default. Im 15-min-Cycle: lead Minuten WACH, Rest schlafend.");
+        pushCompanionMessage(
+          "  gps power lead <N>\n"
+          "    Feintuning fuer cycle-Mode: N Minuten wach vor Advert.\n"
+          "    Default 5 -> 5 min wach + 10 min sleep.");
+        pushCompanionMessage(
+          "  gps power reset\n"
+          "    Power-Mode auf Default zurueck (cycle, lead=5).");
         return;
       }
       if (topic_prefix_match(topic, "advert")) {
@@ -5081,15 +5114,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       char ll[32];
       formatLatLonDM(ll, sizeof(ll), sensors.node_lat, sensors.node_lon);
-      char block[200];
-      // C-Punkt aus Tests: Leerzeile zwischen gps-Line und pos lag am
-      // Word-Wrap des langen Strings, nicht an explizitem \n\n. Mit
-      // dem kuerzeren DM-Format passt jetzt alles in eine Zeile.
+      // D2: power-Mode mit anzeigen (User-Wunsch -- mode ist sonst nur
+      // unter 'gps power' sichtbar).
+      const char* pmode = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
+      uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
+      char block[240];
       snprintf(block, sizeof(block),
                "gps=%s  fix_ever=%d  moving=%d  app-poll-interval=%s\n"
+               "power=%s  lead=%u min\n"
                "pos=%s",
-               state, (int)_gps_had_fix_ever, (int)_is_moving,
-               interval_str, ll);
+               state, (int)_gps_had_fix_ever, (int)_is_moving, interval_str,
+               pmode, (unsigned)lead, ll);
       pushCompanionMessage(block);
       return;
     }
@@ -5165,7 +5200,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (m == 1) {
       _prefs.gps_enabled = 1;
       savePrefs();
-      pushCompanionMessage("OK - GPS enabled.");
+      // D3: informativer als nur "OK - GPS enabled". Zeige aktuelle
+      // power-Konfig damit User direkt sieht was greift.
+      const char* pmode = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
+      uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
+      char r[120];
+      snprintf(r, sizeof(r), "OK - GPS enabled.\n  power=%s  lead=%u min",
+               pmode, (unsigned)lead);
+      pushCompanionMessage(r);
     } else if (m == 0) {
       _prefs.gps_enabled = 0;
       savePrefs();
@@ -6095,7 +6137,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  if (starts_with_word(cmd, "stats")) {
+  // D5: 'stat' (Abbr) als Alias zu 'stats' akzeptieren. 'status' ist ein
+  // anderer Befehl (siehe oben), aber 'stat' faellt aus dessen Match
+  // raus (text[4]=NUL/space) und kommt erst hier vorbei -- spart
+  // Tipparbeit.
+  if (starts_with_word(cmd, "stats") || starts_with_word(cmd, "stat")) {
     uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
     if (total_ms == 0) total_ms = 1;
     uint64_t uptime_s = total_ms / 1000ULL;
@@ -6292,31 +6338,35 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ') arg++; }
 
     // -- Status (kein Arg) --
+    // C4+C5: User-Wunsch klarere Wording. 'active' war frueher als
+    // 'aktive Kategorien' verwendet -- jetzt 'trace ist ON/OFF' als
+    // erstes Wort, und die Sektionsliste daneben. Plus: wenn trace OFF
+    // ist UND persistent != 0, in einer Message ausgeben (statt zwei).
     if (!arg || *arg == 0) {
-      // Zwei Zeilen: aktiv + persistent (wenn beide gleich, nur eine)
       char line[160]; int used;
-      used = snprintf(line, sizeof(line), "trace active:");
-      bool any_a = false;
-      for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
-        if (_trace_flags & trace_cats[k].flag) {
-          used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
-          any_a = true;
-        }
-      }
-      if (!any_a) snprintf(line + used, sizeof(line) - used, " (none)");
-      pushCompanionMessage(line);
-
-      if (_prefs.trace_flags_persistent != _trace_flags) {
-        used = snprintf(line, sizeof(line), "trace persistent (-> 'trace on'):");
-        bool any_p = false;
+      bool tr_on = (_trace_flags != 0);
+      if (tr_on) {
+        used = snprintf(line, sizeof(line), "trace ist ON\naktiv:");
         for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
-          if (_prefs.trace_flags_persistent & trace_cats[k].flag) {
+          if (_trace_flags & trace_cats[k].flag) {
             used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
-            any_p = true;
           }
         }
-        if (!any_p) snprintf(line + used, sizeof(line) - used, " (none)");
         pushCompanionMessage(line);
+      } else {
+        // trace OFF -- wenn persistent gesetzt, Hinweis in derselben Message.
+        if (_prefs.trace_flags_persistent != 0) {
+          used = snprintf(line, sizeof(line),
+                          "trace ist OFF\nNach 'trace on' wieder aktiv:");
+          for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
+            if (_prefs.trace_flags_persistent & trace_cats[k].flag) {
+              used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
+            }
+          }
+          pushCompanionMessage(line);
+        } else {
+          pushCompanionMessage("trace ist OFF (keine Kategorien gespeichert).");
+        }
       }
       return;
     }
@@ -7714,8 +7764,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
       bool strict_ok = isValidClientRepeatFreq(f_khz);
       char line[160];
+      // C1: Multi-Line statt einer langen Zeile (User-Wunsch).
       snprintf(line, sizeof(line),
-               "repeater=%s%s  profile=%s  freq=%.4f MHz  strict_ok=%s",
+               "repeater=%s%s\n"
+               "profile=%s\n"
+               "freq=%.4f MHz\n"
+               "strict_ok=%s",
                _prefs.client_repeat ? "on" : "off",
                _prefs.client_repeat_force ? " (force)" : "",
                _prefs.repeater_profile == 1 ? "normal" : "defensive",
