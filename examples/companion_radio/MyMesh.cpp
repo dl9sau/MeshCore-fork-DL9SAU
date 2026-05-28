@@ -6696,6 +6696,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // geo ist alias fuer auto (beide -> aidx 8/10 -> "auto" shortcut)
       if (aidx == 10) aidx = 8;
 
+      // Sentinel-Schutz: #local-discard ist ein Sentinel-Scope und darf
+      // NICHT modifiziert werden. Nur 'info' ist erlaubt -- alles andere
+      // (enable/disable/delete/undelete/pin/auto/off/rep/adv) wuerde die
+      // Sentinel-Semantik kaputt machen (s. Wunschliste 14 +
+      // allowPacketForward local-discard-Hard-Block).
+      if (ref.storage == SCOPE_BUILDIN && strcmp(name, "local-discard") == 0
+          && aidx != 6 /* info */) {
+        pushCompanionMessage(
+          "#local-discard ist Sentinel — nicht modifizierbar.\n"
+          "  Erlaubt: nur 'scope local-discard info'.");
+        return;
+      }
+
       // Argument nach der Aktion ermitteln
       const char* aarg = strchr(p, ' ');
       if (aarg) { while (*aarg == ' ' || *aarg == '\t') aarg++; }
@@ -7240,6 +7253,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       ScopeRef ref = findScopeByName(name);
+      // Sentinel-Schutz: local-discard nicht entfernbar (Wunschliste 14).
+      if (ref.storage == SCOPE_BUILDIN && strcmp(name, "local-discard") == 0) {
+        pushCompanionMessage(
+          "#local-discard ist Sentinel — nicht entfernbar.");
+        return;
+      }
       if (ref.storage == SCOPE_BUILDIN) {
         // Build-in -> als user_deleted markieren (Slot bleibt sticky in
         // scope_buildin_status). Vorher abklappern damit andere Status-
