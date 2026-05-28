@@ -6662,19 +6662,57 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(ovr_line, sizeof(ovr_line), "override = (none)");
       }
 
+      // Bug-Fix + Klarstellung (Test-Bericht 2026-05-29):
+      // active muss auto=prefer beruecksichtigen (Geo gewinnt VOR Default
+      // bei prefer + unterschiedlicher Region). Plus annotation an 'auto'
+      // damit User klar sieht ob Geo gerade greift oder nur 'bereit' ist.
+      TransportKey geo_k;
+      bool has_geo = chooseGeoFallbackScope(geo_k);
+      bool geo_differs_from_default = has_geo && default_set
+          && memcmp(geo_k.key, _prefs.default_scope_key, 16) != 0;
+      bool geo_wins_default = (_prefs.scope_advert_auto == 3 /* prefer */)
+                              && geo_differs_from_default;
+      bool geo_is_fallback  = (_prefs.scope_advert_auto >= 2 /* on or prefer */)
+                              && has_geo && !default_set;
+
       const char* active;
-      if (override_active) active = "override";
-      else if (bake_set)   active = "bake";
-      else if (default_set) active = "default";
-      else {
-        TransportKey tmp;
-        active = chooseGeoFallbackScope(tmp) ? "geo-fallback" : "(none)";
+      if (override_active)            active = "override";
+      else if (bake_set)              active = "bake";
+      else if (geo_wins_default)      active = "geo-fallback (gewinnt vor Default)";
+      else if (default_set)           active = "default";
+      else if (geo_is_fallback)       active = "geo-fallback";
+      else                            active = "(none)";
+
+      // auto-Annotation:
+      char auto_str[140];
+      switch (_prefs.scope_advert_auto) {
+        case 1: // off
+          snprintf(auto_str, sizeof(auto_str), "off (Geo wird nie verwendet)");
+          break;
+        case 3: // prefer
+          if (geo_wins_default)
+            snprintf(auto_str, sizeof(auto_str), "prefer (Geo gewinnt vor Default)");
+          else if (default_set)
+            snprintf(auto_str, sizeof(auto_str),
+                     "prefer (Default == Geo oder kein Geo-Match -- Default wins)");
+          else if (has_geo)
+            snprintf(auto_str, sizeof(auto_str), "prefer (Geo als Fallback)");
+          else
+            snprintf(auto_str, sizeof(auto_str), "prefer (keine Quelle)");
+          break;
+        default: // on
+          if (default_set)
+            snprintf(auto_str, sizeof(auto_str),
+                     "on (Geo bereit, greift NICHT -- Default gesetzt;\n"
+                     "       'auto prefer' liesse Geo gewinnen)");
+          else if (has_geo)
+            snprintf(auto_str, sizeof(auto_str), "on (Geo greift als Fallback)");
+          else
+            snprintf(auto_str, sizeof(auto_str), "on (kein Geo-Match)");
+          break;
       }
-      // scope_advert_auto: 1=off, 2=on, 3=prefer
-      const char* auto_str = (_prefs.scope_advert_auto == 1) ? "off"
-                           : (_prefs.scope_advert_auto == 3) ? "prefer"
-                                                              : "on";
-      char block[300];
+
+      char block[500];
       snprintf(block, sizeof(block),
                "scope advert (send hierarchy):\n"
                "  %s\n  %s\n  %s\n"
@@ -6999,14 +7037,54 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         } else {
           snprintf(ovr_line, sizeof(ovr_line), "override = (none)");
         }
-        const char* auto_str = (_prefs.scope_advert_auto == 1) ? "off"
-                             : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
+        // (Logik identisch zu 'scope' no-arg Block -- bei Aenderungen
+        //  hier mit-pflegen.)
+        TransportKey geo_k;
+        bool has_geo = chooseGeoFallbackScope(geo_k);
+        bool geo_differs_from_default = has_geo && default_set
+            && memcmp(geo_k.key, _prefs.default_scope_key, 16) != 0;
+        bool geo_wins_default = (_prefs.scope_advert_auto == 3)
+                                && geo_differs_from_default;
+        bool geo_is_fallback  = (_prefs.scope_advert_auto >= 2)
+                                && has_geo && !default_set;
+
         const char* active;
-        if (override_active) active = "override";
-        else if (bake_set)   active = "bake";
-        else if (default_set) active = "default";
-        else { TransportKey tk; active = chooseGeoFallbackScope(tk) ? "geo-fallback" : "(none)"; }
-        char block[300];
+        if (override_active)            active = "override";
+        else if (bake_set)              active = "bake";
+        else if (geo_wins_default)      active = "geo-fallback (gewinnt vor Default)";
+        else if (default_set)           active = "default";
+        else if (geo_is_fallback)       active = "geo-fallback";
+        else                            active = "(none)";
+
+        char auto_str[140];
+        switch (_prefs.scope_advert_auto) {
+          case 1:
+            snprintf(auto_str, sizeof(auto_str), "off (Geo wird nie verwendet)");
+            break;
+          case 3:
+            if (geo_wins_default)
+              snprintf(auto_str, sizeof(auto_str), "prefer (Geo gewinnt vor Default)");
+            else if (default_set)
+              snprintf(auto_str, sizeof(auto_str),
+                       "prefer (Default == Geo oder kein Geo-Match -- Default wins)");
+            else if (has_geo)
+              snprintf(auto_str, sizeof(auto_str), "prefer (Geo als Fallback)");
+            else
+              snprintf(auto_str, sizeof(auto_str), "prefer (keine Quelle)");
+            break;
+          default:
+            if (default_set)
+              snprintf(auto_str, sizeof(auto_str),
+                       "on (Geo bereit, greift NICHT -- Default gesetzt;\n"
+                       "       'auto prefer' liesse Geo gewinnen)");
+            else if (has_geo)
+              snprintf(auto_str, sizeof(auto_str), "on (Geo greift als Fallback)");
+            else
+              snprintf(auto_str, sizeof(auto_str), "on (kein Geo-Match)");
+            break;
+        }
+
+        char block[500];
         snprintf(block, sizeof(block),
                  "scope advert (send hierarchy):\n"
                  "  %s\n  %s\n  %s\n"
