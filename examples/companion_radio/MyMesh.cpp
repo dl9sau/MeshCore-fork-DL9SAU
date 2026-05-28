@@ -5094,7 +5094,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     // ---- gps power [...] - Power-Management-Konfig ----
-    if (starts_with_word(arg, "power")) {
+    // Prefix-Match (B2): 'gps pow' soll auch funktionieren.
+    bool is_power_kw = false;
+    {
+      static const CompanionChoice gps_subs[] = { { "power", false } };
+      char ambig[32];
+      int m = match_choice(arg, gps_subs, 1, ambig, sizeof(ambig));
+      is_power_kw = (m == 0);
+    }
+    if (is_power_kw) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) {
@@ -6313,13 +6321,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    if (starts_with_word(arg, "list")) {
-      for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
-        char line[160];
-        snprintf(line, sizeof(line), "  %s - %s", trace_cats[k].name, trace_cats[k].desc);
-        pushCompanionMessage(line);
+    // 'list' (mit Prefix-Match -> 'li' / 'lis' / 'list' alle ok). Test-
+    // Bericht B1: 'tra li' soll funktionieren.
+    {
+      static const CompanionChoice tr_subs[] = { { "list", false } };
+      char ambig[32];
+      int m = match_choice(arg, tr_subs, 1, ambig, sizeof(ambig));
+      if (m == 0) {
+        for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
+          char line[160];
+          snprintf(line, sizeof(line), "  %s - %s", trace_cats[k].name, trace_cats[k].desc);
+          pushCompanionMessage(line);
+        }
+        return;
       }
-      return;
+      // m == -1 = mehrdeutig (kann hier nicht passieren -- nur ein Eintrag).
+      // m < 0  = kein Match (nicht 'list') -> faellt durch zu on/off/all/<cat>.
     }
 
     // 'trace on/off' -> active = persistent (resume) / active = 0 (pause)
@@ -6579,12 +6596,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         TransportKey tmp;
         active = chooseGeoFallbackScope(tmp) ? "geo-fallback" : "(none)";
       }
+      // scope_advert_auto: 1=off, 2=on, 3=prefer
+      const char* auto_str = (_prefs.scope_advert_auto == 1) ? "off"
+                           : (_prefs.scope_advert_auto == 3) ? "prefer"
+                                                              : "on";
       char block[300];
       snprintf(block, sizeof(block),
-               "scope (nightly bake hierarchy):\n"
+               "scope advert (send hierarchy):\n"
                "  %s\n  %s\n  %s\n"
+               "  auto = %s\n"
                "  active = %s",
-               def_line, bake_line, ovr_line, active);
+               def_line, bake_line, ovr_line, auto_str, active);
       pushCompanionMessage(block);
       return;
     }
@@ -6861,9 +6883,69 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ') p++; }
 
-      // ?-Help oder no-arg
-      if (!p || *p == 0
-          || (p[0] == '?' && (p[1] == 0 || p[1] == ' '))) {
+      // No-arg: zeige den AKTUELLEN STAND der Send-Hierarchie (Test-
+      // Bericht B6: User will Status, Hilfe nur bei '?'). Wir
+      // duplizieren NICHT die Logik aus dem 'scope' no-arg Block --
+      // stattdessen leiten wir intern dorthin um. Einfacher Weg:
+      // sub_idx auf -1 zwingen und der existierende fallback-Branch
+      // erledigt das nicht (er macht per-Eintrag-dispatch). Daher
+      // hier eigene Status-Ausgabe (analog scope no-arg).
+      if (!p || *p == 0) {
+        // Reuse der scope-no-arg Logik. Der einfachste Weg ist
+        // Recursion via interner Erzeugung -- aber wir sind tief im
+        // dispatch. Kopiere stattdessen den Status-Code (ist klein).
+        // Hinweis: Wenn der scope-no-arg-Block weiterentwickelt wird,
+        // muss hier mit-gepflegt werden.
+        bool default_set = (_prefs.default_scope_key[0] != 0);
+        bool bake_set    = false;
+        for (size_t k = 0; k < sizeof(_prefs.bake_scope_key); k++) {
+          if (_prefs.bake_scope_key[k] != 0) { bake_set = true; break; }
+        }
+        uint32_t now = getRTCClock()->getCurrentTime();
+        bool override_active = (_prefs.override_expiry != 0
+                                && now < _prefs.override_expiry);
+        char def_line[80], bake_line[80], ovr_line[120];
+        snprintf(def_line, sizeof(def_line), "default = %s",
+                 default_set ? _prefs.default_scope_name : "(none)");
+        snprintf(bake_line, sizeof(bake_line), "bake = %s",
+                 bake_set ? _prefs.bake_scope_name : "(none)");
+        if (override_active) {
+          uint32_t rem = _prefs.override_expiry - now;
+          uint32_t rd = rem / 86400UL, rh = (rem % 86400UL) / 3600UL, rm = (rem % 3600UL) / 60UL;
+          if (rd > 0) snprintf(ovr_line, sizeof(ovr_line),
+                               "override = #%s (noch %lud%02luh%02lum)",
+                               _prefs.override_scope_name,
+                               (unsigned long)rd, (unsigned long)rh, (unsigned long)rm);
+          else        snprintf(ovr_line, sizeof(ovr_line),
+                               "override = #%s (noch %luh%02lum)",
+                               _prefs.override_scope_name,
+                               (unsigned long)rh, (unsigned long)rm);
+        } else if (_prefs.override_expiry != 0) {
+          snprintf(ovr_line, sizeof(ovr_line), "override = (expired)");
+        } else {
+          snprintf(ovr_line, sizeof(ovr_line), "override = (none)");
+        }
+        const char* auto_str = (_prefs.scope_advert_auto == 1) ? "off"
+                             : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
+        const char* active;
+        if (override_active) active = "override";
+        else if (bake_set)   active = "bake";
+        else if (default_set) active = "default";
+        else { TransportKey tk; active = chooseGeoFallbackScope(tk) ? "geo-fallback" : "(none)"; }
+        char block[300];
+        snprintf(block, sizeof(block),
+                 "scope advert (send hierarchy):\n"
+                 "  %s\n  %s\n  %s\n"
+                 "  auto = %s\n"
+                 "  active = %s",
+                 def_line, bake_line, ovr_line, auto_str, active);
+        pushCompanionMessage(block);
+        pushCompanionMessage("Hilfe: 'scope advert ?' fuer Sub-Befehle.");
+        return;
+      }
+
+      // ?-Help -- nur bei explizitem ?
+      if (p[0] == '?' && (p[1] == 0 || p[1] == ' ')) {
         const char* state = (_prefs.scope_advert_auto == 1) ? "off"
                           : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
         char r[200];
@@ -6881,9 +6963,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "    Temp Override (max 30d, persistent ueber Reboot)");
         pushCompanionMessage(
           "  scope advert auto off | on | prefer\n"
-          "    off:    Geo wird nie verwendet\n"
-          "    on:     Geo als Fallback wenn Default leer\n"
-          "    prefer: Geo schlaegt Default wenn ortlich anders");
+          "    Geo-vs-Default Send-Hierarchie");
         return;
       }
 
@@ -7645,7 +7725,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // -- profile [defensive|normal] (Wunschliste 8) --
-    if (starts_with_word(arg, "profile")) {
+    // Prefix-Match (B3): 'rep pro' soll auch funktionieren.
+    bool is_profile_kw = false;
+    {
+      static const CompanionChoice rep_subs[] = { { "profile", false } };
+      char ambig[32];
+      int m = match_choice(arg, rep_subs, 1, ambig, sizeof(ambig));
+      is_profile_kw = (m == 0);
+    }
+    if (is_profile_kw) {
       const char* pv = strchr(arg, ' ');
       if (pv) { while (*pv == ' ') pv++; }
       if (!pv || *pv == 0) {
