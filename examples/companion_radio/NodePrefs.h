@@ -206,12 +206,18 @@ struct NodePrefs {  // persisted to file
   // 1..64. CLI: set flood_max <N> (oder flood.max).
   uint8_t        flood_max;
 
-  // Wenn 1: Geo-Region (chooseGeoFallbackScope) gewinnt VOR Default-
-  // Scope, sofern sie eine ANDERE Region liefert als das Default. "User
-  // ist offensichtlich nicht zu Hause -- nimm den lokalen Scope statt
-  // dem Home-Scope". Default 0 (off). Wirkt sowohl auf reguläre
-  // sendFloodScoped-Pfade als auch auf chooseNightFloodScope.
-  uint8_t        scope_geo_prefers;
+  // Geo-vs-Default Send-Hierarchie fuer eigene Adverts (Wunschliste 13).
+  //   0 = uninitialisiert (begin() migriert)
+  //   1 = off:    Default-Scope gewinnt immer. Geo wird nie verwendet.
+  //   2 = on:     Geo als Fallback wenn Default leer (heutiges Standard-
+  //               Verhalten ohne scope_geo_prefers).
+  //   3 = prefer: Geo gewinnt vor Default wenn ortliche Region != Default.
+  //               (= altes scope_geo_prefers=1)
+  // Migration aus altem scope_geo_prefers (war an gleichem Offset):
+  //   alter Wert 0 -> 2 (on)
+  //   alter Wert 1 -> 3 (prefer)
+  // CLI: scope advert auto off|on|prefer
+  uint8_t        scope_advert_auto;
 
   // Repeater-Profil (Wunschliste 8):
   //   0 = defensive (Default, aktuelles Verhalten: PATH nur lokal,
@@ -223,4 +229,13 @@ struct NodePrefs {  // persisted to file
   // wieder defensiv. Andere Filter (client_repeat, duty, flood_max,
   // scope-Allowlist) bleiben unveraendert.
   uint8_t        repeater_profile;
+
+  // Globaler Auto-Schalter fuer Repeat (Wunschliste 13).
+  //   0 = uninitialisiert (begin() initialisiert auf 2)
+  //   1 = off: alle auto-rep-Eintraege werden ignoriert. Nur Pin und
+  //            explizit OFF zaehlen. Use-Case: temporaer Geo-Bbox-mode
+  //            stilllegen ohne Per-Eintrag-Config zu verlieren.
+  //   2 = on (Default): auto-rep-Eintraege greifen wenn GPS in Bbox.
+  // CLI: scope repeater auto on|off
+  uint8_t        scope_repeater_auto;
 };
