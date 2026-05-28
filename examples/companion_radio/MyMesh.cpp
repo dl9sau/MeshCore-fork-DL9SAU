@@ -4577,13 +4577,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Hoechste Send-Prioritaet, persistent ueber Reboots, max 30d TTL.");
         pushCompanionMessage(
           "scope advert auto off|on|prefer\n"
-          "  Geo-vs-Default Send-Hierarchie:\n"
-          "    off:    Geo wird nie verwendet\n"
-          "    on:     Geo als Fallback wenn Default leer (Default)\n"
-          "    prefer: Geo schlaegt Default wenn ortlich anders");
+          "  Geo-vs-Default Send-Hierarchie:");
         pushCompanionMessage(
-          "Alt-Befehle 'scope default/bake/override <n>' bleiben als Alias\n"
-          "fuer Muscle-Memory erlaubt.");
+          "    off:    Geo wird nie verwendet\n"
+          "    on:     Geo als Fallback wenn Default leer (Default)");
+        pushCompanionMessage(
+          "    prefer: Geo schlaegt Default wenn ortlich andere Region");
         return;
       }
       if (topic_prefix_match(topic, "scope")) {
@@ -4596,7 +4595,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "4) Per-Eintrag ('scope <name> ...')");
         pushCompanionMessage(
           "Send-Hierarchie (nightly bake / 'advert flood'):\n"
-          "override > bake > default > geo-fallback");
+          "  override > bake > default-oder-geo (gemaess scope advert auto)");
         pushCompanionMessage(
           "scope\n"
           "  ohne Argument: Status der drei Send-Quellen + Registry-Count");
@@ -4713,14 +4712,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "duty")) {
         pushCompanionMessage(
-          "duty: Duty-Cycle-Schutz (10% TX-Airtime pro rollendem 1h-Fenster). "
-          "Ohne Arg -> Status (stats, blocked, soft/hard-Limits)."
-        );
+          "duty: Duty-Cycle-Schutz (EU-Vorgabe 10% TX-Airtime pro\n"
+          "rollendem 1h-Fenster). Ohne Arg -> Status (stats, blocked,\n"
+          "soft/hard-Limits in % VOM 10%-Limit).");
         pushCompanionMessage(
-          "duty soft N (0..99): Repeats ab N% droppen. duty hard N (1..100): "
-          "ALLE TX ab N% droppen. duty reset -> Default 80/100. "
-          "Trace-Kategorie 'duty'."
-        );
+          "duty soft N (0..99): Repeats droppen ab N% vom 10%-Limit\n"
+          "  (z.B. 80 = bei 8.0% Airtime).");
+        pushCompanionMessage(
+          "duty hard N (1..100): ALLE TX droppen ab N% vom 10%-Limit\n"
+          "  (z.B. 100 = bei 10.0% Airtime = harter EU-Cap).");
+        pushCompanionMessage(
+          "duty reset -> Default 80/100. Trace-Kategorie 'duty'.");
         return;
       }
       if (topic_prefix_match(topic, "repeater")) {
@@ -4735,12 +4737,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "gecleared. Ohne Arg -> Status."
         );
         pushCompanionMessage(
-          "repeater profile [defensive | normal]: Filter-Tiefe.\n"
-          "  defensive (Default): PATH nur fuer lokale Endpoints,\n"
-          "                       Repeats mit reduzierter Power + CR5.\n"
-          "  normal:    ALLE PATH-Pakete repeaten, volle Power +\n"
-          "                       konfigurierte CR (=echter Repeater)."
-        );
+          "repeater profile [defensive | normal]: Filter-Tiefe.");
+        pushCompanionMessage(
+          "  defensive (Default):\n"
+          "    PATH nur fuer lokale Endpoints,\n"
+          "    Repeats mit reduzierter Power + CR5.");
+        pushCompanionMessage(
+          "  normal:\n"
+          "    ALLE PATH-Pakete repeaten, volle Power +\n"
+          "    konfigurierte CR (= echter Repeater).");
         return;
       }
       if (topic_prefix_match(topic, "status")) {
@@ -5439,17 +5444,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.repeater_profile != 0) non_default_count++;
     }
-    // duty
+    // duty (Werte sind % vom 10%-EU-Airtime-Limit)
     if (show_all || _prefs.duty_soft_pct != 80) {
-      snprintf(tmp, sizeof(tmp), "  duty_soft_pct = %u%%%s",
+      snprintf(tmp, sizeof(tmp), "  duty_soft_pct = %u%% (= %u.%u%% Airtime)%s",
                (unsigned)_prefs.duty_soft_pct,
+               (unsigned)_prefs.duty_soft_pct / 10,
+               (unsigned)_prefs.duty_soft_pct % 10,
                _prefs.duty_soft_pct == 80 ? " [default]" : " (default: 80)");
       add_line(tmp);
       if (_prefs.duty_soft_pct != 80) non_default_count++;
     }
     if (show_all || _prefs.duty_hard_pct != 100) {
-      snprintf(tmp, sizeof(tmp), "  duty_hard_pct = %u%%%s",
+      snprintf(tmp, sizeof(tmp), "  duty_hard_pct = %u%% (= %u.%u%% Airtime)%s",
                (unsigned)_prefs.duty_hard_pct,
+               (unsigned)_prefs.duty_hard_pct / 10,
+               (unsigned)_prefs.duty_hard_pct % 10,
                _prefs.duty_hard_pct == 100 ? " [default]" : " (default: 100)");
       add_line(tmp);
       if (_prefs.duty_hard_pct != 100) non_default_count++;
