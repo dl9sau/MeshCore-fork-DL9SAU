@@ -3844,8 +3844,10 @@ void MyMesh::updateMotionTracking() {
     _pos_anchor_millis = now;
 
     if (was_moving != _is_moving) {
-      traceCompanion(TRACE_MOTION, "[motion] %s (Anker-Distanz %d m)",
-                     _is_moving ? "moving" : "static", (int)d_m);
+      char ll[32];
+      formatLatLonDM(ll, sizeof(ll), cur_lat, cur_lon);
+      traceCompanion(TRACE_MOTION, "[motion] %s (Anker-Distanz %d m) pos=%s",
+                     _is_moving ? "moving" : "static", (int)d_m, ll);
     }
     // Movement just started — accelerate the next advert so a fresh
     // position goes out promptly, instead of waiting out the static
@@ -4049,10 +4051,19 @@ void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
   strncpy(_last_geo_reco, buf, sizeof(_last_geo_reco) - 1);
   _last_geo_reco[sizeof(_last_geo_reco) - 1] = 0;
 
-  // Koordinaten im nautischen DM-Format "DD-MM,M N/S DDD-MM,M E/W"
-  // (Komma als Dezimal-Trenner, Grad-Breite 2 für Lat, 3 für Lon mit
-  // führenden Nullen). Z.B. lat=54.0767 lon=6.7467 -> "54-04,6N 006-44,8E".
-  auto fmt_dm = [](char* out, size_t out_size, double v, int deg_width, char pos, char neg) {
+  char ll[32];
+  formatLatLonDM(ll, sizeof(ll), lat, lon);
+  pushDebugLog("[GEO-SCOPE] %s -> %s", ll, buf);
+  // Zusätzlich im Companion-Channel anzeigen, damit die Info auch bei
+  // verbundener App sichtbar wird (nicht nur im Debug-Protokoll-View).
+  char chat[256];
+  snprintf(chat, sizeof(chat), "GEO-SCOPE @ %s: %s", ll, buf);
+  pushCompanionMessage(chat);
+}
+
+// Helper-Implementation. Siehe Header fuer Format-Doku.
+void MyMesh::formatLatLonDM(char* out, size_t out_size, double lat, double lon) const {
+  auto fmt_one = [](char* p, size_t n, double v, int deg_w, char pos, char neg) {
     char hemi = (v >= 0) ? pos : neg;
     double a = fabs(v);
     int deg = (int)a;
@@ -4061,18 +4072,12 @@ void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
     int min_frac = (int)((rem_min - min_int) * 10.0 + 0.5);
     if (min_frac >= 10) { min_frac = 0; min_int++; }
     if (min_int >= 60)  { min_int = 0;  deg++; }
-    snprintf(out, out_size, "%0*d-%02d,%d%c", deg_width, deg, min_int, min_frac, hemi);
+    snprintf(p, n, "%0*d-%02d,%d%c", deg_w, deg, min_int, min_frac, hemi);
   };
   char lat_dm[16], lon_dm[16];
-  fmt_dm(lat_dm, sizeof(lat_dm), lat, 2, 'N', 'S');
-  fmt_dm(lon_dm, sizeof(lon_dm), lon, 3, 'E', 'W');
-
-  pushDebugLog("[GEO-SCOPE] %s %s -> %s", lat_dm, lon_dm, buf);
-  // Zusätzlich im Companion-Channel anzeigen, damit die Info auch bei
-  // verbundener App sichtbar wird (nicht nur im Debug-Protokoll-View).
-  char chat[256];
-  snprintf(chat, sizeof(chat), "GEO-SCOPE @ %s %s: %s", lat_dm, lon_dm, buf);
-  pushCompanionMessage(chat);
+  fmt_one(lat_dm, sizeof(lat_dm), lat, 2, 'N', 'S');
+  fmt_one(lon_dm, sizeof(lon_dm), lon, 3, 'E', 'W');
+  snprintf(out, out_size, "%s %s", lat_dm, lon_dm);
 }
 
 // ---------------------------------------------------------------------------
@@ -4829,11 +4834,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned long)_tx_digi_count,
              (unsigned long)_bt_connect_count);
     pushCompanionMessage(line);
-    snprintf(line, sizeof(line),
-             "gps=%s fix_ever=%d moving=%d  pos=%.4f,%.4f",
-             _prefs.gps_enabled ? "on" : "off",
-             (int)_gps_had_fix_ever, (int)_is_moving,
-             sensors.node_lat, sensors.node_lon);
+    {
+      char ll[32];
+      formatLatLonDM(ll, sizeof(ll), sensors.node_lat, sensors.node_lon);
+      snprintf(line, sizeof(line),
+               "gps=%s fix_ever=%d moving=%d  pos=%s",
+               _prefs.gps_enabled ? "on" : "off",
+               (int)_gps_had_fix_ever, (int)_is_moving, ll);
+    }
     pushCompanionMessage(line);
     const char* zh = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) ? "on" : "off";
     const char* nl = (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) ? "on" : "off";
@@ -5066,14 +5074,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(interval_str, sizeof(interval_str), "%lus",
                  (unsigned long)_prefs.gps_interval);
       }
+      char ll[32];
+      formatLatLonDM(ll, sizeof(ll), sensors.node_lat, sensors.node_lon);
       char block[200];
+      // C-Punkt aus Tests: Leerzeile zwischen gps-Line und pos lag am
+      // Word-Wrap des langen Strings, nicht an explizitem \n\n. Mit
+      // dem kuerzeren DM-Format passt jetzt alles in eine Zeile.
       snprintf(block, sizeof(block),
                "gps=%s  fix_ever=%d  moving=%d  app-poll-interval=%s\n"
-               "\n"
-               "pos=%.4f,%.4f",
+               "pos=%s",
                state, (int)_gps_had_fix_ever, (int)_is_moving,
-               interval_str,
-               sensors.node_lat, sensors.node_lon);
+               interval_str, ll);
       pushCompanionMessage(block);
       return;
     }

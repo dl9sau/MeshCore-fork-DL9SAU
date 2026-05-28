@@ -371,6 +371,14 @@ private:
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
   bool signalFitsInIsmBand(uint32_t freq_khz, uint32_t bw_hz) const;
+
+  // Koordinaten im nautischen DM-Format "DD-MM,M N/S DDD-MM,M E/W"
+  // (Komma als Dezimal-Trenner, Grad-Breite 2 fuer Lat, 3 fuer Lon mit
+  // fuehrenden Nullen). Anzeige-Kontext in allen User-sichtbaren
+  // Ausgaben (status, gps, motion-trace, geo-scope, scope info bbox).
+  // NICHT in 'get/set' -- dort bleiben Dezimalgrade (config backup).
+  // Output benoetigt mindestens 18 Byte ("DD-MM,M N DDD-MM,M E\0").
+  void formatLatLonDM(char* out, size_t out_size, double lat, double lon) const;
   // Copies _prefs.node_name into dest, truncated to the first
   // CR_CHANNEL_SENDER_MAX_WORDS whitespace-separated words.
   void copyShortSenderName(char* dest, size_t dest_size) const;
