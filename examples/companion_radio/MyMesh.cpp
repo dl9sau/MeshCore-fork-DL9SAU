@@ -7123,9 +7123,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "Flags: R=aktiv jetzt, A=auto-mode, P=pin, D=disabled,\n"
         "X=deleted, b=hat bbox; (b-in)=Build-in, (ext)=Extras");
       pushCompanionMessage(
-        "  ! = Eigenes geo auto-Advert waehlt diesen Scope nie aus.\n"
-        "      (Repeat ist davon unberuehrt; explizite 'scope advert bake/\n"
-        "       default/override <name>' auch.)");
+        "  ! = Eigenes geo auto-Advert nimmt diesen Scope nie.");
+      pushCompanionMessage(
+        "      Repeat + explizite 'scope advert <verb>' nicht betroffen.");
       return;
     }
 
