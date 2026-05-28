@@ -4083,6 +4083,8 @@ void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
 }
 
 // Helper-Implementation. Siehe Header fuer Format-Doku.
+// Minuten-Nachkomma jetzt 3 Stellen (User-Wunsch nach Genauigkeit):
+// fueher 'DD-MM,M', jetzt 'DD-MM,MMM'.
 void MyMesh::formatLatLonDM(char* out, size_t out_size, double lat, double lon) const {
   auto fmt_one = [](char* p, size_t n, double v, int deg_w, char pos, char neg) {
     char hemi = (v >= 0) ? pos : neg;
@@ -4090,12 +4092,13 @@ void MyMesh::formatLatLonDM(char* out, size_t out_size, double lat, double lon) 
     int deg = (int)a;
     double rem_min = (a - deg) * 60.0;
     int min_int = (int)rem_min;
-    int min_frac = (int)((rem_min - min_int) * 10.0 + 0.5);
-    if (min_frac >= 10) { min_frac = 0; min_int++; }
-    if (min_int >= 60)  { min_int = 0;  deg++; }
-    snprintf(p, n, "%0*d-%02d,%d%c", deg_w, deg, min_int, min_frac, hemi);
+    // 3 Nachkommastellen der Minuten (~0.001' ~ 1.8 m am Aequator).
+    int min_frac = (int)((rem_min - min_int) * 1000.0 + 0.5);
+    if (min_frac >= 1000) { min_frac = 0; min_int++; }
+    if (min_int >= 60)    { min_int = 0;  deg++; }
+    snprintf(p, n, "%0*d-%02d,%03d%c", deg_w, deg, min_int, min_frac, hemi);
   };
-  char lat_dm[16], lon_dm[16];
+  char lat_dm[20], lon_dm[20];
   fmt_one(lat_dm, sizeof(lat_dm), lat, 2, 'N', 'S');
   fmt_one(lon_dm, sizeof(lon_dm), lon, 3, 'E', 'W');
   snprintf(out, out_size, "%s %s", lat_dm, lon_dm);
@@ -4610,12 +4613,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Hoechste Send-Prioritaet, persistent ueber Reboots, max 30d TTL.");
         pushCompanionMessage(
           "scope advert auto off|on|prefer\n"
-          "  Geo-vs-Default Send-Hierarchie:");
+          "  Send-Hierarchie fuer eigene Auto-Adverts:");
         pushCompanionMessage(
-          "    off:    Geo wird nie verwendet\n"
-          "    on:     Geo als Fallback wenn Default leer (Default)");
+          "    on (Default):\n"
+          "      Default-Scope gewinnt. Geo nur als Fallback wenn\n"
+          "      kein Default gesetzt ist.");
         pushCompanionMessage(
-          "    prefer: Geo schlaegt Default wenn ortlich andere Region");
+          "    prefer:\n"
+          "      Geo schlaegt Default, wenn die ortliche Region eine\n"
+          "      andere ist als das Default. ('User ist nicht zu Hause')");
+        pushCompanionMessage(
+          "    off:\n"
+          "      Geo wird nie verwendet, nur Default/Bake/Override.");
         return;
       }
       if (topic_prefix_match(topic, "scope")) {
@@ -6059,6 +6068,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
       emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
+      // owner_info (Wunschliste 7) -- String, eigenes emit-Pattern.
+      {
+        bool eq = (_prefs.owner_info[0] == 0);
+        if (!list_changed || !eq) {
+          if (!eq) changed++;
+          if (eq) snprintf(tmp, sizeof(tmp), "  owner_info = \"\" [default]");
+          else    snprintf(tmp, sizeof(tmp), "  owner_info = \"%s\" (default: \"\")", _prefs.owner_info);
+          gline(tmp);
+        }
+      }
 
       if (list_changed && changed == 0) gline("  (keine Aenderungen — alle Werte auf Default)");
       gflush();
@@ -6313,9 +6332,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       fmt_secs(cur_s,  sizeof(cur_s),  cur);
       fmt_secs(soft_s, sizeof(soft_s), soft_ms);
       fmt_secs(hard_s, sizeof(hard_s), hard_ms);
+      // limits (pro Stunde): macht den Bezug zur EU-erlaubten 10%-Airtime
+      // explizit (User-Feedback). soft/hard sind Anteile von 10% airtime.
       snprintf(block, sizeof(block),
                "duty: last_h=%s of %s (%.1f%%)\n"
-               "  soft=%u%% (%s) hard=%u%% (%s) blocked=%lu",
+               "  limits (pro Stunde):\n"
+               "    soft=%u%% (%s)\n"
+               "    hard=%u%% (%s)\n"
+               "  blocked=%lu",
                cur_s, hard_s, cur_pct,
                (unsigned)_prefs.duty_soft_pct, soft_s,
                (unsigned)_prefs.duty_hard_pct, hard_s,
@@ -6774,7 +6798,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (aidx < 0) {
         pushCompanionMessage(
           "Unbekannte Aktion. Erlaubt:\n"
-          "  pin | auto | off      Repeat-Mode (= rep <verb>)\n"
+          "  pin | auto | off      Repeat-Mode\n"
           "  adv auto|off          Advert-Mode\n"
           "  disable | enable      temporaer aus/an\n"
           "  delete | undelete     dauerhaft verstecken (Build-in)\n"
@@ -7012,8 +7036,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  scope advert override <name> [<n>h|<n>d] | clear\n"
           "    Temp Override (max 30d, persistent ueber Reboot)");
         pushCompanionMessage(
-          "  scope advert auto off | on | prefer\n"
-          "    Geo-vs-Default Send-Hierarchie");
+          "  scope advert auto off | on | prefer");
+        pushCompanionMessage(
+          "    on (Default):\n"
+          "      Default-Scope gewinnt. Geo als Fallback wenn\n"
+          "      kein Default gesetzt ist.");
+        pushCompanionMessage(
+          "    prefer:\n"
+          "      Geo schlaegt Default, wenn die ortliche Region eine\n"
+          "      andere ist als das Default. ('User ist nicht zu Hause')");
+        pushCompanionMessage(
+          "    off:\n"
+          "      Geo wird nie verwendet, nur Default/Bake/Override.");
         return;
       }
 
@@ -7531,7 +7565,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("  scope repeater mode all|allowlist\n    Global: Liste anwenden (allowlist) oder alles (all)");
         pushCompanionMessage("  scope repeater auto on|off\n    Global: auto-rep-Eintraege greifen (on) oder werden ignoriert (off)\n    off = nur Pin-Eintraege zaehlen");
         pushCompanionMessage("Per Eintrag (siehe 'scope <name> ?'):");
-        pushCompanionMessage("  scope <name> pin | auto | off\n    Repeat-Mode (= rep <verb>)");
+        pushCompanionMessage("Per-Eintrag (mit Name):");
+        pushCompanionMessage("  scope <name> pin\n    immer repeaten");
+        pushCompanionMessage("  scope <name> auto\n    repeaten wenn GPS in Bbox (Tag A / A-)");
+        pushCompanionMessage("  scope <name> off\n    nie repeaten");
+        pushCompanionMessage("  scope <name> ?  fuer alle Aktionen");
         return;
       }
       if (!sub || *sub == 0) {
@@ -7627,7 +7665,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             "Legende: (A)=aktiv (auto Bbox),\n"
             "(A-)=inaktiv (auto Bbox),\n"
             "(P)=pin (immer aktiv), (D)=disabled\n"
-            "Umschalten: scope <name> pin | geo | off");
+            "Umschalten: scope <name> pin | auto | off\n"
+            "Hilfe: 'scope repeater ?' fuer Sub-Befehle.");
         }
         return;
       }
