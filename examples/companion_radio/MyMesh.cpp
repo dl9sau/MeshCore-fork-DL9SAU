@@ -3706,6 +3706,12 @@ bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
   //   2) bake-scope (persistent, explizit fuer nightly)
   //   3) resolveDefaultOrGeo (Default/Geo gemaess scope_advert_auto)
   //   4) geo-fallback (Position-basiert, wenn nichts anderes)
+  //   5) #local LAST-RESORT (User-Konsens 2026-05-29): wenn alles
+  //      andere fehlt, geht der Nightly mit #local raus -- single-
+  //      hop, harmlos, minimaler Netz-Impact. Stellt sicher dass
+  //      ein User der ALLE Send-Scopes geleert hat (kein default,
+  //      bake, override) UND ausserhalb aller Geo-Bboxen sitzt
+  //      trotzdem erreichbar ist.
   uint32_t now = getRTCClock()->getCurrentTime();
   // 1) override: aktiv solange now < expiry
   if (_prefs.override_expiry != 0 && now < _prefs.override_expiry) {
@@ -3726,7 +3732,14 @@ bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
   // 3) Default oder Geo (gemaess scope_advert_auto)
   if (resolveDefaultOrGeo(out_key)) return true;
   // 4) geo fallback (wenn weder Default noch geo_prefers gegriffen hat)
-  return chooseGeoFallbackScope(out_key);
+  if (chooseGeoFallbackScope(out_key)) return true;
+  // 5) Last-Resort: #local aus der Build-in-Tabelle.
+  int idx = dl9sau_find_region_index("local");
+  if (idx >= 0 && idx < _buildin_keys_count) {
+    out_key = _buildin_keys[idx];
+    return true;
+  }
+  return false;
 }
 
 void MyMesh::scheduleNextNightFlood() {
@@ -3985,6 +3998,13 @@ void MyMesh::doNightFloodAdvert() {
     } else if (keyNotNull(_prefs.default_scope_key, 16)
         && memcmp(scope.key, _prefs.default_scope_key, 16) == 0) {
       src = "default"; nm = _prefs.default_scope_name;
+    } else {
+      // Wenn key == #local Build-in-Key -> Last-Resort gegriffen.
+      int li = dl9sau_find_region_index("local");
+      if (li >= 0 && li < _buildin_keys_count
+          && memcmp(scope.key, _buildin_keys[li].key, 16) == 0) {
+        src = "last-resort"; nm = "local";
+      }
     }
     traceCompanion(TRACE_ADVERTS, "[adv] nightly-flood scope=#%s (%s) code=%04X",
                    nm[0] ? nm : "?", src, (unsigned)codes[0]);
@@ -6777,7 +6797,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else if (geo_wins_default)      active = "geo-fallback (gewinnt vor Default)";
       else if (default_set)           active = "default";
       else if (geo_is_fallback)       active = "geo-fallback";
-      else                            active = "(none)";
+      else                            active = "#local (last-resort)";
 
       // auto-Annotation:
       char auto_str[140];
