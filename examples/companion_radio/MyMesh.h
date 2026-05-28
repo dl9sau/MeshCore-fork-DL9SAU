@@ -87,6 +87,35 @@
 #define REQ_TYPE_GET_STATUS             0x01 // same as _GET_STATS
 #define REQ_TYPE_KEEP_ALIVE             0x02
 #define REQ_TYPE_GET_TELEMETRY_DATA     0x03
+#define REQ_TYPE_GET_NEIGHBOURS         0x06
+#define REQ_TYPE_GET_OWNER_INFO         0x07  // FIRMWARE_VER_LEVEL >= 2
+
+// Wunschliste 7 Phase 3: Anonymous-Request-Typen (Discovery-Queries).
+// Werden in onAnonDataRecv anhand der effektiven Role gegated.
+#define ANON_REQ_TYPE_REGIONS    0x01
+#define ANON_REQ_TYPE_OWNER      0x02
+#define ANON_REQ_TYPE_BASIC      0x03  // just remote clock + features
+
+// Wire-Layout fuer REQ_TYPE_GET_STATUS Antwort (Wunschliste 7 Phase 4).
+// 1:1 kompatibel zu simple_repeater::RepeaterStats damit die App den
+// gleichen Parser verwenden kann.
+struct RepeaterStats {
+  uint16_t batt_milli_volts;
+  uint16_t curr_tx_queue_len;
+  int16_t  noise_floor;
+  int16_t  last_rssi;
+  uint32_t n_packets_recv;
+  uint32_t n_packets_sent;
+  uint32_t total_air_time_secs;
+  uint32_t total_up_time_secs;
+  uint32_t n_sent_flood, n_sent_direct;
+  uint32_t n_recv_flood, n_recv_direct;
+  uint16_t err_events;
+  int16_t  last_snr;   // x 4
+  uint16_t n_direct_dups, n_flood_dups;
+  uint32_t total_rx_air_time_secs;
+  uint32_t n_recv_errors;
+};
 
 struct AdvertPath {
   uint8_t pubkey_prefix[7];
@@ -273,6 +302,21 @@ protected:
   uint8_t onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                            uint8_t len, uint8_t *reply) override;
   void onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) override;
+
+  // Wunschliste 7 Phase 3: ANON_REQ Discovery-Queries (OWNER/REGIONS/BASIC).
+  // Override Mesh::onAnonDataRecv. Gating per effectiveAdvertRole().
+  void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
+                      const mesh::Identity& sender, uint8_t* data, size_t len) override;
+
+  // Wunschliste 7 Phase 2: effektiver Advert-Role (Auflösung von 'auto').
+  //   Returns ADV_TYPE_* (1=CHAT, 2=REPEATER, 3=ROOM, 4=SENSOR).
+  // Wird sowohl von createSelfAdvert als auch von den Discovery-Query-
+  // Handlern verwendet (single source of truth).
+  uint8_t effectiveAdvertRole() const;
+  // Shadows BaseChatMesh::createSelfAdvert(...). Verwendet
+  // effectiveAdvertRole() statt hartcodiert ADV_TYPE_CHAT.
+  mesh::Packet* createSelfAdvert(const char* name);
+  mesh::Packet* createSelfAdvert(const char* name, double lat, double lon);
   void onControlDataRecv(mesh::Packet *packet) override;
   void onRawDataRecv(mesh::Packet *packet) override;
   void onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,

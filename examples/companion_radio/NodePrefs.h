@@ -238,4 +238,19 @@ struct NodePrefs {  // persisted to file
   //   2 = on (Default): auto-rep-Eintraege greifen wenn GPS in Bbox.
   // CLI: scope repeater auto on|off
   uint8_t        scope_repeater_auto;
+
+  // Owner-Info (Wunschliste 7 Phase 1). Free-form Beschreibung der Node,
+  // wird bei ANON_REQ_TYPE_OWNER und REQ_TYPE_GET_OWNER_INFO mitgesendet.
+  // Layout analog CommonCLI/simple_repeater.
+  char           owner_info[120];
+
+  // Advert-Role (Wunschliste 7 Phase 2). Steuert sowohl den ADV_TYPE in
+  // createSelfAdvert als auch die Discovery-Query-Antworten (anon/peer).
+  //   0 = auto      -> effectiveAdvertRole() per Matrix (siehe MyMesh.cpp)
+  //   1 = chat      -> ADV_TYPE_CHAT
+  //   2 = repeater  -> ADV_TYPE_REPEATER
+  //   3 = sensor    -> ADV_TYPE_SENSOR
+  //   4 = room      -> ADV_TYPE_ROOM
+  // CLI: advert role auto | fixed chat|repeater|sensor|room
+  uint8_t        advert_role;
 };

@@ -926,8 +926,205 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   }
 }
 
+// ----- Wunschliste 7 (Discoverability) -------------------------------------
+//
+// Phase 2: effectiveAdvertRole.
+// Resolved Wire-Type fuer Adverts UND Discovery-Query-Antworten. Wenn
+// _prefs.advert_role gesetzt (1..4) -> fester Type. Wenn 0 (auto):
+// Matrix aus client_repeat + repeater_profile:
+//   client_repeat == 0                          -> CHAT
+//   client_repeat == 1, profile == normal       -> REPEATER
+//   client_repeat == 1, profile == defensive    -> CHAT (chat-tauglich)
+uint8_t MyMesh::effectiveAdvertRole() const {
+  switch (_prefs.advert_role) {
+    case 1: return ADV_TYPE_CHAT;
+    case 2: return ADV_TYPE_REPEATER;
+    case 3: return ADV_TYPE_SENSOR;
+    case 4: return ADV_TYPE_ROOM;
+    default: break;  // 0 = auto
+  }
+  if (_prefs.client_repeat == 0) return ADV_TYPE_CHAT;
+  if (_prefs.repeater_profile == 1) return ADV_TYPE_REPEATER;  // normal
+  return ADV_TYPE_CHAT;  // defensive (Default)
+}
+
+// Shadows BaseChatMesh::createSelfAdvert. Wirkt nur fuer externe Aufrufer
+// (= MyMesh.cpp); BaseChatMesh selbst ruft seine Variante nicht intern.
+mesh::Packet* MyMesh::createSelfAdvert(const char* name) {
+  uint8_t app_data[MAX_ADVERT_DATA_SIZE];
+  uint8_t app_data_len;
+  {
+    AdvertDataBuilder builder(effectiveAdvertRole(), name);
+    app_data_len = builder.encodeTo(app_data);
+  }
+  return createAdvert(self_id, app_data, app_data_len);
+}
+
+mesh::Packet* MyMesh::createSelfAdvert(const char* name, double lat, double lon) {
+  uint8_t app_data[MAX_ADVERT_DATA_SIZE];
+  uint8_t app_data_len;
+  {
+    AdvertDataBuilder builder(effectiveAdvertRole(), name, lat, lon);
+    app_data_len = builder.encodeTo(app_data);
+  }
+  return createAdvert(self_id, app_data, app_data_len);
+}
+
+// Phase 3: ANON_REQ Handler. Antwortet abhaengig von effectiveAdvertRole:
+//   CHAT     -> nur BASIC (clock)
+//   REPEATER -> OWNER + REGIONS + BASIC + handleRequest (Phase 4)
+//   SENSOR   -> BASIC (clock); GET_TELEMETRY in onContactRequest
+//   ROOM     -> nichts (eigene Wunschliste 9)
+void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
+                            const mesh::Identity& sender, uint8_t* data, size_t len) {
+  if (packet->getPayloadType() != PAYLOAD_TYPE_ANON_REQ) return;
+  if (len < 5) return;  // mindestens timestamp(4) + type(1)
+
+  uint32_t sender_timestamp;
+  memcpy(&sender_timestamp, data, 4);
+  uint8_t req_type = data[4];
+
+  uint8_t role = effectiveAdvertRole();
+  bool allow_basic   = (role == ADV_TYPE_CHAT)
+                    || (role == ADV_TYPE_REPEATER)
+                    || (role == ADV_TYPE_SENSOR);
+  bool allow_owner   = (role == ADV_TYPE_REPEATER);
+  bool allow_regions = (role == ADV_TYPE_REPEATER);
+
+  // Reply-Path aus dem Request extrahieren (analog simple_repeater).
+  // data[5] = (path_len << 6) | (path_hash_size - 1) ... eigentlich
+  // (size-1)<<6 | len; siehe simple_repeater handleAnonOwnerReq.
+  if (len < 6) return;
+  uint8_t reply_path_meta = data[5];
+  uint8_t reply_path_len  = reply_path_meta & 63;
+  uint8_t hash_size       = (reply_path_meta >> 6) + 1;
+  if (6 + (size_t)reply_path_len * hash_size > len) return;  // truncated
+  const uint8_t* reply_path = &data[6];
+
+  // Reply-Datagram bauen: 4 Byte sender_timestamp-Echo, 4 Byte unsere
+  // RTC-Zeit, dann typ-spezifischer Payload.
+  uint8_t reply_data[160];
+  uint8_t reply_len = 0;
+  memcpy(&reply_data[0], &sender_timestamp, 4);
+  uint32_t now = getRTCClock()->getCurrentTime();
+  memcpy(&reply_data[4], &now, 4);
+  reply_len = 8;
+
+  if (req_type == ANON_REQ_TYPE_OWNER && allow_owner && packet->isRouteDirect()) {
+    // name + owner_info
+    int n = snprintf((char*)&reply_data[8], sizeof(reply_data) - 8,
+                     "%s\n%s", _prefs.node_name, _prefs.owner_info);
+    if (n < 0) return;
+    if ((size_t)n > sizeof(reply_data) - 8 - 1) n = sizeof(reply_data) - 8 - 1;
+    reply_len = 8 + (uint8_t)n;
+  } else if (req_type == ANON_REQ_TYPE_REGIONS && allow_regions && packet->isRouteDirect()) {
+    // Comma-separated Liste der aktiven Repeat-Scopes (Build-in Repeat-Set
+    // + Extras, mit mode != OFF). Best-Effort; truncate bei buffer-Limit.
+    size_t off = 8;
+    auto append_name = [&](const char* nm) -> bool {
+      size_t nl = strlen(nm);
+      size_t need = nl + (off > 8 ? 1 : 0);  // +1 fuer Komma-Separator
+      if (off + need + 1 > sizeof(reply_data)) return false;  // +1 NUL
+      if (off > 8) reply_data[off++] = ',';
+      memcpy(&reply_data[off], nm, nl);
+      off += nl;
+      return true;
+    };
+    bool auto_en = (_prefs.scope_repeater_auto == 2);
+    for (int i = 0; i < _buildin_keys_count; i++) {
+      uint8_t st = getBuildinStatus(i);
+      if (st & (SCOPE_STATUS_DISABLED | SCOPE_STATUS_USER_DELETED)) continue;
+      uint8_t m = st & SCOPE_STATUS_REPEAT_MASK;
+      if (m == SCOPE_STATUS_REPEAT_OFF) continue;
+      if (m == SCOPE_STATUS_REPEAT_AUTO && !auto_en) continue;
+      const char* nm = NULL;
+      if (!dl9sau_get_region((size_t)i, &nm, NULL, NULL, NULL, NULL)) continue;
+      if (!append_name(nm)) break;
+    }
+    for (int i = 0; i < _prefs.scope_extras_count; i++) {
+      uint8_t st = getScopeStatus({SCOPE_EXTRAS, i});
+      if (st & (SCOPE_STATUS_DISABLED | SCOPE_STATUS_USER_DELETED)) continue;
+      uint8_t m = st & SCOPE_STATUS_REPEAT_MASK;
+      if (m == SCOPE_STATUS_REPEAT_OFF) continue;
+      if (m == SCOPE_STATUS_REPEAT_AUTO && !auto_en) continue;
+      if (!append_name(_prefs.scope_extras[i].name)) break;
+    }
+    reply_data[off] = 0;
+    reply_len = (uint8_t)off;
+  } else if (req_type == ANON_REQ_TYPE_BASIC && allow_basic && packet->isRouteDirect()) {
+    // features-byte (analog simple_repeater)
+    reply_data[8] = 0;  // keine Bridge-Features im Companion
+    if (_prefs.client_repeat == 0) reply_data[8] |= 0x80;  // 'disabled' = nicht-repeating
+    reply_len = 9;
+  } else {
+    return;  // unbekannt oder per role gegated
+  }
+
+  // Reply zurueck. Wenn Request flood war: createPathReturn (analog
+  // simple_repeater). Wenn direct + path bekannt: sendDirect; sonst
+  // sendFlood.
+  if (packet->isRouteFlood()) {
+    mesh::Packet* path = createPathReturn(sender, secret, packet->path, packet->path_len,
+                                          PAYLOAD_TYPE_RESPONSE, reply_data, reply_len);
+    if (path) sendFlood(path, 300 /* ms reply-delay */);
+  } else {
+    mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, secret,
+                                          reply_data, reply_len);
+    if (!reply) return;
+    if (reply_path_len > 0) {
+      uint8_t path_meta = ((hash_size - 1) << 6) | (reply_path_len & 63);
+      sendDirect(reply, (uint8_t*)reply_path, path_meta, 300 /* ms reply-delay */);
+    } else {
+      sendFlood(reply, 300 /* ms reply-delay */);
+    }
+  }
+}
+
 uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                                  uint8_t len, uint8_t *reply) {
+  uint8_t role = effectiveAdvertRole();
+
+  // Wunschliste 7 Phase 4: REQ_TYPE_GET_STATUS (RepeaterStats).
+  // Nur fuer Role == REPEATER. Wire-Layout 1:1 wie simple_repeater.
+  if (data[0] == REQ_TYPE_GET_STATUS && role == ADV_TYPE_REPEATER) {
+    memcpy(reply, &sender_timestamp, 4);
+    RepeaterStats stats;
+    stats.batt_milli_volts     = (uint16_t)board.getBattMilliVolts();
+    stats.curr_tx_queue_len    = (uint16_t)_mgr->getOutboundTotal();
+    stats.noise_floor          = (int16_t)_radio->getNoiseFloor();
+    stats.last_rssi            = (int16_t)radio_driver.getLastRSSI();
+    stats.n_packets_recv       = radio_driver.getPacketsRecv();
+    stats.n_packets_sent       = radio_driver.getPacketsSent();
+    stats.total_air_time_secs  = getTotalAirTime() / 1000;
+    stats.total_up_time_secs   = millis() / 1000;
+    stats.n_sent_flood         = getNumSentFlood();
+    stats.n_sent_direct        = getNumSentDirect();
+    stats.n_recv_flood         = getNumRecvFlood();
+    stats.n_recv_direct        = getNumRecvDirect();
+    stats.err_events           = 0;
+    stats.last_snr             = (int16_t)(radio_driver.getLastSNR() * 4);
+    stats.n_direct_dups        = ((SimpleMeshTables*)getTables())->getNumDirectDups();
+    stats.n_flood_dups         = ((SimpleMeshTables*)getTables())->getNumFloodDups();
+    stats.total_rx_air_time_secs = getReceiveAirTime() / 1000;
+    stats.n_recv_errors        = radio_driver.getPacketsRecvErrors();
+    memcpy(&reply[4], &stats, sizeof(stats));
+    return 4 + sizeof(stats);
+  }
+
+  // Wunschliste 7 Phase 4: REQ_TYPE_GET_OWNER_INFO.
+  if (data[0] == REQ_TYPE_GET_OWNER_INFO && role == ADV_TYPE_REPEATER) {
+    memcpy(reply, &sender_timestamp, 4);
+    int n = snprintf((char*)&reply[4], 160 - 4,
+                     "%s\n%s\n%s", FIRMWARE_VERSION, _prefs.node_name, _prefs.owner_info);
+    if (n < 0) return 0;
+    return 4 + (uint8_t)n;
+  }
+
+  // NOTE: REQ_TYPE_GET_NEIGHBOURS noch nicht implementiert -- der
+  // Companion hat keine pub_key-getrackten Neighbours wie der
+  // simple_repeater (nur HeardList mit 1-Byte-Hashes). Spaeter
+  // nachruesten falls die App das nutzt.
+
   if (data[0] == REQ_TYPE_GET_TELEMETRY_DATA) {
     uint8_t permissions = 0;
     uint8_t cp = contact.flags >> 1; // LSB used as 'favourite' bit (so only use upper bits)
@@ -1397,6 +1594,11 @@ void MyMesh::begin(bool has_display) {
   }
   // repeater_profile: 0 = defensive (Default), 1 = normal
   if (_prefs.repeater_profile > 1) _prefs.repeater_profile = 0;
+  // advert_role (Wunschliste 7): 0=auto, 1=chat, 2=repeater, 3=sensor, 4=room
+  if (_prefs.advert_role > 4) _prefs.advert_role = 0;
+  // owner_info: NULL-Terminator sicherstellen (defensive gegen
+  // unterminierte Flash-Daten).
+  _prefs.owner_info[sizeof(_prefs.owner_info) - 1] = 0;
   // scope_regional_hop_limit: 0 = uninitialisiert -> Companion-Default 3.
   // Range 1..flood_max (sonst widerspruechlich — flood_max ist die harte
   // Obergrenze, regional muss drunter liegen).
@@ -4288,6 +4490,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "override > default > geo-fallback. Scope-Quelle wird in der "
           "Antwort gemeldet."
         );
+        pushCompanionMessage(
+          "advert role [auto | fixed chat|repeater|sensor|room]:\n"
+          "  Welcher ADV_TYPE in createSelfAdvert + welche Discovery-\n"
+          "  Queries beantwortet werden (Wunschliste 7). 'auto' folgt der\n"
+          "  Matrix aus client_repeat + repeater_profile."
+        );
         return;
       }
       if (topic_prefix_match(topic, "autoadv")) {
@@ -4432,7 +4640,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "          airtime_factor rx_boosted_gain");
         pushCompanionMessage(
           "App:    name manual_add_contacts multi_acks autoadd_config\n"
-          "        autoadd_max_hops path_hash_mode buzzer_quiet");
+          "        autoadd_max_hops path_hash_mode buzzer_quiet\n"
+          "        owner_info (free-form, max 119 Zeichen, '|' -> Newline)");
         pushCompanionMessage(
           "Hinweise: Sued/West negativ (lat -10.5). freq MHz, bw kHz. "
           "Delays = Faktor*Airtime (tx/direct 0..2, rx 0..20). "
@@ -4651,6 +4860,76 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   if (starts_with_word(cmd, "advert")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
+
+    // Wunschliste 7 Phase 2: advert role <auto|fixed <type>>
+    if (arg && starts_with_word(arg, "role")) {
+      const char* rarg = strchr(arg, ' ');
+      if (rarg) { while (*rarg == ' ') rarg++; }
+      auto roleName = [](uint8_t v) {
+        switch (v) {
+          case 0: return "auto";
+          case 1: return "chat";
+          case 2: return "repeater";
+          case 3: return "sensor";
+          case 4: return "room";
+          default: return "?";
+        }
+      };
+      auto roleNameByAdv = [](uint8_t adv) {
+        switch (adv) {
+          case ADV_TYPE_CHAT:     return "chat";
+          case ADV_TYPE_REPEATER: return "repeater";
+          case ADV_TYPE_SENSOR:   return "sensor";
+          case ADV_TYPE_ROOM:     return "room";
+          default: return "?";
+        }
+      };
+      if (!rarg || *rarg == 0
+          || (rarg[0] == '?' && (rarg[1] == 0 || rarg[1] == ' '))) {
+        char r[200];
+        snprintf(r, sizeof(r),
+          "advert role = %s (effective: %s)\n"
+          "  auto                  Default per Matrix (repeater_profile + client_repeat)\n"
+          "  fixed chat|repeater|sensor|room   Type pinnen",
+          roleName(_prefs.advert_role),
+          roleNameByAdv(effectiveAdvertRole()));
+        pushCompanionMessage(r);
+        return;
+      }
+      if (starts_with_word(rarg, "auto")) {
+        _prefs.advert_role = 0;
+        savePrefs();
+        char r[120]; snprintf(r, sizeof(r),
+          "OK - advert role = auto (effective: %s)",
+          roleNameByAdv(effectiveAdvertRole()));
+        pushCompanionMessage(r);
+        return;
+      }
+      if (starts_with_word(rarg, "fixed")) {
+        const char* tv = strchr(rarg, ' ');
+        if (tv) { while (*tv == ' ') tv++; }
+        if (!tv || *tv == 0) { pushCompanionMessage("Usage: advert role fixed chat|repeater|sensor|room"); return; }
+        static const CompanionChoice rch[] = {
+          { "chat",     false },  // -> 1
+          { "repeater", false },  // -> 2
+          { "sensor",   false },  // -> 3
+          { "room",     false },  // -> 4
+        };
+        char rambig[40];
+        int ri = match_choice(tv, rch, 4, rambig, sizeof(rambig));
+        if (ri == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rambig); pushCompanionMessage(r); return; }
+        if (ri < 0)   { pushCompanionMessage("Usage: advert role fixed chat|repeater|sensor|room"); return; }
+        _prefs.advert_role = (uint8_t)(ri + 1);
+        savePrefs();
+        char r[120]; snprintf(r, sizeof(r),
+          "OK - advert role = fixed %s",
+          roleName(_prefs.advert_role));
+        pushCompanionMessage(r);
+        return;
+      }
+      pushCompanionMessage("Usage: advert role [auto | fixed chat|repeater|sensor|room]");
+      return;
+    }
 
     bool want_flood = false;
     if (arg && *arg) {
@@ -5189,6 +5468,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.scope_repeater_auto != 2) non_default_count++;
     }
+    // advert_role (Wunschliste 7)
+    if (show_all || _prefs.advert_role != 0) {
+      const char* rn = (_prefs.advert_role == 1) ? "chat"
+                     : (_prefs.advert_role == 2) ? "repeater"
+                     : (_prefs.advert_role == 3) ? "sensor"
+                     : (_prefs.advert_role == 4) ? "room" : "auto";
+      snprintf(tmp, sizeof(tmp), "  advert_role = %s%s", rn,
+               _prefs.advert_role == 0 ? " [default]" : " (default: auto)");
+      add_line(tmp);
+      if (_prefs.advert_role != 0) non_default_count++;
+    }
+    // owner_info: zeigen wenn gesetzt
+    if (show_all || _prefs.owner_info[0] != 0) {
+      snprintf(tmp, sizeof(tmp), "  owner_info = %s",
+               _prefs.owner_info[0] ? _prefs.owner_info : "(leer) [default]");
+      add_line(tmp);
+      if (_prefs.owner_info[0] != 0) non_default_count++;
+    }
     // trace persistent
     if (show_all || _prefs.trace_flags_persistent != 0) {
       snprintf(tmp, sizeof(tmp), "  trace_flags_persistent = 0x%04X%s",
@@ -5346,6 +5643,42 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       StrHelper::strncpy(_prefs.node_name, clean, sizeof(_prefs.node_name));
       savePrefs();
       char r[80]; snprintf(r, sizeof(r), "OK - name = \"%s\"", _prefs.node_name);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // -- set owner_info <text> (case-sensitiv, raw_cmd, lange Strings) --
+    // Wunschliste 7 Phase 1: free-form Beschreibung der Node. Max 119
+    // Zeichen + NUL. '|' wird in '\n' uebersetzt (analog CommonCLI).
+    if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) {
+      const char* rp = raw_cmd;
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip "set"
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;          // skip "owner_info"
+      while (*rp == ' ' || *rp == '\t') rp++;
+      if (!*rp) {
+        // leerer Text -> clear
+        _prefs.owner_info[0] = 0;
+        savePrefs();
+        pushCompanionMessage("OK - owner_info cleared.");
+        return;
+      }
+      char* dp = _prefs.owner_info;
+      char* dend = dp + sizeof(_prefs.owner_info) - 1;
+      while (*rp && dp < dend) {
+        *dp++ = (*rp == '|') ? '\n' : *rp;
+        rp++;
+      }
+      *dp = 0;
+      // Trailing whitespace strippen.
+      while (dp > _prefs.owner_info
+             && (dp[-1] == ' ' || dp[-1] == '\t' || dp[-1] == '\r' || dp[-1] == '\n')) {
+        --dp; *dp = 0;
+      }
+      savePrefs();
+      char r[60]; snprintf(r, sizeof(r), "OK - owner_info = (%u Zeichen)",
+                            (unsigned)strlen(_prefs.owner_info));
       pushCompanionMessage(r);
       return;
     }
@@ -5676,6 +6009,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "direct_txdelay") == 0)    snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
     else if (strcmp(key, "scope_regional_hops") == 0) snprintf(r, sizeof(r), "scope_regional_hops = %u", (unsigned)_prefs.scope_regional_hop_limit);
     else if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) snprintf(r, sizeof(r), "flood_max = %u", (unsigned)_prefs.flood_max);
+    else if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) snprintf(r, sizeof(r), "owner_info = %s", _prefs.owner_info[0] ? _prefs.owner_info : "(leer)");
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
     }
