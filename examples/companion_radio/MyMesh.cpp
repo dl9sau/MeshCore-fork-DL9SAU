@@ -293,6 +293,26 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
 //    direct-heard list (zero-hop HeardList) -> reduced. We let these
 //    through allowPacketForward via the contacts <48h check, but they
 //    are not "our" local nodes in the strict sense.
+// Wunschliste 6b: Loop-Detection-Maxima je Hash-Size (analog
+// simple_repeater). Index = Hash-Size (1..3 Byte). Index 0 unused.
+static const uint8_t max_loop_minimal[]  = { 0, 4, 2, 1 };
+static const uint8_t max_loop_moderate[] = { 0, 2, 1, 1 };
+static const uint8_t max_loop_strict[]   = { 0, 1, 1, 1 };
+
+bool MyMesh::isLooped(const mesh::Packet* packet, const uint8_t max_counters[]) const {
+  uint8_t hash_size  = packet->getPathHashSize();
+  uint8_t hash_count = packet->getPathHashCount();
+  uint8_t n = 0;
+  const uint8_t* path = packet->path;
+  while (hash_count > 0) {
+    if (self_id.isHashMatch(path, hash_size)) n++;
+    hash_count--;
+    path += hash_size;
+  }
+  if (hash_size == 0 || hash_size > 3) return false;  // safety
+  return n >= max_counters[hash_size];
+}
+
 bool MyMesh::shouldReduceFloodRetransmit(const mesh::Packet* packet, uint8_t n) const {
   // Wunschliste 8: im normal-Profil keine Power/CR-Reduktion. Egal wie
   // viele Retransmits — der Repeater verhaelt sich wie ein "echter".
@@ -641,10 +661,28 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   bool decision = false;
   const char* reject_reason = "?";
 
+  // Wunschliste 6b: Loop-Detection-Vorbereitung. Pre-compute ob das
+  // Paket im normal-Profile als Loop verworfen werden soll. Wir nutzen
+  // das Ergebnis als else-if-Pruefer, damit nicht-geloopte Pakete den
+  // normalen ptype-Dispatch weiter durchlaufen.
+  bool loop_drop = (_prefs.repeater_profile == 1 /* normal */
+                    && _prefs.loop_detect != LOOP_DETECT_OFF
+                    && packet->isRouteFlood());
+  if (loop_drop) {
+    const uint8_t* maxs =
+        (_prefs.loop_detect == LOOP_DETECT_MINIMAL)  ? max_loop_minimal
+      : (_prefs.loop_detect == LOOP_DETECT_MODERATE) ? max_loop_moderate
+                                                     : max_loop_strict;
+    loop_drop = isLooped(packet, maxs);
+  }
+
   // path-length cap (hop count, not byte length). _prefs.flood_max
   // analog CommonCLI/simple_repeater 'flood.max'.
   if (packet->getPathHashCount() > _prefs.flood_max) {
     reject_reason = "path-too-long";
+  }
+  else if (loop_drop) {
+    reject_reason = "loop-detected";
   }
   // ADVERTs and ACKs: forward only if the packet is scoped (transport-coded)
   else if (ptype == PAYLOAD_TYPE_ADVERT || ptype == PAYLOAD_TYPE_ACK ||
@@ -1611,6 +1649,8 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.repeater_profile > 1) _prefs.repeater_profile = 0;
   // advert_role (Wunschliste 7): 0=auto, 1=chat, 2=repeater, 3=sensor, 4=room
   if (_prefs.advert_role > 4) _prefs.advert_role = 0;
+  // loop_detect (Wunschliste 6b): 0=off, 1=minimal, 2=moderate, 3=strict
+  if (_prefs.loop_detect > 3) _prefs.loop_detect = 0;
   // owner_info: NULL-Terminator sicherstellen (defensive gegen
   // unterminierte Flash-Daten).
   _prefs.owner_info[sizeof(_prefs.owner_info) - 1] = 0;
@@ -4696,6 +4736,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
           "Repeat:   repeat flood_max scope_regional_hops\n"
+          "          loop_detect (off|minimal|moderate|strict)\n"
           "Delays:   rxdelay txdelay direct_txdelay\n"
           "Telemetry: telemetry_mode_base loc env\n"
           "          airtime_factor rx_boosted_gain");
@@ -5503,6 +5544,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.repeater_profile != 0) non_default_count++;
     }
+    // loop_detect (Wunschliste 6b)
+    if (show_all || _prefs.loop_detect != 0) {
+      const char* nm = (_prefs.loop_detect == 0) ? "off"
+                     : (_prefs.loop_detect == 1) ? "minimal"
+                     : (_prefs.loop_detect == 2) ? "moderate" : "strict";
+      snprintf(tmp, sizeof(tmp), "  loop_detect = %s%s%s",
+               nm,
+               _prefs.loop_detect == 0 ? " [default]" : " (default: off)",
+               (_prefs.loop_detect != 0 && _prefs.repeater_profile != 1)
+                   ? "  (inaktiv -- profile=defensive)" : "");
+      add_line(tmp);
+      if (_prefs.loop_detect != 0) non_default_count++;
+    }
     // duty (Werte sind % vom 10%-EU-Airtime-Limit)
     if (show_all || _prefs.duty_soft_pct != 80) {
       snprintf(tmp, sizeof(tmp), "  duty_soft_pct = %u%% (= %u.%u%% Airtime)%s",
@@ -5915,6 +5969,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Loop-Detection-Modus (Wunschliste 6b).
+    // 'loop.detect' (CommonCLI-Stil) als Alias erlaubt.
+    if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
+      static const CompanionChoice ld_modes[] = {
+        { "off",      false },  // 0
+        { "minimal",  false },  // 1
+        { "moderate", false },  // 2
+        { "strict",   false },  // 3
+      };
+      char amb[40];
+      int m = match_choice(value_lc, ld_modes, 4, amb, sizeof(amb));
+      if (m == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", amb); pushCompanionMessage(r); return; }
+      if (m < 0)   { pushCompanionMessage("Usage: set loop_detect off|minimal|moderate|strict"); return; }
+      _prefs.loop_detect = (uint8_t)m;
+      savePrefs();
+      const char* nm = (m == 0) ? "off" : (m == 1) ? "minimal" : (m == 2) ? "moderate" : "strict";
+      char r[160];
+      snprintf(r, sizeof(r),
+        "OK - loop_detect = %s\n"
+        "  Wirkt NUR im 'repeater profile normal'\n"
+        "  (defensive Profile braucht keine Loop-Detection).",
+        nm);
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Globale Repeat-Hop-Obergrenze. Range 1..64 analog CommonCLI flood.max.
     // 'flood.max' (CommonCLI-Stil) als Alias erlaubt.
     if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) {
@@ -6068,6 +6148,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
       emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
+      // loop_detect (Wunschliste 6b) -- enum, eigene Anzeige.
+      {
+        uint8_t v = _prefs.loop_detect;
+        bool eq = (v == 0);
+        if (!list_changed || !eq) {
+          if (!eq) changed++;
+          const char* nm = (v == 0) ? "off" : (v == 1) ? "minimal" : (v == 2) ? "moderate" : "strict";
+          if (eq) snprintf(tmp, sizeof(tmp), "  loop_detect = off [default]");
+          else    snprintf(tmp, sizeof(tmp), "  loop_detect = %s (default: off)", nm);
+          gline(tmp);
+        }
+      }
       // owner_info (Wunschliste 7) -- String, eigenes emit-Pattern.
       {
         bool eq = (_prefs.owner_info[0] == 0);
@@ -6114,6 +6206,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "scope_regional_hops") == 0) snprintf(r, sizeof(r), "scope_regional_hops = %u", (unsigned)_prefs.scope_regional_hop_limit);
     else if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) snprintf(r, sizeof(r), "flood_max = %u", (unsigned)_prefs.flood_max);
     else if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) snprintf(r, sizeof(r), "owner_info = %s", _prefs.owner_info[0] ? _prefs.owner_info : "(leer)");
+    else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
+      const char* nm = (_prefs.loop_detect == 0) ? "off" : (_prefs.loop_detect == 1) ? "minimal" : (_prefs.loop_detect == 2) ? "moderate" : "strict";
+      snprintf(r, sizeof(r), "loop_detect = %s", nm);
+    }
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
     }
@@ -7400,7 +7496,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(
         "  ! = Eigenes geo auto-Advert nimmt diesen Scope nie.");
       pushCompanionMessage(
-        "      Repeat + explizite 'scope advert <verb>' nicht betroffen.");
+        "      Repeat-Verhalten bleibt unberuehrt.");
+      pushCompanionMessage(
+        "      'scope advert default/bake/override <name>' kann diesen\n"
+        "      Scope trotzdem explizit waehlen.");
       return;
     }
 
@@ -7882,14 +7981,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool strict_ok = isValidClientRepeatFreq(f_khz);
       char line[160];
       // C1: Multi-Line statt einer langen Zeile (User-Wunsch).
+      // Wunschliste 6b: loop_detect mit anzeigen wenn != off.
+      const char* ld = (_prefs.loop_detect == 0) ? "off"
+                     : (_prefs.loop_detect == 1) ? "minimal"
+                     : (_prefs.loop_detect == 2) ? "moderate" : "strict";
       snprintf(line, sizeof(line),
                "repeater=%s%s\n"
                "profile=%s\n"
+               "loop_detect=%s%s\n"
                "freq=%.4f MHz\n"
                "strict_ok=%s",
                _prefs.client_repeat ? "on" : "off",
                _prefs.client_repeat_force ? " (force)" : "",
                _prefs.repeater_profile == 1 ? "normal" : "defensive",
+               ld,
+               (_prefs.repeater_profile != 1 && _prefs.loop_detect != 0)
+                   ? " (inaktiv -- profile=defensive)" : "",
                _prefs.freq, strict_ok ? "yes" : "no");
       pushCompanionMessage(line);
       return;

@@ -316,7 +316,7 @@ Quelle: User-Anfrage in dieser Session, 2026-05-26.
 
 
 --------------------------------------------------------------------------------
-6. flood_max + loop.detect Companion-CLI Mirror
+6. flood_max + loop.detect Companion-CLI Mirror  ERLEDIGT
 --------------------------------------------------------------------------------
 
 Ist-Zustand:
@@ -713,7 +713,7 @@ User-Tests dazwischen.
 Quelle: User-Anregung in dieser Session, 2026-05-28.
 
 
-12. flood_max + loop.detect Companion-CLI Mirror (NEU OFFEN)
+12. flood_max + loop.detect Companion-CLI Mirror  ERLEDIGT
 --------------------------------------------------------------------------------
 Siehe Punkt 6 oben. flood_max ERLEDIGT (Commit a7450b24). loop.detect
 noch nicht eingebaut — Companion hat heute nur 8-Byte hasSeen-Cache,

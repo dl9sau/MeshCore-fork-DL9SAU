@@ -253,4 +253,17 @@ struct NodePrefs {  // persisted to file
   //   4 = room      -> ADV_TYPE_ROOM
   // CLI: advert role auto | fixed chat|repeater|sensor|room
   uint8_t        advert_role;
+
+  // Loop-Detection-Modus (Wunschliste 6b). Analog CommonCLI/
+  // simple_repeater. Pro Hash-Size ein maximaler Self-Occurrence-Count
+  // im Pfad -- ab Schwelle wird das Paket verworfen.
+  //   0 = off       (Default; greift nur im normal-Profile)
+  //   1 = minimal   { 1B:4, 2B:2, 3B:1 }
+  //   2 = moderate  { 1B:2, 2B:1, 3B:1 }
+  //   3 = strict    { 1B:1, 2B:1, 3B:1 }
+  // GATING: nur aktiv wenn repeater_profile == 1 (normal). Defensive
+  // Profile leitet ohnehin nur an lokal-bekannte Endpoints weiter --
+  // Schleifen koennen da nicht entstehen.
+  // CLI: set loop_detect <mode> (oder loop.detect fuer CommonCLI-Stil)
+  uint8_t        loop_detect;
 };

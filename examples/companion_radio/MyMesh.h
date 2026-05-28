@@ -96,6 +96,12 @@
 #define ANON_REQ_TYPE_OWNER      0x02
 #define ANON_REQ_TYPE_BASIC      0x03  // just remote clock + features
 
+// Wunschliste 6b: Loop-Detection-Modi (analog CommonCLI).
+#define LOOP_DETECT_OFF          0
+#define LOOP_DETECT_MINIMAL      1
+#define LOOP_DETECT_MODERATE     2
+#define LOOP_DETECT_STRICT       3
+
 // Wire-Layout fuer REQ_TYPE_GET_STATUS Antwort (Wunschliste 7 Phase 4).
 // 1:1 kompatibel zu simple_repeater::RepeaterStats damit die App den
 // gleichen Parser verwenden kann.
@@ -317,6 +323,11 @@ protected:
   // effectiveAdvertRole() statt hartcodiert ADV_TYPE_CHAT.
   mesh::Packet* createSelfAdvert(const char* name);
   mesh::Packet* createSelfAdvert(const char* name, double lat, double lon);
+
+  // Wunschliste 6b: Loop-Detection. Zaehlt wie oft unser self_id-Hash
+  // (in der angegebenen Hash-Size) im Path bereits vorkommt. Returns
+  // true wenn n >= max_counters[hash_size]. Analog simple_repeater.
+  bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]) const;
   void onControlDataRecv(mesh::Packet *packet) override;
   void onRawDataRecv(mesh::Packet *packet) override;
   void onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
