@@ -4318,6 +4318,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Global: Liste ueberhaupt anwenden (allowlist) oder alle\n"
           "  scoped Pakete repeaten (all).");
         pushCompanionMessage(
+          "scope repeater auto on|off\n"
+          "  Global: auto-rep-Eintraege greifen (on, Default) oder\n"
+          "  werden ignoriert (off, nur Pin zaehlt).");
+        pushCompanionMessage(
           "Per Eintrag (statt der alten 'scope repeater add/remove/..'):");
         pushCompanionMessage(
           "  scope <name> pin     immer aktiv (Tag P)\n"
@@ -4329,13 +4333,39 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  scope <name> delete  dauerhaft verstecken (Build-in)");
         return;
       }
+      if (topic_prefix_match(topic, "scope advert")
+          || topic_prefix_match(topic, "scope adv")) {
+        pushCompanionMessage(
+          "scope advert: konfiguriert was meine eigenen Auto-Adverts senden.");
+        pushCompanionMessage(
+          "scope advert default <name>|clear\n"
+          "  Default-Scope fuer Auto-Adverts.");
+        pushCompanionMessage(
+          "scope advert bake <name>|clear\n"
+          "  Nightly-Flood-Advert nutzt diesen Scope (kann weiter sein\n"
+          "  als default, z.B. de-be -> de-bebb).");
+        pushCompanionMessage(
+          "scope advert override <name> [<n>h|<n>d]|clear\n"
+          "  Hoechste Send-Prioritaet, persistent ueber Reboots, max 30d TTL.");
+        pushCompanionMessage(
+          "scope advert auto off|on|prefer\n"
+          "  Geo-vs-Default Send-Hierarchie:\n"
+          "    off:    Geo wird nie verwendet\n"
+          "    on:     Geo als Fallback wenn Default leer (Default)\n"
+          "    prefer: Geo schlaegt Default wenn ortlich anders");
+        pushCompanionMessage(
+          "Alt-Befehle 'scope default/bake/override <n>' bleiben als Alias\n"
+          "fuer Muscle-Memory erlaubt.");
+        return;
+      }
       if (topic_prefix_match(topic, "scope")) {
         pushCompanionMessage(
-          "scope: drei Bereiche.");
+          "scope: vier Bereiche.");
         pushCompanionMessage(
-          "1) eigene Send-Policy (default/bake/override)\n"
-          "2) Registry (Liste bekannter Scopes)\n"
-          "3) Repeater-Policy ('scope repeater', 'help scope repeater')");
+          "1) Auto-Adverts ('scope advert', 'help scope advert')\n"
+          "2) Registry (scope list/add/remove/info/regions)\n"
+          "3) Repeater-Policy ('scope repeater', 'help scope repeater')\n"
+          "4) Per-Eintrag ('scope <name> ...')");
         pushCompanionMessage(
           "Send-Hierarchie (nightly bake / 'advert flood'):\n"
           "override > bake > default > geo-fallback");
@@ -5141,6 +5171,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                ovr_set ? " (default: (none))" : " [default]");
       add_line(tmp);
       if (ovr_set) non_default_count++;
+    }
+    // scope advert auto (Wunschliste 13)
+    if (show_all || _prefs.scope_advert_auto != 2) {
+      const char* st = (_prefs.scope_advert_auto == 1) ? "off"
+                     : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
+      snprintf(tmp, sizeof(tmp), "  scope_advert_auto = %s%s", st,
+               _prefs.scope_advert_auto == 2 ? " [default]" : " (default: on)");
+      add_line(tmp);
+      if (_prefs.scope_advert_auto != 2) non_default_count++;
+    }
+    // scope repeater auto (Wunschliste 13)
+    if (show_all || _prefs.scope_repeater_auto != 2) {
+      const char* st = (_prefs.scope_repeater_auto == 1) ? "off" : "on";
+      snprintf(tmp, sizeof(tmp), "  scope_repeater_auto = %s%s", st,
+               _prefs.scope_repeater_auto == 2 ? " [default]" : " (default: on)");
+      add_line(tmp);
+      if (_prefs.scope_repeater_auto != 2) non_default_count++;
     }
     // trace persistent
     if (show_all || _prefs.trace_flags_persistent != 0) {
@@ -6176,15 +6223,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // -- Sub-Befehl-Dispatch via match_choice (Prefix-Matching erlaubt).
     // 'remove' und 'clear' sind no_abbrev (zerstoerend).
     static const CompanionChoice scope_subs[] = {
-      { "default",  false },  // 0  - eigene Send-Default
-      { "bake",     false },  // 1  - nightly bake
-      { "override", false },  // 2  - persistent override mit TTL
+      { "default",  false },  // 0  - eigene Send-Default (auch unter 'advert')
+      { "bake",     false },  // 1  - nightly bake (auch unter 'advert')
+      { "override", false },  // 2  - persistent override (auch unter 'advert')
       { "list",     false },  // 3  - Registry (Liste A) anzeigen
       { "add",      false },  // 4  - Registry-Eintrag hinzufuegen
       { "remove",   true  },  // 5  - Registry-Eintrag loeschen (no_abbrev!)
       { "info",     false },  // 6  - Detail-Anzeige fuer einen Eintrag
-      { "repeater", false },  // 7  - Sub-Namespace: Repeat-Policy (Liste B)
+      { "repeater", false },  // 7  - Sub-Namespace: Repeat-Policy
       { "regions",  false },  // 8  - Built-in Region-Tabelle (read-only)
+      { "advert",   false },  // 9  - Sub-Namespace: Advert-Policy (Wunschliste 13)
     };
     char scope_ambig[80];
     int sub_idx = match_choice(arg, scope_subs,
@@ -6209,10 +6257,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // ? — Top-Level-Hilfe
       if (first_word[0] == '?' && first_word[1] == 0) {
         pushCompanionMessage("scope — Sub-Befehle:");
-        pushCompanionMessage("  scope default | bake | override <...>");
-        pushCompanionMessage("  scope list | add | remove | info | regions");
-        pushCompanionMessage("  scope repeater [...]   ('scope rep ?')");
-        pushCompanionMessage("  scope <name> pin|geo|off|disable|delete|advert|info");
+        pushCompanionMessage("  scope advert [...]   ('scope adv ?')\n    Eigene Adverts: default/bake/override/auto");
+        pushCompanionMessage("  scope repeater [...]   ('scope rep ?')\n    Repeat-Policy + globaler Auto-Schalter");
+        pushCompanionMessage("  scope list | add | remove | info | regions\n    Registry");
+        pushCompanionMessage("  scope <name> pin|geo|off|disable|delete|advert|info\n    Per-Eintrag");
         return;
       }
 
@@ -6399,6 +6447,104 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       pushCompanionMessage("(unbehandelte action)");
       return;
+    }
+
+    // -- scope advert <sub> ... (Wunschliste 13) --
+    // Sub-Namespace fuer alles Advert-bezogene:
+    //   scope advert default <n>|clear     -> sub_idx 0
+    //   scope advert bake <n>|clear        -> sub_idx 1
+    //   scope advert override <n> [TTL]    -> sub_idx 2
+    //   scope advert auto off|on|prefer    -> hier behandelt
+    // Re-Dispatch fuer default/bake/override: arg + sub_idx werden auf
+    // die existierenden Handler umgebogen und das if-chain faellt durch.
+    if (sub_idx == 9) {
+      const char* p = strchr(arg, ' ');
+      if (p) { while (*p == ' ') p++; }
+
+      // ?-Help oder no-arg
+      if (!p || *p == 0
+          || (p[0] == '?' && (p[1] == 0 || p[1] == ' '))) {
+        const char* state = (_prefs.scope_advert_auto == 1) ? "off"
+                          : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
+        char r[200];
+        snprintf(r, sizeof(r),
+          "scope advert — Sub-Befehle (Status auto = %s):", state);
+        pushCompanionMessage(r);
+        pushCompanionMessage(
+          "  scope advert default <name> | clear\n"
+          "    Default-Scope fuer eigene Auto-Adverts");
+        pushCompanionMessage(
+          "  scope advert bake <name> | clear\n"
+          "    Nightly-Flood-Advert nutzt diesen Scope");
+        pushCompanionMessage(
+          "  scope advert override <name> [<n>h|<n>d] | clear\n"
+          "    Temp Override (max 30d, persistent ueber Reboot)");
+        pushCompanionMessage(
+          "  scope advert auto off | on | prefer\n"
+          "    off:    Geo wird nie verwendet\n"
+          "    on:     Geo als Fallback wenn Default leer\n"
+          "    prefer: Geo schlaegt Default wenn ortlich anders");
+        return;
+      }
+
+      static const CompanionChoice adv_subs[] = {
+        { "default",  false },  // 0 -> dispatch to existing sub_idx==0
+        { "bake",     false },  // 1 -> sub_idx==1
+        { "override", false },  // 2 -> sub_idx==2
+        { "auto",     false },  // 3 -> handled here
+      };
+      char adv_ambig[40];
+      int av = match_choice(p, adv_subs, 4, adv_ambig, sizeof(adv_ambig));
+      if (av == -1) {
+        char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", adv_ambig);
+        pushCompanionMessage(r); return;
+      }
+      if (av < 0) {
+        pushCompanionMessage(
+          "Sub-Aktion unbekannt. 'scope advert ?' fuer Liste.");
+        return;
+      }
+
+      if (av == 3) {
+        // scope advert auto off|on|prefer
+        const char* val = strchr(p, ' ');
+        if (val) { while (*val == ' ') val++; }
+        if (!val || *val == 0) {
+          const char* state = (_prefs.scope_advert_auto == 1) ? "off"
+                            : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
+          char r[160];
+          snprintf(r, sizeof(r),
+            "scope advert auto = %s\n"
+            "  off / on / prefer  (siehe 'scope advert ?')", state);
+          pushCompanionMessage(r);
+          return;
+        }
+        static const CompanionChoice auto_vals[] = {
+          { "off",    false },  // -> 1
+          { "on",     false },  // -> 2
+          { "prefer", false },  // -> 3
+        };
+        char val_ambig[40];
+        int vi = match_choice(val, auto_vals, 3, val_ambig, sizeof(val_ambig));
+        if (vi == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", val_ambig); pushCompanionMessage(r); return; }
+        if (vi < 0) { pushCompanionMessage("Usage: scope advert auto off|on|prefer"); return; }
+        _prefs.scope_advert_auto = (uint8_t)(vi + 1);
+        savePrefs();
+        const char* name_str = (vi == 0) ? "off" : (vi == 1) ? "on" : "prefer";
+        const char* desc =
+            (vi == 0) ? "Geo wird nie verwendet"
+          : (vi == 1) ? "Geo als Fallback wenn Default leer"
+                      : "Geo schlaegt Default wenn ortlich andere Region";
+        char r[160]; snprintf(r, sizeof(r), "OK - scope advert auto = %s\n  %s", name_str, desc);
+        pushCompanionMessage(r);
+        return;
+      }
+
+      // av == 0/1/2: re-dispatch zu existing default/bake/override.
+      // Wir biegen arg + sub_idx um und lassen die if-chain weiterlaufen.
+      arg = p;
+      sub_idx = av;
+      // Fall-through.
     }
 
     // -- default <name>|clear --
@@ -6837,13 +6983,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // ? -> Kurzhilfe (vor dem Status-Check, sonst greift no-arg=status).
       if (sub && sub[0] == '?'
           && (sub[1] == 0 || sub[1] == ' ' || sub[1] == '\t')) {
-        pushCompanionMessage("scope repeater — Sub-Befehle:");
+        const char* aut = (_prefs.scope_repeater_auto == 1) ? "off" : "on";
+        char r[80];
+        snprintf(r, sizeof(r), "scope repeater — Sub-Befehle (auto = %s):", aut);
+        pushCompanionMessage(r);
         pushCompanionMessage("  scope repeater\n    Status (Mode + Repeat-Liste mit Tags)");
         pushCompanionMessage("  scope repeater mode all|allowlist\n    Global: Liste anwenden (allowlist) oder alles (all)");
-        pushCompanionMessage("Per Eintrag (statt 'scope repeater add/remove/...'):");
+        pushCompanionMessage("  scope repeater auto on|off\n    Global: auto-rep-Eintraege greifen (on) oder werden ignoriert (off)\n    off = nur Pin-Eintraege zaehlen");
+        pushCompanionMessage("Per Eintrag (siehe 'scope <name> ?'):");
         pushCompanionMessage("  scope <name> pin | geo | off\n    Repeat-Mode setzen");
-        pushCompanionMessage("  scope <name> disable | enable\n    temporaer aus/an (Mode bleibt)");
-        pushCompanionMessage("  scope <name> delete | undelete\n    dauerhaft verstecken (Build-in)");
         return;
       }
       if (!sub || *sub == 0) {
@@ -6944,25 +7092,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
 
-      // Wunschliste 11 Schritt 8: nur 'mode' bleibt als rep-Sub-Aktion.
-      // add/remove/geo/enable/disable wurden durch das per-Name CLI
-      // ersetzt: 'scope <name> pin|geo|off', 'scope <name> disable'.
+      // 'mode' + 'auto' als rep-Sub-Aktionen. Per-Eintrag-Verben
+      // (pin/geo/off/disable/...) leben unter 'scope <name>'.
       static const CompanionChoice rep_subs[] = {
         { "mode",    false },  // 0
+        { "auto",    false },  // 1 (Wunschliste 13)
       };
       char rep_ambig[60];
-      int rs = match_choice(sub, rep_subs, 1, rep_ambig, sizeof(rep_ambig));
+      int rs = match_choice(sub, rep_subs, 2, rep_ambig, sizeof(rep_ambig));
       if (rs == -1) {
         char r[100]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rep_ambig);
         pushCompanionMessage(r); return;
       }
       if (rs < 0) {
         pushCompanionMessage(
-          "Sub-Aktion unbekannt. Per-Eintrag jetzt:\n"
-          "  scope <name> pin | geo | off\n"
-          "  scope <name> disable | enable | delete\n"
-          "  scope <name> advert auto|off | info\n"
-          "Global:  scope repeater mode all|allowlist");
+          "Sub-Aktion unbekannt. Global:\n"
+          "  scope repeater mode all|allowlist\n"
+          "  scope repeater auto on|off\n"
+          "Per-Eintrag: 'scope <name> ?'");
         return;
       }
 
@@ -6982,6 +7129,36 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         savePrefs();
         pushCompanionMessage(mm == 0 ? "OK - scope repeater mode = all"
                                      : "OK - scope repeater mode = allowlist");
+        return;
+      }
+
+      // -- repeater auto on|off (Wunschliste 13) --
+      if (rs == 1) {
+        const char* av = strchr(sub, ' ');
+        if (av) { while (*av == ' ') av++; }
+        if (!av || *av == 0) {
+          char r[160];
+          snprintf(r, sizeof(r),
+            "scope repeater auto = %s\n"
+            "  on:  auto-rep-Eintraege greifen wenn GPS in Bbox.\n"
+            "  off: auto-Eintraege werden ignoriert. Nur Pin zaehlt.",
+            (_prefs.scope_repeater_auto == 1) ? "off" : "on");
+          pushCompanionMessage(r);
+          return;
+        }
+        int aon = match_on_off(av);
+        if (aon == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
+        if (aon < 0)   { pushCompanionMessage("Usage: scope repeater auto on|off"); return; }
+        _prefs.scope_repeater_auto = (uint8_t)(aon ? 2 : 1);
+        savePrefs();
+        char r[140];
+        snprintf(r, sizeof(r),
+          "OK - scope repeater auto = %s\n"
+          "  %s",
+          aon ? "on" : "off",
+          aon ? "auto-rep-Eintraege greifen wenn in Bbox"
+              : "auto-rep-Eintraege ignoriert, nur Pin zaehlt");
+        pushCompanionMessage(r);
         return;
       }
     }
