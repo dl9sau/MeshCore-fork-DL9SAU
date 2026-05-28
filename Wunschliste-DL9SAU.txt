@@ -905,3 +905,102 @@ Reihenfolge:
   Danach 15a, dann 15b.
 
 Quelle: Diskussion 2026-05-29 nach Test-Runde.
+
+
+--------------------------------------------------------------------------------
+16. ROOM-Server-Funktionalitaet in Companion (very-low priority)
+--------------------------------------------------------------------------------
+
+Diskussion 2026-05-30 mit DL9SAU. Detail-Befund nach Code-Review von
+examples/simple_room_server.
+
+Aufwand-Schaetzung (was Companion nicht hat):
+  - ACL / Client-Permissions  (Companion: nur ContactInfo ohne mask)   ~100 LoC
+  - Posts-Buffer cyclic + Persistenz                                   ~150 LoC
+  - addPost + pushPostToClient Retry-Loop                              ~250 LoC
+  - Login/Auth via ANON_REQ_TYPE_LOGIN                                  ~80 LoC
+  - Admin handleCommand via PAYLOAD_TYPE_CLI_DATA                      ~100 LoC
+  - App-Frame-Integration fuer Setup                                   ~100 LoC
+  - Posts-Persistenz Flash-Layout                                       ~50 LoC
+  Total ~800 LoC + 1 Tag Test/Polish. Reale Zeit 2-3 Tage.
+
+Verschluesselung:
+  Posts -> Client werden mit dem PRO-CLIENT shared_secret verschluesselt,
+  exakt identisch zur Direct-Message-Crypto. Ein Post an N Subscriber =
+  N verschluesselte Pakete im Mesh. Verstaerkt das Last-Argument.
+
+Nutzen-Analyse:
+  Pro:
+    - Asynchrone Notiz-Tafel (Litfasssaeule) ohne 5 separate Direct-Sends
+    - Sammeltimer (PUSH_NOTIFY_DELAY_MILLIS=15min) bundelt mehrere
+      Posts in einen Push-Vorgang pro Client
+    - Optional Authentication (PSK / ACL) fuer Privacy
+    - Spontan deploybar ohne Reflash (User-Argument): jeder Companion
+      kann kurzfristig als Room-Server fungieren, ohne erst auf
+      simple_room_server-Firmware umflashen zu muessen.
+    - Manche User wuenschen Authentication, andere reine Litfasssaeule
+      (= ohne Login fuer alle lesbar). Beide Faelle waeren konfigurierbar.
+
+  Contra:
+    - Push pro Post pro Client -> hohe Last bei aktiven Diskussionen
+    - Retry-Loop bei offline Clients -> Last-Vervielfachung
+    - Setup-Aufwand pro User der joinen will
+    - Fuer Einzel-Companion-Nutzer wahrscheinlich kein realer Use-Case
+    - Fuer Vereins-Notiz-Wall waere dedizierter simple_room_server-Build
+      sinnvoller (klare Trennung, mehr RAM/Flash, kein Companion-
+      Aufwand-Overhead).
+
+ADV_TYPE_ROOM-Anforderung:
+  Damit die App den Companion als Room-Server erkennt: 'advert role
+  fixed room' (= effectiveAdvertRole() liefert ADV_TYPE_ROOM). Geht
+  technisch (Wunschliste 7 Phase 2 hat das gebaut). ABER: die App
+  schickt dann Login-Versuche, Posts-Listen-Queries, etc. Ohne
+  implementierte Room-Logik laufen die ins Leere. -> ADV_TYPE_ROOM
+  nur in Kombi mit kompletter Room-Implementation sinnvoll.
+
+
+--------------------------------------------------------------------------------
+17. SENSOR-Role + Message-Receive (Test-Interesse)
+--------------------------------------------------------------------------------
+
+Diskussion 2026-05-30 mit DL9SAU. Offene Beobachtung fuer zukuenftige
+Tests.
+
+Hypothese (User-Fund in App-Doku):
+  Nodes mit ADV_TYPE_SENSOR koennen keine Messages empfangen.
+
+Genaue Sachlage (Code-Review):
+  Technisch nicht stimmt. Der Companion mit 'advert role fixed sensor'
+  empfaengt weiterhin PAYLOAD_TYPE_TXT_MSG ueber BaseChatMesh::
+  onPeerDataRecv -> onMessageRecv. Die TXT_MSG-Handler werden weiter
+  durchlaufen.
+
+  Die App-Konvention ist allerdings:
+    - SENSOR-advertete Nodes werden im UI als read-only Datenquelle
+      dargestellt.
+    - Chat-Send-Buttons sind ausgeblendet.
+    - Wenn jemand mit anderer App oder direkter Wire-Manipulation
+      sendet, kommt die Message AN, aber:
+      - Ack wird vom Companion versendet (BaseChatMesh-Default-Pfad)
+      - App-User-Frust: in seiner Chat-Liste sieht er
+        'ack pending' weil App keinen Reply erwartet
+      - Companion-Side: queue/onMessageRecv wird ausgefuehrt,
+        User sieht die Message in seiner App-Inbox
+
+Test-Interesse (verfuegbar wenn User Zeit hat):
+  a) Companion auf 'advert role fixed sensor' setzen
+  b) Von einer anderen App eine TXT_MSG senden
+  c) Beobachten:
+     - Kommt sie an?
+     - Was zeigt die Sender-App? (ack pending? Fehler?)
+     - Was zeigt der Empfaenger-Companion?
+     - Reagiert die App wenn Sender-Companion ADV_TYPE_REPEATER ist und
+       Empfaenger ADV_TYPE_SENSOR? Vermutung: gleich.
+
+  Daraus ergeben sich evtl. weitere Polish-Ideen, z.B.:
+    - SENSOR-Role unterdrueckt automatisch onPeerDataRecv-Verarbeitung
+      und sendet stattdessen 'nicht erlaubt'-Reply?
+    - Oder einfach nur User-Konfig-Frage: 'soll Sensor-Mode strenger
+      Receive-Filter anwenden?'
+
+  Quelle: User-Beobachtung 2026-05-30 nach App-Doku-Lektuere.
