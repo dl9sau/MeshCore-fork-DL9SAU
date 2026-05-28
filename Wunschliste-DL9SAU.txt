@@ -89,42 +89,40 @@ Quelle: User-Anfrage in dieser Session, 2026-05-26.
 
 
 --------------------------------------------------------------------------------
-3. scope vs runtime_last_channel_scope - Konzept-Klaerung
+3. scope vs runtime_last_channel_scope - Konzept-Klaerung  ERLEDIGT
 --------------------------------------------------------------------------------
 
-Ist-Zustand (kurz):
-  - CMD_SEND_CHANNEL_TXT_MSG speichert die RAW BYTES des channel.secret
-    (16 Byte Channel-Decryption-Key) in runtime_last_channel_scope.key.
-  - Diese Bytes werden beim nightly-flood als HMAC-Key fuer
+Ist-Zustand (Original-Problem 2026-05-26):
+  - CMD_SEND_CHANNEL_TXT_MSG speicherte die RAW BYTES des channel.secret
+    in runtime_last_channel_scope.key.
+  - Diese Bytes wurden beim nightly-flood als HMAC-Key fuer
     transport_codes verwendet -> implizite Routing-Beschraenkung auf
     Knoten die DENSELBEN Channel kennen.
-  - send_scope (App-CMD_SET_SEND_SCOPE, z.B. "#bebb") ist eine SEPARATE
-    Variable und wird NICHT in runtime_last_channel_scope gespiegelt.
-  - "Scope #channelname" gibt es technisch nicht zwingend - das ist nur
-    eine Konvention die im Code nicht klar abgegrenzt ist.
+  - send_scope (App-CMD_SET_SEND_SCOPE) war separate Variable und wurde
+    NICHT in runtime_last_channel_scope gespiegelt.
+  - Die Bezeichnung "runtime_last_channel_scope" suggerierte einen
+    Scope, enthielt aber Channel-Secret-Bytes. Naming widerspruechlich.
 
-Verwirrungspunkt (User-Reaktion):
-  Die Bezeichnung "runtime_last_channel_scope" suggeriert einen Scope,
-  enthaelt aber Channel-Secret-Bytes. Doku/Naming/Verhalten widerspruechlich.
+Aufloesung (sukzessive ueber mehrere Commits):
+  a) cd0e84e0: Autolearn entfernt (channel.secret nicht mehr als
+     implicit Scope). Variable umbenannt zu _tx_scope_override.
+  b) Spaeter: Variable komplett entfernt (nicht mehr noetig nach
+     Auto-Learn-Removal). RAM-only send_scope (vom App per
+     CMD_SET_SCOPE gesetzt) genuegt.
+  c) Scope-Bake-Persistenz: _prefs.bake_scope_name + bake_scope_key
+     (NodePrefs.h:155 ff) -- 2. persistente Variable neben default,
+     dediziert fuer Nightly-Flood-Advert-Scope.
+  d) Scope-Override-Persistenz: _prefs.override_scope_name + key +
+     override_expiry (NodePrefs.h:161 ff) -- ueberlebt Reboot,
+     mit TTL-basierter Auto-Cleanup.
+  e) Send-Hierarchie als sauberer Helper:
+     chooseNightFloodScope -> override > bake > resolveDefaultOrGeo
+     resolveDefaultOrGeo -> Default oder Geo gemaess scope_advert_auto
+     (off / on / prefer). Wunschliste 5 + 13.
+  f) Doku: README-dl9sau.txt + 'help scope advert' + 'scope advert ?'
+     mit klarer Hierarchie-Beschreibung.
 
-Klaerungsbedarf (deferred):
-  a) Wollen wir wirklich channel.secret als runtime-scope verwenden, oder
-     den explizit per App gewaehlten send_scope?
-  b) Soll bei Channel-Send mit explizitem send_scope der send_scope
-     Prioritaet haben?
-  c) Variable umbenennen damit klar wird was sie enthaelt?
-  d) Doku/Help-Texte schaerfen.
-
-User-Wunsch: erstmal nicht jetzt - kommen wir spaeter dazu.
-
-UPDATE 2026-05-26 (gleicher Tag, spaeter): Autolearn wurde entfernt
-(Option A) im Commit cd0e84e0. Variable umbenannt nach
-_tx_scope_override. Damit ist die Klaerung im Wesentlichen
-abgeschlossen — verbleibend nur "scope bake" als 2. persistente
-Variable und Override-Persistierung (Akkubank-Power-Cycle ueberlebt
-RAM-only nicht). Wird in einem Refactor-Commit umgesetzt.
-
-Quelle: Diskussion in dieser Session, 2026-05-26.
+Quelle: Diskussion 2026-05-26, Abschluss 2026-05-29.
 
 
 --------------------------------------------------------------------------------
