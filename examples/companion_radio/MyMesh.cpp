@@ -6281,34 +6281,46 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (!*p || (p[0] == '?' && (p[1] == 0 || p[1] == ' '))) {
         char head[80]; snprintf(head, sizeof(head), "scope #%s — Aktionen:", name);
         pushCompanionMessage(head);
-        pushCompanionMessage("  pin\n    immer repeaten (= Pin)");
-        pushCompanionMessage("  geo\n    repeaten wenn GPS in Bbox (= auto)");
+        pushCompanionMessage("Repeat (Achse rep):");
+        pushCompanionMessage("  pin\n    immer repeaten");
+        pushCompanionMessage("  auto  (alias: geo)\n    repeaten wenn GPS in Bbox");
         pushCompanionMessage("  off\n    nie repeaten");
-        pushCompanionMessage("  disable | enable\n    temporaer aus/an (Mode bleibt)");
-        pushCompanionMessage("  delete | undelete\n    dauerhaft verstecken (Build-in)");
-        pushCompanionMessage("  advert auto|off\n    Geo-Send-Fallback ein/aus");
+        pushCompanionMessage("  rep <pin|auto|off>\n    explizit (gleiche Wirkung wie Top-Level)");
+        pushCompanionMessage("Advert (Achse adv):");
+        pushCompanionMessage("  adv auto|off  (alias: advert)\n    darf dieser Scope als Geo-Match-Kandidat\n    fuer eigene Adverts dienen");
+        pushCompanionMessage("Orthogonal:");
+        pushCompanionMessage("  disable | enable\n    temporaer beide Achsen aus/an");
+        pushCompanionMessage("  delete | undelete\n    dauerhaft verstecken (nur Build-in)");
         pushCompanionMessage("  info\n    Status anzeigen");
         return;
       }
 
-      // Top-Level Aktionen:
-      //   pin  geo  off       — Repeat-Mode direkt (kurz, klar)
-      //   repeat <auto|on|off|pin|geo>  — alter Pfad + Aliase
-      //   advert auto|off
-      //   disable | enable    — temporaer (Repeat-Mode bleibt erhalten)
-      //   delete | undelete   — permanent verstecken (Build-in)
+      // Top-Level Aktionen (zwei orthogonale Achsen rep + adv):
+      //   pin  auto  off        — direkt Repeat-Mode (Achse rep)
+      //   rep <pin|auto|off>    — Repeat-Mode, expliziter Achsen-Verb
+      //   adv <auto|off>        — Advert-Mode (= darf dieser Scope als
+      //                            Geo-Match-Kandidat fuer eigene Adverts
+      //                            dienen)
+      //   advert <auto|off>     — Alias zu adv (alter Verb)
+      //   repeat <pin|auto|off> — Alias zu rep (alter Verb)
+      //   disable | enable      — temporaer aus/an (Mode bleibt)
+      //   delete | undelete     — permanent verstecken (Build-in)
       //   info
+      //   geo                   — Alias fuer 'auto' (alter Verb)
       static const CompanionChoice action_choices[] = {
-        { "repeat",   false },  // 0
-        { "advert",   false },  // 1
+        { "repeat",   false },  // 0  alias zu 'rep'
+        { "advert",   false },  // 1  alias zu 'adv'
         { "disable",  false },  // 2
         { "enable",   false },  // 3
         { "delete",   true  },  // 4 no_abbrev
         { "undelete", false },  // 5
         { "info",     false },  // 6
-        { "pin",      false },  // 7  alias: repeat on
-        { "geo",      false },  // 8  alias: repeat auto
-        { "off",      false },  // 9  alias: repeat off
+        { "pin",      false },  // 7  shortcut: rep pin
+        { "geo",      false },  // 8  shortcut: rep auto (alias)
+        { "off",      false },  // 9  shortcut: rep off
+        { "auto",     false },  // 10 shortcut: rep auto
+        { "rep",      false },  // 11 (Achse) repeat-mode
+        { "adv",      false },  // 12 (Achse) advert-mode
       };
       char act_ambig[80];
       int aidx = match_choice(p, action_choices,
@@ -6321,13 +6333,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (aidx < 0) {
         pushCompanionMessage(
           "Unbekannte Aktion. Erlaubt:\n"
-          "  pin | geo | off       Repeat-Mode\n"
+          "  pin | auto | off      Repeat-Mode (= rep <verb>)\n"
+          "  adv auto|off          Advert-Mode\n"
           "  disable | enable      temporaer aus/an\n"
           "  delete | undelete     dauerhaft verstecken (Build-in)\n"
-          "  advert auto|off\n"
           "  info");
         return;
       }
+      // Aliase: rep/repeat sind aequivalent (beide -> aidx 0 logik)
+      if (aidx == 11) aidx = 0;
+      // adv/advert sind aequivalent (beide -> aidx 1 logik)
+      if (aidx == 12) aidx = 1;
+      // geo ist alias fuer auto (beide -> aidx 8/10 -> "auto" shortcut)
+      if (aidx == 10) aidx = 8;
 
       // Argument nach der Aktion ermitteln
       const char* aarg = strchr(p, ' ');
@@ -6335,57 +6353,57 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
       uint8_t status = getScopeStatus(ref);
 
-      // Direkt-Aktion: pin / geo / off  -> Repeat-Mode setzen ohne sub-arg.
+      // Direkt-Aktion: pin / auto / off  -> Repeat-Mode setzen ohne sub-arg.
       if (aidx == 7 || aidx == 8 || aidx == 9) {
         status &= ~SCOPE_STATUS_REPEAT_MASK;
         const char* mode_str;
         if (aidx == 7)      { status |= SCOPE_STATUS_REPEAT_ON;   mode_str = "pin (immer aktiv)"; }
-        else if (aidx == 8) { status |= SCOPE_STATUS_REPEAT_AUTO; mode_str = "geo (auto Bbox)";   }
+        else if (aidx == 8) { status |= SCOPE_STATUS_REPEAT_AUTO; mode_str = "auto (Bbox-Match)"; }
         else                { status |= SCOPE_STATUS_REPEAT_OFF;  mode_str = "off (nicht repeated)"; }
         setScopeStatus(ref, status);
         savePrefs();
-        char r[120]; snprintf(r, sizeof(r), "OK - #%s repeat = %s", name, mode_str);
+        char r[120]; snprintf(r, sizeof(r), "OK - #%s rep = %s", name, mode_str);
         pushCompanionMessage(r);
         return;
       }
 
-      if (aidx == 0) {  // repeat <verb> (mit pin/geo Aliases)
+      if (aidx == 0) {  // rep / repeat <verb> (mit Aliases pin/auto/geo)
         static const CompanionChoice repeat_choices[] = {
-          { "auto", false },  // 0 = AUTO (= geo)
-          { "on",   false },  // 1 = ON   (= pin)
+          { "auto", false },  // 0 = AUTO
+          { "on",   false },  // 1 = ON   (= pin, alter Verb)
           { "off",  false },  // 2 = OFF
-          { "geo",  false },  // 3 alias auto
+          { "geo",  false },  // 3 alias auto (alter Verb)
           { "pin",  false },  // 4 alias on
         };
         char rmambig[40];
         int rm = match_choice(aarg, repeat_choices, 5, rmambig, sizeof(rmambig));
         if (rm == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rmambig); pushCompanionMessage(r); return; }
-        if (rm < 0)   { pushCompanionMessage("Usage: scope <name> repeat pin|geo|off"); return; }
+        if (rm < 0)   { pushCompanionMessage("Usage: scope <name> rep pin|auto|off"); return; }
         status &= ~SCOPE_STATUS_REPEAT_MASK;
         const char* mode_str;
-        if (rm == 0 || rm == 3) { status |= SCOPE_STATUS_REPEAT_AUTO; mode_str = "geo (auto Bbox)";   }
+        if (rm == 0 || rm == 3) { status |= SCOPE_STATUS_REPEAT_AUTO; mode_str = "auto (Bbox-Match)"; }
         else if (rm == 1 || rm == 4) { status |= SCOPE_STATUS_REPEAT_ON; mode_str = "pin (immer aktiv)"; }
         else                          { status |= SCOPE_STATUS_REPEAT_OFF; mode_str = "off (nicht repeated)"; }
         setScopeStatus(ref, status);
         savePrefs();
-        char r[120]; snprintf(r, sizeof(r), "OK - #%s repeat = %s", name, mode_str);
+        char r[120]; snprintf(r, sizeof(r), "OK - #%s rep = %s", name, mode_str);
         pushCompanionMessage(r);
         return;
       }
 
-      if (aidx == 1) {  // advert auto|off
+      if (aidx == 1) {  // adv / advert auto|off
         static const CompanionChoice advert_choices[] = {
           { "auto", false }, { "off", false },
         };
         char amambig[40];
         int am = match_choice(aarg, advert_choices, 2, amambig, sizeof(amambig));
         if (am == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", amambig); pushCompanionMessage(r); return; }
-        if (am < 0)   { pushCompanionMessage("Usage: scope <name> advert auto|off"); return; }
+        if (am < 0)   { pushCompanionMessage("Usage: scope <name> adv auto|off"); return; }
         if (am == 0) status &= ~SCOPE_STATUS_ADVERT_OFF;
         else         status |=  SCOPE_STATUS_ADVERT_OFF;
         setScopeStatus(ref, status);
         savePrefs();
-        char r[100]; snprintf(r, sizeof(r), "OK - #%s advert = %s",
+        char r[100]; snprintf(r, sizeof(r), "OK - #%s adv = %s",
                               name, (am == 0) ? "auto" : "off");
         pushCompanionMessage(r);
         return;
@@ -6424,8 +6442,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         savePrefs();
         char r[100]; snprintf(r, sizeof(r), "OK - #%s %s",
                               name,
-                              (aidx == 4) ? "deleted (versteckt, repeat=off)"
-                                          : "undeleted (repeat=geo)");
+                              (aidx == 4) ? "deleted (versteckt, rep=off)"
+                                          : "undeleted (rep=auto)");
         pushCompanionMessage(r);
         return;
       }
@@ -6436,9 +6454,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         char head[140];
         const char* st_str = (status & SCOPE_STATUS_USER_DELETED) ? "deleted"
                            : (status & SCOPE_STATUS_DISABLED)     ? "disabled"
-                           : ((status & SCOPE_STATUS_REPEAT_MASK) == SCOPE_STATUS_REPEAT_ON) ? "repeat=pin"
-                           : ((status & SCOPE_STATUS_REPEAT_MASK) == SCOPE_STATUS_REPEAT_OFF) ? "repeat=off"
-                           : "repeat=geo";
+                           : ((status & SCOPE_STATUS_REPEAT_MASK) == SCOPE_STATUS_REPEAT_ON) ? "rep=pin"
+                           : ((status & SCOPE_STATUS_REPEAT_MASK) == SCOPE_STATUS_REPEAT_OFF) ? "rep=off"
+                           : "rep=auto";
         const char* ad_str = (status & SCOPE_STATUS_ADVERT_OFF) ? "advert=off" : "advert=auto";
         const char* store_str = (ref.storage == SCOPE_BUILDIN) ? "build-in" : "extras";
         snprintf(head, sizeof(head), "#%s [%s] %s %s", name, store_str, st_str, ad_str);
@@ -6930,7 +6948,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
       // Effective state
       uint8_t mode = st & SCOPE_STATUS_REPEAT_MASK;
-      const char* mode_str = (mode == SCOPE_STATUS_REPEAT_ON) ? "on (pin)"
+      const char* mode_str = (mode == SCOPE_STATUS_REPEAT_ON) ? "pin"
                            : (mode == SCOPE_STATUS_REPEAT_OFF) ? "off"
                            : "auto";
       bool eff_active = false;
@@ -6943,7 +6961,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(block, sizeof(block),
                "#%s [%s]:\n"
                "  hash = %02X%02X%02X%02X\n"
-               "  repeat = %s -> %s",
+               "  rep = %s -> %s",
                name,
                (r.storage == SCOPE_BUILDIN) ? "Build-in" : "Extras",
                key ? key[0] : 0, key ? key[1] : 0, key ? key[2] : 0, key ? key[3] : 0,
@@ -6953,7 +6971,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
       char line2[160];
       snprintf(line2, sizeof(line2),
-               "  advert = %s\n"
+               "  adv = %s\n"
                "  disabled = %s\n"
                "  user_deleted = %s",
                (st & SCOPE_STATUS_ADVERT_OFF)    ? "off" : "auto",
@@ -6991,7 +7009,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("  scope repeater mode all|allowlist\n    Global: Liste anwenden (allowlist) oder alles (all)");
         pushCompanionMessage("  scope repeater auto on|off\n    Global: auto-rep-Eintraege greifen (on) oder werden ignoriert (off)\n    off = nur Pin-Eintraege zaehlen");
         pushCompanionMessage("Per Eintrag (siehe 'scope <name> ?'):");
-        pushCompanionMessage("  scope <name> pin | geo | off\n    Repeat-Mode setzen");
+        pushCompanionMessage("  scope <name> pin | auto | off\n    Repeat-Mode (= rep <verb>)");
         return;
       }
       if (!sub || *sub == 0) {

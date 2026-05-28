@@ -723,7 +723,7 @@ kein Modus-Schalter wie simple_repeater. Bleibt offen.
 
 
 --------------------------------------------------------------------------------
-13. Scope-CLI Restruktur + orthogonale rep/adv-Achsen + Wording-Konsistenz
+13. Scope-CLI Restruktur + orthogonale rep/adv-Achsen + Wording-Konsistenz  ERLEDIGT
 --------------------------------------------------------------------------------
 
 Anlass (User-Erkenntnis 2026-05-28, spaeter Abend):
@@ -795,3 +795,15 @@ Wording-Konsistenz:
 
 Quelle: User-Anregung 2026-05-28 (spaete Session, nach Schritt 8
 Implementation). Diskussion morgen weiter.
+
+--------------------------------------------------------------------------------
+14. scope predefined list "local", "lokal", "region", "regional":
+--------------------------------------------------------------------------------
+
+Haben eine Location - weil es immer gilt (-> pin).
+Hier steht predefined '!' fuer local adverts. Ist diese Entscheidung riichtig? Denn
+die Staerke dieser sehr begrenzt haltenden scopes ist, das Netz so wenig
+wie moeglich zu tangieren. Deshalb ist eine flooded advert ("bake") dortihn
+keine schlechte Idee, um das Netz zu schonen.
+Da user keine advert-Filterliste haben und alle scoped-Nachrichten lesen koennen,
+ist es ok solche Scopes zu nutzen.
