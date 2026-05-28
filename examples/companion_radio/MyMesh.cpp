@@ -4819,7 +4819,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "advert role [auto | fixed chat|repeater|sensor|room]:\n"
           "  Welcher ADV_TYPE in createSelfAdvert + welche Discovery-\n"
-          "  Queries beantwortet werden (Wunschliste 7). 'auto' folgt der\n"
+          "  Queries beantwortet werden."
+        );
+        pushCompanionMessage(
+          "  'auto' folgt der\n"
           "  Matrix aus client_repeat + repeater_profile."
         );
         return;
@@ -5202,6 +5205,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
 
+    // ? -- vollstaendige Sub-Befehl-Liste (User-Bericht: 'advert ?'
+    // zeigte nur '[zero-hop | flood]', 'role' fehlte).
+    if (arg && arg[0] == '?' && (arg[1] == 0 || arg[1] == ' ')) {
+      pushCompanionMessage("advert -- Sub-Befehle:");
+      pushCompanionMessage(
+        "  advert [zero-hop | flood]\n"
+        "    Einmal-Advert senden (zero-hop = single-hop neighbours,\n"
+        "    flood = scoped flood-advert wie nightly).");
+      pushCompanionMessage(
+        "  advert role\n"
+        "    Status (configured + effective Role)");
+      pushCompanionMessage(
+        "  advert role auto\n"
+        "    Auto-Matrix (siehe 'help advert'): folgt client_repeat\n"
+        "    + repeater_profile.");
+      pushCompanionMessage(
+        "  advert role fixed chat|repeater|sensor|room\n"
+        "    Type fest pinnen -- beeinflusst createSelfAdvert UND\n"
+        "    Discovery-Query-Antworten (siehe Wunschliste 7).");
+      return;
+    }
+
     // Wunschliste 7 Phase 2: advert role <auto|fixed <type>>
     if (arg && starts_with_word(arg, "role")) {
       const char* rarg = strchr(arg, ' ');
@@ -5230,8 +5255,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         char r[200];
         snprintf(r, sizeof(r),
           "advert role = %s (effective: %s)\n"
-          "  auto                  Default per Matrix (repeater_profile + client_repeat)\n"
-          "  fixed chat|repeater|sensor|room   Type pinnen",
+          "  auto = Matrix client_repeat + profile\n"
+          "  fixed chat|repeater|sensor|room",
           roleName(_prefs.advert_role),
           roleNameByAdv(effectiveAdvertRole()));
         pushCompanionMessage(r);
@@ -5297,7 +5322,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r); return;
       }
       if (m < 0) {
-        pushCompanionMessage("Usage: advert [zero-hop | flood]");
+        pushCompanionMessage(
+          "Usage: advert [zero-hop | flood]\n"
+          "       advert role [auto | fixed <type>]\n"
+          "Hilfe: 'advert ?' oder 'help advert'");
         return;
       }
       want_flood = (m == 1);
@@ -7003,9 +7031,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
       const char* active;
       if (override_active)            active = "override";
-      else if (bake_set)              active = "bake";
+      else if (bake_set)              active = "bake (flooded advert, nightly)";
       else if (geo_wins_default)      active = "geo-fallback (gewinnt vor Default)";
-      else if (default_set)           active = "default";
+      else if (default_set)           active = "default (configured catchall scope)";
       else if (geo_is_fallback)       active = "geo-fallback";
       else                            active = "#local (last-resort)";
 
@@ -7382,9 +7410,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
         const char* active;
         if (override_active)            active = "override";
-        else if (bake_set)              active = "bake";
+        else if (bake_set)              active = "bake (flooded advert, nightly)";
         else if (geo_wins_default)      active = "geo-fallback (gewinnt vor Default)";
-        else if (default_set)           active = "default";
+        else if (default_set)           active = "default (configured catchall scope)";
         else if (geo_is_fallback)       active = "geo-fallback";
         else                            active = "(none)";
 
