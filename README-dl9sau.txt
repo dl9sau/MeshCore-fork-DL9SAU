@@ -564,3 +564,83 @@ Wire-Frame-Limit:
   Message. Multi-Output-Befehle (prefs all, get all, scope list, scope
   regions) flushen vor jedem Append bei Threshold 130 — keine Wire-
   Truncation, mehrere Messages werden geschickt. (14y)
+
+
+================================================================================
+Konzept-Erklaerungen (Stand 2026-05-29)
+================================================================================
+
+Send-Scope-Hierarchie (wo greift was):
+  Eigene Auto-Adverts und Channel-/Recipient-Sends gehen durch eine
+  Hierarchie. Reihenfolge (hoechste Prio zuerst):
+    1) override   temp Pin mit TTL, ueberlebt Reboot.
+                  CLI: scope advert override <n> [<h>h|<d>d]
+    2) bake       persistent. WIRKT NUR fuer NIGHTLY-Flood-Advert.
+                  CLI: scope advert bake <n>
+                  Beispiel: default=#de-be, bake=#de-bebb -- Tag-Sends
+                  bleiben auf Berlin, einmal pro Nacht weiter via
+                  Brandenburg-Bridge.
+    3) default-oder-geo (per scope_advert_auto):
+                  off:    Geo nie verwendet
+                  on:     Default gewinnt, Geo nur als Fallback wenn
+                          Default leer  (Default-Verhalten)
+                  prefer: Geo schlaegt Default wenn oertliche Region
+                          eine andere ist als das Default
+                  CLI: scope advert auto off|on|prefer
+                  CLI: scope advert default <n>
+    4) chooseGeoFallbackScope -- zweite Geo-Chance.
+    5) #local (LAST-RESORT) -- single-hop, harmlos, immer verfuegbar.
+                  Greift nur wenn ALLES andere leer ist.
+
+  'scope' und 'scope advert' (no-arg) zeigen den vollen State plus
+  Annotation, was gerade aktiv ist und warum.
+
+Repeater Profile:
+  defensive (Default) -- 'client-Repeater':
+    PATH-Discovery nur fuer lokal-bekannte Endpoints (HeardList <48h
+    ODER Contact <48h). Repeats mit reduzierter TX-Power (-6 dB,
+    Floor 10 dBm) + forced CR5.
+  normal -- 'wie ein echter Repeater':
+    PATH-Discovery alle Pakete. Repeats mit voller Power +
+    konfigurierter CR.
+  CLI: repeater profile [defensive | normal]
+
+Loop-Detection (nur in profile=normal aktiv):
+  off (Default) | minimal | moderate | strict
+  Profile=defensive braucht keine Loop-Detection (PATH nur lokal,
+  Schleifen unmoeglich). Status-Ausgaben kennzeichnen das mit
+  '(inaktiv -- profile=defensive)'.
+  CLI: set loop_detect off|minimal|moderate|strict
+
+flood_max:
+  Globale Hop-Obergrenze (1..64, Default 16). Wirkt in beiden
+  Profiles. CLI: set flood_max <N>
+
+Discoverability (advert_role + owner_info):
+  Companion advertet+antwortet je nach effectiveAdvertRole():
+    advert_role=auto:
+      client_repeat=0                      -> CHAT
+      client_repeat=1 + profile=defensive  -> CHAT (chat-tauglich)
+      client_repeat=1 + profile=normal     -> REPEATER (vollwertig)
+    advert_role=fixed chat|repeater|sensor|room -> fester Type.
+
+  Antwort-Endpoints (gegated by Role):
+    Anon (jeder kann fragen):
+      BASIC (Clock + Features)       -- CHAT/REPEATER/SENSOR
+      OWNER (Name + owner_info)      -- nur REPEATER
+      REGIONS (Repeat-Set)           -- nur REPEATER
+    Authenticated (Contact mit shared_secret):
+      GET_STATUS                     -- nur REPEATER
+      GET_OWNER_INFO                 -- nur REPEATER
+      GET_NEIGHBOURS                 -- nur REPEATER
+      GET_TELEMETRY_DATA             -- nach telemetry_mode_*
+  CLI: advert role [auto | fixed <type>]
+  CLI: set owner_info <text>  ('|' wird zu Newline, max 119 Zeichen)
+
+Runtime-Neighbours (fuer GET_NEIGHBOURS):
+  RAM-Tabelle, gefuellt aus zero-hop gehoerten Adverts.
+  Max 32 Eintraege, LRU. Alle adv_types ('liberal').
+  Funktioniert ab Boot ohne RTC -- 'heard seconds ago' aus
+  millis()-Delta wenn RTC nicht gesetzt.
+  Augmentation: juengere Contacts (lastmod < 1 Woche) werden
+  zusaetzlich beigemischt -- nur wenn RTC gesetzt.

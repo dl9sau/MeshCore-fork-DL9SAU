@@ -2053,6 +2053,232 @@ Aenderungen:
 Quelle: User-Frage 2026-05-29 mit Begruendung Netzschonung.
 
 ================================================================================
+19. Test-Bericht-Folgerunde + Doku-Konsolidierung (29. Mai 2026)
+================================================================================
+
+Nach mehreren intensiven Test-Sessions mit DL9SAU sind die neuen
+Features (Wunschliste 5, 6b, 7, 8, 11, 13, 14, 15) gereift und durch
+viele kleine Polish-Commits stabil. Zusammenfassung der Konzept-
+Erklaerungen die in der Session gut ankamen und in diesem Block
+dokumentiert sind:
+
+------------------------------------------------------------------------
+Send-Scope-Hierarchie (chooseNightFloodScope + sendFloodScoped)
+------------------------------------------------------------------------
+
+Fuer eigene Adverts und Sends ohne explizites send_scope greift die
+folgende Hierarchie (in absteigender Prioritaet):
+
+  1) override   -- temp Pin mit TTL (max 30d), persistent ueber Reboot.
+                  Setzen via 'scope advert override <name> [TTL]'.
+  2) bake       -- persistent. WIRKT NUR fuer Nightly-Flood-Advert
+                  (chooseNightFloodScope). Fuer regulaere Sends (Chat
+                  zu Contact, Channel) wird bake NICHT konsultiert.
+                  Use-Case: default=#de-be (Stadt-Scope), bake=
+                  #de-bebb (Bridge-Scope, weitere Reichweite fuer
+                  einmal-pro-Nacht-Flood).
+  3) default-oder-geo  -- 'resolveDefaultOrGeo' Helper, abhaengig
+                  von scope_advert_auto.
+  4) chooseGeoFallbackScope  -- zweite Geo-Chance wenn weder
+                  default noch geo_prefers gegriffen hat.
+  5) #local      -- LAST-RESORT (eingefuehrt Mai 2026 nach User-
+                  Konsens). Wenn ALLE obigen leer und User ausserhalb
+                  aller Geo-Bboxen, geht der Nightly mit #local raus
+                  (single-hop, harmlos, minimaler Netz-Impact). Stellt
+                  sicher dass auch ohne jede Konfig Nightly-Discovery
+                  funktioniert.
+
+scope advert auto (3-stufig):
+
+  off     -> Geo wird NIE verwendet. Nur Default/Bake/Override.
+  on      -> (Default) Default-Scope gewinnt. Geo als Fallback wenn
+            Default leer.
+  prefer  -> Geo schlaegt Default, wenn die oertliche Region eine
+            andere ist als das Default. "User ist nicht zu Hause".
+
+Wichtig: bei auto=on und gesetztem Default ist Geo PRAKTISCH DORMANT
+(greift nicht). Erst prefer oder geleerter Default lassen Geo gewinnen.
+
+Anzeige in 'scope' und 'scope advert' (no-arg):
+  default = ...
+  bake = ...
+  override = ...
+  auto = on (Geo bereit, greift NICHT -- Default gesetzt;
+              'auto prefer' liesse Geo gewinnen)
+  active = default
+
+Die 'auto'-Zeile annotiert je nach Kombination welcher Modus + welche
+Quellen + welche Effekte greifen. Macht den State self-documenting.
+
+------------------------------------------------------------------------
+Repeater Profile (Wunschliste 8, Mai 2026)
+------------------------------------------------------------------------
+
+Globaler Modus-Schalter fuer das Forward-Verhalten:
+
+  defensive (Default) -- 'client-Repeater'
+    - PATH-Discovery nur fuer lokal-bekannte Endpoints repeated
+      (HeardList <48h ODER Contact <48h).
+    - Repeats mit reduzierter TX-Power (-6 dB, Floor 10 dBm) +
+      forced CR5 statt konfigurierter CR.
+    - Schoner Netzeffekt, geringe Verbreitung.
+
+  normal -- 'wie ein echter Repeater'
+    - PATH-Discovery: ALLE Pakete weitergeleitet.
+    - Repeats mit voller Power + konfigurierter CR.
+    - Verhalten wie simple_repeater.
+    - Kombinierbar mit loop_detect (siehe unten) gegen Schleifen.
+
+Verzahnung mit advert role auto (Wunschliste 7):
+  defensive + client_repeat=1 -> CHAT (chat-tauglich)
+  normal    + client_repeat=1 -> REPEATER (vollwertig)
+
+CLI:
+  repeater profile [defensive | normal]
+  repeater (no-arg) zeigt aktuellen profile in der Status-Zeile.
+  prefs / get all listen es.
+
+------------------------------------------------------------------------
+flood_max + loop_detect (Wunschliste 6, Mai 2026)
+------------------------------------------------------------------------
+
+flood_max: globale Hop-Obergrenze beim Repeat.
+  Werte 1..64. Default 16 (frueherer CR_MAX_REPEAT_PATH_LEN).
+  Pakete mit path_hash_count > flood_max werden gedroppt.
+  Wirkt in BEIDEN Profiles (defensive + normal).
+  CLI: set flood_max <N> (alias: set flood.max <N>)
+
+loop_detect: Self-Hash-Count im Path checken.
+  Modi:
+    off (Default)
+    minimal   { 1B:4, 2B:2, 3B:1 }
+    moderate  { 1B:2, 2B:1, 3B:1 }
+    strict    { 1B:1, 2B:1, 3B:1 }
+  WICHTIG: loop_detect WIRKT NUR im 'normal' Profile.
+  Defensive Profile leitet ohnehin nur an lokal-bekannte Endpoints
+  weiter -- Schleifen koennen da nicht entstehen.
+  Status-Ausgabe macht das transparent: bei loop_detect != off und
+  profile = defensive zeigt sie '(inaktiv -- profile=defensive)'.
+  CLI: set loop_detect off|minimal|moderate|strict (alias: loop.detect)
+
+------------------------------------------------------------------------
+Discoverability (Wunschliste 7, Mai 2026)
+------------------------------------------------------------------------
+
+advert_role + owner_info + Discovery-Query-Endpoints. Macht Companion
+in der App sichtbar und antwortfaehig wie ein echter Repeater.
+
+effectiveAdvertRole(): single source of truth fuer Wire-Type in
+Adverts UND fuer das Gating der Discovery-Antworten.
+  _prefs.advert_role:
+    0 = auto       (Matrix aus client_repeat + repeater_profile)
+    1 = chat       -> ADV_TYPE_CHAT
+    2 = repeater   -> ADV_TYPE_REPEATER
+    3 = sensor     -> ADV_TYPE_SENSOR
+    4 = room       -> ADV_TYPE_ROOM
+
+Auto-Matrix:
+  client_repeat == 0                      -> CHAT
+  client_repeat == 1, profile defensive   -> CHAT  (chat-tauglich)
+  client_repeat == 1, profile normal      -> REPEATER
+
+ANON_REQ-Endpoints (unauthentifiziert, jeder kann fragen):
+  ANON_REQ_TYPE_BASIC (Clock + Features)   -- CHAT/REP/SENSOR
+  ANON_REQ_TYPE_OWNER (Name+owner_info)    -- nur REPEATER
+  ANON_REQ_TYPE_REGIONS (Repeat-Set)       -- nur REPEATER
+
+REQ_TYPE_* Authenticated-Endpoints (Contact mit shared_secret):
+  GET_STATUS (RepeaterStats Wire-Layout)   -- nur REPEATER
+  GET_OWNER_INFO (FW+Name+owner_info)      -- nur REPEATER
+  GET_NEIGHBOURS (Runtime-Tabelle + Recent Contacts) -- nur REPEATER
+  GET_TELEMETRY_DATA (bestand)             -- pro telemetry_mode_*
+
+CLI:
+  advert role [auto | fixed chat|repeater|sensor|room]
+  set owner_info <text>  (case-sensitive, '|' -> Newline, max 119 Zeichen)
+  get owner_info / prefs / get all
+
+------------------------------------------------------------------------
+Runtime-Neighbours (Wunschliste 15, Mai 2026)
+------------------------------------------------------------------------
+
+RAM-only Tabelle, gefuellt aus jedem zero-hop-heard Advert. Verwendet
+fuer REQ_TYPE_GET_NEIGHBOURS Antwort.
+
+Eigenschaften:
+  - Max 32 Eintraege, LRU via heard_millis (robust ohne RTC).
+  - 'Liberal' -- alle adv_types werden aufgenommen (chat/repeater/
+    sensor/room), kein Filter.
+  - Pro Eintrag: pub_key[32], advert_timestamp, heard_timestamp,
+    heard_millis, snr, adv_type.
+  - heard_seconds_ago aus RTC wenn gesetzt, sonst aus millis()-Delta
+    seit Hoervorgang -> Antwort funktioniert ab Boot ohne RTC.
+
+15b Augmentation: zusatzlich juengere Contacts aus _contacts[]:
+  - Nur wenn RTC gesetzt (ContactInfo.lastmod ist Unix-Sek).
+  - Filter: lastmod < 1 Woche alt.
+  - Dedup gegen Runtime-Tabelle.
+  - Contacts haben kein SNR -> snr=0 in Antwort.
+
+Gating der Antwort: effectiveAdvertRole() == ADV_TYPE_REPEATER.
+Wire-Layout 1:1 zu simple_repeater (kompatibel mit App-Discovery).
+
+------------------------------------------------------------------------
+Scope-CLI Restruktur (Wunschliste 13, Mai 2026)
+------------------------------------------------------------------------
+
+Vollstandige Neugliederung der scope-Befehle nach Achsen + Zweck:
+
+  scope advert <sub>         Global eigene Send-Hierarchie
+    default <n>|clear        persistent Default-Scope
+    bake <n>|clear           persistent Nightly-Flood-Scope
+    override <n> [TTL]|clear temp Override (max 30d)
+    auto off|on|prefer       Geo-vs-Default Verhalten
+
+  scope repeater <sub>       Global Repeat-Policy
+    mode all|allowlist       welche scoped Pakete repeated werden
+    auto on|off              globaler auto-rep Schalter
+
+  scope <name> <action>      Per-Eintrag (orthogonale Achsen)
+    pin|auto|off             Repeat-Mode (= rep <verb>)
+    rep pin|auto|off         explizit (Achse rep)
+    adv auto|off             Advert-Mode (Achse adv)
+    advert auto|off          Alias zu adv
+    disable|enable           temporaer aus/an (Mode bleibt)
+    delete|undelete          dauerhaft verstecken (Build-in)
+    info                     Details
+
+  scope list | list all | regions | add | remove
+                             Registry-Browsing/Editing
+
+Backward-Compat:
+  'scope default/bake/override' (Top-Level) bleiben Aliase zu
+  'scope advert default/bake/override'.
+  'scope <name> geo' bleibt Alias zu 'scope <name> auto'.
+  'scope <name> repeat <verb>' bleibt zu 'scope <name> rep <verb>'.
+
+Wording: 'auto' ist das zentrale Wort fuer den Geo-Bbox-gesteuerten
+Modus -- ueberall konsistent. 'geo' als Alias erlaubt.
+
+------------------------------------------------------------------------
+Polish-Commits (Test-Bericht-Folgerunde)
+------------------------------------------------------------------------
+
+40ff269d  GPS-Format-Helper formatLatLonDM extrahiert + Display-Stellen
+b2a05c79  Truncations + Help-Texte fixed (A2-A6)
+a1240756  Funktionale Bugs B1-B6 (Abkuerzungen, scope-no-arg-Status)
+df088e59  Layout + UX (C1, C4, C5, D1-D6)
+967f99f0  owner_info in get all + Pre-6b Polish (3-Dezimalstellen,
+          duty 'limits (pro Stunde)', scope rep ? help, advert auto Erklaerung)
+334eefb1  scope advert active/auto-Annotation: auto=prefer Bug + Klarstellung
+fc521aea  scope advert no-arg Output splitten (Wire-Frame-Limit)
+4cdb2d4b  Wunschliste 6b -- loop_detect mit profile-Gate
+52175e3d  chooseNightFloodScope -- #local als Last-Resort-Fallback
+5473d135  Typo-Fix 'ortliche' -> 'oertliche'
+db68b60d  Wunschliste 15a -- REQ_TYPE_GET_NEIGHBOURS Implementation
+8468ba93  Wunschliste 15b -- Recent Contacts ergaenzen GET_NEIGHBOURS
+
+================================================================================
 Build-Status
 ================================================================================
 
