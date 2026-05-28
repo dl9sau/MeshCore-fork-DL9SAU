@@ -1997,6 +1997,62 @@ flood_max konfigurierbar (Wunschliste 6, erste Haelfte):      a7450b24
   loop_detect (zweite Haelfte) noch nicht gebaut.
 
 ================================================================================
+18. Wunschliste 14 — Special-Scopes Advert-Off Cleanup + Sentinel-Doku
+================================================================================
+
+User-Beobachtung: hat default-'!' (= SCOPE_STATUS_ADVERT_OFF) auf den
+position-unabhaengigen Special-Scopes (#local/#lokal/#region/#regional)
+ueberhaupt Sinn? Die Staerke dieser Scopes ist Netzschonung — 'scope
+advert bake region' fuer Nightly-Flood ist genau die richtige Idee.
+
+Befund nach Code-Review:
+  Das '!'-Bit auf den Specials war funktional ein No-Op.
+  chooseGeoFallbackScope (das die Auto-Wahl meines eigenen Send-Advert-
+  Scopes macht) filtert no-bbox-Eintraege schon per has_bbox-Check raus
+  -- VOR dem ADVERT_OFF-Check. Das '!' wirkte nur kosmetisch in der
+  scope-list-Ausgabe ([RP!] statt [RP]).
+
+Aenderungen:
+
+  1) NOGEO_PIN macro (dl9sau_geo_recommendations.cpp) entfernt
+     ADVERT_OFF. #local / #lokal / #region / #regional zeigen jetzt
+     [RP] statt [RP!]. Konsistent mit dem User-Intent: explizite
+     'scope advert bake/default/override <name>' war fuer diese
+     Scopes immer schon erlaubt.
+
+     NOGEO_OFF (#local-discard) behaelt ADVERT_OFF als zweite
+     Sicherung gegen versehentliches Pinnen.
+
+  2) Legende in 'scope list' Output: '!' nicht mehr als 'advert-off'
+     beschrieben (zu mehrdeutig — klang als haette es was mit dem
+     Repeaten von Adverts zu tun). Neuer Text:
+       '! = Eigenes geo auto-Advert waehlt diesen Scope nie aus.'
+     Mit erklaerendem Nachsatz dass Repeat + explizite Send-Befehle
+     unberuehrt sind.
+
+  3) allowPacketForward Comment-Block geschaerft: local-discard
+     Sentinel-Block gilt EXPLIZIT auch im 'scope repeater mode all'-
+     Modus, nicht nur im allowlist-Modus. Im all-Modus laeuft
+     scopeStatusAllowsRepeat short-circuit, daher MUSS der hard-block
+     hier sitzen — sonst waere die Single-Hop-Garantie von #local
+     nach dem Scope-Rewrite kaputt (zweiter Repeater wuerde das
+     local-discard-Paket weiterleiten).
+
+     Code-Kommentar explizit:
+       'WICHTIG: hier IMMER hart blocken, unabhaengig vom
+       repeat_scope_mode'
+     Plus inline-Kommentar an der is_local_discard-Verzweigung:
+       'SENTINEL: NIE weiterleiten. Gilt auch im repeat all-Modus.'
+
+  4) README-dl9sau.txt: Flags-Legende und Special-Scopes-Block
+     angepasst. local-discard-Sentinel-Beschreibung explizit auf die
+     'wird auch in repeat all NIE weitergeleitet' Garantie hinweisen.
+
+  5) Wunschliste 14 als ERLEDIGT markiert + komplette Doku.
+
+Quelle: User-Frage 2026-05-29 mit Begruendung Netzschonung.
+
+================================================================================
 Build-Status
 ================================================================================
 

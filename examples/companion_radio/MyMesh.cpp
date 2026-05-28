@@ -659,11 +659,25 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       decision = false;
       reject_reason = "scope-not-allowed";
     } else {
-      // Wunschliste 11 Schritte 11+12: Special-Scope-Handling.
-      // local/lokal: single-hop, beim Repeat Scope-Rewrite zu local-discard.
-      // region/regional: konfigurierbares Hop-Limit (_prefs.scope_regional_hop_limit).
-      // local-discard: wird durch default-REPEAT_OFF schon abgelehnt; falls
-      // doch (User hat es manuell gepinnt) -> Sentinel, hier hart blocken.
+      // Wunschliste 11 Schritte 11+12 + Wunschliste 14: Special-Scope-
+      // Handling. Diese Logik laeuft NACH scopeAllowedForRepeat — also
+      // sowohl im 'repeat allowlist'- als auch im 'repeat all'-Modus
+      // (im all-Modus liefert scopeAllowedForRepeat immer true, danach
+      // greifen hier die hard-blocks).
+      //
+      // local/lokal: single-hop. Pakete mit hops==0 werden weitergeleitet,
+      //              dabei wird der Scope zu 'local-discard' umgeschrieben
+      //              damit kein zweiter Repeater drueber geht. Pakete mit
+      //              hops>0 werden verworfen.
+      // region/regional: konfigurierbares Hop-Limit (scope_regional_hop_limit).
+      //
+      // local-discard SENTINEL — WICHTIG: hier IMMER hart blocken,
+      // unabhaengig vom repeat_scope_mode. Im 'repeat all'-Modus ist
+      // scopeStatusAllowsRepeat NICHT auf den status_byte geprueft worden
+      // (kurz-circuit), daher MUESSEN wir den Block hier setzen. Sonst
+      // wuerde ein local-Paket, das gerade auf local-discard umgeschrieben
+      // wurde, beim naechsten Repeater wieder weitergeleitet — und die
+      // Single-Hop-Garantie waere kaputt.
       uint16_t target = packet->transport_codes[0];
       uint8_t hops = packet->getPathHashCount();
       int idx_local         = dl9sau_find_region_index("local");
@@ -680,6 +694,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       bool is_local_discard = codeMatches(idx_local_discard);
 
       if (is_local_discard) {
+        // SENTINEL: NIE weiterleiten. Gilt auch im 'repeat all'-Modus.
         decision = false;
         reject_reason = "local-discard";
       } else if (is_local) {
@@ -7106,7 +7121,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       gflush();
       pushCompanionMessage(
         "Flags: R=aktiv jetzt, A=auto-mode, P=pin, D=disabled,\n"
-        "X=deleted, !=advert-off, b=hat bbox; (b-in)=Build-in, (ext)=Extras");
+        "X=deleted, b=hat bbox; (b-in)=Build-in, (ext)=Extras");
+      pushCompanionMessage(
+        "  ! = Eigenes geo auto-Advert waehlt diesen Scope nie aus.\n"
+        "      (Repeat ist davon unberuehrt; explizite 'scope advert bake/\n"
+        "       default/override <name>' auch.)");
       return;
     }
 

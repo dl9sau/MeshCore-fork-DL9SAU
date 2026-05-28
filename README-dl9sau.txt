@@ -518,12 +518,16 @@ Scope-System (Changelog 14t + 14v..14z):
 
   Flags in scope list:
     R = aktiv jetzt  (Mode-aktiv UND nicht disabled)
-    A = auto-mode (geo)
+    A = auto-mode (Bbox-Match)
     P = pin (immer aktiv)
     D = disabled (temporaer)
     X = deleted (versteckt)
-    ! = advert off
     b = hat bbox
+    ! = Eigenes geo auto-Advert waehlt diesen Scope nie aus
+        (= chooseGeoFallbackScope skippt diesen Eintrag).
+        Betrifft NUR die Auto-Auswahl meines eigenen Send-Adverts;
+        Repeat-Verhalten und explizite 'scope advert bake/default/
+        override' bleiben davon unberuehrt.
 
   Flags in scope rep:
     (A)  aktiv (auto Bbox)
@@ -537,7 +541,22 @@ Scope-System (Changelog 14t + 14v..14z):
                               kein zweiter Repeater drueber geht.
     #region / #regional       konfigurierbarer Hop-Cap; Default 3.
                               CLI: set scope_regional_hops <1..flood_max>
-    #local-discard            sentinel; default off, wird nie repeated.
+    #local-discard            SENTINEL — wird NIE repeated, auch nicht
+                              im 'scope repeater mode all'-Modus. Der
+                              Block ist im allowPacketForward fest
+                              verdrahtet (vor der allowlist-Pruefung).
+                              Damit ist die Single-Hop-Garantie von
+                              #local / #lokal sicher: nach dem Rewrite
+                              durch den ersten Repeater landet das
+                              Paket auf #local-discard und KEIN weiterer
+                              Repeater leitet es weiter.
+                              Diese Eintraege koennen mit 'scope advert
+                              bake/default/override <name>' explizit
+                              als eigener Send-Scope gewaehlt werden;
+                              das geht heute schon — '!' (advert auto
+                              off) auf diesen Eintraegen war frueher
+                              gesetzt aber funktional No-Op (Wunschliste
+                              14), heute deshalb entfernt.
 
 Wire-Frame-Limit:
   pushCompanionMessage prefixt mit Sender-Name (z.B. 'Generic ESP32: ',

@@ -22,12 +22,22 @@ struct GeoRegion {
 // Helper-Makros fuer Tabellen-Eintraege:
 //   GEO(name, lat_min, lat_max, lon_min, lon_max)  — normaler Geo-Eintrag
 //   NOGEO_PIN(name)                                — position-unabhaengig,
-//                                                    default repeat=on, advert=off
+//                                                    default repeat=on
 //   NOGEO_OFF(name)                                — position-unabhaengig,
 //                                                    default repeat=off (Sentinel)
 #define GEO(N, A, B, C, D)   { N, A, B, C, D, true, 0 }
+// NOGEO_PIN: KEIN ADVERT_OFF mehr (Wunschliste 14). chooseGeoFallbackScope
+// ueberspringt no-bbox-Eintraege bereits per has_bbox-Filter, das
+// ADVERT_OFF-Bit waere also redundant gewesen und nur kosmetisch
+// irritierend in 'scope list' ([RP!] -> [RP]). User kann diese Scopes
+// weiterhin explizit als 'scope advert bake/default/override' nutzen --
+// das war auch vorher schon erlaubt (kein Filter), jetzt aber konsistent
+// im Display.
 #define NOGEO_PIN(N)         { N, 0, 0, 0, 0, false, \
-                               (uint8_t)(SCOPE_STATUS_REPEAT_ON | SCOPE_STATUS_ADVERT_OFF) }
+                               (uint8_t)SCOPE_STATUS_REPEAT_ON }
+// NOGEO_OFF: Sentinel mit repeat=off + advert=off. ADVERT_OFF bleibt als
+// zweite Sicherung -- selbst wenn ein User local-discard versehentlich
+// pinned, soll er nicht als eigener Send-Scope verwendet werden.
 #define NOGEO_OFF(N)         { N, 0, 0, 0, 0, false, \
                                (uint8_t)(SCOPE_STATUS_REPEAT_OFF | SCOPE_STATUS_ADVERT_OFF) }
 

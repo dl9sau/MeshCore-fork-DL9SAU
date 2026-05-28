@@ -797,13 +797,47 @@ Quelle: User-Anregung 2026-05-28 (spaete Session, nach Schritt 8
 Implementation). Diskussion morgen weiter.
 
 --------------------------------------------------------------------------------
-14. scope predefined list "local", "lokal", "region", "regional":
+14. scope predefined list "local", "lokal", "region", "regional":  ERLEDIGT
 --------------------------------------------------------------------------------
 
-Haben eine Location - weil es immer gilt (-> pin).
-Hier steht predefined '!' fuer local adverts. Ist diese Entscheidung riichtig? Denn
-die Staerke dieser sehr begrenzt haltenden scopes ist, das Netz so wenig
-wie moeglich zu tangieren. Deshalb ist eine flooded advert ("bake") dortihn
-keine schlechte Idee, um das Netz zu schonen.
-Da user keine advert-Filterliste haben und alle scoped-Nachrichten lesen koennen,
-ist es ok solche Scopes zu nutzen.
+User-Frage: hat default-'!' (= SCOPE_STATUS_ADVERT_OFF) auf diesen Special-
+Scopes Sinn? Die Staerke dieser Scopes ist, das Netz wenig zu tangieren —
+flooded advert (bake) auf z.B. #region ist netzschonend und sollte nicht
+durch '!' blockiert sein.
+
+Befund nach Code-Review (Wunschliste 14):
+
+Was '!' (SCOPE_STATUS_ADVERT_OFF) eigentlich tut:
+  chooseGeoFallbackScope() iteriert Build-in + Extras und waehlt einen
+  Geo-Match als MEINEN eigenen Send-Advert-Scope (Nightly-Flood,
+  Self-Advert). Wenn '!' gesetzt: Eintrag wird uebersprungen.
+  Es betrifft NUR die Auto-Wahl meines eigenen Adverts.
+  Es betrifft NICHT:
+    - Repeat-Verhalten (steuert pin/auto/off)
+    - explizite 'scope advert bake/default/override <name>'
+    - eingehende Adverts oder andere Pakete
+
+Effekt auf local/lokal/region/regional:
+  chooseGeoFallbackScope filtert no-bbox-Eintraege BEREITS per
+  has_bbox-Check (MyMesh.cpp:3589) raus -- VOR dem '!'-Check. Das
+  '!'-Bit auf den Specials war also rein kosmetisch: in 'scope list'
+  erschien [RP!] obwohl es funktional dasselbe wie [RP] bedeutete.
+
+Cleanup:
+  NOGEO_PIN Macro (dl9sau_geo_recommendations.cpp) ohne ADVERT_OFF.
+  #local / #lokal / #region / #regional zeigen jetzt [RP] statt [RP!].
+  Konsistent mit dem User-Intent: 'scope advert bake region' war
+  schon vorher erlaubt, ist jetzt aber auch optisch nicht mehr
+  irritierend.
+  local-discard (NOGEO_OFF) BEHAELT ADVERT_OFF als zweite Sicherung
+  gegen versehentliches Pinnen.
+
+Legenden-Update in 'scope list':
+  '!' wird nicht mehr als 'advert-off' tituliert (zu mehrdeutig --
+  klang als haette es was mit Repeat von Adverts zu tun). Neuer Text:
+    '! = Eigenes geo auto-Advert waehlt diesen Scope nie aus.'
+
+local-discard Sentinel hard-block:
+  allowPacketForward blockt local-discard explizit auch im
+  'repeat all'-Modus (nicht nur in allowlist). Code-Kommentar
+  ausdruecklich geschaerft.
