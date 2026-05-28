@@ -717,8 +717,81 @@ Quelle: User-Anregung in dieser Session, 2026-05-28.
 
 12. flood_max + loop.detect Companion-CLI Mirror (NEU OFFEN)
 --------------------------------------------------------------------------------
-Siehe Punkt 6 oben — die Voraussetzungen sind geklaert. _prefs.flood_max
-+ set/get CLI noch nicht eingebaut; CR_MAX_REPEAT_PATH_LEN bleibt
-hartcodiert auf 16 in MyMesh.cpp:641. Konsens: kein per-Scope-Limit
-(zu verwirrend); 3-stufige Reichweite reicht (local=1 hop, regional=
-scope_regional_hops, alles andere=flood_max).
+Siehe Punkt 6 oben. flood_max ERLEDIGT (Commit a7450b24). loop.detect
+noch nicht eingebaut — Companion hat heute nur 8-Byte hasSeen-Cache,
+kein Modus-Schalter wie simple_repeater. Bleibt offen.
+
+
+--------------------------------------------------------------------------------
+13. Scope-CLI Restruktur + orthogonale rep/adv-Achsen + Wording-Konsistenz
+--------------------------------------------------------------------------------
+
+Anlass (User-Erkenntnis 2026-05-28, spaeter Abend):
+  Das 'scope'-Toplevel ist gewachsen und hat heute mindestens vier
+  Konzept-Kategorien unter einem Dach (Send-Policy, Registry, per-
+  Eintrag, Global-Repeat-Policy). Plus zwei Wording-Probleme:
+
+  (a) 'scope rep ?' zeigt 'scope <name> pin|geo|off' als ob das rep-
+      Sub-Befehle waeren. Sind sie nicht — das ist Top-Level CLI.
+  (b) Wir benutzen mal 'geo' (in 'scope <name> geo'), mal 'auto' (in
+      Anzeige-Tags '(A)' und in 'scope <name> advert auto|off'). Wir
+      meinen das gleiche — auto via Geo-Bbox.
+
+Soll-Architektur:
+
+  Send-Policy als Sub-Namespace:
+    scope send default <name> | clear
+    scope send bake <name> | clear
+    scope send override <name> [TTL] | clear
+    scope send follow on|off            (= scope_geo_prefers; "follow
+                                         GPS for sending", Geo gewinnt
+                                         vor Default wenn ortlich
+                                         anders)
+
+  Global Repeat-Policy (existing, umbenannt):
+    scope repeater mode all|allowlist   (bleibt)
+    scope repeater auto on|off          (NEU: globaler Schalter ob
+                                         auto-rep-Eintraege ueberhaupt
+                                         greifen. off = nur Pins
+                                         zaehlen)
+
+  Global Advert-Policy:
+    scope advert auto on|off            (NEU: globaler Schalter ob
+                                         auto-adv-Eintraege ueberhaupt
+                                         senden. off = nur Pins
+                                         adverten)
+
+  Per-Eintrag (zwei orthogonale Achsen, beide 3 Modi):
+    scope <name> rep pin|auto|off       Repeat-Mode
+    scope <name> adv pin|auto|off       Advert-Mode
+    scope <name> disable | enable       temporaer beide Achsen aus/an
+    scope <name> delete | undelete      permanent verstecken (Build-in)
+    scope <name> info                   Details
+
+  Registry-Browsing (existing):
+    scope list | list all
+    scope info <name>
+    scope add <name> [bbox]
+    scope remove <name>
+    scope regions
+
+Offene Frage vor Implementation:
+  Brauchen wir wirklich 3 Modi fuer adv (= pin-adv)? Pin-adv hiesse:
+  "ich adverte mich IMMER als <name>, auch wenn ich nicht in dessen
+  Bbox bin". Use-Case fraglich. Falls nein -> adv bleibt binaer
+  (auto/off), Status-Byte muss nicht geaendert werden.
+
+Storage-Konsequenz bei pin-adv:
+  Status-Byte muesste umgemappt werden:
+    bits 0-1: rep_mode (auto/pin/off) -- unchanged
+    bits 2-3: adv_mode (auto/pin/off) -- NEU (war: bit 2 = advert_off)
+    bit 4:    disabled                -- umgezogen von bit 3
+    bit 5:    user_deleted            -- umgezogen von bit 4
+  Format-Bump #2 noetig. Bei nur 2 adv-Modi (auto/off): kein Bump.
+
+Wording-Konsistenz:
+  Ueberall 'auto' statt 'geo' fuer den dynamischen Bbox-Mode.
+  'scope <name> geo' bleibt als Alias erlaubt fuer Muscle-Memory.
+
+Quelle: User-Anregung 2026-05-28 (spaete Session, nach Schritt 8
+Implementation). Diskussion morgen weiter.
