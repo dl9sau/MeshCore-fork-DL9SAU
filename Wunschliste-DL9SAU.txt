@@ -446,7 +446,7 @@ Quelle: User-Frage in dieser Session, 2026-05-28.
 
 
 --------------------------------------------------------------------------------
-8. repeater profile [defensive | normal] — temporaerer "wie ein Repeater"
+8. repeater profile [defensive | normal] — temporaerer "wie ein Repeater"  ERLEDIGT
 --------------------------------------------------------------------------------
 
 Ist-Zustand:

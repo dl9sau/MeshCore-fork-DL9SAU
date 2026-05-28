@@ -294,6 +294,10 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
 //    through allowPacketForward via the contacts <48h check, but they
 //    are not "our" local nodes in the strict sense.
 bool MyMesh::shouldReduceFloodRetransmit(const mesh::Packet* packet, uint8_t n) const {
+  // Wunschliste 8: im normal-Profil keine Power/CR-Reduktion. Egal wie
+  // viele Retransmits — der Repeater verhaelt sich wie ein "echter".
+  if (_prefs.repeater_profile == 1) return false;
+
   if (n > 0) return true;
 
   uint8_t ptype = packet->getPayloadType();
@@ -702,8 +706,13 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       }
     }
   } else if (ptype == PAYLOAD_TYPE_PATH) {
-    // PATH discovery: only repeat for local nodes (heard < 48h OR known contact < 48h)
-    if (packet->payload_len >= 2) {
+    // PATH discovery. Wunschliste 8:
+    //   defensive (Default): nur fuer lokale Nodes repeaten (heard < 48h
+    //     ODER known contact < 48h).
+    //   normal: alle PATH-Pakete weiterleiten ("wie echter Repeater").
+    if (_prefs.repeater_profile == 1) {
+      decision = true;  // normal-Profil: kein lokaler Endpoint-Filter
+    } else if (packet->payload_len >= 2) {
       uint8_t dest_hash = packet->payload[0];
       uint8_t src_hash  = packet->payload[1];
       uint32_t now = getRTCClock()->getCurrentTime();
@@ -1373,6 +1382,8 @@ void MyMesh::begin(bool has_display) {
   }
   // scope_geo_prefers: 0 = off (Default), 1 = Geo gewinnt vor Default
   if (_prefs.scope_geo_prefers > 1) _prefs.scope_geo_prefers = 0;
+  // repeater_profile: 0 = defensive (Default), 1 = normal
+  if (_prefs.repeater_profile > 1) _prefs.repeater_profile = 0;
   // scope_regional_hop_limit: 0 = uninitialisiert -> Companion-Default 3.
   // Range 1..flood_max (sonst widerspruechlich — flood_max ist die harte
   // Obergrenze, regional muss drunter liegen).
@@ -4438,6 +4449,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "bleibt aktiv. Force-Flag wird persistiert und beim App-'aus' "
           "gecleared. Ohne Arg -> Status."
         );
+        pushCompanionMessage(
+          "repeater profile [defensive | normal]: Filter-Tiefe.\n"
+          "  defensive (Default): PATH nur fuer lokale Endpoints,\n"
+          "                       Repeats mit reduzierter Power + CR5.\n"
+          "  normal:    ALLE PATH-Pakete repeaten, volle Power +\n"
+          "                       konfigurierte CR (=echter Repeater)."
+        );
         return;
       }
       if (topic_prefix_match(topic, "status")) {
@@ -5051,6 +5069,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                _prefs.client_repeat_force == 0 ? " [default]" : " (default: 0)");
       add_line(tmp);
       if (_prefs.client_repeat_force != 0) non_default_count++;
+    }
+    // repeater_profile
+    if (show_all || _prefs.repeater_profile != 0) {
+      snprintf(tmp, sizeof(tmp), "  repeater_profile = %s%s",
+               _prefs.repeater_profile == 1 ? "normal" : "defensive",
+               _prefs.repeater_profile == 0 ? " [default]" : " (default: defensive)");
+      add_line(tmp);
+      if (_prefs.repeater_profile != 0) non_default_count++;
     }
     // duty
     if (show_all || _prefs.duty_soft_pct != 80) {
@@ -7018,13 +7044,55 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool strict_ok = isValidClientRepeatFreq(f_khz);
       char line[160];
       snprintf(line, sizeof(line),
-               "repeater=%s%s  freq=%.4f MHz  strict_ok=%s",
+               "repeater=%s%s  profile=%s  freq=%.4f MHz  strict_ok=%s",
                _prefs.client_repeat ? "on" : "off",
                _prefs.client_repeat_force ? " (force)" : "",
+               _prefs.repeater_profile == 1 ? "normal" : "defensive",
                _prefs.freq, strict_ok ? "yes" : "no");
       pushCompanionMessage(line);
       return;
     }
+
+    // -- profile [defensive|normal] (Wunschliste 8) --
+    if (starts_with_word(arg, "profile")) {
+      const char* pv = strchr(arg, ' ');
+      if (pv) { while (*pv == ' ') pv++; }
+      if (!pv || *pv == 0) {
+        char r[200];
+        snprintf(r, sizeof(r),
+          "repeater profile = %s\n"
+          "  defensive: PATH nur fuer lokale Endpoints, Repeats mit\n"
+          "             reduzierter Power + CR5 (= client-Repeater).\n"
+          "  normal:    ALLE PATH-Pakete weiterleiten, volle Power +\n"
+          "             konfigurierte CR (= wie echter Repeater).",
+          _prefs.repeater_profile == 1 ? "normal" : "defensive");
+        pushCompanionMessage(r);
+        return;
+      }
+      static const CompanionChoice prof_ch[] = {
+        { "defensive", false },  // 0
+        { "normal",    false },  // 1
+      };
+      char pa[40];
+      int pm = match_choice(pv, prof_ch, 2, pa, sizeof(pa));
+      if (pm == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", pa); pushCompanionMessage(r); return; }
+      if (pm < 0)   { pushCompanionMessage("Usage: repeater profile defensive|normal"); return; }
+      _prefs.repeater_profile = (uint8_t)pm;
+      savePrefs();
+      char r[160];
+      snprintf(r, sizeof(r),
+        "OK - repeater profile = %s.\n"
+        "  PATH-Filter: %s\n"
+        "  Power/CR-Reduktion bei Repeats: %s",
+        pm == 1 ? "normal" : "defensive",
+        pm == 1 ? "AUS (alle PATH weiterleiten)"
+                : "AN (nur lokale Endpoints)",
+        pm == 1 ? "AUS (volle Power + konfigurierte CR)"
+                : "AN (reduziert + CR5)");
+      pushCompanionMessage(r);
+      return;
+    }
+
     int rm = match_on_off(arg);
     if (rm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
     if (rm == 0) {

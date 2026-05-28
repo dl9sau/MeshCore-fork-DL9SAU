@@ -212,4 +212,15 @@ struct NodePrefs {  // persisted to file
   // dem Home-Scope". Default 0 (off). Wirkt sowohl auf reguläre
   // sendFloodScoped-Pfade als auch auf chooseNightFloodScope.
   uint8_t        scope_geo_prefers;
+
+  // Repeater-Profil (Wunschliste 8):
+  //   0 = defensive (Default, aktuelles Verhalten: PATH nur lokal,
+  //                  Repeats mit reduzierter Power + CR5)
+  //   1 = normal    ("wie ein echter Repeater": ALLE PATH repeaten,
+  //                  Repeats mit voller Power + konfigurierter CR)
+  // Use-Case: voruebergehender Standortwechsel an einen guten Spot
+  // (Hochhaus, Berg) fuer ein paar Stunden vollwertig repeaten, dann
+  // wieder defensiv. Andere Filter (client_repeat, duty, flood_max,
+  // scope-Allowlist) bleiben unveraendert.
+  uint8_t        repeater_profile;
 };
