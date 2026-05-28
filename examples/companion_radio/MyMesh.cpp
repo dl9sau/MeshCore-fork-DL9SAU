@@ -6808,14 +6808,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           break;
       }
 
-      char block[500];
-      snprintf(block, sizeof(block),
+      // Split in zwei Messages -- auto-Annotation kann ~70 Byte sein,
+      // Gesamt-Block sprengt sonst das 160-Byte Wire-Limit.
+      char head[200];
+      snprintf(head, sizeof(head),
                "scope advert (send hierarchy):\n"
-               "  %s\n  %s\n  %s\n"
+               "  %s\n  %s\n  %s",
+               def_line, bake_line, ovr_line);
+      pushCompanionMessage(head);
+      char tail[200];
+      snprintf(tail, sizeof(tail),
                "  auto = %s\n"
                "  active = %s",
-               def_line, bake_line, ovr_line, auto_str, active);
-      pushCompanionMessage(block);
+               auto_str, active);
+      pushCompanionMessage(tail);
       return;
     }
 
@@ -7180,14 +7186,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             break;
         }
 
-        char block[500];
-        snprintf(block, sizeof(block),
+        // Split wie oben -- s. Wire-Frame-Limit-Kommentar.
+        char head[200];
+        snprintf(head, sizeof(head),
                  "scope advert (send hierarchy):\n"
-                 "  %s\n  %s\n  %s\n"
+                 "  %s\n  %s\n  %s",
+                 def_line, bake_line, ovr_line);
+        pushCompanionMessage(head);
+        char tail[200];
+        snprintf(tail, sizeof(tail),
                  "  auto = %s\n"
                  "  active = %s",
-                 def_line, bake_line, ovr_line, auto_str, active);
-        pushCompanionMessage(block);
+                 auto_str, active);
+        pushCompanionMessage(tail);
         pushCompanionMessage("Hilfe: 'scope advert ?' fuer Sub-Befehle.");
         return;
       }
