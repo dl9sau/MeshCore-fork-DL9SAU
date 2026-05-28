@@ -455,6 +455,55 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
   // onDiscoveredContact() merken (Q4-Format, wie ueblich in MeshCore).
   _last_advert_snr_q4 = (packet != NULL) ? packet->_snr : 0;
   BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
+
+  // Wunschliste 15: bei zero-hop heard (path_len==0) zur Runtime-
+  // Neighbour-Tabelle hinzufuegen. 'liberal' Filter: alle adv_types
+  // werden aufgenommen (chat/repeater/sensor/room).
+  if (packet != NULL && packet->path_len == 0
+      && app_data != NULL && app_data_len > 0) {
+    AdvertDataParser parser(app_data, app_data_len);
+    if (parser.isValid()) {
+      putRuntimeNeighbour(id, timestamp, _last_advert_snr_q4, parser.getType());
+    }
+  }
+}
+
+void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_timestamp,
+                                 int8_t snr_q4, uint8_t adv_type) {
+  // 1) Bereits bekannt? -> Eintrag updaten.
+  for (int i = 0; i < _neighbours_count; i++) {
+    if (memcmp(_neighbours[i].pub_key, id.pub_key, 32) == 0) {
+      _neighbours[i].advert_timestamp = advert_timestamp;
+      _neighbours[i].heard_timestamp  = getRTCClock()->getCurrentTime();
+      _neighbours[i].heard_millis     = millis();
+      _neighbours[i].snr              = snr_q4;
+      _neighbours[i].adv_type         = adv_type;
+      return;
+    }
+  }
+  // 2) Platz vorhanden? -> Anhaengen.
+  int target_idx;
+  if (_neighbours_count < MAX_RUNTIME_NEIGHBOURS) {
+    target_idx = _neighbours_count++;
+  } else {
+    // 3) LRU: aelteste heard_millis verdraengen. (heard_timestamp
+    // unsicher solange RTC nicht gesetzt -> heard_millis ist robuster
+    // weil monoton seit Boot.)
+    uint32_t oldest = 0xFFFFFFFFu;
+    target_idx = 0;
+    for (int i = 0; i < _neighbours_count; i++) {
+      if (_neighbours[i].heard_millis < oldest) {
+        oldest = _neighbours[i].heard_millis;
+        target_idx = i;
+      }
+    }
+  }
+  memcpy(_neighbours[target_idx].pub_key, id.pub_key, 32);
+  _neighbours[target_idx].advert_timestamp = advert_timestamp;
+  _neighbours[target_idx].heard_timestamp  = getRTCClock()->getCurrentTime();
+  _neighbours[target_idx].heard_millis     = millis();
+  _neighbours[target_idx].snr              = snr_q4;
+  _neighbours[target_idx].adv_type         = adv_type;
 }
 
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
@@ -1173,10 +1222,85 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
     return 4 + (uint8_t)n;
   }
 
-  // NOTE: REQ_TYPE_GET_NEIGHBOURS noch nicht implementiert -- der
-  // Companion hat keine pub_key-getrackten Neighbours wie der
-  // simple_repeater (nur HeardList mit 1-Byte-Hashes). Spaeter
-  // nachruesten falls die App das nutzt.
+  // Wunschliste 15: REQ_TYPE_GET_NEIGHBOURS. Nur Role == REPEATER.
+  // Liefert die zero-hop Runtime-Neighbour-Tabelle. Wire-Layout 1:1
+  // wie simple_repeater (request_version 0 mit count/offset/order_by/
+  // pubkey_prefix_length).
+  if (data[0] == REQ_TYPE_GET_NEIGHBOURS && role == ADV_TYPE_REPEATER) {
+    if (len < 8) return 0;  // version + count + offset(2) + order_by + prefix_len + 4-blob = 9
+    uint8_t request_version    = data[1];
+    if (request_version != 0) return 0;
+    uint8_t want_count         = data[2];
+    uint16_t want_offset;       memcpy(&want_offset, &data[3], 2);
+    uint8_t order_by           = data[5];
+    uint8_t pubkey_prefix_len  = data[6];
+    if (pubkey_prefix_len > 32) pubkey_prefix_len = 32;
+
+    memcpy(reply, &sender_timestamp, 4);
+    int reply_off = 4;
+
+    // Sorted-Pointer-Array bauen (LRU ist insertion-order, hier
+    // brauchen wir explizite Sortierung).
+    RuntimeNeighbour* sorted[MAX_RUNTIME_NEIGHBOURS];
+    int16_t total = 0;
+    for (int i = 0; i < _neighbours_count; i++) {
+      sorted[total++] = &_neighbours[i];
+    }
+    // Sort. std::sort wird die meisten ESP32-builds unterstuetzen.
+    if (total > 1) {
+      // Einfacher Insertion-Sort (32 Eintraege max -> O(N^2) ist
+      // billig, vermeidet std::sort-Include-Aufwand).
+      for (int i = 1; i < total; i++) {
+        RuntimeNeighbour* key = sorted[i];
+        int j = i - 1;
+        while (j >= 0) {
+          bool key_before = false;
+          switch (order_by) {
+            case 0: key_before = key->heard_timestamp > sorted[j]->heard_timestamp; break; // newest first
+            case 1: key_before = key->heard_timestamp < sorted[j]->heard_timestamp; break; // oldest first
+            case 2: key_before = key->snr > sorted[j]->snr; break; // strongest first
+            case 3: key_before = key->snr < sorted[j]->snr; break; // weakest first
+            default: key_before = false; break;
+          }
+          if (!key_before) break;
+          sorted[j + 1] = sorted[j];
+          j--;
+        }
+        sorted[j + 1] = key;
+      }
+    }
+
+    // Header: total + result_count placeholder
+    int16_t result_count = 0;
+    int16_t total_w = total;
+    memcpy(&reply[reply_off], &total_w, 2); reply_off += 2;
+    int header_results_off = reply_off; reply_off += 2;  // fill later
+
+    // Entries
+    uint32_t now_rtc = getRTCClock()->getCurrentTime();
+    uint32_t now_ms  = millis();
+    for (int idx = 0; idx < want_count && idx + want_offset < total; idx++) {
+      RuntimeNeighbour* n = sorted[idx + want_offset];
+      int entry_size = pubkey_prefix_len + 4 + 1;
+      // 160 ist defensive Annahme fuer reply-Buffer-Size in BaseChatMesh
+      if (reply_off + entry_size > 150) break;
+      memcpy(&reply[reply_off], n->pub_key, pubkey_prefix_len);
+      reply_off += pubkey_prefix_len;
+      // heard_seconds_ago: aus RTC wenn gesetzt, sonst aus millis()-Delta.
+      uint32_t heard_secs;
+      if (now_rtc > 1500000000UL && n->heard_timestamp > 0) {
+        heard_secs = (now_rtc > n->heard_timestamp)
+                     ? (now_rtc - n->heard_timestamp) : 0;
+      } else {
+        heard_secs = (now_ms - n->heard_millis) / 1000;
+      }
+      memcpy(&reply[reply_off], &heard_secs, 4); reply_off += 4;
+      reply[reply_off++] = (uint8_t)n->snr;
+      result_count++;
+    }
+    memcpy(&reply[header_results_off], &result_count, 2);
+    return (uint8_t)reply_off;
+  }
 
   if (data[0] == REQ_TYPE_GET_TELEMETRY_DATA) {
     uint8_t permissions = 0;
@@ -1422,6 +1546,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(send_scope.key, 0, sizeof(send_scope.key));
   memset(heard_list, 0, sizeof(heard_list));
   heard_next_idx = 0;
+  // Wunschliste 15: Runtime-Neighbour-Tabelle leer initialisieren.
+  _neighbours_count = 0;
+  memset(_neighbours, 0, sizeof(_neighbours));
   next_periodic_advert_at = 0;
   next_night_flood_unix = 0;
   _pos_anchor_lat = 0;

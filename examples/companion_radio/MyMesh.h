@@ -102,6 +102,21 @@
 #define LOOP_DETECT_MODERATE     2
 #define LOOP_DETECT_STRICT       3
 
+// Wunschliste 15: Runtime-Neighbour-Tabelle fuer REQ_TYPE_GET_NEIGHBOURS.
+// RAM-only, LRU, gefuellt aus onAdvertRecv bei zero-hop heard (path_len==0).
+// 'liberal' Filter: alle adv_types werden aufgenommen (Repeater/Chat/Sensor).
+// Funktioniert ab Boot ohne RTC (heard_timestamp ist Unix-Sekunde wenn RTC
+// gesetzt, sonst 0 -> seconds_ago wird relativ aus heard_millis berechnet).
+#define MAX_RUNTIME_NEIGHBOURS   32
+struct RuntimeNeighbour {
+  uint8_t  pub_key[32];      // PUB_KEY_SIZE
+  uint32_t advert_timestamp; // aus dem advert (sender clock)
+  uint32_t heard_timestamp;  // RTC unix seconds (0 wenn RTC ungesetzt)
+  uint32_t heard_millis;     // millis() zum Zeitpunkt des heard
+  int8_t   snr;              // x 4 wie simple_repeater
+  uint8_t  adv_type;         // ADV_TYPE_*
+};
+
 // Wire-Layout fuer REQ_TYPE_GET_STATUS Antwort (Wunschliste 7 Phase 4).
 // 1:1 kompatibel zu simple_repeater::RepeaterStats damit die App den
 // gleichen Parser verwenden kann.
@@ -328,6 +343,12 @@ protected:
   // (in der angegebenen Hash-Size) im Path bereits vorkommt. Returns
   // true wenn n >= max_counters[hash_size]. Analog simple_repeater.
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]) const;
+
+  // Wunschliste 15: zero-hop-Neighbour zur Tabelle hinzufuegen oder
+  // updaten. LRU-Verdraengung wenn voll. Wird aus onAdvertRecv gerufen
+  // wenn packet->path_len == 0 (= zero-hop, direkt gehoert).
+  void putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_timestamp,
+                           int8_t snr_q4, uint8_t adv_type);
   void onControlDataRecv(mesh::Packet *packet) override;
   void onRawDataRecv(mesh::Packet *packet) override;
   void onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
@@ -664,6 +685,10 @@ private:
   // wenn repeat_mode == AUTO. Default false (out-of-bbox / no-bbox).
   bool          _buildin_in_bbox[SCOPE_BUILDIN_KEY_CACHE_MAX];
   bool          _extras_in_bbox[SCOPE_EXTRAS_SLOTS];
+
+  // Wunschliste 15: zero-hop Runtime-Neighbour-Tabelle.
+  RuntimeNeighbour _neighbours[MAX_RUNTIME_NEIGHBOURS];
+  uint8_t          _neighbours_count;
 
 public:
   uint32_t getTxAdvertCount()  const { return _tx_advert_count; }
