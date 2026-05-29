@@ -2805,13 +2805,29 @@ void MyMesh::handleCmdFrame(size_t len) {
     memcpy(&secs, &cmd_frame[1], 4);
     uint32_t curr = getRTCClock()->getCurrentTime();
     if (secs >= curr) {
-      getRTCClock()->setCurrentTime(secs);
-      // Any RTC-driven schedule made before this point used the stale time;
-      // invalidate so the next loop tick re-picks a slot with the corrected RTC.
-      next_night_flood_unix = 0;
-      pushDebugLog("[ADV-DBG] CMD_SET_DEVICE_TIME: rtc %lu -> %lu, nightly slot invalidated\n",
-                    (unsigned long)curr, (unsigned long)secs);
-      writeOKFrame();
+      uint32_t delta = secs - curr;
+      // Toleranz fuer App-Sync (Test-Bericht 2026-05-30): jeder App-Connect
+      // schickt CMD_SET_DEVICE_TIME. Bei kleinen Deltas (App-Clock und RTC
+      // praktisch identisch) wuerde sonst jedes Connect-Event den Nightly-
+      // Slot invalidieren -> ungewollte Re-Schedules pro App-Connect.
+      //   delta <= 10s    : komplett ignorieren (RTC bleibt, Slot bleibt)
+      //   delta <= 3600s  : RTC aktualisieren, Slot beibehalten (1h-Drift
+      //                     innerhalb des 23-05-Fensters bleibt der Slot
+      //                     plausibel)
+      //   delta > 3600s   : RTC aktualisieren UND Slot invalidieren
+      if (delta <= 10) {
+        // praktisch synchron -- still OK
+        writeOKFrame();
+      } else {
+        getRTCClock()->setCurrentTime(secs);
+        bool invalidate = (delta > 3600);
+        if (invalidate) next_night_flood_unix = 0;
+        pushDebugLog("[ADV-DBG] CMD_SET_DEVICE_TIME: rtc %lu -> %lu (delta %lus)%s\n",
+                      (unsigned long)curr, (unsigned long)secs,
+                      (unsigned long)delta,
+                      invalidate ? ", nightly slot invalidated" : "");
+        writeOKFrame();
+      }
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
@@ -3863,9 +3879,16 @@ void MyMesh::loop() {
     // it is re-picked against the corrected time.
     if (_last_observed_rtc != 0) {
       int32_t delta = (int32_t)(now_rtc - _last_observed_rtc);
-      if (delta > 300 || delta < -300) {   // 5 min jump in either direction
+      // Trace-Schwelle: ab 5 Min Sprung loggen (interessant fuer Diagnose).
+      // Invalidierungs-Schwelle: ab 1h Sprung -- kleine Drift-Korrekturen
+      // verschieben den zufaelligen Slot im 23-05-Fenster nicht relevant.
+      // Test-Bericht 2026-05-30: ohne diese Trennung re-schedulet jeder
+      // App-Sync den Slot, sichtbar als unerwartetes [night] scheduled
+      // beim App-Connect.
+      int32_t abs_delta = delta < 0 ? -delta : delta;
+      if (abs_delta > 300) {
         traceCompanion(TRACE_RTC, "[rtc] Sprung %ld sec erkannt", (long)delta);
-        if (next_night_flood_unix != 0) {
+        if (abs_delta > 3600 && next_night_flood_unix != 0) {
           pushDebugLog("[ADV-DBG] RTC jumped %ld sec, nightly slot invalidated\n", (long)delta);
           next_night_flood_unix = 0;
         }
