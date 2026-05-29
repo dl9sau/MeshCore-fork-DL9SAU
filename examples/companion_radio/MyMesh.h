@@ -59,9 +59,8 @@
 #define MAX_CONTACTS 100
 #endif
 
-#ifndef OFFLINE_QUEUE_SIZE
-#define OFFLINE_QUEUE_SIZE 16
-#endif
+// (OFFLINE_QUEUE_SIZE entfernt 2026-05-30 -- Phase A+B Bucket-Redesign,
+//  Wunschliste 19. Limits sind jetzt BUCKET_LIMIT_* in der Klasse.)
 
 #ifndef BLE_NAME_PREFIX
 #define BLE_NAME_PREFIX "MeshCore-"
@@ -570,14 +569,47 @@ private:
   uint8_t out_frame[MAX_FRAME_SIZE + 1];
   CayenneLPP telemetry;
 
+  // Offline-Queue (Messages die ankommen waehrend App nicht connected ist).
+  // 4 typisierte Buckets statt einer einzigen 16er-Queue (Test-Bericht
+  // 2026-05-29 Bug: bei Voll mit DMs wurde die neue DM gedroppt statt die
+  // aelteste DM zu verdraengen). Jetzt: per-Bucket FIFO, kein cross-bucket
+  // Drop. Global monoton steigende seq_no pro Frame -> chronologische
+  // Reihenfolge beim Pop wird ueber alle Buckets hinweg erhalten.
   struct Frame {
-    uint8_t len;
-    uint8_t buf[MAX_FRAME_SIZE];
+    uint8_t  len;
+    uint32_t seq_no;            // 0 = leerer Slot, sonst global monoton steigend
+    uint8_t  buf[MAX_FRAME_SIZE];
 
     bool isChannelMsg() const;
   };
-  int offline_queue_len;
-  Frame offline_queue[OFFLINE_QUEUE_SIZE];
+  enum MsgBucket : uint8_t {
+    BUCKET_PUBLIC    = 0,       // PSK matches PUBLIC_GROUP_PSK
+    BUCKET_HASHTAG   = 1,       // channel.name[0] == '#'
+    BUCKET_PRIVATE   = 2,       // alles andere (User-Channels) ohne $companion
+    BUCKET_DM        = 3,       // RESP_CODE_CONTACT_MSG_RECV / _V3
+    BUCKET_COMPANION = 4,       // $companion-Channel (Trace, CLI-Output)
+    BUCKET_COUNT     = 5
+  };
+  // Phase B Limits hardcoded. Phase C macht sie via NodePrefs + CLI
+  // konfigurierbar (max 16/16/16/32/16). Aenderungen hier muessen ggf.
+  // den seq_no-Scan in getFromOfflineQueue beruehren.
+  // $companion eigener Bucket: Trace/CLI-Output ueberflutet sonst den
+  // privaten Bucket und verdraengt User-Channel-Nachrichten.
+  static constexpr int BUCKET_LIMIT_PUBLIC    = 8;
+  static constexpr int BUCKET_LIMIT_HASHTAG   = 8;
+  static constexpr int BUCKET_LIMIT_PRIVATE   = 16;
+  static constexpr int BUCKET_LIMIT_DM        = 16;
+  static constexpr int BUCKET_LIMIT_COMPANION = 16;
+  Frame    bucket_public   [BUCKET_LIMIT_PUBLIC];
+  Frame    bucket_hashtag  [BUCKET_LIMIT_HASHTAG];
+  Frame    bucket_private  [BUCKET_LIMIT_PRIVATE];
+  Frame    bucket_dm       [BUCKET_LIMIT_DM];
+  Frame    bucket_companion[BUCKET_LIMIT_COMPANION];
+  uint32_t _msg_seq_next;       // naechste seq_no fuer eingehenden Frame
+  // Helper: tableau-pointer + capacity je Bucket.
+  void     getBucket(MsgBucket b, Frame*& out_arr, int& out_cap);
+  int      offlineQueueTotal() const;     // Summe aller Buckets (UI-Indikator)
+  MsgBucket classifyFrame(const uint8_t* frame, int len);
 
   struct AckTableEntry {
     unsigned long msg_sent;

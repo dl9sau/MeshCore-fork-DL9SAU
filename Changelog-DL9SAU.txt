@@ -2432,6 +2432,54 @@ Bewusst NICHT angefasst:
   Aggregate de-nord/sued/west/mitte: bewusst breit; einzige Aus-
     nahme de-ost mit de-by-Suppression (s. oben).
 
+------------------------------------------------------------------------
+Offline-Message-Queue Redesign (Phase A+B, Wunschliste 19)
+------------------------------------------------------------------------
+
+Bei der Vergleichsdiskussion zu Meshtastic-Message-Storage hat der User
+einen Bug aufgedeckt: bei voller offline_queue (16 Slots, all-DM) wurde
+die neu eingehende DM gedroppt statt die aelteste DM zu verdraengen.
+ACK an Sender ging trotzdem raus -> Datenverlust ohne Sender-Notification.
+
+Loesung: 5-Bucket-Redesign mit per-Bucket FIFO.
+
+Buckets + Klassifizierung anhand RESP_CODE + ChannelDetails:
+   BUCKET_PUBLIC    (8 Slots)   PSK matched PUBLIC_GROUP_PSK
+   BUCKET_HASHTAG   (8 Slots)   channel.name[0] == '#'
+   BUCKET_PRIVATE   (16 Slots)  user-PSK channels
+   BUCKET_DM        (16 Slots)  RESP_CODE_CONTACT_MSG_RECV / _V3
+   BUCKET_COMPANION (16 Slots)  $companion-channel (Trace, CLI-Output)
+
+$companion ist eigener Bucket weil Trace-Output sonst den private-
+Bucket fluten und alle User-Channels verdraengen wuerde -- ein Trace
+pro GPS-wake/sleep cycle reicht um den 16er-Slot in einer Stunde voll
+zu machen. User-Hinweis 2026-05-30 vor Implementation.
+
+Im Detail:
+ - Frame-Struct um seq_no (uint32_t) erweitert. 0 = leerer Slot.
+ - addToOfflineQueue klassifiziert via classifyFrame() -> Bucket-Array.
+ - Per-Bucket-FIFO bei Full: aelteste seq_no DESSELBEN Buckets wird
+   ueberschrieben. Loest den DM-Drop-Bug auch automatisch.
+ - getFromOfflineQueue scannt alle Buckets, popped Slot mit niedrigster
+   nicht-null seq_no -> chronologische App-Lieferung wie vorher.
+ - offlineQueueTotal() ersetzt offline_queue_len fuer UI-Counter.
+ - PUBLIC_GROUP_PSK ("izOH6cXN6mrJ5e26oRXNcg==") als 16-Byte-Array
+   statisch vor-dekodiert (vermeidet base64-Header-Konflikt mit
+   BaseChatMesh.cpp wo decode_base64 ebenfalls inline definiert ist).
+
+Phase C ausstehend (siehe Wunschliste 19):
+  - NodePrefs Felder fuer per-Typ Flash-Flag + Limit
+  - CLI-Befehle: messages [flash|limit|clear] ...
+  - Flash-Persistenz via /msgs/<bucket>_<hash>.dat
+  - Boot-Restore in RAM-Buckets
+  - Channel-Delete -> Flash-GC via Hash
+  - Trace TRACE_MSGSTORE Kategorie mit $companion-Guard
+    (sonst infinite loop: Trace pusht zu $companion, wird gespeichert,
+    Trace pusht "gespeichert" zu $companion, ...)
+
+RAM-Delta gegenueber single-16-queue: +~9 KB. Flash-Delta minimal.
+Default-Verhalten unveraendert RAM-only -- Privacy-konsistent.
+
 ================================================================================
 Build-Status
 ================================================================================

@@ -1083,3 +1083,82 @@ normalen App-Inbox-Stream einspeisen muesste (= existierender Pfad,
 deutlich weniger App-Side-Aenderung).
 
 Quelle: User-Idee 2026-05-30 als Reaktion auf ROOM-Server-Diskussion.
+
+================================================================================
+19. Offline-Message-Queue Redesign (Phase B umgesetzt, Phase C ausstehend)
+================================================================================
+
+Hintergrund:
+Bei der Vergleichsdiskussion zu Meshtastic-Message-Storage hat der User
+einen Bug aufgedeckt: bei voller offline_queue (16 Slots, all-DM) wurde
+die neu eingehende DM gedroppt statt die aelteste DM zu verdraengen
+(MyMesh.cpp:221+). Daraus entstand ein groesseres Redesign-Konzept.
+
+Soll-Verhalten (User-Spezifikation 2026-05-30):
+ - 4 Typklassen mit getrennten Buckets:
+     PUBLIC   (well-known PSK)            16 max, RAM
+     HASHTAG  (channel.name[0]=='#')      16 max, RAM
+     PRIVATE  (user-PSK channels)         16 max, RAM + opt. Flash
+     DM       (Contact-Messages)          32 max, RAM + opt. Flash
+ - $companion als eigener Bucket (siehe unten).
+ - Per Typ separat konfigurierbar:
+     - Flash-Persistenz on/off (default off, Privacy-konsistent)
+     - Anzahl der gespeicherten Messages
+ - CLI-Befehle ueber companion-channel:
+     messages                       Status: counts + flash + limits pro Typ
+     messages flash <type> on|off
+     messages limit <type> <N>      max 16 (resp. 32 fuer DM)
+     messages clear <type|all>
+ - Channel-Delete-Pfad muss zugehoerigen Flash-Bucket purgen (oder
+   hash-basierter GC beim Boot).
+ - Trace 'messagestore' moeglich -- aber $companion-Speicherungen MUESSEN
+   selbst vom Trace ausgeschlossen sein, sonst infinite-loop (Trace pusht
+   $companion-msg, msg wird gespeichert, push 'gespeichert', ...).
+
+Code-Analyse-Befunde (verifiziert 2026-05-30 vor Phase B-Implementation):
+ - Public-Channel-PSK ist Konstante PUBLIC_GROUP_PSK in MyMesh.cpp:110
+   = "izOH6cXN6mrJ5e26oRXNcg==" (128-bit). Dekodierte 16 Bytes statisch
+   im Code (vermeidet base64-Header-Konflikt mit BaseChatMesh.cpp).
+ - Hashtag-Channels: App erzeugt PSK aus Name-Hash und schreibt sie via
+   CMD_SET_CHANNEL ins ChannelDetails. Firmware speichert PSK, berechnet
+   nicht zur Laufzeit. Klassifizierung also via name[0]=='#'.
+ - Channel-Delete: kein expliziter Befehl. App ueberschreibt Slot per
+   CMD_SET_CHANNEL mit name="" + Null-PSK. -> Strategie fuer Phase C
+   Flash-Cleanup: Message-Files an Channel-Hash binden (nicht idx).
+   Slot-Repurpose -> alte Files orphan -> GC-Pass beim Boot.
+ - Frame-Layout fuer Klassifizierung:
+     RESP_CODE_CONTACT_MSG_RECV (7)     code at [0], kein channel_idx (DM)
+     RESP_CODE_CHANNEL_MSG_RECV (8)     code at [0], channel_idx at [1]
+     RESP_CODE_CONTACT_MSG_RECV_V3 (16) code at [0], kein channel_idx (DM)
+     RESP_CODE_CHANNEL_MSG_RECV_V3 (17) code at [0]+snr+res*2, channel_idx at [4]
+     RESP_CODE_CHANNEL_DATA_RECV (27)   wie V3, channel_idx at [4]
+
+Phase A+B umgesetzt (Test-Session 2026-05-29 Folge-Commit):
+ - 4 Buckets + $companion-Bucket (5 total). Default-Limits:
+     PUB=8, HASHTAG=8, PRIVATE=16, DM=16, COMPANION=16
+ - Per-Bucket FIFO bei voll (loest DM-Drop-Bug).
+ - Global monotoner seq_no -> chronologische Pop-Reihenfolge erhalten.
+ - $companion sofort separiert weil Trace-Output sonst alle anderen
+   Private-Channels verdraengt haette (User-Hinweis 2026-05-30 vor
+   Phase B-Commit). Frueher als urspruenglich geplant.
+ - Total RAM-Delta gegenueber single-16-queue: +~9 KB.
+
+Phase C ausstehend -- FEINTUNING-MOEGLICHKEIT:
+ - NodePrefs-Felder fuer per-Typ Flash-Flag + Limit (Default: alles RAM).
+ - CLI 'messages [flash|limit|clear] ...' Befehle (siehe oben).
+ - Flash-Persistenz via /msgs/<bucket>_<channel-hash>.dat oder aehnlich.
+ - Boot: einlesen, in RAM-Buckets restaurieren.
+ - Channel-Delete: hash-basierter GC-Pass.
+ - Trace 'messagestore' Kategorie mit $companion-Guard:
+     if (bucket != BUCKET_COMPANION)
+       traceCompanion(TRACE_MSGSTORE, "[store] ...");
+ - Optional: Limits-Caps anheben (aktuell 16/16/16/32/16) wenn RAM-Druck
+   es zulaesst. $companion-Bucket Persistenz wuerde Crash-Log ueber
+   Reboots erhalten (User-Wunsch).
+
+Aufwand:
+ - Phase A+B:  done (~150 LoC).
+ - Phase C:    ~400-600 LoC (NodePrefs + CLI + Flash-Format + Boot-Load
+               + Delete-Hook + Trace-Guard + Doku).
+
+Quelle: User-Spezifikation 2026-05-30 als Folge des Meshtastic-Vergleichs.

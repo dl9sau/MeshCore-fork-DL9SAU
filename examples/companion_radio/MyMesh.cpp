@@ -218,42 +218,134 @@ bool MyMesh::Frame::isChannelMsg() const {
          buf[0] == RESP_CODE_CHANNEL_DATA_RECV;
 }
 
-void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
-  if (offline_queue_len >= OFFLINE_QUEUE_SIZE) {
-    MESH_DEBUG_PRINTLN("WARN: offline_queue is full!");
-    int pos = 0;
-    while (pos < offline_queue_len) {
-      if (offline_queue[pos].isChannelMsg()) {
-        for (int i = pos; i < offline_queue_len - 1; i++) { // delete oldest channel msg from queue
-          offline_queue[i] = offline_queue[i + 1];
-        }
-        MESH_DEBUG_PRINTLN("INFO: removed oldest channel message from queue.");
-        offline_queue[offline_queue_len - 1].len = len;
-        memcpy(offline_queue[offline_queue_len - 1].buf, frame, len);
-        return;
-      }
-      pos++;
-    }
-    MESH_DEBUG_PRINTLN("INFO: no channel messages to remove from queue.");
-  } else {
-    offline_queue[offline_queue_len].len = len;
-    memcpy(offline_queue[offline_queue_len].buf, frame, len);
-    offline_queue_len++;
+// Dekodierte Public-Channel-PSK (16 Bytes). Aus PUBLIC_GROUP_PSK
+// "izOH6cXN6mrJ5e26oRXNcg==" einmalig vor-dekodiert -- spart Runtime-
+// base64 + Header-Konflikt (base64.hpp ist header-only und kollidiert wenn
+// in zwei Translation-Units inkludiert wie BaseChatMesh.cpp + MyMesh.cpp).
+static const uint8_t s_public_psk[16] = {
+  0x8B, 0x33, 0x87, 0xE9, 0xC5, 0xCD, 0xEA, 0x6A,
+  0xC9, 0xE5, 0xED, 0xBA, 0xA1, 0x15, 0xCD, 0x72
+};
+
+void MyMesh::getBucket(MsgBucket b, Frame*& out_arr, int& out_cap) {
+  switch (b) {
+    case BUCKET_PUBLIC:    out_arr = bucket_public;    out_cap = BUCKET_LIMIT_PUBLIC;    break;
+    case BUCKET_HASHTAG:   out_arr = bucket_hashtag;   out_cap = BUCKET_LIMIT_HASHTAG;   break;
+    case BUCKET_PRIVATE:   out_arr = bucket_private;   out_cap = BUCKET_LIMIT_PRIVATE;   break;
+    case BUCKET_DM:        out_arr = bucket_dm;        out_cap = BUCKET_LIMIT_DM;        break;
+    case BUCKET_COMPANION: out_arr = bucket_companion; out_cap = BUCKET_LIMIT_COMPANION; break;
+    default:               out_arr = NULL;             out_cap = 0;                      break;
   }
 }
 
-int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
-  if (offline_queue_len > 0) {         // check offline queue
-    size_t len = offline_queue[0].len; // take from top of queue
-    memcpy(frame, offline_queue[0].buf, len);
+int MyMesh::offlineQueueTotal() const {
+  int n = 0;
+  for (int i = 0; i < BUCKET_LIMIT_PUBLIC;    i++) if (bucket_public   [i].seq_no) n++;
+  for (int i = 0; i < BUCKET_LIMIT_HASHTAG;   i++) if (bucket_hashtag  [i].seq_no) n++;
+  for (int i = 0; i < BUCKET_LIMIT_PRIVATE;   i++) if (bucket_private  [i].seq_no) n++;
+  for (int i = 0; i < BUCKET_LIMIT_DM;        i++) if (bucket_dm       [i].seq_no) n++;
+  for (int i = 0; i < BUCKET_LIMIT_COMPANION; i++) if (bucket_companion[i].seq_no) n++;
+  return n;
+}
 
-    offline_queue_len--;
-    for (int i = 0; i < offline_queue_len; i++) { // delete top item from queue
-      offline_queue[i] = offline_queue[i + 1];
-    }
-    return len;
+// Anhand des Frame-Headers (RESP_CODE) und ggf. der gespeicherten
+// ChannelDetails entscheiden in welchen Bucket ein eingehender Frame gehoert.
+// Frame-Layouts (siehe Frame-Building in queueMessage/onChannelMessageRecv/
+// onChannelDataRecv):
+//   RESP_CODE_CONTACT_MSG_RECV    (7):  Offset 0 = code. Kein channel_idx (DM).
+//   RESP_CODE_CHANNEL_MSG_RECV    (8):  Offset 0 = code, Offset 1 = channel_idx.
+//   RESP_CODE_CONTACT_MSG_RECV_V3 (16): Offset 0 = code. Kein channel_idx (DM).
+//   RESP_CODE_CHANNEL_MSG_RECV_V3 (17): Offset 0 = code (+snr+res1+res2),
+//                                       Offset 4 = channel_idx.
+//   RESP_CODE_CHANNEL_DATA_RECV   (27): wie V3, Offset 4 = channel_idx.
+// Alles andere (z.B. raw-data Frames die zukuenftig dazukommen koennten) wird
+// vorsichtshalber als PRIVATE klassifiziert -- nicht in PUBLIC weil das eine
+// Datenschutz-Regression waere.
+MyMesh::MsgBucket MyMesh::classifyFrame(const uint8_t* frame, int len) {
+  if (len < 1) return BUCKET_PRIVATE;
+  uint8_t code = frame[0];
+  // DM
+  if (code == RESP_CODE_CONTACT_MSG_RECV || code == RESP_CODE_CONTACT_MSG_RECV_V3) {
+    return BUCKET_DM;
   }
-  return 0; // queue is empty
+  // Channel-basierte Codes
+  int chan_offset = -1;
+  if (code == RESP_CODE_CHANNEL_MSG_RECV) chan_offset = 1;
+  else if (code == RESP_CODE_CHANNEL_MSG_RECV_V3
+        || code == RESP_CODE_CHANNEL_DATA_RECV) chan_offset = 4;
+  if (chan_offset < 0 || chan_offset >= len) return BUCKET_PRIVATE;
+  uint8_t channel_idx = frame[chan_offset];
+  // $companion VOR allen anderen Channel-Klassifizierungen abfangen:
+  // Trace-Output landet in $companion und wuerde sonst alle anderen
+  // "private" Channel-Nachrichten aus dem 16er-Bucket verdraengen.
+  if (_companion_channel_idx != 0xFF && channel_idx == _companion_channel_idx) {
+    return BUCKET_COMPANION;
+  }
+  ChannelDetails ch;
+  if (!getChannel(channel_idx, ch)) return BUCKET_PRIVATE;
+  if (memcmp(ch.channel.secret, s_public_psk, 16) == 0) return BUCKET_PUBLIC;
+  if (ch.name[0] == '#')                                 return BUCKET_HASHTAG;
+  return BUCKET_PRIVATE;
+}
+
+void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
+  if (len <= 0 || len > MAX_FRAME_SIZE) return;
+  MsgBucket b = classifyFrame(frame, len);
+  Frame* arr = NULL;
+  int cap = 0;
+  getBucket(b, arr, cap);
+  if (!arr || cap == 0) return;
+
+  // seq_no = 0 ist Sentinel "leer" -- monotonic 1.. via _msg_seq_next.
+  // Bei Wrap-Around (extrem unwahrscheinlich, ~4 Mrd Messages) springen
+  // wir auf 1 zurueck; alte Eintraege hatten dann hoehere Werte, sind
+  // aber bei normalen Pop-Zyklen laengst weg. Beim erstmaligen Hit ist
+  // Reihenfolge-Verlust akzeptabel (Edge-Case).
+  if (++_msg_seq_next == 0) _msg_seq_next = 1;
+
+  // Freien Slot suchen, sonst aelteste seq_no DESSELBEN Buckets ueberschreiben.
+  int free_slot = -1;
+  int oldest_slot = 0;
+  uint32_t oldest_seq = UINT32_MAX;
+  for (int i = 0; i < cap; i++) {
+    if (arr[i].seq_no == 0) { free_slot = i; break; }
+    if (arr[i].seq_no < oldest_seq) {
+      oldest_seq = arr[i].seq_no;
+      oldest_slot = i;
+    }
+  }
+  int slot = (free_slot >= 0) ? free_slot : oldest_slot;
+  if (free_slot < 0) {
+    MESH_DEBUG_PRINTLN("INFO: msg-bucket %d full, evicting oldest seq=%u",
+                       (int)b, (unsigned)oldest_seq);
+  }
+  arr[slot].seq_no = _msg_seq_next;
+  arr[slot].len    = (uint8_t)len;
+  memcpy(arr[slot].buf, frame, len);
+}
+
+int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
+  // Scan ueber alle Buckets, finde Slot mit niedrigster nicht-null seq_no.
+  // Das erhaelt chronologische Reihenfolge wie die alte single-queue --
+  // unabhaengig davon in welchem Bucket der Frame liegt.
+  Frame* best_slot = NULL;
+  uint32_t best_seq = UINT32_MAX;
+  for (int b = 0; b < BUCKET_COUNT; b++) {
+    Frame* arr = NULL;
+    int cap = 0;
+    getBucket((MsgBucket)b, arr, cap);
+    for (int i = 0; i < cap; i++) {
+      if (arr[i].seq_no != 0 && arr[i].seq_no < best_seq) {
+        best_seq  = arr[i].seq_no;
+        best_slot = &arr[i];
+      }
+    }
+  }
+  if (!best_slot) return 0;
+  int len = best_slot->len;
+  memcpy(frame, best_slot->buf, len);
+  best_slot->seq_no = 0;   // Slot freigeben
+  return len;
 }
 
 float MyMesh::getAirtimeBudgetFactor() const {
@@ -646,7 +738,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // we only want to show text messages on display, not cli data
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
   if (should_display && _ui) {
-    _ui->newMsg(path_len, from.name, text, offline_queue_len);
+    _ui->newMsg(path_len, from.name, text, offlineQueueTotal());
     if (!_serial->isConnected()) {
       _ui->notify(UIEventType::contactMessage);
     }
@@ -989,7 +1081,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   if (getChannel(channel_idx, channel_details)) {
     channel_name = channel_details.name;
   }
-  if (_ui) _ui->newMsg(path_len, channel_name, effective_text, offline_queue_len);
+  if (_ui) _ui->newMsg(path_len, channel_name, effective_text, offlineQueueTotal());
 #endif
 }
 
@@ -1622,7 +1714,15 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
       _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui) {
   _iter_started = false;
   _cli_rescue = false;
-  offline_queue_len = 0;
+  // 5 Offline-Buckets initialisieren (seq_no=0 als leerer-Slot Sentinel).
+  // Konstruktor laeuft vor dem ersten addToOfflineQueue, so dass spaeter
+  // _msg_seq_next per ++ auf 1 inkrementiert wird.
+  _msg_seq_next = 0;
+  memset(bucket_public,    0, sizeof(bucket_public));
+  memset(bucket_hashtag,   0, sizeof(bucket_hashtag));
+  memset(bucket_private,   0, sizeof(bucket_private));
+  memset(bucket_dm,        0, sizeof(bucket_dm));
+  memset(bucket_companion, 0, sizeof(bucket_companion));
   app_target_ver = 0;
   clearPendingReqs();
   next_ack_idx = 0;
@@ -2581,7 +2681,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     if ((out_len = getFromOfflineQueue(out_frame)) > 0) {
       _serial->writeFrame(out_frame, out_len);
 #ifdef DISPLAY_CLASS
-      if (_ui) _ui->msgRead(offline_queue_len);
+      if (_ui) _ui->msgRead(offlineQueueTotal());
 #endif
     } else {
       out_frame[0] = RESP_CODE_NO_MORE_MESSAGES;
