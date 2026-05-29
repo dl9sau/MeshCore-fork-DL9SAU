@@ -179,6 +179,15 @@ public :
                                 || ts < cur - ONE_YEAR_SECS);
                     if (!reject) {
                         _clock->setCurrentTime(ts);
+                    } else {
+                        // Verwerfungs-Log (User-Wunsch 2026-05-30): rare
+                        // Diagnose-Event, ungueltige Sync-Versuche sichtbar
+                        // machen. Geht nur ueber Serial (kein pushDebugLog
+                        // verfuegbar in dieser Layer), ohne millis-Prefix
+                        // anders als die MyMesh-Logs.
+                        Serial.printf(
+                            "[+%lums] [NMEA] sync REJECTED: gps_ts=%ld vs rtc=%ld (delta %lds)\r\n",
+                            (unsigned long)millis(), ts, cur, ts - cur);
                     }
                     _time_sync_needed = false;
                     _last_time_sync = millis();
