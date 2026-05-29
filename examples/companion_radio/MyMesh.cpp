@@ -5368,12 +5368,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "clear")) {
         pushCompanionMessage(
-          "clear stats:\n"
+          "clear statistics:\n"
           "  Setzt alle RAM-Statistik-Counter zurueck."
         );
         pushCompanionMessage(
-          "'stats' muss voll ausgeschrieben werden (no_abbrev)\n"
-          "-- Tippfehler wuerden Tests killen."
+          "Abkuerzbar (Prefix-Match, min 3 Zeichen):\n"
+          "  'stat', 'stats', 'statistic' -- alle OK."
         );
         return;
       }
@@ -5399,12 +5399,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "tempradio")) {
         pushCompanionMessage(
-          "tempradio <freq> <sf> <bw> <cr> [<tx_dbm>]: temporaere "
-          "Funkparameter (nicht persistent, weg nach Reboot)."
+          "tempradio: temporaere Funk-Parameter.\n"
+          "Nicht persistent -- weg nach Reboot."
         );
         pushCompanionMessage(
-          "Range-Tests ohne savePrefs. Caveat: andere CLI-Befehle die "
-          "savePrefs() machen wuerden die temp-Werte ins File schreiben."
+          "Status: tempradio (ohne Arg)\n"
+          "Alle: tempradio <f_MHz> <sf> <bw_kHz> <cr> [<tx>]"
+        );
+        pushCompanionMessage(
+          "Einzel:\n"
+          "  tempradio freq <MHz>    z.B. 869.618\n"
+          "  tempradio sf <6..12>\n"
+          "  tempradio cr <5..8>"
+        );
+        pushCompanionMessage(
+          "  tempradio bw <kHz>      legal:\n"
+          "    7.81 10.42 15.63 20.83 31.25\n"
+          "    41.67 62.5 125 250 500\n"
+          "  tempradio tx <dBm>"
+        );
+        pushCompanionMessage(
+          "Caveat: andere CLI-Befehle die savePrefs()\n"
+          "machen wuerden die Werte ins File schreiben."
         );
         return;
       }
@@ -5986,64 +6002,176 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  // ---------- tempradio <freq> <sf> <bw> <cr> [<tx_dbm>] ----------------
+  // ---------- tempradio --------------------------------------------------
   // Temporaere Funk-Parameter (nicht persistent). Ueberschreibt _prefs
   // OHNE savePrefs - beim Reboot werden _prefs aus File geladen und die
   // tempradio-Werte sind weg. Caveat: andere CLI-Befehle die savePrefs()
   // aufrufen wuerden die tempradio-Werte ins File schreiben (-> Test
   // beenden bevor anderes geaendert wird, oder einfach rebooten).
+  //
+  // Formen:
+  //   tempradio                                  Zeige aktuelle Werte
+  //   tempradio <freq> <sf> <bw> <cr> [<tx>]     All-at-once Set
+  //   tempradio freq <MHz>                       Einzel-Set freq
+  //   tempradio sf <6..12>
+  //   tempradio bw <kHz>      (LoRa-legal: 7.81/10.42/15.63/20.83/31.25/
+  //                            41.67/62.5/125/250/500)
+  //   tempradio cr <5..8>     (= 4/5..4/8)
+  //   tempradio tx <dBm>      (Alias: tx_power)
   if (starts_with_word(cmd, "tempradio")) {
-    // Argumente parsen: brauchen min. freq sf bw cr.
     const char* p = strchr(cmd, ' ');
-    if (!p) { pushCompanionMessage("Usage: tempradio <freq_MHz> <sf> <bw_kHz> <cr> [<tx_dbm>]"); return; }
-    while (*p == ' ') p++;
-    // freq (float in MHz)
+    if (p) { while (*p == ' ') p++; }
+
+    // Validatoren-Helper -- werden von beiden Pfaden (all-at-once + Einzel)
+    // gemeinsam genutzt. Returns true=OK, false=Fehler (Message bereits gepusht).
+    auto validateFreq = [&](float f) -> bool {
+      if (f < 150.0f || f > 2500.0f) {
+        pushCompanionMessage("freq ausserhalb 150..2500 MHz");
+        return false;
+      }
+      return true;
+    };
+    auto validateSf = [&](int sf) -> bool {
+      if (sf < 5 || sf > 12) { pushCompanionMessage("sf ausserhalb 5..12"); return false; }
+      return true;
+    };
+    auto validateBw = [&](float bw) -> bool {
+      // LoRa SX126x legal BWs in kHz. Toleranz 0.1 kHz fuer Float-Rundung.
+      static const float legal[] = {
+        7.81f, 10.42f, 15.63f, 20.83f, 31.25f, 41.67f, 62.5f,
+        125.0f, 250.0f, 500.0f
+      };
+      for (size_t i = 0; i < sizeof(legal)/sizeof(legal[0]); i++) {
+        float d = bw - legal[i]; if (d < 0) d = -d;
+        if (d < 0.15f) return true;
+      }
+      pushCompanionMessage(
+        "bw nicht-legal. Erlaubt (kHz):\n"
+        "  7.81 10.42 15.63 20.83 31.25\n"
+        "  41.67 62.5 125 250 500");
+      return false;
+    };
+    auto validateCr = [&](int cr) -> bool {
+      if (cr < 5 || cr > 8) {
+        pushCompanionMessage("cr ausserhalb 5..8 (= LoRa coding rate 4/5..4/8)");
+        return false;
+      }
+      return true;
+    };
+    auto validateTx = [&](int tx) -> bool {
+      if (tx < -9 || tx > MAX_LORA_TX_POWER) {
+        char e[80]; snprintf(e, sizeof(e), "tx_dbm ausserhalb -9..%d", (int)MAX_LORA_TX_POWER);
+        pushCompanionMessage(e);
+        return false;
+      }
+      return true;
+    };
+
+    auto applyAndAck = [&](float f, int sf, float bw, int cr, int tx,
+                           bool full) {
+      _prefs.freq = f;
+      _prefs.sf = (uint8_t)sf;
+      _prefs.bw = bw;
+      _prefs.cr = (uint8_t)cr;
+      _prefs.tx_power_dbm = (int8_t)tx;
+      applyRadioPolicy();
+      radio_set_tx_power((int8_t)tx);
+      char line[160];
+      snprintf(line, sizeof(line),
+               "OK - tempradio: f=%.4f MHz sf=%d bw=%.2f kHz cr=%d tx=%d dBm\n"
+               "(%snicht persistent, weg nach Reboot)",
+               f, sf, bw, cr, tx, full ? "" : "Einzel-Update -- ");
+      pushCompanionMessage(line);
+    };
+
+    // tempradio (kein Arg) -> aktuellen Stand zeigen
+    if (!p || *p == 0) {
+      char line[160];
+      snprintf(line, sizeof(line),
+               "tempradio:\n"
+               "  freq=%.4f MHz  sf=%u  bw=%.2f kHz  cr=%u  tx=%d dBm",
+               (double)_prefs.freq, (unsigned)_prefs.sf, (double)_prefs.bw,
+               (unsigned)_prefs.cr, (int)_prefs.tx_power_dbm);
+      pushCompanionMessage(line);
+      pushCompanionMessage(
+        "Einzel-Set: tempradio freq|sf|bw|cr|tx <wert>\n"
+        "Alle-auf-einmal: tempradio <f> <sf> <bw> <cr> [<tx>]");
+      return;
+    }
+
+    // Einzel-Set: erkennen am ersten Token (keyword statt Zahl).
+    if ((p[0] < '0' || p[0] > '9') && p[0] != '-') {
+      // Sub-Befehl parsen
+      char sub[16];
+      size_t si = 0;
+      while (*p && *p != ' ' && si + 1 < sizeof(sub)) sub[si++] = *p++;
+      sub[si] = 0;
+      while (*p == ' ') p++;
+      if (!*p) {
+        pushCompanionMessage("Wert fehlt. Usage: tempradio <feld> <wert>");
+        return;
+      }
+      // 'tx_power' als Alias zu 'tx'
+      if (strcmp(sub, "tx_power") == 0) sub[2] = 0;
+
+      if (strcmp(sub, "freq") == 0) {
+        float f = atof(p);
+        if (!validateFreq(f)) return;
+        applyAndAck(f, _prefs.sf, _prefs.bw, _prefs.cr, _prefs.tx_power_dbm, false);
+        return;
+      }
+      if (strcmp(sub, "sf") == 0) {
+        int sf = atoi(p);
+        if (!validateSf(sf)) return;
+        applyAndAck(_prefs.freq, sf, _prefs.bw, _prefs.cr, _prefs.tx_power_dbm, false);
+        return;
+      }
+      if (strcmp(sub, "bw") == 0) {
+        float bw = atof(p);
+        if (!validateBw(bw)) return;
+        applyAndAck(_prefs.freq, _prefs.sf, bw, _prefs.cr, _prefs.tx_power_dbm, false);
+        return;
+      }
+      if (strcmp(sub, "cr") == 0) {
+        int cr = atoi(p);
+        if (!validateCr(cr)) return;
+        applyAndAck(_prefs.freq, _prefs.sf, _prefs.bw, cr, _prefs.tx_power_dbm, false);
+        return;
+      }
+      if (strcmp(sub, "tx") == 0) {
+        int tx = atoi(p);
+        if (!validateTx(tx)) return;
+        applyAndAck(_prefs.freq, _prefs.sf, _prefs.bw, _prefs.cr, tx, false);
+        return;
+      }
+      pushCompanionMessage("Unbekanntes Feld. freq | sf | bw | cr | tx");
+      return;
+    }
+
+    // All-at-once Pfad: freq sf bw cr [tx]
     float freq = atof(p);
     while (*p && *p != ' ') p++;
     while (*p == ' ') p++;
-    // sf (int)
+    if (!*p) { pushCompanionMessage("Usage: tempradio <freq> <sf> <bw> <cr> [<tx>]"); return; }
     int sf = atoi(p);
     while (*p && *p != ' ') p++;
     while (*p == ' ') p++;
-    // bw (float in kHz)
+    if (!*p) { pushCompanionMessage("Usage: tempradio <freq> <sf> <bw> <cr> [<tx>]"); return; }
     float bw = atof(p);
     while (*p && *p != ' ') p++;
     while (*p == ' ') p++;
-    // cr (int)
+    if (!*p) { pushCompanionMessage("Usage: tempradio <freq> <sf> <bw> <cr> [<tx>]"); return; }
     int cr = atoi(p);
     while (*p && *p != ' ') p++;
     while (*p == ' ') p++;
-    // tx_dbm optional
     int tx = (*p) ? atoi(p) : (int)_prefs.tx_power_dbm;
 
-    if (freq < 150.0f || freq > 2500.0f) {
-      pushCompanionMessage("freq ausserhalb 150..2500 MHz");
-      return;
-    }
-    if (sf < 5 || sf > 12) { pushCompanionMessage("sf ausserhalb 5..12"); return; }
-    if (bw < 7.0f || bw > 500.0f) { pushCompanionMessage("bw ausserhalb 7..500 kHz"); return; }
-    if (cr < 5 || cr > 8) { pushCompanionMessage("cr ausserhalb 5..8"); return; }
-    if (tx < -9 || tx > MAX_LORA_TX_POWER) {
-      char e[80]; snprintf(e, sizeof(e), "tx_dbm ausserhalb -9..%d", (int)MAX_LORA_TX_POWER);
-      pushCompanionMessage(e);
-      return;
-    }
-
-    // _prefs direkt ueberschreiben (KEIN savePrefs)
-    _prefs.freq = freq;
-    _prefs.sf = (uint8_t)sf;
-    _prefs.bw = bw;
-    _prefs.cr = (uint8_t)cr;
-    _prefs.tx_power_dbm = (int8_t)tx;
-    applyRadioPolicy();
-    radio_set_tx_power((int8_t)tx);
-
-    char line[160];
-    snprintf(line, sizeof(line),
-             "OK - tempradio: f=%.4f sf=%d bw=%.1f cr=%d tx=%d dBm "
-             "(NICHT persistent, weg nach Reboot)",
-             freq, sf, bw, cr, tx);
-    pushCompanionMessage(line);
+    if (!validateFreq(freq)) return;
+    if (!validateSf(sf))     return;
+    if (!validateBw(bw))     return;
+    if (!validateCr(cr))     return;
+    if (!validateTx(tx))     return;
+    applyAndAck(freq, sf, bw, cr, tx, true);
     return;
   }
 
@@ -6453,30 +6581,61 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
     if (!arg || *arg == 0) {
-      // Status-Output -- 5 Buckets, je eine Zeile, in 2 BLE-Messages
-      // gesplittet (max 145 Zeichen).
+      // Status-Output -- gruppiert in 2 BLE-Messages.
+      // Message 1: persoenliche Buckets (DM, $companion)
+      // Message 2: Gruppen-Channels (public, hashtag, private)
+      // Spalte 'cap' bewusst weggelassen (war verwirrend) -- in 'help
+      // messages' steht der maximal moegliche Wert pro Typ.
       static const int caps[BUCKET_COUNT] = {
         BUCKET_CAP_PUBLIC, BUCKET_CAP_HASHTAG, BUCKET_CAP_PRIVATE,
         BUCKET_CAP_DM,     BUCKET_CAP_COMPANION
       };
-      char head[200];
-      snprintf(head, sizeof(head),
-               "messages (offline-queue):\n  bucket  used limit cap flash");
-      pushCompanionMessage(head);
-      for (int b = 0; b < BUCKET_COUNT; b++) {
+      auto bucketUsed = [&](MsgBucket b) -> int {
         Frame* arr = NULL;
-        int cap_unused = 0;
-        getBucket((MsgBucket)b, arr, cap_unused);
-        int used = 0;
-        for (int i = 0; i < caps[b]; i++) if (arr[i].seq_no) used++;
-        char line[120];
-        snprintf(line, sizeof(line),
-                 "  %-9s %3d %5d %3d %s",
-                 bucketName((MsgBucket)b),
-                 used, getBucketLimit((MsgBucket)b), caps[b],
-                 getBucketFlash((MsgBucket)b) ? "on" : "off");
-        pushCompanionMessage(line);
+        int c_unused = 0;
+        getBucket(b, arr, c_unused);
+        if (!arr) return 0;
+        int n = 0;
+        for (int i = 0; i < caps[(int)b]; i++) if (arr[i].seq_no) n++;
+        return n;
+      };
+      auto displayName = [&](MsgBucket b) -> const char* {
+        switch (b) {
+          case BUCKET_DM:        return "DM";
+          case BUCKET_COMPANION: return "$companion";
+          case BUCKET_PUBLIC:    return "public";
+          case BUCKET_HASHTAG:   return "hashtag";
+          case BUCKET_PRIVATE:   return "private";
+          default: return "?";
+        }
+      };
+      // Message 1: persoenliche Buckets
+      char msg1[200];
+      int n1 = snprintf(msg1, sizeof(msg1), "messages (offline-queue):");
+      MsgBucket personal[] = { BUCKET_DM, BUCKET_COMPANION };
+      for (size_t i = 0; i < sizeof(personal)/sizeof(personal[0]); i++) {
+        MsgBucket b = personal[i];
+        n1 += snprintf(msg1 + n1, sizeof(msg1) - n1,
+                       "\n  %-10s %2d/%-2d  flash=%s",
+                       displayName(b), bucketUsed(b),
+                       getBucketLimit(b),
+                       getBucketFlash(b) ? "on" : "off");
       }
+      pushCompanionMessage(msg1);
+
+      // Message 2: Channel-Chats
+      char msg2[200];
+      int n2 = snprintf(msg2, sizeof(msg2), "Channels (Gruppen-Chats):");
+      MsgBucket channels[] = { BUCKET_PUBLIC, BUCKET_HASHTAG, BUCKET_PRIVATE };
+      for (size_t i = 0; i < sizeof(channels)/sizeof(channels[0]); i++) {
+        MsgBucket b = channels[i];
+        n2 += snprintf(msg2 + n2, sizeof(msg2) - n2,
+                       "\n  %-10s %2d/%-2d  flash=%s",
+                       displayName(b), bucketUsed(b),
+                       getBucketLimit(b),
+                       getBucketFlash(b) ? "on" : "off");
+      }
+      pushCompanionMessage(msg2);
       return;
     }
 
@@ -7076,20 +7235,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Detail-Statistik mit Aufschluesselung nach Node-Typ, Pakettyp und
   // Airtime. Alle Counter sind RAM-only (reset bei Reboot). Pro-Stunde/
   // Pro-Tag wird aus dem Session-Total und der Uptime berechnet.
-  // ---------- clear stats ----------------------------------------------
-  // Setzt RAM-Statistik-Counter zurueck. Analog zu simple_repeater
-  // clearStats(). 'stats' ist no_abbrev — Tippfehler wuerden alle
-  // Test-Counter killen.
+  // ---------- clear <subcmd> --------------------------------------------
+  // 'clear' ohne Argument zeigt jetzt Usage statt nur Fehler -- der
+  // alleinige Befehl ist sonst nicht selbsterklaerend (User-Feedback
+  // 2026-05-30). Sub-Befehl 'statistics' abkuerzbar als 'stat' / 'stats'
+  // / 'statistic' (Prefix-Match) -- alte 'clear stats'-Tippung bleibt
+  // damit kompatibel.
   if (starts_with_word(cmd, "clear")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
-    if (!arg || strcmp(arg, "stats") != 0) {
-      pushCompanionMessage("Usage: clear stats\n"
-                           "no_abbrev - 'stats' muss voll ausgeschrieben sein");
+    if (!arg || *arg == 0) {
+      pushCompanionMessage("clear Usage:\n  clear statistics");
       return;
     }
-    clearStats();
-    pushCompanionMessage("OK - alle Statistik-Counter zurueckgesetzt.");
+    // Prefix-Match gegen "statistics". Mindest-Laenge 3 ('sta') --
+    // weniger Buchstaben akzeptieren ist zu fehleranfaellig (s, st).
+    size_t alen = strlen(arg);
+    if (alen >= 3 && strncmp(arg, "statistics", alen) == 0) {
+      clearStats();
+      pushCompanionMessage("OK - alle Statistik-Counter zurueckgesetzt.");
+      return;
+    }
+    pushCompanionMessage("Unbekanntes Argument. 'clear statistics' (oder Prefix wie 'stat').");
     return;
   }
 
