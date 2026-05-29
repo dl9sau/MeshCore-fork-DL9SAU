@@ -1134,6 +1134,9 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
     };
     bool auto_en = (_prefs.scope_repeater_auto == 2);
     for (int i = 0; i < _buildin_keys_count; i++) {
+      // Alias-Eintraege (zusatz-Bbox fuer einen schon vorhandenen Namen)
+      // ueberspringen -- der Primaer-Eintrag schreibt den Namen schon.
+      if (dl9sau_is_alias((size_t)i)) continue;
       uint8_t st = getBuildinStatus(i);
       if (st & (SCOPE_STATUS_DISABLED | SCOPE_STATUS_USER_DELETED)) continue;
       uint8_t m = st & SCOPE_STATUS_REPEAT_MASK;
@@ -1821,6 +1824,10 @@ void MyMesh::begin(bool has_display) {
   // ----- Key-Cache fuer Build-in-Region-Eintraege (Wunschliste 11, Schritt 4)
   // Computed once at boot. Wird von scopeAllowedForRepeat() etc. verwendet
   // um TransportKey::calcTransportCode() ohne SHA-256-Recomputation aufzurufen.
+  // Alias-Eintraege bekommen denselben Schluessel wie der Primaer-Eintrag
+  // (gleicher Name -> gleicher getAutoKeyFor-Output); chooseGeoFallbackScope
+  // verwendet das Index direkt, beide Slots liefern also intentional die
+  // gleichen Bytes.
   {
     size_t n = dl9sau_region_count();
     if (n > (size_t)SCOPE_BUILDIN_KEY_CACHE_MAX) n = SCOPE_BUILDIN_KEY_CACHE_MAX;
@@ -7867,6 +7874,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
       // Build-in
       for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
+        // Alias-Eintraege (Multi-Rectangle fuer L-foermige Regionen) sind nur
+        // dem Matcher relevant -- nicht im Registry-Display anzeigen, sonst
+        // erschiene z.B. "#de-sh" zweimal.
+        if (dl9sau_is_alias((size_t)i)) continue;
         uint8_t st = getBuildinStatus(i);
         if (!show_all && !inRepeatSet(st)) continue;
         const char* nm = NULL;

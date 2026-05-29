@@ -53,3 +53,11 @@ void dl9sau_compute_name_hash(const char* name, uint8_t out[4]);
 // position-unabhaengige Special-Scopes) und default_status (SCOPE_STATUS_*
 // bei abwesendem sparse-Slot in scope_buildin_status[]).
 bool dl9sau_get_region_meta(size_t idx, bool* has_bbox, uint8_t* default_status);
+
+// True fuer "alias" Bbox-Eintraege: zusaetzliche Bounding-Boxen fuer einen
+// schon existierenden Namen, die nur dem Matcher dienen (z.B. eine extra
+// Bbox fuer die Nordfriesischen Inseln unter dem Namen 'de-sh'). Werden
+// in Registry-Ansichten/Buildin-Key-Cache uebersprungen damit der Name
+// nicht doppelt erscheint. Returns false fuer normale Eintraege und fuer
+// ungueltige idx.
+bool dl9sau_is_alias(size_t idx);

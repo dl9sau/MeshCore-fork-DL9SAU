@@ -2365,6 +2365,73 @@ UX / Komfort:
     [gps] wake, [gps] sleep) -- erlaubt GPS-Zustandsuebergaenge
     direkt mit Position/Hoehe/Zeit zu korrelieren.
 
+------------------------------------------------------------------------
+Geo-Bbox-Audit + Korrektur (Folge-Session 2026-05-29)
+------------------------------------------------------------------------
+
+User-Beobachtung: in Jever (Ostfriesland, 53.575N 7.90E) wurde der
+Geo-Scope #de-sh (Schleswig-Holstein) empfohlen. SH liegt ~75 km
+nord-oestlich; Bug-haftig.
+
+Ursache: die Bboxes in dl9sau_geo_recommendations.cpp waren von den
+OSM-Bounding-Boxes uebernommen (z.B. de-sh = N 54.88, W 7.87, S
+53.36, E 11.14). OSM-Bbox ist der kleinste Rechteck der die echte
+Region umschliesst -- bei L-foermigen Bundeslaendern (de-sh wegen
+Nordfriesischer Inseln, de-ni wegen Umschliessung HH/HB) catcht
+das viel Niemandsland.
+
+Loesung: Multi-Rectangle-Ansatz (Option 1 nach Algorithmus-Diskussion):
+
+ (a) GeoRegion-Struct erweitert um is_alias-Flag.
+     GEO_ALIAS(name,...) Macro fuer Zusatz-Bboxes unter schon
+     vorhandenem Namen. Aliases erscheinen NICHT im Registry-
+     Display und werden im buildin-key-cache als Duplikat des
+     primaeren Keys belegt. Per dl9sau_is_alias(idx) abfragbar.
+
+ (b) Pass 3 von dl9sau_recommend_scopes dedupliziert per Name --
+     egal wieviele Bbox-Eintraege matchen, der Name erscheint
+     nur einmal in der Empfehlung.
+
+ (c) Bbox-Korrekturen Bundeslaender:
+       de-sh: lon_min 7.87 -> 9.00 (Mainland);
+              + Alias 54.45-55.20, 8.30-9.00 (Sylt/Foehr/Amrum)
+       de-hh: lon_min 8.42 -> 9.70  (raus: Bremerhaven, Stade)
+       de-mv: lon_min 10.59 -> 11.00 (raus: Luebeck, Boizenburg
+                                       faellt mit raus -- via
+                                       de-nord erreichbar)
+       de-bb: lat_max 53.56 -> 53.20 (raus: Parchim, Plau,
+                                       Ludwigslust (MV-Sued))
+
+ (d) Suppression-Regeln (city_rules-Tabelle) ergaenzt:
+       de-hh -> suppress de-ni    (NI umschliesst HH; minimiert
+                                   #de-ni-Traffic fuer HH-Knoten)
+       de-hb -> suppress de-ni    (analog HB; Praxis-pruefen,
+                                   ggf. wieder rausnehmen)
+       de-by -> suppress de-ost   (BY-Nord (Oberfranken/Coburg)
+                                   liegt im de-ost-Aggregat;
+                                   Bayer soll nicht de-ost
+                                   empfohlen bekommen)
+     Die bisherige Regel { de-be, de-bb } bleibt.
+
+     Suppression-Logik selbst wurde robust gegen Multi-Rectangle
+     gemacht: 'matched'-Pruefung iteriert ueber ALLE Eintraege
+     mit dem Namen, ebenso die skip-Schleife.
+
+Begruendung Praezision: Bbox-Toleranz unkritisch -- Funkwellen
+kennen keine Verwaltungsgrenzen. Brocken-Repeater im Harz erreicht
+bis Braunschweig (~80 km), Flachland-Standorte mit <50 m Hoehe
+oft <20 km. Bbox-Abweichungen <=20 km sind belanglos.
+
+Bewusst NICHT angefasst:
+  ostfriesland (53.10-53.80, 6.50-8.50): user-definierte Region,
+    Grenzen "wohl definiert" und aktueller Stand pragmatisch OK.
+  de-ni (51.30-53.89, 6.65-11.60): groesster Flaechenstaat, ueber-
+    lappt zwangslaeufig mit HH/HB/SH/NW. Stadtstaaten-Suppression
+    (s. oben) deckt die Haupt-FPs ab. Osnabrueck (NI/NW-Doppel)
+    explizit OK pro User.
+  Aggregate de-nord/sued/west/mitte: bewusst breit; einzige Aus-
+    nahme de-ost mit de-by-Suppression (s. oben).
+
 ================================================================================
 Build-Status
 ================================================================================

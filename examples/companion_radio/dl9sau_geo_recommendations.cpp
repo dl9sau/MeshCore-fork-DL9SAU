@@ -15,17 +15,24 @@ struct GeoRegion {
   double      lat_min, lat_max, lon_min, lon_max;
   bool        has_bbox;        // false fuer position-unabhaengige Special-Scopes
   uint8_t     default_status;  // SCOPE_STATUS_* default (= state ohne sparse-Slot)
+  bool        is_alias;        // true = Zusatz-Bbox fuer schon existierenden Namen
+                               //        (Multi-Rectangle fuer L-foermige Regionen);
+                               //        wird in Registry/Key-Cache uebersprungen.
 };
 
 // Order matters for output: broadest first. The matcher walks the table
 // in order and the printed list follows that order.
 // Helper-Makros fuer Tabellen-Eintraege:
-//   GEO(name, lat_min, lat_max, lon_min, lon_max)  — normaler Geo-Eintrag
-//   NOGEO_PIN(name)                                — position-unabhaengig,
-//                                                    default repeat=on
-//   NOGEO_OFF(name)                                — position-unabhaengig,
-//                                                    default repeat=off (Sentinel)
-#define GEO(N, A, B, C, D)   { N, A, B, C, D, true, 0 }
+//   GEO(name, lat_min, lat_max, lon_min, lon_max)        — Geo-Eintrag
+//   GEO_ALIAS(name, lat_min, lat_max, lon_min, lon_max)  — zusaetzliche Bbox
+//                                                          fuer schon vorhandenen
+//                                                          Namen (Multi-Rectangle)
+//   NOGEO_PIN(name)                                      — position-unabhaengig,
+//                                                          default repeat=on
+//   NOGEO_OFF(name)                                      — position-unabhaengig,
+//                                                          default repeat=off
+#define GEO(N, A, B, C, D)        { N, A, B, C, D, true, 0, false }
+#define GEO_ALIAS(N, A, B, C, D)  { N, A, B, C, D, true, 0, true  }
 // NOGEO_PIN: KEIN ADVERT_OFF mehr (Wunschliste 14). chooseGeoFallbackScope
 // ueberspringt no-bbox-Eintraege bereits per has_bbox-Filter, das
 // ADVERT_OFF-Bit waere also redundant gewesen und nur kosmetisch
@@ -33,13 +40,13 @@ struct GeoRegion {
 // weiterhin explizit als 'scope advert bake/default/override' nutzen --
 // das war auch vorher schon erlaubt (kein Filter), jetzt aber konsistent
 // im Display.
-#define NOGEO_PIN(N)         { N, 0, 0, 0, 0, false, \
-                               (uint8_t)SCOPE_STATUS_REPEAT_ON }
+#define NOGEO_PIN(N)              { N, 0, 0, 0, 0, false, \
+                                    (uint8_t)SCOPE_STATUS_REPEAT_ON, false }
 // NOGEO_OFF: Sentinel mit repeat=off + advert=off. ADVERT_OFF bleibt als
 // zweite Sicherung -- selbst wenn ein User local-discard versehentlich
 // pinned, soll er nicht als eigener Send-Scope verwendet werden.
-#define NOGEO_OFF(N)         { N, 0, 0, 0, 0, false, \
-                               (uint8_t)(SCOPE_STATUS_REPEAT_OFF | SCOPE_STATUS_ADVERT_OFF) }
+#define NOGEO_OFF(N)              { N, 0, 0, 0, 0, false, \
+                                    (uint8_t)(SCOPE_STATUS_REPEAT_OFF | SCOPE_STATUS_ADVERT_OFF), false }
 
 static const GeoRegion regions[] = {
   // Top-level / continent
@@ -54,21 +61,35 @@ static const GeoRegion regions[] = {
   GEO("de-mitte", 49.40, 53.04,  6.65, 12.66),  // HE, TH, ST + parts of NW/NI/BY/SN
 
   // Bundesländer (16) — ISO 3166-2
+  // Bboxes wurden bewusst gegenueber den OSM-Rechtecken in zwei Faellen
+  // angepasst (Test-Bericht 2026-05-30):
+  //   - de-sh: lon_min 7.87 -> 9.00 (Mainland). Die OSM-Box war so weit
+  //     westlich dass Jever (53.575,7.90 in NI/Ostfriesland) sie traf.
+  //     Sylt + Nordfriesische Inseln werden ueber GEO_ALIAS unten
+  //     separat abgedeckt (Dedup-Logik in Pass 3).
+  //   - de-hh: lon_min 8.42 -> 9.70. Vorher fielen Bremerhaven (8.58, HB!),
+  //     Stade (9.48, NI) in die Hamburg-Bbox.
+  //   - de-mv: lon_min 10.59 -> 11.00. Vorher fiel Luebeck (10.69, SH) in
+  //     die MV-Bbox. Side-effect: MV-Salient Boizenburg (10.72) faellt
+  //     raus und wird nur ueber de-nord erreicht -- akzeptabel.
+  //   - de-bb: lat_max 53.56 -> 53.20. Vorher fielen MV-Suedstaedte
+  //     (Parchim 53.43, Plau 53.46, Ludwigslust 53.32) in die BB-Bbox.
   GEO("de-bw", 47.53, 49.79,  7.51, 10.50),   // Baden-Württemberg
   GEO("de-by", 47.27, 50.56,  8.97, 13.84),   // Bayern
   GEO("de-be", 52.34, 52.68, 13.09, 13.76),   // Berlin (Stadtstaat)
-  GEO("de-bb", 51.36, 53.56, 11.27, 14.77),   // Brandenburg
+  GEO("de-bb", 51.36, 53.20, 11.27, 14.77),   // Brandenburg (lat_max gegenueber OSM verkleinert)
   GEO("de-hb", 53.01, 53.61,  8.48,  8.99),   // Bremen (Stadtstaat, vereinfacht inkl. Bremerhaven)
-  GEO("de-hh", 53.39, 53.74,  8.42, 10.33),   // Hamburg (Stadtstaat)
+  GEO("de-hh", 53.39, 53.74,  9.70, 10.33),   // Hamburg (Stadtstaat, lon_min gegenueber OSM verkleinert)
   GEO("de-he", 49.40, 51.66,  7.77, 10.24),   // Hessen
-  GEO("de-mv", 53.11, 54.69, 10.59, 14.42),   // Mecklenburg-Vorpommern
+  GEO("de-mv", 53.11, 54.69, 11.00, 14.42),   // Mecklenburg-Vorpommern (lon_min gegenueber OSM verkleinert)
   GEO("de-ni", 51.30, 53.89,  6.65, 11.60),   // Niedersachsen
   GEO("de-nw", 50.32, 52.53,  5.87,  9.46),   // Nordrhein-Westfalen
   GEO("de-rp", 48.97, 50.94,  6.11,  8.51),   // Rheinland-Pfalz
   GEO("de-sl", 49.11, 49.64,  6.36,  7.40),   // Saarland
   GEO("de-sn", 50.16, 51.69, 11.87, 15.04),   // Sachsen
   GEO("de-st", 50.94, 53.04, 10.56, 13.19),   // Sachsen-Anhalt
-  GEO("de-sh", 53.36, 55.06,  7.87, 11.31),   // Schleswig-Holstein
+  GEO("de-sh", 53.36, 55.06,  9.00, 11.00),   // Schleswig-Holstein Mainland (s. Hinweis oben)
+  GEO_ALIAS("de-sh", 54.45, 55.20, 8.30, 9.00),  // SH Nordfriesische Inseln (Sylt/Foehr/Amrum)
   GEO("de-th", 50.20, 51.65,  9.87, 12.66),   // Thüringen
 
   // Local specials (DL9SAU's two geo-fence regions, see chooseGeoFallbackScope)
@@ -93,22 +114,39 @@ static const GeoRegion regions[] = {
   NOGEO_OFF("local-discard"),
 };
 #undef GEO
+#undef GEO_ALIAS
 #undef NOGEO_PIN
 #undef NOGEO_OFF
 static const size_t REGION_COUNT = sizeof(regions) / sizeof(regions[0]);
 
-// Berlin/Brandenburg has an explicit bridge-scope (#de-bebb) so a Berlin
-// node listing #de-bb in addition would be misleading — Brandenburger
-// stay among themselves on #de-bb and use #de-bebb to reach Berlin.
-// No equivalent bridge-scope exists for Bremen <-> Niedersachsen or
-// Hamburg <-> Niedersachsen/Schleswig-Holstein, so we let the surrounding
-// Flächenstaat show up in those recommendations.
+// Suppression-Regeln: wenn der Knoten in der Bbox von 'matched' liegt,
+// wird 'skip' aus der Empfehlung ausgeblendet. Zwei Anwendungsfaelle:
+//
+//   1) Stadtstaaten-Suppression: HH/HB/BE-Buerger sehen den
+//      umgebenden Flaechenstaat nicht. Berliner verwenden de-be
+//      untereinander und de-bebb als Bruecke zu Brandenburg;
+//      analog HH/HB gegenueber NI.
+//   2) Bayern verdraengt Aggregat de-ost: die OSM-Bbox catcht die
+//      noerdlichen ~40 km von Bayern wegen lat_min an der SN/TH-
+//      Suedgrenze (50.16) waehrend BY-lat_max bei 50.56 liegt --
+//      Bayer soll nicht de-ost empfohlen bekommen (Test-Bericht
+//      2026-05-30).
 struct CityStateRule {
-  const char* city_state;
-  const char* skip;
+  const char* city_state;   // wenn diese Bbox passt
+  const char* skip;         // wird die hier genannte Region ausgeblendet
 };
 static const CityStateRule city_rules[] = {
-  { "de-be", "de-bb" },   // Berlin in Brandenburg-box -> suppress de-bb (de-bebb bridge)
+  { "de-be", "de-bb" },   // Berlin -> suppress de-bb (de-bebb bridge stattdessen)
+  // Niedersachsen ist das groesste Bundesland und #de-ni traegt entsprechend
+  // viel Traffic. HH/HB-Knoten in dieser Suppression-Liste mindern das,
+  // ohne die HH/HB-Repeater-Reichweite einzuschraenken (App zeigt nur die
+  // Empfehlung; was geroutet wird steuert die scope-Registry).
+  { "de-hh", "de-ni" },   // Hamburg -> suppress de-ni (NI umschliesst HH)
+  { "de-hb", "de-ni" },   // Bremen  -> suppress de-ni
+                          // (TODO Test-Bericht 2026-05-30: Bremen ist sehr
+                          //  klein -- ggf. Regel rausnehmen wenn Praxis zeigt
+                          //  dass HB-Knoten doch de-ni-Repeats brauchen.)
+  { "de-by", "de-ost" },  // Bayern (noerdl. Teile) im de-ost-Aggregat -> suppress
 };
 static const size_t CITY_RULE_COUNT = sizeof(city_rules) / sizeof(city_rules[0]);
 
@@ -137,20 +175,42 @@ void dl9sau_recommend_scopes(double lat, double lon, char* dest, size_t dest_siz
     match[i] = inside(regions[i], lat, lon);
   }
 
-  // Pass 2: apply city-state suppression rules
+  // Pass 2: apply suppression rules.
+  // Robust gegen Multi-Rectangle: ein Name kann mehrere Eintraege haben
+  // (z.B. de-sh Mainland + Inseln). Wir pruefen "irgendein Eintrag mit
+  // diesem Namen matched" und blenden ALLE Eintraege des skip-Namens aus.
   for (size_t r = 0; r < CITY_RULE_COUNT; r++) {
-    int cs_idx   = find_idx(city_rules[r].city_state);
-    int skip_idx = find_idx(city_rules[r].skip);
-    if (cs_idx >= 0 && skip_idx >= 0 && match[cs_idx]) {
-      match[skip_idx] = false;
+    bool cs_matched = false;
+    for (size_t i = 0; i < REGION_COUNT; i++) {
+      if (match[i] && strcmp(regions[i].name, city_rules[r].city_state) == 0) {
+        cs_matched = true;
+        break;
+      }
+    }
+    if (!cs_matched) continue;
+    for (size_t i = 0; i < REGION_COUNT; i++) {
+      if (strcmp(regions[i].name, city_rules[r].skip) == 0) {
+        match[i] = false;
+      }
     }
   }
 
-  // Pass 3: emit in table order (broadest -> most specific)
+  // Pass 3: emit in table order (broadest -> most specific), dedup by name.
+  // Erlaubt mehrere Bbox-Eintraege unter gleichem Namen (Multi-Rectangle
+  // fuer L-foermige Regionen wie de-sh Mainland + Nordfriesische Inseln).
   bool first = true;
   size_t used = 0;
   for (size_t i = 0; i < REGION_COUNT; i++) {
     if (!match[i]) continue;
+    // dup-check gegen alle frueheren matches
+    bool dup = false;
+    for (size_t j = 0; j < i; j++) {
+      if (match[j] && strcmp(regions[i].name, regions[j].name) == 0) {
+        dup = true;
+        break;
+      }
+    }
+    if (dup) continue;
     size_t nlen = strlen(regions[i].name);
     size_t need = nlen + (first ? 0 : 2);
     if (used + need + 1 > dest_size) break;
@@ -211,6 +271,11 @@ bool dl9sau_get_region_meta(size_t idx, bool* has_bbox, uint8_t* default_status)
   if (has_bbox)       *has_bbox       = regions[idx].has_bbox;
   if (default_status) *default_status = regions[idx].default_status;
   return true;
+}
+
+bool dl9sau_is_alias(size_t idx) {
+  if (idx >= REGION_COUNT) return false;
+  return regions[idx].is_alias;
 }
 
 void dl9sau_compute_name_hash(const char* name, uint8_t out[4]) {
