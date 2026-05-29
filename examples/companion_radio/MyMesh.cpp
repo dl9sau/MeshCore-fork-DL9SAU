@@ -8760,11 +8760,25 @@ void MyMesh::pushDebugLog(const char* fmt, ...) {
   if (n <= 0) return;
   if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
 
-  // Always to Serial — direct USB users keep their stream
-  Serial.print(buf);
-  if (buf[n - 1] != '\n') Serial.print('\n');
+  // Always to Serial -- jede '\n' im Buffer in '\r\n' uebersetzen, sonst
+  // bleibt der Cursor in seriellen Terminals (USB-Serial, putty, screen)
+  // in der vorherigen Spalte stehen und die Folge-Zeile haengt rechts
+  // angeklatscht raus statt am linken Rand zu beginnen. Funktioniert
+  // auch bei multiline-Logs (mehrere \n im Buffer). Doppel-CR vermeiden
+  // falls vor einem \n schon ein \r steht.
+  for (int i = 0; i < n; i++) {
+    if (buf[i] == '\n' && (i == 0 || buf[i - 1] != '\r')) {
+      Serial.write('\r');
+    }
+    Serial.write(buf[i]);
+  }
+  if (buf[n - 1] != '\n') {
+    Serial.write('\r');
+    Serial.write('\n');
+  }
 
-  // Push to app debug log if connected. Frame: [PUSH_CODE][text bytes, no null]
+  // Push to app debug log if connected. Frame: [PUSH_CODE][text bytes, no null].
+  // App-Frame bekommt kein CRLF -- die UI fuegt eigene Zeilenumbrueche.
   if (_serial != NULL && _serial->isConnected()) {
     uint8_t frame[1 + sizeof(buf)];
     frame[0] = PUSH_CODE_DEBUG_LOG;
