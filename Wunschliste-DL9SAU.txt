@@ -1190,7 +1190,7 @@ Aufwand-Effektiv:
 Quelle: User-Spezifikation 2026-05-30 als Folge des Meshtastic-Vergleichs.
 
 ================================================================================
-20. stats-Subkategorien (MeshCore-Docs-Konvention)
+20. stats-Subkategorien (MeshCore-Docs-Konvention) -- ERLEDIGT
 ================================================================================
 
 User-Hinweis 2026-05-30 (nach Phase-C-Test): die MeshCore-Docs

@@ -5086,7 +5086,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // unveraendert; Sub-Handler die raw-strings brauchen (chatname custom)
   // tokenisieren raw_cmd selbst.
   static const char* const TOP_CMDS[] = {
-    "help", "?", "status", "stats", "uptime", "advert", "autoadv",
+    "help", "?", "status",
+    // Wunschliste 20: 'stats' bleibt Sammel-Output, 'stat' als kurze Alias-
+    // Form (exact in TOP_CMDS damit nicht mit den stats-*-Varianten
+    // konfligiert). stats-core/-radio/-packets sind Docs-kompatible Filter.
+    "stats", "stat", "stats-core", "stats-radio", "stats-packets",
+    "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
     "messages", "clear",
@@ -5482,14 +5487,47 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
-      if (topic_prefix_match(topic, "stats")) {
+      if (topic_prefix_match(topic, "stats-core")) {
         pushCompanionMessage(
-          "stats: detaillierte RX/Repeat/Airtime-Statistik. Aufschluesselung "
-          "nach Node-Typ und Payload-Typ, plus /h und /d hochgerechnet."
+          "stats-core: System-Stats.\n"
+          "  uptime, battery (mV), msg-queue, trace-flags."
         );
         pushCompanionMessage(
-          "Direct-Pakete sind NICHT erfasst (nur Flood, der Hauptanteil "
-          "des Mesh-Hintergrundtraffics). Counter sind RAM-only."
+          "MeshCore-Docs-konform (docs.meshcore.io).\n"
+          "Subset von 'stats' (Sammel-Output)."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "stats-radio")) {
+        pushCompanionMessage(
+          "stats-radio: Radio-Stats.\n"
+          "  noise floor, last rssi/snr, airtime, rx errors."
+        );
+        pushCompanionMessage(
+          "Plus duty-cycle 1h-Window vs 10%-Limit.\n"
+          "Subset von 'stats'. Docs-konform."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "stats-packets")) {
+        pushCompanionMessage(
+          "stats-packets: Packet-Counters.\n"
+          "  heard direct, rx flood, tx own (per payload-type)."
+        );
+        pushCompanionMessage(
+          "Direct-Pakete sind NICHT erfasst (nur Flood-Pfad).\n"
+          "Subset von 'stats'. Docs-konform."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "stats")) {
+        pushCompanionMessage(
+          "stats: Sammel-Output (alle Kategorien).\n"
+          "Filter: 'stats-core', 'stats-radio', 'stats-packets'."
+        );
+        pushCompanionMessage(
+          "Aufschluesselung nach Node-Typ + Payload-Typ.\n"
+          "Plus /h und /d hochgerechnete Raten."
         );
         return;
       }
@@ -7271,6 +7309,151 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // anderer Befehl (siehe oben), aber 'stat' faellt aus dessen Match
   // raus (text[4]=NUL/space) und kommt erst hier vorbei -- spart
   // Tipparbeit.
+  // ---------- stats-core: Battery, Uptime, Queue, Debug Flags --------------
+  // Wunschliste 20: MeshCore-Docs-Konvention (docs.meshcore.io). Erlaubt
+  // gezieltes Pollen der System-Stats ohne den vollen Sammel-'stats'-Output.
+  if (starts_with_word(cmd, "stats-core")) {
+    uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
+    uint64_t total_s = total_ms / 1000ULL;
+    unsigned long up_d = (unsigned long)(total_s / 86400ULL);
+    unsigned long up_h = (unsigned long)((total_s % 86400ULL) / 3600ULL);
+    unsigned long up_m = (unsigned long)((total_s % 3600ULL) / 60ULL);
+    uint16_t batt_mv = (uint16_t)board.getBattMilliVolts();
+    int q_used = offlineQueueTotal();
+    int q_cap  = BUCKET_CAP_PUBLIC + BUCKET_CAP_HASHTAG + BUCKET_CAP_PRIVATE
+               + BUCKET_CAP_DM + BUCKET_CAP_COMPANION;
+    char block[200];
+    int n = snprintf(block, sizeof(block),
+                     "stats-core:\n"
+                     "  uptime    = ");
+    if (up_d > 0) n += snprintf(block+n, sizeof(block)-n,
+                                "%lud%02luh%02lum\n", up_d, up_h, up_m);
+    else          n += snprintf(block+n, sizeof(block)-n,
+                                "%luh%02lum\n", up_h, up_m);
+    n += snprintf(block+n, sizeof(block)-n,
+                  "  battery   = %u mV\n"
+                  "  msg-queue = %d / %d slots\n"
+                  "  trace     = 0x%04X (%s)",
+                  (unsigned)batt_mv, q_used, q_cap,
+                  (unsigned)_trace_flags,
+                  _trace_flags ? "active" : "off");
+    pushCompanionMessage(block);
+    return;
+  }
+
+  // ---------- stats-radio: Noise floor, RSSI/SNR, Airtime, RX errors --------
+  if (starts_with_word(cmd, "stats-radio")) {
+    uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
+    if (total_ms == 0) total_ms = 1;
+    int16_t  noise_floor = (int16_t)_radio->getNoiseFloor();
+    int8_t   last_rssi   = (int8_t)radio_driver.getLastRSSI();
+    int8_t   last_snr_q4 = (int8_t)(radio_driver.getLastSNR() * 4.0f);
+    uint32_t rx_errors   = (uint32_t)radio_driver.getPacketsRecvErrors();
+
+    char block[200];
+    snprintf(block, sizeof(block),
+             "stats-radio:\n"
+             "  noise floor = %d dBm\n"
+             "  last rssi   = %d dBm  snr = %.1f dB\n"
+             "  rx errors   = %lu",
+             (int)noise_floor, (int)last_rssi,
+             (double)last_snr_q4 / 4.0,
+             (unsigned long)rx_errors);
+    pushCompanionMessage(block);
+
+    // Airtime block (Sekunden + Prozent)
+    unsigned long rx_air = getReceiveAirTime();
+    unsigned long tx_air = getTotalAirTime();
+    double rx_pct = 100.0 * (double)rx_air / (double)total_ms;
+    double tx_pct = 100.0 * (double)tx_air / (double)total_ms;
+    char rx_s[16], tx_s[16];
+    fmt_secs(rx_s, sizeof(rx_s), rx_air);
+    fmt_secs(tx_s, sizeof(tx_s), tx_air);
+
+    // Duty rolling 1h
+    unsigned long duty_cur  = getTxAirLastHour();
+    unsigned long duty_hard = getDutyHardLimitMs();
+    double duty_pct = duty_hard > 0 ? 100.0 * (double)duty_cur / (double)duty_hard : 0.0;
+    char duty_cur_s[16], duty_hard_s[16];
+    fmt_secs(duty_cur_s,  sizeof(duty_cur_s),  duty_cur);
+    fmt_secs(duty_hard_s, sizeof(duty_hard_s), duty_hard);
+
+    snprintf(block, sizeof(block),
+             "airtime + duty:\n"
+             "  rx = %s (%.2f%%)\n"
+             "  tx = %s (%.2f%%)\n"
+             "  duty last_h = %s of %s (%.1f%%)",
+             rx_s, rx_pct, tx_s, tx_pct,
+             duty_cur_s, duty_hard_s, duty_pct);
+    pushCompanionMessage(block);
+    return;
+  }
+
+  // ---------- stats-packets: Packet counters Received / Sent ----------------
+  if (starts_with_word(cmd, "stats-packets")) {
+    uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
+    if (total_ms == 0) total_ms = 1;
+    uint64_t uptime_s = total_ms / 1000ULL;
+    if (uptime_s == 0) uptime_s = 1;
+    char block[200];
+    int p;
+
+    uint32_t hd_total = 0;
+    for (int t = 0; t < 5; t++) hd_total += _heard_direct[t];
+    p = snprintf(block, sizeof(block),
+                 "stats-packets:\n"
+                 "heard direct: rep=%u cmp=%u room=%u sns=%u total=%lu",
+                 (unsigned)_heard_direct[ADV_TYPE_REPEATER],
+                 (unsigned)_heard_direct[ADV_TYPE_CHAT],
+                 (unsigned)_heard_direct[ADV_TYPE_ROOM],
+                 (unsigned)_heard_direct[ADV_TYPE_SENSOR],
+                 (unsigned long)hd_total);
+    append_rate_hint(block + p, sizeof(block) - p, hd_total, uptime_s);
+    pushCompanionMessage(block);
+
+    uint32_t rxf_total = 0;
+    for (int pp = 0; pp < 16; pp++) rxf_total += _rx_flood_by_ptype[pp];
+    p = snprintf(block, sizeof(block),
+                 "rx flood:\n"
+                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                 "  total=%lu",
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE],
+                 (unsigned long)rxf_total);
+    append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
+    pushCompanionMessage(block);
+
+    auto own_of = [&](uint8_t pp) -> unsigned {
+      uint16_t tot = _tx_total_by_ptype[pp];
+      uint16_t rep = _repeat_by_ptype[pp];
+      return (tot > rep) ? (unsigned)(tot - rep) : 0u;
+    };
+    uint32_t own_total = 0;
+    for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
+    p = snprintf(block, sizeof(block),
+                 "tx own:\n"
+                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                 "  total=%lu",
+                 own_of(PAYLOAD_TYPE_ADVERT),
+                 own_of(PAYLOAD_TYPE_PATH),
+                 own_of(PAYLOAD_TYPE_TXT_MSG),
+                 own_of(PAYLOAD_TYPE_GRP_TXT),
+                 own_of(PAYLOAD_TYPE_ACK),
+                 own_of(PAYLOAD_TYPE_REQ),
+                 own_of(PAYLOAD_TYPE_RESPONSE),
+                 own_of(PAYLOAD_TYPE_TRACE),
+                 (unsigned long)own_total);
+    append_rate_hint(block + p, sizeof(block) - p, own_total, uptime_s);
+    pushCompanionMessage(block);
+    return;
+  }
+
   if (starts_with_word(cmd, "stats") || starts_with_word(cmd, "stat")) {
     uint64_t total_ms = (uint64_t)_millis_wraps * 4294967296ULL + (uint64_t)millis();
     if (total_ms == 0) total_ms = 1;
