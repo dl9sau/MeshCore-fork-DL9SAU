@@ -163,7 +163,23 @@ public :
             }
             if (_time_sync_needed && time_valid > 2) {
                 if (_clock != NULL) {
-                    _clock->setCurrentTime(getTimestamp());
+                    // Defensive Sanity-Schranke (Test-Bericht 2026-05-30):
+                    // bei GPS-Week-Rollover-Bugs oder NMEA-Frankenframes liefert
+                    // die Lib gelegentlich ein Jahr ~2038 oder noch weiter weg.
+                    // Wenn die RTC schon plausibel gesetzt ist und der GPS-
+                    // Timestamp mehr als 1 Jahr (in beide Richtungen) abweicht,
+                    // den Sync VERWERFEN statt RTC kaputt machen. Bei frisch
+                    // gebooteter RTC (cur < 1.5e9 = pre-2017) kein Vergleich,
+                    // da haben wir keinen Anker.
+                    long ts = getTimestamp();
+                    long cur = (long)_clock->getCurrentTime();
+                    const long ONE_YEAR_SECS = 365L * 86400L;
+                    bool reject = (cur > 1500000000L)
+                               && (ts > cur + ONE_YEAR_SECS
+                                || ts < cur - ONE_YEAR_SECS);
+                    if (!reject) {
+                        _clock->setCurrentTime(ts);
+                    }
                     _time_sync_needed = false;
                     _last_time_sync = millis();
                 }

@@ -600,17 +600,21 @@ private:
   // Bucket-Kapazitaeten (Array-Groessen). Phase C macht das Slot-Limit
   // pro Bucket per NodePrefs+CLI konfigurierbar; die Arrays sind hier
   // auf MAX vorallokiert. Slot mit Index >= runtime-limit bleibt
-  // ungenutzt. Caps: 16 fuer alle ausser DM (32).
-  // $companion eigener Bucket: Trace/CLI-Output wuerde sonst den
-  // privaten Bucket ueberfluten und User-Channel-Nachrichten verdraengen.
-  static constexpr int BUCKET_CAP_PUBLIC    = 16;
-  static constexpr int BUCKET_CAP_HASHTAG   = 16;
-  static constexpr int BUCKET_CAP_PRIVATE   = 16;
-  static constexpr int BUCKET_CAP_DM        = 32;
+  // ungenutzt. $companion eigener Bucket: Trace/CLI-Output wuerde sonst
+  // den privaten Bucket ueberfluten und User-Channel-Nachrichten
+  // verdraengen.
+  // Caps angepasst nach Test-Bericht 2026-05-30: User-Wunsch HASHTAG/
+  // PRIVATE auf 24 anheben (mehr Puffer fuer Gruppen-Chats), DM von
+  // 32 auf 24 reduziert (DMs sind seltener). PUBLIC bewusst klein (8)
+  // -- nur ein well-known PSK-Channel, geringer Traffic.
+  static constexpr int BUCKET_CAP_PUBLIC    = 8;
+  static constexpr int BUCKET_CAP_HASHTAG   = 24;
+  static constexpr int BUCKET_CAP_PRIVATE   = 24;
+  static constexpr int BUCKET_CAP_DM        = 24;
   static constexpr int BUCKET_CAP_COMPANION = 16;
   // Defaults wenn NodePrefs.msg_store_limit[b] == 0.
   static constexpr int BUCKET_DEFAULT_PUBLIC    = 8;
-  static constexpr int BUCKET_DEFAULT_HASHTAG   = 8;
+  static constexpr int BUCKET_DEFAULT_HASHTAG   = 16;
   static constexpr int BUCKET_DEFAULT_PRIVATE   = 16;
   static constexpr int BUCKET_DEFAULT_DM        = 16;
   static constexpr int BUCKET_DEFAULT_COMPANION = 16;

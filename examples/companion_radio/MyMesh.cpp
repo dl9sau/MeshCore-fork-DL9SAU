@@ -467,8 +467,19 @@ void MyMesh::loadBucketsFromFlash() {
   // Timestamp tragen koennen.
   if (max_ts > 0) {
     uint32_t cur = getRTCClock()->getCurrentTime();
-    if (max_ts + 1 > cur) {
+    // Sanity-Schranke (Test-Bericht 2026-05-30): wenn der hoechste stored
+    // sender_timestamp in einer korrupten Aera geschrieben wurde (alter
+    // NMEA-stale-time Bug -> Frames mit Jahr 2038), wuerden wir die RTC
+    // beim Boot in die ferne Zukunft schieben. Akzeptiere nur Bumps die
+    // maximal 1 Jahr ueber dem Contact-Bootstrap liegen.
+    const uint32_t ONE_YEAR_SECS = 365UL * 86400UL;
+    if (max_ts + 1 > cur && max_ts < cur + ONE_YEAR_SECS) {
       getRTCClock()->setCurrentTime(max_ts + 1);
+      pushDebugLog("[MSGSTORE] RTC bumped %lu -> %lu (max stored ts)\n",
+                   (unsigned long)cur, (unsigned long)(max_ts + 1));
+    } else if (max_ts >= cur + ONE_YEAR_SECS) {
+      pushDebugLog("[MSGSTORE] RTC bump SKIPPED: max stored ts %lu > cur %lu + 1 year\n",
+                   (unsigned long)max_ts, (unsigned long)cur);
     }
   }
 }
@@ -9686,12 +9697,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 }
 
 void MyMesh::pushDebugLog(const char* fmt, ...) {
-  char buf[160];
+  // millis()-Prefix vor jedem Log-Eintrag -- erlaubt Korrelation und
+  // Reihenfolge-Validierung auf der seriellen Konsole (User-Wunsch
+  // 2026-05-30). Der Wert ist seit-Boot in Millisekunden, wraps alle
+  // ~49 Tage (uint32). Format: "[+1234567ms] ".
+  char buf[180];
+  int n_pref = snprintf(buf, sizeof(buf), "[+%lums] ", (unsigned long)millis());
   va_list ap;
   va_start(ap, fmt);
-  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  int n_body = vsnprintf(buf + n_pref, sizeof(buf) - n_pref, fmt, ap);
   va_end(ap);
-  if (n <= 0) return;
+  if (n_body <= 0) return;
+  int n = n_pref + n_body;
   if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
 
   // Always to Serial -- jede '\n' im Buffer in '\r\n' uebersetzen, sonst
