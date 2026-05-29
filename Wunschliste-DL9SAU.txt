@@ -1188,3 +1188,41 @@ Aufwand-Effektiv:
                Help-Texte + Doku).
 
 Quelle: User-Spezifikation 2026-05-30 als Folge des Meshtastic-Vergleichs.
+
+================================================================================
+20. stats-Subkategorien (MeshCore-Docs-Konvention)
+================================================================================
+
+User-Hinweis 2026-05-30 (nach Phase-C-Test): die MeshCore-Docs
+(docs.meshcore.io/cli_commands) splitten 'stats' in drei Sub-Befehle:
+
+  stats-core      System Stats: Battery, Uptime, Queue Length, Debug Flags
+                  (Serial Only: Yes)
+  stats-radio     Radio Stats:  Noise floor, Last RSSI/SNR, Airtime,
+                  Receive errors (Serial Only: Yes)
+  stats-packets   Packet stats: Packet counters Received/Sent
+                  (Serial Only: Yes)
+
+Unser aktueller 'stats'-Befehl ist ein Sammel-Output (alle Kategorien
+in einem Block). Vorteil: kompakte Uebersicht. Nachteil: nicht-kompatibel
+zur MeshCore-Docs-Konvention -- ein User der die Docs liest und
+'stats-core' tippt bekommt 'Unbekannter Befehl' statt der erwarteten
+Info.
+
+Optionen (zur User-Entscheidung):
+  a) Nichts aendern -- 'stats' bleibt Sammel-Output.
+  b) 'stats' als Sammel-Alias zu allen drei beibehalten +
+     'stats-core/-radio/-packets' als Filter-Varianten hinzufuegen.
+     Zusaetzlicher CLI-Code, ~80 LoC.
+  c) 'stats' zu Sammel-Default machen aber Argument-Filter erlauben:
+     'stats core', 'stats radio', 'stats packets'.
+     (NB: nicht docs-kompatibel weil Docs Bindestrich verwenden.)
+  d) Voll auf docs umstellen: 'stats' alleine = nicht erlaubt oder
+     Usage-Output, nur 'stats-core' etc. erlaubt.
+     User-Beschwerden zu erwarten bei Re-Lernen.
+
+Empfehlung: Option (b) -- backward-compatibel und docs-konform.
+
+Aufwand: ~80 LoC + Help-Texte fuer 3 neue Topics.
+
+Quelle: User-Hinweis 2026-05-30, https://docs.meshcore.io/cli_commands/

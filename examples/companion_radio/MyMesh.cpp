@@ -5368,12 +5368,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "clear")) {
         pushCompanionMessage(
-          "clear statistics:\n"
+          "clear stats:\n"
           "  Setzt alle RAM-Statistik-Counter zurueck."
         );
         pushCompanionMessage(
-          "Abkuerzbar (Prefix-Match, min 3 Zeichen):\n"
-          "  'stat', 'stats', 'statistic' -- alle OK."
+          "Abkuerzbar als 'stat' (Prefix-Match >= 3 Zeichen).\n"
+          "Konsistent zur MeshCore-Docs 'clear stats'."
         );
         return;
       }
@@ -5530,10 +5530,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("(kein Help-Eintrag fuer dieses Topic)");
       return;
     }
+    // 'Befehle: ...' war zu lang fuer MAX_TEXT_LEN (160 inkl. 'Sender: '-
+    // Prefix, effektiv ~145 Bytes). Output wurde bei 'time' abgeschnitten.
+    // -> in 2 BLE-Messages gesplittet.
     pushCompanionMessage(
-      "Befehle: help [topic], status, stats, uptime, neighbors, advert, "
-      "autoadv, repeater, duty, scope, gps, trace, chatname, prefs, "
-      "set, get, clock, time, messages, tempradio, clear, reboot."
+      "Befehle: help [topic], status, stats, uptime, "
+      "neighbors, advert, autoadv, repeater, duty, scope, "
+      "gps, trace, chatname,"
+    );
+    pushCompanionMessage(
+      "  prefs, set, get, clock, time, messages, "
+      "tempradio, clear, reboot."
     );
     return;
   }
@@ -7238,25 +7245,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // ---------- clear <subcmd> --------------------------------------------
   // 'clear' ohne Argument zeigt jetzt Usage statt nur Fehler -- der
   // alleinige Befehl ist sonst nicht selbsterklaerend (User-Feedback
-  // 2026-05-30). Sub-Befehl 'statistics' abkuerzbar als 'stat' / 'stats'
-  // / 'statistic' (Prefix-Match) -- alte 'clear stats'-Tippung bleibt
-  // damit kompatibel.
+  // 2026-05-30).
+  // Sub-Befehl 'stats' (= MeshCore-Docs Konvention -- docs.meshcore.io,
+  // 'Clear Stats / Usage: clear stats'). Prefix-Match gegen "stats"
+  // erlaubt 'clear stat' als Abkuerzung (Tippfehler-tolerant, min 3
+  // Zeichen). Konsistent zu unserem 'stats'-Readout-Befehl.
   if (starts_with_word(cmd, "clear")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
     if (!arg || *arg == 0) {
-      pushCompanionMessage("clear Usage:\n  clear statistics");
+      pushCompanionMessage("clear Usage:\n  clear stats");
       return;
     }
-    // Prefix-Match gegen "statistics". Mindest-Laenge 3 ('sta') --
-    // weniger Buchstaben akzeptieren ist zu fehleranfaellig (s, st).
     size_t alen = strlen(arg);
-    if (alen >= 3 && strncmp(arg, "statistics", alen) == 0) {
+    if (alen >= 3 && alen <= 5 && strncmp(arg, "stats", alen) == 0) {
       clearStats();
       pushCompanionMessage("OK - alle Statistik-Counter zurueckgesetzt.");
       return;
     }
-    pushCompanionMessage("Unbekanntes Argument. 'clear statistics' (oder Prefix wie 'stat').");
+    pushCompanionMessage("Unbekanntes Argument. 'clear stats' (Prefix 'stat' OK).");
     return;
   }
 
