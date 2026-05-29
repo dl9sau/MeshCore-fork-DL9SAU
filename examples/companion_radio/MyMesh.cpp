@@ -287,6 +287,81 @@ int MyMesh::bucketByName(const char* s) const {
   return -1;
 }
 
+// --- DST-Helper (EU CET/CEST) -----------------------------------------------
+// Zeller's congruence: Wochentag fuer Datum (y, m, d). Rueckgabe 0=Sonntag,
+// 1=Montag, ..., 6=Samstag. (Standard ISO 8601-aehnlich)
+static int dst_dayOfWeek(int y, int m, int d) {
+  if (m < 3) { m += 12; y -= 1; }
+  int K = y % 100;
+  int J = y / 100;
+  int h = (d + (13*(m+1))/5 + K + K/4 + J/4 + 5*J) % 7;
+  // h: 0=Saturday, 1=Sunday, 2=Monday, ..., 6=Friday
+  // Konvertieren auf 0=Sunday: (h + 6) % 7
+  return (h + 6) % 7;
+}
+
+int32_t MyMesh::localTzOffsetSecs(uint32_t utc) const {
+  int32_t base = (int32_t)LOCAL_TZ_OFFSET_SECS;
+#if LOCAL_TZ_DST_EU
+  // EU-DST: last-Sunday-of-March 01:00 UTC bis last-Sunday-of-October 01:00 UTC.
+  if (utc < 1500000000UL) return base;  // RTC unset -- nichts annehmen
+  time_t t = (time_t)utc;
+  struct tm tm_utc;
+  gmtime_r(&t, &tm_utc);
+  int year = tm_utc.tm_year + 1900;
+  // March 31 weekday -> wieviele Tage zurueck zum letzten Sonntag.
+  int mar31_dow = dst_dayOfWeek(year, 3, 31);  // 0=Sunday
+  int mar_sun = 31 - mar31_dow;
+  int oct31_dow = dst_dayOfWeek(year, 10, 31);
+  int oct_sun = 31 - oct31_dow;
+
+  int mon = tm_utc.tm_mon + 1;
+  int day = tm_utc.tm_mday;
+  int hour = tm_utc.tm_hour;
+  // Vor Maerz oder nach Oktober -> sicher Winterzeit
+  if (mon < 3 || mon > 10) return base;
+  // April..September -> sicher Sommerzeit
+  if (mon > 3 && mon < 10) return base + 3600;
+  // Maerz: ab last-Sunday 01:00 UTC -> CEST
+  if (mon == 3) {
+    if (day < mar_sun) return base;
+    if (day > mar_sun) return base + 3600;
+    // genau am Umstellungs-Sonntag
+    return (hour >= 1) ? (base + 3600) : base;
+  }
+  // Oktober: bis last-Sunday 01:00 UTC -> CEST
+  if (mon == 10) {
+    if (day < oct_sun) return base + 3600;
+    if (day > oct_sun) return base;
+    return (hour < 1) ? (base + 3600) : base;
+  }
+#endif
+  return base;
+}
+
+// Extrahiere sender_timestamp aus einem gespeicherten Frame -- wird beim
+// Boot-Restore verwendet um die RTC ggf. nach oben zu korrigieren wenn ein
+// gespeicherter Frame neuer ist als der Contact-basierte Bootstrap.
+// Frame-Layouts siehe queueMessage/onChannelMessageRecv/onChannelDataRecv
+// (Test-Bericht 2026-05-30). Returns 0 wenn Frame kein timestamp-Feld hat.
+static uint32_t frame_extract_timestamp(const uint8_t* buf, int len) {
+  if (len < 4) return 0;
+  uint8_t code = buf[0];
+  int off = -1;
+  switch (code) {
+    case 7:   off = 9;  break;  // RESP_CODE_CONTACT_MSG_RECV
+    case 16:  off = 12; break;  // RESP_CODE_CONTACT_MSG_RECV_V3
+    case 8:   off = 4;  break;  // RESP_CODE_CHANNEL_MSG_RECV
+    case 17:  off = 7;  break;  // RESP_CODE_CHANNEL_MSG_RECV_V3
+    case 27:  return 0;         // RESP_CODE_CHANNEL_DATA_RECV (kein timestamp)
+    default:  return 0;
+  }
+  if (off < 0 || off + 4 > len) return 0;
+  uint32_t ts;
+  memcpy(&ts, buf + off, 4);
+  return ts;
+}
+
 const char* MyMesh::msgBucketPath(MsgBucket b) const {
   switch (b) {
     case BUCKET_PUBLIC:    return "/msgs/b0_public.dat";
@@ -332,6 +407,8 @@ void MyMesh::saveBucketToFlash(MsgBucket b) {
 
 void MyMesh::loadBucketsFromFlash() {
   uint32_t max_seq = 0;
+  uint32_t max_ts  = 0;   // hoechster sender_timestamp ueber alle restaurierten
+                          // Frames -- fuer RTC-Bootstrap (Test-Bericht 2026-05-30)
   for (int b = 0; b < BUCKET_COUNT; b++) {
     if (!getBucketFlash((MsgBucket)b)) continue;
     const char* path = msgBucketPath((MsgBucket)b);
@@ -372,11 +449,28 @@ void MyMesh::loadBucketsFromFlash() {
       arr[slot].len    = len;
       memcpy(arr[slot].buf, tmp, len);
       if (seq > max_seq) max_seq = seq;
+      uint32_t ts = frame_extract_timestamp(tmp, len);
+      if (ts > max_ts) max_ts = ts;
       slot++;
     }
     f.close();
   }
   if (max_seq + 1 > _msg_seq_next) _msg_seq_next = max_seq;  // ++ in addToOfflineQueue erhoeht auf max_seq+1
+
+  // RTC-Bootstrap aus restaurierten Frames: wenn ein Frame mit hoeherem
+  // sender_timestamp existiert als der derzeitige RTC-Stand (typisch aus
+  // bootstrapRTCfromContacts -- max contact.lastmod), RTC anheben. So
+  // verlieren wir nach Reboot nicht die ueblicherweise hoehere Zeit-
+  // Genauigkeit der Trace-Messages im $companion-Bucket (oder einer
+  // gerade-erst empfangenen DM in BUCKET_DM).
+  // Toleranz: kleiner Puffer +1s damit neue Pakete nicht denselben
+  // Timestamp tragen koennen.
+  if (max_ts > 0) {
+    uint32_t cur = getRTCClock()->getCurrentTime();
+    if (max_ts + 1 > cur) {
+      getRTCClock()->setCurrentTime(max_ts + 1);
+    }
+  }
 }
 
 void MyMesh::clearBucket(MsgBucket b) {
@@ -4242,8 +4336,9 @@ void MyMesh::scheduleNextNightFlood() {
     next_night_flood_unix = 0;
     return;
   }
-  // shift into local time
-  uint32_t local_now = now + (uint32_t)LOCAL_TZ_OFFSET_SECS;
+  // shift into local time (DST-aware -- CEST im Sommer = UTC+2)
+  int32_t  tz_off    = localTzOffsetSecs(now);
+  uint32_t local_now = now + (uint32_t)tz_off;
   uint32_t day_secs = local_now % 86400UL;
   uint32_t local_midnight_today = local_now - day_secs;
 
@@ -4270,7 +4365,9 @@ void MyMesh::scheduleNextNightFlood() {
 
   uint32_t span = window_end - window_start;
   uint32_t pick_local = window_start + getRNG()->nextInt(0, span);
-  next_night_flood_unix = pick_local - (uint32_t)LOCAL_TZ_OFFSET_SECS;
+  // Rueckkonvertierung lokal->UTC mit gleichem Offset wie oben. Edge-Case
+  // DST-Wechsel-Sonntag: minimal 1h off, akzeptabler Trade-off.
+  next_night_flood_unix = pick_local - (uint32_t)tz_off;
   uint32_t now_rtc = getRTCClock()->getCurrentTime();
   long until_s = (long)next_night_flood_unix - (long)now_rtc;
   traceCompanion(TRACE_NIGHT, "[night] scheduled in %ld min", until_s / 60);
@@ -5002,7 +5099,7 @@ void MyMesh::appendGpsTraceStatus(char* out, size_t out_size) {
   if (now_rtc < 1500000000UL) {
     snprintf(rtc_str, sizeof(rtc_str), "rtc-unset");
   } else {
-    time_t lt = (time_t)(now_rtc + (uint32_t)LOCAL_TZ_OFFSET_SECS);
+    time_t lt = (time_t)(now_rtc + (uint32_t)localTzOffsetSecs(now_rtc));
     struct tm tm_loc;
     gmtime_r(&lt, &tm_loc);
     snprintf(rtc_str, sizeof(rtc_str), "%04d-%02d-%02d %02d:%02d:%02d",
@@ -5905,7 +6002,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (now_rtc < 1500000000UL) {
         snprintf(rtc_str, sizeof(rtc_str), "rtc not set");
       } else {
-        time_t lt = (time_t)(now_rtc + (uint32_t)LOCAL_TZ_OFFSET_SECS);
+        time_t lt = (time_t)(now_rtc + (uint32_t)localTzOffsetSecs(now_rtc));
         struct tm tm_loc;
         gmtime_r(&lt, &tm_loc);
         snprintf(rtc_str, sizeof(rtc_str), "%04d-%02d-%02d %02d:%02d:%02d loc",
@@ -6572,14 +6669,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     snprintf(utc_str, sizeof(utc_str), "%04d-%02d-%02d %02d:%02d:%02d UTC",
              utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
              utc.tm_hour, utc.tm_min, utc.tm_sec);
-    // Lokal: now + LOCAL_TZ_OFFSET_SECS
-    time_t local_t = (time_t)(now + (uint32_t)LOCAL_TZ_OFFSET_SECS);
+    // Lokal: now + runtime-Offset (DST-aware via localTzOffsetSecs)
+    int32_t tz_off = localTzOffsetSecs(now);
+    time_t local_t = (time_t)(now + (uint32_t)tz_off);
     struct tm loc;
     gmtime_r(&local_t, &loc);
-    char loc_str[40];
-    snprintf(loc_str, sizeof(loc_str), "%04d-%02d-%02d %02d:%02d:%02d (TZ+%lds)",
+    char loc_str[48];
+    // CEST / CET-Label aus dem Offset ableiten (3600 = CET, 7200 = CEST).
+    const char* tzname = (tz_off == 7200) ? "CEST" :
+                         (tz_off == 3600) ? "CET"  : "TZ";
+    snprintf(loc_str, sizeof(loc_str), "%04d-%02d-%02d %02d:%02d:%02d %s (TZ+%lds)",
              loc.tm_year + 1900, loc.tm_mon + 1, loc.tm_mday,
-             loc.tm_hour, loc.tm_min, loc.tm_sec, (long)LOCAL_TZ_OFFSET_SECS);
+             loc.tm_hour, loc.tm_min, loc.tm_sec,
+             tzname, (long)tz_off);
     char block[200];
     snprintf(block, sizeof(block),
              "clock:\n  unix = %lu\n  utc  = %s\n  loc  = %s",

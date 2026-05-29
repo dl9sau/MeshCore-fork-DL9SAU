@@ -237,7 +237,13 @@ struct AdvertPath {
 #define CR_PERIODIC_ADVERT_BOOT_DELAY_MS      (5UL  * 60UL * 1000UL)
 #define CR_PERIODIC_ADVERT_BOOT_DELAY_GPS_MS  (10UL * 60UL * 1000UL)
 #ifndef LOCAL_TZ_OFFSET_SECS
-#define LOCAL_TZ_OFFSET_SECS    3600   // CET; override per-build for other zones
+#define LOCAL_TZ_OFFSET_SECS    3600   // CET (winter base); override per-build for other zones
+#endif
+// EU-DST automatisch handhaben (Last-Sunday-of-March 01:00 UTC -> +1h,
+// Last-Sunday-of-October 01:00 UTC -> zurueck). Fuer andere Regionen
+// im Build deaktivieren (-DLOCAL_TZ_DST_EU=0).
+#ifndef LOCAL_TZ_DST_EU
+#define LOCAL_TZ_DST_EU         1
 #endif
 #define CR_NIGHT_FLOOD_START_HOUR_LOCAL 23
 #define CR_NIGHT_FLOOD_END_HOUR_LOCAL    5     // exclusive
@@ -624,6 +630,11 @@ private:
   void     saveBucketToFlash(MsgBucket b);
   // Pfad fuer die persistente Datei eines Buckets.
   const char* msgBucketPath(MsgBucket b) const;
+  // Effektiver Lokal-TZ-Offset zu UTC fuer einen gegebenen UTC-Zeitpunkt.
+  // = LOCAL_TZ_OFFSET_SECS + (EU-DST aktiv ? 3600 : 0).
+  // Sommerzeit-Detektion: last-Sunday-March 01:00 UTC bis last-Sunday-
+  // October 01:00 UTC. CEST = UTC+2 in Sommer, CET = UTC+1 in Winter.
+  int32_t localTzOffsetSecs(uint32_t utc) const;
   // Alle Buckets mit aktivem Flash-Flag von Flash einlesen. Wird einmalig
   // beim Boot nach setupCompanionChannel() gerufen.
   void     loadBucketsFromFlash();
