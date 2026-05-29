@@ -266,4 +266,20 @@ struct NodePrefs {  // persisted to file
   // Schleifen koennen da nicht entstehen.
   // CLI: set loop_detect <mode> (oder loop.detect fuer CommonCLI-Stil)
   uint8_t        loop_detect;
+
+  // ----------------------------------------------------------------
+  // Offline-Message-Queue Konfiguration (Wunschliste 19 Phase C).
+  // ----------------------------------------------------------------
+  // Bit-Field pro Bucket: 1 = Flash-Persistenz aktiv, 0 = RAM-only.
+  // Default 0 (alles RAM-only, privacy-konsistent).
+  //   bit 0 = PUBLIC, bit 1 = HASHTAG, bit 2 = PRIVATE,
+  //   bit 3 = DM,     bit 4 = COMPANION
+  // CLI: messages flash <type> on|off
+  uint8_t        msg_store_flash;
+
+  // Per-Bucket Slot-Limit. 0 = type-spezifischer Default
+  // (PUB=8, HT=8, PRIV=16, DM=16, COMP=16). Cap: 16 fuer alle ausser
+  // DM (32). Indizes [PUB,HT,PRIV,DM,COMP].
+  // CLI: messages limit <type> <N>
+  uint8_t        msg_store_limit[5];
 };

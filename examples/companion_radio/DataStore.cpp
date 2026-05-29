@@ -155,6 +155,12 @@ File DataStore::openRead(FILESYSTEM* fs, const char* filename) {
 #endif
 }
 
+// Oeffnet eine Datei zum Schreiben (truncate). Wird von MyMesh fuer
+// Offline-Message-Bucket-Persistenz verwendet (Wunschliste 19 Phase C).
+File DataStore::openWriteFile(const char* filename) {
+  return openWrite(_fs, filename);
+}
+
 bool DataStore::removeFile(const char* filename) {
   return _fs->remove(filename);
 }
@@ -267,6 +273,12 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)_prefs.owner_info, sizeof(_prefs.owner_info));                              // 1380 (120 byte)
     file.read((uint8_t *)&_prefs.advert_role, sizeof(_prefs.advert_role));                          // 1500
     file.read((uint8_t *)&_prefs.loop_detect, sizeof(_prefs.loop_detect));                          // 1501
+    // Wunschliste 19 Phase C: Offline-Queue-Speicher-Konfig. Bei aelteren
+    // Files erreicht file.read() EOF und liefert 0 zurueck -> Felder bleiben
+    // auf 0 (entspricht Default: alles RAM-only mit type-spezifischen
+    // Default-Limits). Reihenfolge im File ist append-only stabil.
+    file.read((uint8_t *)&_prefs.msg_store_flash, sizeof(_prefs.msg_store_flash));                  // 1502
+    file.read((uint8_t *)_prefs.msg_store_limit, sizeof(_prefs.msg_store_limit));                   // 1503 (5 byte)
 
     file.close();
   }
@@ -336,6 +348,8 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)_prefs.owner_info, sizeof(_prefs.owner_info));                              // 1380 (120 byte)
     file.write((uint8_t *)&_prefs.advert_role, sizeof(_prefs.advert_role));                          // 1500
     file.write((uint8_t *)&_prefs.loop_detect, sizeof(_prefs.loop_detect));                          // 1501
+    file.write((uint8_t *)&_prefs.msg_store_flash, sizeof(_prefs.msg_store_flash));                  // 1502
+    file.write((uint8_t *)_prefs.msg_store_limit, sizeof(_prefs.msg_store_limit));                   // 1503
 
     file.close();
   }

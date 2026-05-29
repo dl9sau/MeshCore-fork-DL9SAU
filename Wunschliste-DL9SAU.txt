@@ -1085,7 +1085,7 @@ deutlich weniger App-Side-Aenderung).
 Quelle: User-Idee 2026-05-30 als Reaktion auf ROOM-Server-Diskussion.
 
 ================================================================================
-19. Offline-Message-Queue Redesign (Phase B umgesetzt, Phase C ausstehend)
+19. Offline-Message-Queue Redesign (Phase A+B+C ERLEDIGT)
 ================================================================================
 
 Hintergrund:
@@ -1143,22 +1143,48 @@ Phase A+B umgesetzt (Test-Session 2026-05-29 Folge-Commit):
    Phase B-Commit). Frueher als urspruenglich geplant.
  - Total RAM-Delta gegenueber single-16-queue: +~9 KB.
 
-Phase C ausstehend -- FEINTUNING-MOEGLICHKEIT:
- - NodePrefs-Felder fuer per-Typ Flash-Flag + Limit (Default: alles RAM).
- - CLI 'messages [flash|limit|clear] ...' Befehle (siehe oben).
- - Flash-Persistenz via /msgs/<bucket>_<channel-hash>.dat oder aehnlich.
- - Boot: einlesen, in RAM-Buckets restaurieren.
- - Channel-Delete: hash-basierter GC-Pass.
- - Trace 'messagestore' Kategorie mit $companion-Guard:
-     if (bucket != BUCKET_COMPANION)
-       traceCompanion(TRACE_MSGSTORE, "[store] ...");
- - Optional: Limits-Caps anheben (aktuell 16/16/16/32/16) wenn RAM-Druck
-   es zulaesst. $companion-Bucket Persistenz wuerde Crash-Log ueber
-   Reboots erhalten (User-Wunsch).
+Phase C umgesetzt (Folge-Commit gleicher Tag):
+ - NodePrefs erweitert: uint8_t msg_store_flash (Bit-Field, 5 Buckets) +
+   uint8_t msg_store_limit[5]. Felder am Strukturende -- alte Prefs-
+   Files laden okay (EOF -> Defaults).
+ - DataStore::openWriteFile() als public-API fuer Flash-IO.
+ - CLI 'messages' im companion-channel:
+     messages                       Status pro Bucket
+     messages flash <type> on|off   Flash-Flag toggle + sofort save/remove
+     messages limit <type> <N>      0..cap (0 = type-Default)
+     messages clear <type|all>      RAM + Flash leeren
+   Hilfe 'help messages'. Caps: 16 fuer alle ausser DM (32).
+ - Flash-Persistenz: /msgs/b<n>_<name>.dat pro Bucket. Format pro Eintrag
+   { seq_no:4LE, len:1, frame:len }. Komplett-Rewrite bei jedem add
+   (Bucket-Groesse <=32 Frames). _msg_seq_next wird beim Boot-Load auf
+   max() der restaurierten seq_no gesetzt -> Pop-Reihenfolge stabil
+   ueber Reboot.
+ - TRACE_MSGSTORE Kategorie mit $companion-Guard in addToOfflineQueue:
+     if (b != BUCKET_COMPANION)
+       traceCompanion(TRACE_MSGSTORE, "[store] saved msg in bucket %d", b);
+   Verhindert Rekursion (Trace pusht -> wird gespeichert -> Trace pusht
+   "gespeichert" -> ...).
+ - Cap-Bumps fuer Phase C:
+     PUBLIC    8 -> 16 cap (Default bleibt 8)
+     HASHTAG   8 -> 16 cap (Default bleibt 8)
+     DM       16 -> 32 cap (Default bleibt 16)
+     PRIVATE / COMPANION: 16 = cap (Default bleibt 16)
 
-Aufwand:
- - Phase A+B:  done (~150 LoC).
- - Phase C:    ~400-600 LoC (NodePrefs + CLI + Flash-Format + Boot-Load
-               + Delete-Hook + Trace-Guard + Doku).
+Ausstehende Refinements (nicht blockierend):
+ - Channel-Delete-Hook: aktuell wird gespeicherte Data nicht aktiv
+   geloescht wenn ein Channel ueber die App entfernt wird. Beim
+   naechsten Boot-Load klassifiziert classifyFrame Frames mit
+   unbekanntem channel_idx als BUCKET_PRIVATE -- nicht ideal, aber
+   kein Datenleck (PSK ist weg, Frame ist verschluesselt). Spaeter
+   optional: hash-basierter GC beim Boot oder beim Channel-Delete.
+ - App-Connect-Tickle nach Boot-Restore: aktuell sieht die App den
+   Counter erst beim Polling von CMD_SYNC_NEXT_MESSAGE. Optional
+   PUSH_CODE_MSG_WAITING bei BLE-Connect senden wenn offlineQueueTotal
+   > 0.
+
+Aufwand-Effektiv:
+ - Phase A+B:  ~150 LoC, 1 Build-Cycle.
+ - Phase C:    ~350 LoC (NodePrefs + CLI + Flash + Boot-Load + Trace +
+               Help-Texte + Doku).
 
 Quelle: User-Spezifikation 2026-05-30 als Folge des Meshtastic-Vergleichs.

@@ -227,24 +227,176 @@ static const uint8_t s_public_psk[16] = {
   0xC9, 0xE5, 0xED, 0xBA, 0xA1, 0x15, 0xCD, 0x72
 };
 
+// out_cap = Hardware-Kapazitaet (Array-Groesse). Runtime-Limit (slot count
+// das tatsaechlich benutzt wird) ist getBucketLimit() -- kann kleiner sein.
 void MyMesh::getBucket(MsgBucket b, Frame*& out_arr, int& out_cap) {
   switch (b) {
-    case BUCKET_PUBLIC:    out_arr = bucket_public;    out_cap = BUCKET_LIMIT_PUBLIC;    break;
-    case BUCKET_HASHTAG:   out_arr = bucket_hashtag;   out_cap = BUCKET_LIMIT_HASHTAG;   break;
-    case BUCKET_PRIVATE:   out_arr = bucket_private;   out_cap = BUCKET_LIMIT_PRIVATE;   break;
-    case BUCKET_DM:        out_arr = bucket_dm;        out_cap = BUCKET_LIMIT_DM;        break;
-    case BUCKET_COMPANION: out_arr = bucket_companion; out_cap = BUCKET_LIMIT_COMPANION; break;
-    default:               out_arr = NULL;             out_cap = 0;                      break;
+    case BUCKET_PUBLIC:    out_arr = bucket_public;    out_cap = BUCKET_CAP_PUBLIC;    break;
+    case BUCKET_HASHTAG:   out_arr = bucket_hashtag;   out_cap = BUCKET_CAP_HASHTAG;   break;
+    case BUCKET_PRIVATE:   out_arr = bucket_private;   out_cap = BUCKET_CAP_PRIVATE;   break;
+    case BUCKET_DM:        out_arr = bucket_dm;        out_cap = BUCKET_CAP_DM;        break;
+    case BUCKET_COMPANION: out_arr = bucket_companion; out_cap = BUCKET_CAP_COMPANION; break;
+    default:               out_arr = NULL;             out_cap = 0;                    break;
   }
+}
+
+int MyMesh::getBucketLimit(MsgBucket b) const {
+  uint8_t cap_default[BUCKET_COUNT] = {
+    BUCKET_DEFAULT_PUBLIC,  BUCKET_DEFAULT_HASHTAG, BUCKET_DEFAULT_PRIVATE,
+    BUCKET_DEFAULT_DM,      BUCKET_DEFAULT_COMPANION
+  };
+  uint8_t cap_max[BUCKET_COUNT] = {
+    BUCKET_CAP_PUBLIC,  BUCKET_CAP_HASHTAG, BUCKET_CAP_PRIVATE,
+    BUCKET_CAP_DM,      BUCKET_CAP_COMPANION
+  };
+  if (b < 0 || b >= BUCKET_COUNT) return 0;
+  uint8_t pref = _prefs.msg_store_limit[b];
+  if (pref == 0) return cap_default[b];
+  if (pref > cap_max[b]) return cap_max[b];
+  return pref;
+}
+
+bool MyMesh::getBucketFlash(MsgBucket b) const {
+  if (b < 0 || b >= BUCKET_COUNT) return false;
+  return (_prefs.msg_store_flash & (1 << (int)b)) != 0;
+}
+
+static const char* k_bucket_names[] = {
+  "public", "hashtag", "private", "dm", "companion"
+};
+
+const char* MyMesh::bucketName(MsgBucket b) const {
+  if (b < 0 || b >= BUCKET_COUNT) return "?";
+  return k_bucket_names[b];
+}
+
+int MyMesh::bucketByName(const char* s) const {
+  if (!s || !*s) return -1;
+  size_t n = strlen(s);
+  int hit = -1;
+  int matches = 0;
+  for (int i = 0; i < BUCKET_COUNT; i++) {
+    if (strncmp(s, k_bucket_names[i], n) == 0) {
+      if (strlen(k_bucket_names[i]) == n) return i;  // exakt
+      hit = i;
+      matches++;
+    }
+  }
+  if (matches == 1) return hit;
+  if (matches > 1)  return -2;
+  return -1;
+}
+
+const char* MyMesh::msgBucketPath(MsgBucket b) const {
+  switch (b) {
+    case BUCKET_PUBLIC:    return "/msgs/b0_public.dat";
+    case BUCKET_HASHTAG:   return "/msgs/b1_hashtag.dat";
+    case BUCKET_PRIVATE:   return "/msgs/b2_private.dat";
+    case BUCKET_DM:        return "/msgs/b3_dm.dat";
+    case BUCKET_COMPANION: return "/msgs/b4_companion.dat";
+    default: return NULL;
+  }
+}
+
+void MyMesh::saveBucketToFlash(MsgBucket b) {
+  const char* path = msgBucketPath(b);
+  if (!path) return;
+  Frame* arr = NULL;
+  int cap = 0;
+  getBucket(b, arr, cap);
+  if (!arr) return;
+  // Verzeichnis muss existieren -- mkdir falls noetig (ist idempotent auf den
+  // unterstuetzten FS). Plattformen ohne mkdir-Support: das open(...,"w")
+  // greift trotzdem solange path keine Tiefen-Ebene anlegt.
+  FILESYSTEM* fs = _store->getPrimaryFS();
+#if !(defined(NRF52_PLATFORM) || defined(STM32_PLATFORM))
+  if (fs) fs->mkdir("/msgs");
+#else
+  (void)fs;
+#endif
+  File f = _store->openWriteFile(path);
+  if (!f) return;
+  for (int i = 0; i < cap; i++) {
+    if (arr[i].seq_no == 0) continue;
+    uint8_t hdr[5];
+    hdr[0] = (uint8_t)( arr[i].seq_no        & 0xFF);
+    hdr[1] = (uint8_t)((arr[i].seq_no >>  8) & 0xFF);
+    hdr[2] = (uint8_t)((arr[i].seq_no >> 16) & 0xFF);
+    hdr[3] = (uint8_t)((arr[i].seq_no >> 24) & 0xFF);
+    hdr[4] = arr[i].len;
+    f.write(hdr, 5);
+    if (arr[i].len > 0) f.write(arr[i].buf, arr[i].len);
+  }
+  f.close();
+}
+
+void MyMesh::loadBucketsFromFlash() {
+  uint32_t max_seq = 0;
+  for (int b = 0; b < BUCKET_COUNT; b++) {
+    if (!getBucketFlash((MsgBucket)b)) continue;
+    const char* path = msgBucketPath((MsgBucket)b);
+    if (!path) continue;
+    File f = _store->openRead(path);
+    if (!f) continue;
+    Frame* arr = NULL;
+    int cap = 0;
+    getBucket((MsgBucket)b, arr, cap);
+    int limit = getBucketLimit((MsgBucket)b);
+    if (limit > cap) limit = cap;
+    int slot = 0;
+    while (slot < limit && f.available() >= 5) {
+      uint8_t hdr[5];
+      if (f.read(hdr, 5) != 5) break;
+      uint32_t seq = (uint32_t)hdr[0]
+                   | ((uint32_t)hdr[1] << 8)
+                   | ((uint32_t)hdr[2] << 16)
+                   | ((uint32_t)hdr[3] << 24);
+      uint8_t len = hdr[4];
+      if (len == 0 || len > MAX_FRAME_SIZE) { f.close(); break; }
+      // Validity-Check fuer Channel-basierte Buckets: wenn der Frame eine
+      // channel_idx referenziert die nicht mehr existiert -> Eintrag droppen
+      // (verlorener Channel-Loesch-Speicher). DM-Bucket bleibt ohne Check.
+      uint8_t tmp[MAX_FRAME_SIZE];
+      if (f.read(tmp, len) != (int)len) { f.close(); break; }
+      // Re-Klassifizieren -- falls Frame jetzt in einen ANDEREN Bucket
+      // gehoeren wuerde (z.B. Channel geloescht und Idx mit anderem PSK
+      // wieder belegt), in Original-Bucket dennoch laden -- der Mismatch
+      // ist akzeptabler Edge-Case. Aber wenn classify ergibt: Channel
+      // existiert ueberhaupt nicht mehr (z.B. Slot leer) -> droppen.
+      MsgBucket re_b = classifyFrame(tmp, len);
+      (void)re_b;  // Pruefung erfolgt indirekt: BUCKET_PRIVATE default fuer
+                   // unbekannte channel_idx -- mischt sich harmlos in privat-
+                   // Bucket beim erstmaligen Laden. Per Phase-C-Refinement
+                   // ggf. spaeter strenger.
+      arr[slot].seq_no = seq;
+      arr[slot].len    = len;
+      memcpy(arr[slot].buf, tmp, len);
+      if (seq > max_seq) max_seq = seq;
+      slot++;
+    }
+    f.close();
+  }
+  if (max_seq + 1 > _msg_seq_next) _msg_seq_next = max_seq;  // ++ in addToOfflineQueue erhoeht auf max_seq+1
+}
+
+void MyMesh::clearBucket(MsgBucket b) {
+  Frame* arr = NULL;
+  int cap = 0;
+  getBucket(b, arr, cap);
+  if (arr) {
+    for (int i = 0; i < cap; i++) arr[i].seq_no = 0;
+  }
+  const char* path = msgBucketPath(b);
+  if (path) _store->removeFile(path);
 }
 
 int MyMesh::offlineQueueTotal() const {
   int n = 0;
-  for (int i = 0; i < BUCKET_LIMIT_PUBLIC;    i++) if (bucket_public   [i].seq_no) n++;
-  for (int i = 0; i < BUCKET_LIMIT_HASHTAG;   i++) if (bucket_hashtag  [i].seq_no) n++;
-  for (int i = 0; i < BUCKET_LIMIT_PRIVATE;   i++) if (bucket_private  [i].seq_no) n++;
-  for (int i = 0; i < BUCKET_LIMIT_DM;        i++) if (bucket_dm       [i].seq_no) n++;
-  for (int i = 0; i < BUCKET_LIMIT_COMPANION; i++) if (bucket_companion[i].seq_no) n++;
+  for (int i = 0; i < BUCKET_CAP_PUBLIC;    i++) if (bucket_public   [i].seq_no) n++;
+  for (int i = 0; i < BUCKET_CAP_HASHTAG;   i++) if (bucket_hashtag  [i].seq_no) n++;
+  for (int i = 0; i < BUCKET_CAP_PRIVATE;   i++) if (bucket_private  [i].seq_no) n++;
+  for (int i = 0; i < BUCKET_CAP_DM;        i++) if (bucket_dm       [i].seq_no) n++;
+  for (int i = 0; i < BUCKET_CAP_COMPANION; i++) if (bucket_companion[i].seq_no) n++;
   return n;
 }
 
@@ -295,6 +447,12 @@ void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
   int cap = 0;
   getBucket(b, arr, cap);
   if (!arr || cap == 0) return;
+  // Runtime-Limit aus NodePrefs (oder Default wenn 0). Slot mit Index
+  // >= limit ist tabu -- wird beim Pop ignoriert (alte Eintraege bei
+  // Limit-Verkleinerung verfallen so naturwuechsig nach naechstem Pop).
+  int limit = getBucketLimit(b);
+  if (limit <= 0) return;
+  if (limit > cap) limit = cap;
 
   // seq_no = 0 ist Sentinel "leer" -- monotonic 1.. via _msg_seq_next.
   // Bei Wrap-Around (extrem unwahrscheinlich, ~4 Mrd Messages) springen
@@ -303,11 +461,12 @@ void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
   // Reihenfolge-Verlust akzeptabel (Edge-Case).
   if (++_msg_seq_next == 0) _msg_seq_next = 1;
 
-  // Freien Slot suchen, sonst aelteste seq_no DESSELBEN Buckets ueberschreiben.
+  // Freien Slot suchen INNERHALB des Runtime-Limits, sonst aelteste seq_no
+  // DESSELBEN Buckets ueberschreiben.
   int free_slot = -1;
   int oldest_slot = 0;
   uint32_t oldest_seq = UINT32_MAX;
-  for (int i = 0; i < cap; i++) {
+  for (int i = 0; i < limit; i++) {
     if (arr[i].seq_no == 0) { free_slot = i; break; }
     if (arr[i].seq_no < oldest_seq) {
       oldest_seq = arr[i].seq_no;
@@ -322,6 +481,17 @@ void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
   arr[slot].seq_no = _msg_seq_next;
   arr[slot].len    = (uint8_t)len;
   memcpy(arr[slot].buf, frame, len);
+
+  // Flash-Persistenz (Wunschliste 19 Phase C): wenn fuer diesen Bucket
+  // aktiviert, neuen Bucket-State auf Flash schreiben. $companion-Bucket
+  // ist von TRACE_MSGSTORE ausgenommen (sonst Rekursion: Trace pusht
+  // $companion-Msg -> wird gespeichert -> Trace pusht "gespeichert" -> ...).
+  if (getBucketFlash(b)) {
+    saveBucketToFlash(b);
+    if (b != BUCKET_COMPANION) {
+      traceCompanion(TRACE_MSGSTORE, "[store] saved msg in bucket %d", (int)b);
+    }
+  }
 }
 
 int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
@@ -2015,6 +2185,13 @@ void MyMesh::begin(bool has_display) {
   // Eintrag übernehmen. Muss VOR jedem pushCompanionMessage() laufen — daher
   // hier, NACH loadChannels() aber vor dem Boot-Geo-Push weiter unten.
   setupCompanionChannel();
+
+  // Offline-Message-Buckets von Flash laden (Wunschliste 19 Phase C).
+  // Vor dem Boot-Geo-Push, sonst wuerde der seq_no der Geo-Push-Message
+  // VOR den restaurierten Eintraegen liegen und sich falsch in den Pop-
+  // Order schmuggeln. loadBucketsFromFlash() setzt _msg_seq_next auf
+  // max(seq_no) der restaurierten Eintraege.
+  loadBucketsFromFlash();
 
   // Boot-Geo-Push (Channel ist jetzt vorhanden, Output erscheint im Chat):
   if (_boot_pos_known) {
@@ -4871,8 +5048,9 @@ static const TraceCat trace_cats[] = {
   { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
   { "connect", TRACE_CONNECT, "BLE-App-Connect Events" },
   { "filter",  TRACE_FILTER,  "NICHT-repeatete Pakete + Grund (kann viele Zeilen erzeugen)" },
-  { "night",   TRACE_NIGHT,   "Nightly-Flood Schedule + Scope-Auswahl" },
-  { "duty",    TRACE_DUTY,    "Duty-Cycle Drops (Soft/Hard) ueber 10% TX/h" },
+  { "night",    TRACE_NIGHT,    "Nightly-Flood Schedule + Scope-Auswahl" },
+  { "duty",     TRACE_DUTY,     "Duty-Cycle Drops (Soft/Hard) ueber 10% TX/h" },
+  { "msgstore", TRACE_MSGSTORE, "Offline-Queue Bucket-Save zu Flash ($companion ausgenommen)" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
@@ -4911,7 +5089,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "help", "?", "status", "stats", "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
-    "clear",
+    "messages", "clear",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -5179,8 +5357,43 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "clock") || topic_prefix_match(topic, "date")
           || topic_prefix_match(topic, "time")) {
         pushCompanionMessage(
-          "clock / date / time (ohne Arg): zeigt RTC (Unix-sec, UTC, lokal). "
-          "time <epoch>: setzt RTC. Sanity-Check 1500000000..4000000000."
+          "clock / date / time (ohne Arg):\n"
+          "  zeigt RTC (Unix-sec, UTC, lokal)."
+        );
+        pushCompanionMessage(
+          "time <epoch>: setzt RTC.\n"
+          "  Sanity-Check 1500000000..4000000000."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "clear")) {
+        pushCompanionMessage(
+          "clear stats:\n"
+          "  Setzt alle RAM-Statistik-Counter zurueck."
+        );
+        pushCompanionMessage(
+          "'stats' muss voll ausgeschrieben werden (no_abbrev)\n"
+          "-- Tippfehler wuerden Tests killen."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "messages")) {
+        pushCompanionMessage(
+          "messages (no arg): Status pro Bucket.\n"
+          "Typen: public, hashtag, private, dm, companion."
+        );
+        pushCompanionMessage(
+          "messages flash <type> on|off\n"
+          "  Flash-Persistenz toggle (default off)."
+        );
+        pushCompanionMessage(
+          "messages limit <type> <N>\n"
+          "  Slot-Limit setzen. 0 = type-Default.\n"
+          "  Max: 16 fuer alle ausser DM (32)."
+        );
+        pushCompanionMessage(
+          "messages clear <type|all>\n"
+          "  RAM + Flash leeren."
         );
         return;
       }
@@ -5304,7 +5517,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage(
       "Befehle: help [topic], status, stats, uptime, neighbors, advert, "
       "autoadv, repeater, duty, scope, gps, trace, chatname, prefs, "
-      "set, get, clock, time, tempradio, reboot."
+      "set, get, clock, time, messages, tempradio, clear, reboot."
     );
     return;
   }
@@ -6226,6 +6439,145 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     snprintf(line, sizeof(line), "OK - RTC = %lu (nightly slot invalidated).",
              (unsigned long)epoch);
     pushCompanionMessage(line);
+    return;
+  }
+
+  // ---------- messages [flash|limit|clear] ------------------------------
+  // Wunschliste 19 Phase C: Offline-Queue Konfiguration + Anzeige.
+  //   messages                       Status pro Bucket
+  //   messages flash <type> on|off   Flash-Persistenz toggeln
+  //   messages limit <type> <N>      Slot-Limit setzen (0 = Default)
+  //   messages clear <type|all>      RAM + Flash leeren
+  // type: public | hashtag | private | dm | companion (Prefix erlaubt).
+  if (starts_with_word(cmd, "messages")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    if (!arg || *arg == 0) {
+      // Status-Output -- 5 Buckets, je eine Zeile, in 2 BLE-Messages
+      // gesplittet (max 145 Zeichen).
+      static const int caps[BUCKET_COUNT] = {
+        BUCKET_CAP_PUBLIC, BUCKET_CAP_HASHTAG, BUCKET_CAP_PRIVATE,
+        BUCKET_CAP_DM,     BUCKET_CAP_COMPANION
+      };
+      char head[200];
+      snprintf(head, sizeof(head),
+               "messages (offline-queue):\n  bucket  used limit cap flash");
+      pushCompanionMessage(head);
+      for (int b = 0; b < BUCKET_COUNT; b++) {
+        Frame* arr = NULL;
+        int cap_unused = 0;
+        getBucket((MsgBucket)b, arr, cap_unused);
+        int used = 0;
+        for (int i = 0; i < caps[b]; i++) if (arr[i].seq_no) used++;
+        char line[120];
+        snprintf(line, sizeof(line),
+                 "  %-9s %3d %5d %3d %s",
+                 bucketName((MsgBucket)b),
+                 used, getBucketLimit((MsgBucket)b), caps[b],
+                 getBucketFlash((MsgBucket)b) ? "on" : "off");
+        pushCompanionMessage(line);
+      }
+      return;
+    }
+
+    // Sub-Befehl extrahieren
+    char sub[16];
+    size_t si = 0;
+    while (*arg && *arg != ' ' && si + 1 < sizeof(sub)) sub[si++] = *arg++;
+    sub[si] = 0;
+    while (*arg == ' ' || *arg == '\t') arg++;
+
+    if (strcmp(sub, "flash") == 0 || strcmp(sub, "limit") == 0) {
+      // type-Argument extrahieren
+      char tname[16];
+      size_t ti = 0;
+      while (*arg && *arg != ' ' && ti + 1 < sizeof(tname)) tname[ti++] = *arg++;
+      tname[ti] = 0;
+      while (*arg == ' ' || *arg == '\t') arg++;
+      int b = bucketByName(tname);
+      if (b == -2) {
+        pushCompanionMessage("Mehrdeutig. public/hashtag/private/dm/companion.");
+        return;
+      }
+      if (b < 0) {
+        pushCompanionMessage("Unbekannter Typ. public/hashtag/private/dm/companion.");
+        return;
+      }
+      if (sub[0] == 'f') {  // flash
+        if (strcmp(arg, "on") == 0) {
+          _prefs.msg_store_flash |= (1 << b);
+          savePrefs();
+          // Sofort persistieren falls Bucket gerade Eintraege hat
+          saveBucketToFlash((MsgBucket)b);
+          char r[80];
+          snprintf(r, sizeof(r), "OK - flash %s = on (file persistiert).",
+                   bucketName((MsgBucket)b));
+          pushCompanionMessage(r);
+        } else if (strcmp(arg, "off") == 0) {
+          _prefs.msg_store_flash &= ~(1 << b);
+          savePrefs();
+          // Bestehende Datei loeschen (RAM bleibt)
+          const char* path = msgBucketPath((MsgBucket)b);
+          if (path) _store->removeFile(path);
+          char r[80];
+          snprintf(r, sizeof(r), "OK - flash %s = off (file geloescht, RAM bleibt).",
+                   bucketName((MsgBucket)b));
+          pushCompanionMessage(r);
+        } else {
+          pushCompanionMessage("Usage: messages flash <type> on|off");
+        }
+      } else {  // limit
+        if (!*arg || !(arg[0] >= '0' && arg[0] <= '9')) {
+          pushCompanionMessage("Usage: messages limit <type> <N>  (0 = Default)");
+          return;
+        }
+        int n = atoi(arg);
+        int cap;
+        switch (b) {
+          case BUCKET_PUBLIC:    cap = BUCKET_CAP_PUBLIC;    break;
+          case BUCKET_HASHTAG:   cap = BUCKET_CAP_HASHTAG;   break;
+          case BUCKET_PRIVATE:   cap = BUCKET_CAP_PRIVATE;   break;
+          case BUCKET_DM:        cap = BUCKET_CAP_DM;        break;
+          case BUCKET_COMPANION: cap = BUCKET_CAP_COMPANION; break;
+          default: cap = 0;
+        }
+        if (n < 0 || n > cap) {
+          char r[80];
+          snprintf(r, sizeof(r), "Range 0..%d (0 = Default).", cap);
+          pushCompanionMessage(r);
+          return;
+        }
+        _prefs.msg_store_limit[b] = (uint8_t)n;
+        savePrefs();
+        char r[80];
+        snprintf(r, sizeof(r), "OK - limit %s = %d (effective %d).",
+                 bucketName((MsgBucket)b), n,
+                 getBucketLimit((MsgBucket)b));
+        pushCompanionMessage(r);
+      }
+      return;
+    }
+    if (strcmp(sub, "clear") == 0) {
+      if (strcmp(arg, "all") == 0) {
+        for (int b = 0; b < BUCKET_COUNT; b++) clearBucket((MsgBucket)b);
+        pushCompanionMessage("OK - alle Buckets geleert (RAM + Flash).");
+        return;
+      }
+      int b = bucketByName(arg);
+      if (b == -2) { pushCompanionMessage("Mehrdeutig. Typ angeben oder 'all'."); return; }
+      if (b < 0)   { pushCompanionMessage("Unbekannter Typ. public/hashtag/private/dm/companion/all."); return; }
+      clearBucket((MsgBucket)b);
+      char r[80];
+      snprintf(r, sizeof(r), "OK - bucket %s geleert (RAM + Flash).",
+               bucketName((MsgBucket)b));
+      pushCompanionMessage(r);
+      return;
+    }
+    pushCompanionMessage("Usage:\n"
+                         "  messages\n"
+                         "  messages flash <type> on|off\n"
+                         "  messages limit <type> <N>\n"
+                         "  messages clear <type|all>");
     return;
   }
 

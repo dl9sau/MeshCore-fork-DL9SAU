@@ -2467,17 +2467,57 @@ Im Detail:
    statisch vor-dekodiert (vermeidet base64-Header-Konflikt mit
    BaseChatMesh.cpp wo decode_base64 ebenfalls inline definiert ist).
 
-Phase C ausstehend (siehe Wunschliste 19):
-  - NodePrefs Felder fuer per-Typ Flash-Flag + Limit
-  - CLI-Befehle: messages [flash|limit|clear] ...
-  - Flash-Persistenz via /msgs/<bucket>_<hash>.dat
-  - Boot-Restore in RAM-Buckets
-  - Channel-Delete -> Flash-GC via Hash
-  - Trace TRACE_MSGSTORE Kategorie mit $companion-Guard
-    (sonst infinite loop: Trace pusht zu $companion, wird gespeichert,
-    Trace pusht "gespeichert" zu $companion, ...)
+Phase C umgesetzt (Folge-Commit gleicher Tag):
+  - NodePrefs: msg_store_flash (bit-field 5 buckets) + msg_store_limit[5].
+    Felder am Strukturende -- alte Prefs-Files laden okay (file.read am
+    EOF liefert 0 -> Defaults).
+  - DataStore::openWriteFile() als public-API fuer Bucket-IO.
+  - CLI 'messages':
+      messages                       Status: used/limit/cap/flash pro Bucket
+      messages flash <type> on|off   Flag setzen + sofort save/remove file
+      messages limit <type> <N>      0..cap (0 = Default)
+      messages clear <type|all>      RAM + Flash leeren
+    Hilfe via 'help messages'. Bucket-Caps: 16 fuer alle ausser DM (32).
+  - Flash-Persistenz: /msgs/b<n>_<name>.dat pro Bucket. Format pro
+    Eintrag { seq_no:4LE, len:1, frame:len }. Komplett-Rewrite bei
+    jedem add (Bucket ist klein <=32 Frames).
+  - Boot: loadBucketsFromFlash() nach setupCompanionChannel(). seq_no
+    wird auf max() der restaurierten Eintraege gesetzt damit Pop-
+    Reihenfolge ueber Reboot stabil bleibt.
+  - TRACE_MSGSTORE Kategorie. $companion-Guard in addToOfflineQueue:
+      if (b != BUCKET_COMPANION) traceCompanion(TRACE_MSGSTORE, ...);
+    Verhindert Rekursion (Trace pusht zu $companion -> wird gespeichert
+    -> Trace pusht "gespeichert" zu $companion -> ...).
+  - Cap-Bumps fuer Phase C (Defaults bleiben Phase B):
+      PUBLIC    8 -> 16 cap
+      HASHTAG   8 -> 16 cap
+      PRIVATE  16 = cap
+      DM       16 -> 32 cap
+      COMPANION 16 = cap
+  - Help-Texte: clock/date/time gesplittet (war zu lang fuer BLE-
+    Frame-Limit). 'help clear' und 'help messages' neu hinzugefuegt.
 
-RAM-Delta gegenueber single-16-queue: +~9 KB. Flash-Delta minimal.
+Use-Case Crash-Log (User-Wunsch):
+  > messages flash companion on
+  > trace gps on
+  ... Geraet laeuft, ggf. Crash/Reboot ...
+  Nach Boot: $companion-Bucket aus Flash restauriert, letzte ~16 Trace-
+  Eintraege ueberleben.
+
+Ausstehend (Refinements, nicht blockierend):
+  - Channel-Delete-Hook: aktuell wird stored data nicht aktiv geloescht
+    wenn ein Channel via App entfernt wird. Beim naechsten Boot-Load
+    klassifiziert classifyFrame Frames mit unbekanntem channel_idx als
+    BUCKET_PRIVATE -- nicht ideal, aber kein Datenleck (PSK ist weg,
+    Frame ist verschluesselt + entschluesselt-Cache nur in RAM).
+    Spaeter optional: hash-basierte GC beim Boot.
+  - App-Connect-Tickle nach Boot-Restore: aktuell sieht die App den
+    Counter erst bei Re-Connect (Polling). Optional PUSH_CODE_MSG_WAITING
+    bei BLE-Connect wenn offlineQueueTotal() > 0.
+
+RAM-Delta gegenueber single-16-queue: +~12 KB (Phase B war +9 KB,
++3 KB durch groessere Caps). Flash: bis ~6 KB pro Bucket bei voller
+Belegung -- Daten-Partition (1.4 MB) hat reichlich Headroom.
 Default-Verhalten unveraendert RAM-only -- Privacy-konsistent.
 
 ================================================================================

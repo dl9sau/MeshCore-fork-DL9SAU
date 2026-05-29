@@ -205,18 +205,19 @@ struct AdvertPath {
 // Trace-Flags: RAM-only Bitmask die selektiv Events als Companion-Channel-
 // Messages pusht. Setzen via "trace <cat> on/off" Befehl. Reset bei Reboot,
 // damit man nicht versehentlich eine Trace-Kategorie auf-Dauer aktiv lässt.
-#define TRACE_GPS      0x0001
-#define TRACE_ADVERTS  0x0002
-#define TRACE_REPEAT   0x0004
-#define TRACE_SCOPE    0x0008
-#define TRACE_MOTION   0x0010
-#define TRACE_HEARD    0x0020
-#define TRACE_RTC      0x0040
-#define TRACE_CONNECT  0x0080
-#define TRACE_FILTER   0x0100
-#define TRACE_NIGHT    0x0200
-#define TRACE_DUTY     0x0400
-#define TRACE_ALL_MASK 0x07FF
+#define TRACE_GPS       0x0001
+#define TRACE_ADVERTS   0x0002
+#define TRACE_REPEAT    0x0004
+#define TRACE_SCOPE     0x0008
+#define TRACE_MOTION    0x0010
+#define TRACE_HEARD     0x0020
+#define TRACE_RTC       0x0040
+#define TRACE_CONNECT   0x0080
+#define TRACE_FILTER    0x0100
+#define TRACE_NIGHT     0x0200
+#define TRACE_DUTY      0x0400
+#define TRACE_MSGSTORE  0x0800   // Offline-Queue Bucket-Save zu Flash
+#define TRACE_ALL_MASK  0x0FFF
 
 // Duty-Cycle-Schutz: regulatorische 10% TX-Airtime pro rollendem 1h-Fenster
 // (EU SRD 869 narrow). Sliding-Window mit 60 Slots à 1 Minute (millis-basiert,
@@ -590,21 +591,50 @@ private:
     BUCKET_COMPANION = 4,       // $companion-Channel (Trace, CLI-Output)
     BUCKET_COUNT     = 5
   };
-  // Phase B Limits hardcoded. Phase C macht sie via NodePrefs + CLI
-  // konfigurierbar (max 16/16/16/32/16). Aenderungen hier muessen ggf.
-  // den seq_no-Scan in getFromOfflineQueue beruehren.
-  // $companion eigener Bucket: Trace/CLI-Output ueberflutet sonst den
-  // privaten Bucket und verdraengt User-Channel-Nachrichten.
-  static constexpr int BUCKET_LIMIT_PUBLIC    = 8;
-  static constexpr int BUCKET_LIMIT_HASHTAG   = 8;
-  static constexpr int BUCKET_LIMIT_PRIVATE   = 16;
-  static constexpr int BUCKET_LIMIT_DM        = 16;
-  static constexpr int BUCKET_LIMIT_COMPANION = 16;
-  Frame    bucket_public   [BUCKET_LIMIT_PUBLIC];
-  Frame    bucket_hashtag  [BUCKET_LIMIT_HASHTAG];
-  Frame    bucket_private  [BUCKET_LIMIT_PRIVATE];
-  Frame    bucket_dm       [BUCKET_LIMIT_DM];
-  Frame    bucket_companion[BUCKET_LIMIT_COMPANION];
+  // Bucket-Kapazitaeten (Array-Groessen). Phase C macht das Slot-Limit
+  // pro Bucket per NodePrefs+CLI konfigurierbar; die Arrays sind hier
+  // auf MAX vorallokiert. Slot mit Index >= runtime-limit bleibt
+  // ungenutzt. Caps: 16 fuer alle ausser DM (32).
+  // $companion eigener Bucket: Trace/CLI-Output wuerde sonst den
+  // privaten Bucket ueberfluten und User-Channel-Nachrichten verdraengen.
+  static constexpr int BUCKET_CAP_PUBLIC    = 16;
+  static constexpr int BUCKET_CAP_HASHTAG   = 16;
+  static constexpr int BUCKET_CAP_PRIVATE   = 16;
+  static constexpr int BUCKET_CAP_DM        = 32;
+  static constexpr int BUCKET_CAP_COMPANION = 16;
+  // Defaults wenn NodePrefs.msg_store_limit[b] == 0.
+  static constexpr int BUCKET_DEFAULT_PUBLIC    = 8;
+  static constexpr int BUCKET_DEFAULT_HASHTAG   = 8;
+  static constexpr int BUCKET_DEFAULT_PRIVATE   = 16;
+  static constexpr int BUCKET_DEFAULT_DM        = 16;
+  static constexpr int BUCKET_DEFAULT_COMPANION = 16;
+  Frame    bucket_public   [BUCKET_CAP_PUBLIC];
+  Frame    bucket_hashtag  [BUCKET_CAP_HASHTAG];
+  Frame    bucket_private  [BUCKET_CAP_PRIVATE];
+  Frame    bucket_dm       [BUCKET_CAP_DM];
+  Frame    bucket_companion[BUCKET_CAP_COMPANION];
+  // Runtime-Limit pro Bucket (resolved aus NodePrefs.msg_store_limit + Default).
+  int      getBucketLimit(MsgBucket b) const;
+  // Flash-Flag pro Bucket (lookup in NodePrefs.msg_store_flash bit-field).
+  bool     getBucketFlash(MsgBucket b) const;
+  // Bucket vollstaendig auf Flash schreiben (Datei: /msgs/b<n>.dat). Wird
+  // nach jedem add gerufen wenn der Flash-Flag fuer diesen Bucket gesetzt
+  // ist. Format: per-Eintrag { seq_no:4 LE, len:1, frame:len }. Nur Slots
+  // mit seq_no != 0 werden geschrieben.
+  void     saveBucketToFlash(MsgBucket b);
+  // Pfad fuer die persistente Datei eines Buckets.
+  const char* msgBucketPath(MsgBucket b) const;
+  // Alle Buckets mit aktivem Flash-Flag von Flash einlesen. Wird einmalig
+  // beim Boot nach setupCompanionChannel() gerufen.
+  void     loadBucketsFromFlash();
+  // Bucket leeren -- RAM-Slots auf 0 setzen + ggf. Flash-Datei loeschen.
+  // Wird von 'messages clear' CLI verwendet.
+  void     clearBucket(MsgBucket b);
+  // Helper: User-facing Bucket-Name fuer CLI ('public', 'hashtag', etc.).
+  const char* bucketName(MsgBucket b) const;
+  // Helper: User-Eingabe ('public'/'pub', 'dm', ...) -> Bucket-Enum.
+  // Returns -1 bei unbekanntem Namen, -2 bei mehrdeutigem Prefix.
+  int      bucketByName(const char* s) const;
   uint32_t _msg_seq_next;       // naechste seq_no fuer eingehenden Frame
   // Helper: tableau-pointer + capacity je Bucket.
   void     getBucket(MsgBucket b, Frame*& out_arr, int& out_cap);
