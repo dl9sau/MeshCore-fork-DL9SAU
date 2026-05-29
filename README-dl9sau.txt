@@ -423,7 +423,8 @@ System-Befehle:
   uptime                  nur Uptime
   stats                   detaillierte Stats nach Pkt-Typ + Airtime
   reboot                  Deferred reboot (3s delay fuer Frame-Auslieferung)
-  clock / time <epoch>    RTC anzeigen / setzen
+  clock / date / time     RTC anzeigen (ohne Arg: Unix-sec, UTC, lokal)
+  time <unix-epoch>       RTC setzen (Sanity 1500000000..4000000000)
   gps [on|off|sync]       GPS-Modul-Kontrolle
   gps power [...]         GPS Power-Cycle-Mode (Wunschliste-1 verwandt)
   neighbors               Contacts mit Advert <48h, sortiert nach hop+SNR

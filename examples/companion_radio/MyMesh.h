@@ -445,6 +445,10 @@ private:
   // Pusht eine Trace-Message in den Companion-Channel — aber nur wenn das
   // entsprechende Flag in _trace_flags gesetzt ist. No-op sonst.
   void traceCompanion(uint16_t flag, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+  // Baut einen Status-Suffix für TRACE_GPS Messages: pos, alt, valid-Flags,
+  // RTC-Zeit. Wird an [gps] wake/sleep/first-fix angehaengt damit der User
+  // GPS-Zustandsuebergaenge mit Position/Hoehe/Zeit korrelieren kann.
+  void appendGpsTraceStatus(char* out, size_t out_size);
   // Duty-Cycle Helper. updateDutyWindow muss in loop() laufen damit
   // get/Reached-Funktionen aktuelle Werte liefern.
   void updateDutyWindow();

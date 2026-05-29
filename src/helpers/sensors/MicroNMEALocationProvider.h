@@ -74,6 +74,13 @@ public :
     }
 
     void begin() override {
+        // Parser-State invalidieren -- ohne dies wuerde isValid()/getTimestamp()
+        // den Stand vom letzten Wake-Cycle liefern, und der periodische
+        // Time-Sync in loop() koennte SOFORT mit STALEM Timestamp feuern
+        // bevor der GPS-Chip frische NMEA-Daten geliefert hat.
+        // Symptom: RTC springt um die Sleep-Dauer rueckwaerts.
+        nmea.clear();
+        time_valid = 0;
         claim();
         if (_pin_en != -1) {
             digitalWrite(_pin_en, PIN_GPS_EN_ACTIVE);
@@ -92,6 +99,11 @@ public :
     }
 
     void stop() override {
+        // Parser-State invalidieren. Sonst behaelt MicroNMEA isValid()=true
+        // und die letzten Y/M/D/H/M/S des Pre-Sleep-RMC-Frames -- siehe
+        // ausfuehrliche Erklaerung in begin().
+        nmea.clear();
+        time_valid = 0;
         if (_pin_en != -1) {
             digitalWrite(_pin_en, !PIN_GPS_EN_ACTIVE);
         }

@@ -3967,13 +3967,21 @@ void MyMesh::scheduleNextNightFlood() {
   uint32_t window_start = local_midnight_today + (uint32_t)(CR_NIGHT_FLOOD_START_HOUR_LOCAL * 3600UL);
   uint32_t window_end   = local_midnight_today + (uint32_t)((24 + CR_NIGHT_FLOOD_END_HOUR_LOCAL) * 3600UL);
 
-  // If we're already past today's window, schedule for tomorrow.
-  if (local_now >= window_end) {
+  // Semantik (User-Wunsch 2026-05-29):
+  // Es wird IMMER nur ausserhalb des Nightly-Fensters gewuerfelt -- der Slot
+  // bleibt den ganzen Tag stehen. Wenn local_now im laufenden Fenster liegt
+  // (heute 23:00..04:59 morgen), schieben wir das Fenster komplett um einen
+  // Tag weiter. Das verhindert:
+  //   - dass nach einem gerade gesendeten Flood ein 2. Slot in den Resttagen
+  //     des selben Fensters gewuerfelt wird (z.B. Flood 04:30 -> reschedule
+  //     waehlt 04:56 -> zweiter Flood in der gleichen Nacht).
+  //   - dass nach einem Boot mitten in der Nacht ohne Wissen ueber prior
+  //     Flood ein Slot in der Resttag-Nacht erwischt wird.
+  // Konsequenz: Boot mitten in der Nacht -> heutige Nacht wird uebersprungen,
+  // erst morgen Nacht gefloodet. Akzeptabler Trade-off fuer Eindeutigkeit.
+  if (local_now >= window_start) {
     window_start += 86400UL;
     window_end   += 86400UL;
-  } else if (local_now >= window_start) {
-    // we're inside the window now; pick any future second within remaining window
-    window_start = local_now + 1;
   }
 
   uint32_t span = window_end - window_start;
@@ -4039,7 +4047,11 @@ void MyMesh::updateMotionTracking() {
 
   if (!_gps_had_fix_ever) {
     _gps_had_fix_ever = true;
-    traceCompanion(TRACE_GPS, "[gps] first fix erkannt");
+    {
+      char st[140];
+      appendGpsTraceStatus(st, sizeof(st));
+      traceCompanion(TRACE_GPS, "[gps] first fix erkannt -- %s", st);
+    }
     // First fix arrived during boot wait: collapse the GPS-extended boot
     // delay (10 min) to "5 min after boot" (not "5 min from now"!). If we are
     // already past that mark, fire as soon as possible.
@@ -4304,15 +4316,46 @@ void MyMesh::manageGpsPower() {
     _gps_off_at_millis = 0;
     _gps_fix_seen_this_wake = false;              // start a fresh wake cycle
     pushDebugLog("[GPS-DBG] wake at millis=%lu (until_advert=%lds)\n", now, until_advert / 1000);
-    traceCompanion(TRACE_GPS, "[gps] wake (until_advert=%lds)", until_advert / 1000);
+    {
+      char st[140];
+      appendGpsTraceStatus(st, sizeof(st));
+      traceCompanion(TRACE_GPS, "[gps] wake (until_advert=%lds) %s",
+                     until_advert / 1000, st);
+    }
   } else if (!want_gps_on && gps_is_on) {
+    // Wert VOR dem Reset retten -- sonst loggen wir immer 0. Der Reset selbst
+    // gehoert hierher (frischer Wake-Cycle bei naechstem wake), nur die
+    // Reihenfolge war Bug-haftig.
+    bool fix_was_seen = _gps_fix_seen_this_wake;
+    // NMEA-Parser-State explizit invalidieren bevor GPS abschaltet.
+    // syncTime() ruft intern nmea.clear() + setzt _time_sync_needed=true:
+    //   - clear() verhindert dass der naechste loop() nach Wake mit stalem
+    //     isValid()=true/getTimestamp() sofort die RTC rueckwaerts springen
+    //     laesst (Bug 2026-05-29: symmetrische +/-7min RTC-Spruenge).
+    //   - _time_sync_needed=true sorgt fuer frische RTC-Sync nach Wake
+    //     statt auf den naechsten 30-min-Slot zu warten.
+    // Redundant zu nmea.clear() in MicroNMEALocationProvider::stop()/begin();
+    // greift aber auch wenn diese Upstream-Patches ge-reverted wuerden.
+    LocationProvider* loc = sensors.getLocationProvider();
+    if (loc) loc->syncTime();
     sensors.setSettingValue("gps", "0");
     _gps_woke_at_millis = 0;
     _gps_off_at_millis = (now == 0 ? 1 : now);
     _gps_fix_seen_this_wake = false;
-    pushDebugLog("[GPS-DBG] sleep at millis=%lu (until_advert=%lds, fix_was_seen=1)\n",
-                  now, until_advert / 1000);
-    traceCompanion(TRACE_GPS, "[gps] sleep (fix_seen=%d)", (int)_gps_fix_seen_this_wake);
+    pushDebugLog("[GPS-DBG] sleep at millis=%lu (until_advert=%lds, fix_was_seen=%d)\n",
+                  now, until_advert / 1000, (int)fix_was_seen);
+    {
+      // Status-Suffix nach dem syncTime()/nmea.clear() oben -- loc_valid und
+      // time_valid sind hier definitionsgemaess 0. Pos/Alt/RTC bleiben
+      // letzte bekannte Werte (sensors.node_lat/lon/altitude wurden zuvor
+      // gecached).
+      char st[140];
+      appendGpsTraceStatus(st, sizeof(st));
+      if (fix_was_seen)
+        traceCompanion(TRACE_GPS, "[gps] sleep (fix this wake) %s", st);
+      else
+        traceCompanion(TRACE_GPS, "[gps] sleep (got no fix this wake) %s", st);
+    }
   }
 #endif
 }
@@ -4655,6 +4698,37 @@ void MyMesh::traceCompanion(uint16_t flag, const char* fmt, ...) {
   pushCompanionMessage(buf);
 }
 
+void MyMesh::appendGpsTraceStatus(char* out, size_t out_size) {
+  // Format: "pos=LAT LON alt=Xm loc=N time=N t=YYYY-MM-DD HH:MM:SS loc"
+  // Identische Felder wie 'gps' no-arg, gemittelt fuer eine einzelne Trace-Zeile.
+  char ll[32];
+  formatLatLonDM(ll, sizeof(ll), sensors.node_lat, sensors.node_lon);
+  int loc_valid = 0, time_valid = 0;
+#if ENV_INCLUDE_GPS == 1
+  {
+    LocationProvider* loc = sensors.getLocationProvider();
+    if (loc) {
+      loc_valid  = loc->isValid() ? 1 : 0;
+      time_valid = loc->waitingTimeSync() ? 0 : 1;
+    }
+  }
+#endif
+  char rtc_str[32];
+  uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  if (now_rtc < 1500000000UL) {
+    snprintf(rtc_str, sizeof(rtc_str), "rtc-unset");
+  } else {
+    time_t lt = (time_t)(now_rtc + (uint32_t)LOCAL_TZ_OFFSET_SECS);
+    struct tm tm_loc;
+    gmtime_r(&lt, &tm_loc);
+    snprintf(rtc_str, sizeof(rtc_str), "%04d-%02d-%02d %02d:%02d:%02d",
+             tm_loc.tm_year + 1900, tm_loc.tm_mon + 1, tm_loc.tm_mday,
+             tm_loc.tm_hour, tm_loc.tm_min, tm_loc.tm_sec);
+  }
+  snprintf(out, out_size, "pos=%s alt=%.1fm loc=%d time=%d t=%s",
+           ll, sensors.node_altitude, loc_valid, time_valid, rtc_str);
+}
+
 // Trace-Kategorien-Tabelle für die CLI (Name + Flag + Beschreibung).
 struct TraceCat {
   const char* name;
@@ -4729,7 +4803,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   static const char* const TOP_CMDS[] = {
     "help", "?", "status", "stats", "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
-    "prefs", "neighbors", "tempradio", "set", "get", "clock", "time",
+    "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
     "clear",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
@@ -4995,9 +5069,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  flood.max (alias flood_max), scope_regional_hops");
         return;
       }
-      if (topic_prefix_match(topic, "clock") || topic_prefix_match(topic, "time")) {
+      if (topic_prefix_match(topic, "clock") || topic_prefix_match(topic, "date")
+          || topic_prefix_match(topic, "time")) {
         pushCompanionMessage(
-          "clock: zeigt RTC (Unix-sec, UTC, lokal). "
+          "clock / date / time (ohne Arg): zeigt RTC (Unix-sec, UTC, lokal). "
           "time <epoch>: setzt RTC. Sanity-Check 1500000000..4000000000."
         );
         return;
@@ -5426,14 +5501,51 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // unter 'gps power' sichtbar).
       const char* pmode = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
       uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
-      char block[240];
-      snprintf(block, sizeof(block),
-               "gps=%s  fix_ever=%d  moving=%d  app-poll-interval=%s\n"
-               "power=%s  lead=%u min\n"
-               "pos=%s",
-               state, (int)_gps_had_fix_ever, (int)_is_moving, interval_str,
-               pmode, (unsigned)lead, ll);
-      pushCompanionMessage(block);
+      // Live-Validity-Flags aus dem LocationProvider (User-Wunsch
+      // 2026-05-29 -- hilft NMEA-stale-time-Bug-Symptome zu erkennen):
+      //   loc_valid  = aktueller Position-Fix gueltig (RMC 'A')
+      //   time_valid = GPS-Zeit kuerzlich auf RTC ge-synct (kein
+      //                offener 30-min-Re-Sync)
+      // Beide 0 wenn GPS off oder ohne Provider.
+      int loc_valid = 0, time_valid = 0;
+#if ENV_INCLUDE_GPS == 1
+      {
+        LocationProvider* loc = sensors.getLocationProvider();
+        if (loc) {
+          loc_valid  = loc->isValid() ? 1 : 0;
+          time_valid = loc->waitingTimeSync() ? 0 : 1;
+        }
+      }
+#endif
+      // Aktuelle RTC-Zeit lokal formatieren (User-Wunsch 2026-05-29 --
+      // GPS-Status korrelieren mit Uhrzeit). "rtc not set" falls pre-2017.
+      char rtc_str[32];
+      uint32_t now_rtc = getRTCClock()->getCurrentTime();
+      if (now_rtc < 1500000000UL) {
+        snprintf(rtc_str, sizeof(rtc_str), "rtc not set");
+      } else {
+        time_t lt = (time_t)(now_rtc + (uint32_t)LOCAL_TZ_OFFSET_SECS);
+        struct tm tm_loc;
+        gmtime_r(&lt, &tm_loc);
+        snprintf(rtc_str, sizeof(rtc_str), "%04d-%02d-%02d %02d:%02d:%02d loc",
+                 tm_loc.tm_year + 1900, tm_loc.tm_mon + 1, tm_loc.tm_mday,
+                 tm_loc.tm_hour, tm_loc.tm_min, tm_loc.tm_sec);
+      }
+      // Split in 2 BLE-Messages -- mit den neuen valid-Flags wuerde der
+      // kombinierte Block die 145-Byte-Wire-Grenze sprengen.
+      char block1[200];
+      snprintf(block1, sizeof(block1),
+               "gps=%s  fix_ever=%d  loc_valid=%d  time_valid=%d  moving=%d\n"
+               "power=%s  lead=%u min  app-poll-interval=%s",
+               state, (int)_gps_had_fix_ever, loc_valid, time_valid,
+               (int)_is_moving, pmode, (unsigned)lead, interval_str);
+      pushCompanionMessage(block1);
+      char block2[120];
+      snprintf(block2, sizeof(block2),
+               "pos=%s  alt=%.1fm\n"
+               "time=%s",
+               ll, sensors.node_altitude, rtc_str);
+      pushCompanionMessage(block2);
       return;
     }
     // ---- gps power [...] - Power-Management-Konfig ----
@@ -5942,9 +6054,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  // ---------- clock ----------------------------------------------------
+  // ---------- clock / date / time (no arg) ----------------------------
   // Zeigt die aktuelle RTC-Zeit (Unix-Sekunden + UTC-formatiert + lokal).
-  if (starts_with_word(cmd, "clock")) {
+  // 'date' und 'time' (ohne Argument) sind Aliasse fuer 'clock'. 'time
+  // <epoch>' weiter unten setzt die RTC.
+  bool _is_clock_readout = (starts_with_word(cmd, "clock")
+                            || starts_with_word(cmd, "date"));
+  if (!_is_clock_readout && starts_with_word(cmd, "time")) {
+    const char* a = strchr(cmd, ' ');
+    if (a) { while (*a == ' ' || *a == '\t') a++; }
+    if (!a || *a == 0) _is_clock_readout = true;
+  }
+  if (_is_clock_readout) {
     uint32_t now = getRTCClock()->getCurrentTime();
     if (now < 1500000000UL) {
       pushCompanionMessage("clock: RTC nicht gesetzt (pre-2017).");
@@ -5978,10 +6099,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // RTC setzen. Sanity: epoch muss in plausiblem Bereich (post-2017,
   // pre-2096). Triggert RTC-Jump-Detector -> nightly slot wird neu geplant.
   if (starts_with_word(cmd, "time")) {
+    // 'time' ohne Arg ist oben vom clock-Readout-Block schon abgefangen --
+    // hier landen wir nur mit nicht-numerischem Arg (Tippfehler).
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
     if (!arg || !(arg[0] >= '0' && arg[0] <= '9')) {
-      pushCompanionMessage("Usage: time <unix-epoch-sec>\npost-2017, < 4 Mrd");
+      pushCompanionMessage("Usage: time <unix-epoch-sec>  (post-2017..pre-2096)\n"
+                           "time/date/clock ohne Arg zeigt aktuelle RTC.");
       return;
     }
     uint32_t epoch = (uint32_t)atoll(arg);
@@ -7029,57 +7153,74 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool geo_is_fallback  = (_prefs.scope_advert_auto >= 2 /* on or prefer */)
                               && has_geo && !default_set;
 
-      const char* active;
-      if (override_active)            active = "override";
-      else if (bake_set)              active = "bake (flooded advert, nightly)";
-      else if (geo_wins_default)      active = "geo-fallback (gewinnt vor Default)";
-      else if (default_set)           active = "default (configured catchall scope)";
-      else if (geo_is_fallback)       active = "geo-fallback";
-      else                            active = "#local (last-resort)";
+      // Test-Bericht 2026-05-29: Werte und Erklaerungen trennen, damit User
+      // nicht "auto = prefer (...)" als ganze Aussage liest. Stattdessen:
+      //   auto = prefer
+      //   prefer: Geo gewinnt vor Default
+      // Die Legende-Zeilen erscheinen NUR fuer die aktuell aktiven Werte.
+      const char* active_val;
+      const char* active_legend;   // NULL = kein Legende-Zeile noetig
+      if (override_active)         { active_val = "override";     active_legend = NULL; }
+      else if (bake_set)           { active_val = "bake";         active_legend = "flooded advert, nightly"; }
+      else if (geo_wins_default)   { active_val = "geo-fallback"; active_legend = "Geo gewinnt vor Default (auto=prefer)"; }
+      else if (default_set)        { active_val = "default";      active_legend = "configured catchall scope"; }
+      else if (geo_is_fallback)    { active_val = "geo-fallback"; active_legend = "kein Default gesetzt"; }
+      else                         { active_val = "#local";       active_legend = "last-resort (kein Default/Geo)"; }
 
-      // auto-Annotation:
-      char auto_str[140];
+      const char* auto_val;
+      const char* auto_legend;
       switch (_prefs.scope_advert_auto) {
         case 1: // off
-          snprintf(auto_str, sizeof(auto_str), "off (Geo wird nie verwendet)");
+          auto_val = "off"; auto_legend = "Geo wird nie verwendet";
           break;
         case 3: // prefer
-          if (geo_wins_default)
-            snprintf(auto_str, sizeof(auto_str), "prefer (Geo gewinnt vor Default)");
-          else if (default_set)
-            snprintf(auto_str, sizeof(auto_str),
-                     "prefer (Default == Geo oder kein Geo-Match -- Default wins)");
-          else if (has_geo)
-            snprintf(auto_str, sizeof(auto_str), "prefer (Geo als Fallback)");
-          else
-            snprintf(auto_str, sizeof(auto_str), "prefer (keine Quelle)");
+          auto_val = "prefer";
+          if (geo_wins_default)      auto_legend = "Geo gewinnt vor Default";
+          else if (default_set)      auto_legend = "Default == Geo / kein Geo-Match";
+          else if (has_geo)          auto_legend = "Geo als Fallback (kein Default)";
+          else                       auto_legend = "keine Quelle";
           break;
         default: // on
-          if (default_set)
-            snprintf(auto_str, sizeof(auto_str),
-                     "on (Geo bereit, greift NICHT -- Default gesetzt;\n"
-                     "       'auto prefer' liesse Geo gewinnen)");
-          else if (has_geo)
-            snprintf(auto_str, sizeof(auto_str), "on (Geo greift als Fallback)");
-          else
-            snprintf(auto_str, sizeof(auto_str), "on (kein Geo-Match)");
+          auto_val = "on";
+          if (default_set)           auto_legend = "Default gesetzt -- 'auto prefer' liesse Geo gewinnen";
+          else if (has_geo)          auto_legend = "Geo greift als Fallback";
+          else                       auto_legend = "kein Geo-Match";
           break;
       }
 
-      // Split in zwei Messages -- auto-Annotation kann ~70 Byte sein,
-      // Gesamt-Block sprengt sonst das 160-Byte Wire-Limit.
+      // Max 145 Zeichen pro BLE-Message (User-Constraint 2026-05-29).
+      // Channelnamen koennen lang sein -> kombinierte Header-Message kann
+      // ueberlaufen. Wenn ja, per-Line splitten.
       char head[200];
-      snprintf(head, sizeof(head),
-               "scope advert (send hierarchy):\n"
-               "  %s\n  %s\n  %s",
-               def_line, bake_line, ovr_line);
-      pushCompanionMessage(head);
-      char tail[200];
-      snprintf(tail, sizeof(tail),
-               "  auto = %s\n"
-               "  active = %s",
-               auto_str, active);
-      pushCompanionMessage(tail);
+      int hlen = snprintf(head, sizeof(head),
+                          "scope advert (send hierarchy):\n  %s\n  %s\n  %s",
+                          def_line, bake_line, ovr_line);
+      if (hlen < 145) {
+        pushCompanionMessage(head);
+      } else {
+        pushCompanionMessage("scope advert (send hierarchy):");
+        char line[160];
+        snprintf(line, sizeof(line), "  %s", def_line);  pushCompanionMessage(line);
+        snprintf(line, sizeof(line), "  %s", bake_line); pushCompanionMessage(line);
+        snprintf(line, sizeof(line), "  %s", ovr_line);  pushCompanionMessage(line);
+      }
+
+      // auto + active als 2 separate Messages (jede mit Wert + Legende).
+      // Bleibt unter 145 Zeichen auch bei laengster Legende.
+      char line2[160];
+      if (auto_legend)
+        snprintf(line2, sizeof(line2), "  auto = %s\n  %s: %s",
+                 auto_val, auto_val, auto_legend);
+      else
+        snprintf(line2, sizeof(line2), "  auto = %s", auto_val);
+      pushCompanionMessage(line2);
+
+      if (active_legend)
+        snprintf(line2, sizeof(line2), "  active = %s\n  %s: %s",
+                 active_val, active_val, active_legend);
+      else
+        snprintf(line2, sizeof(line2), "  active = %s", active_val);
+      pushCompanionMessage(line2);
       return;
     }
 

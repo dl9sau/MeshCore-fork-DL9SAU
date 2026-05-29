@@ -2278,6 +2278,93 @@ fc521aea  scope advert no-arg Output splitten (Wire-Frame-Limit)
 db68b60d  Wunschliste 15a -- REQ_TYPE_GET_NEIGHBOURS Implementation
 8468ba93  Wunschliste 15b -- Recent Contacts ergaenzen GET_NEIGHBOURS
 
+------------------------------------------------------------------------
+Test-Session 2026-05-29 (Tracker in der Tasche, 6h13min uptime)
+------------------------------------------------------------------------
+
+Bug-Fixes:
+
+ 1) [gps] sleep (fix_seen=...) loggt IMMER 0.
+    Order-of-operations: _gps_fix_seen_this_wake = false wurde VOR
+    dem Trace-Log gesetzt. Wert vor Reset retten und in zwei
+    Varianten loggen ("fix this wake" / "got no fix this wake").
+    Begleitend: pushDebugLog hardcoded "fix_was_seen=1" durch
+    echten Wert ersetzt.
+
+ 2) Nightly-Flood doppel-Trigger moeglich.
+    scheduleNextNightFlood() konnte direkt nach einem Flood (z.B.
+    04:30) erneut einen Slot innerhalb der Rest-Nacht wuerfeln
+    (Zufall: 04:56) -> zweiter Flood selbe Nacht. Neue Semantik:
+    wenn local_now im Fenster [23:00, 05:00) liegt, wird das Fenster
+    KOMPLETT auf den naechsten Tag verschoben. Slot bleibt nun den
+    ganzen Tag stehen, wird erst nach 5 Uhr neu gewuerfelt.
+    Edge: Boot mitten in der Nacht ueberspringt die laufende Nacht.
+
+ 3) MicroNMEA-Library haelt Parser-State waehrend GPS-Sleep.
+    Beobachtet als symmetrische +/-7min RTC-Spruenge (-456s / +457s)
+    mehrfach in 6h. Code-Trace:
+      - EnvironmentSensorManager::loop() ruft _location->loop() nur
+        bei gps_active=true. Waehrend Sleep wird time_valid nicht
+        zurueckgesetzt, NMEA-Parser-State frozen.
+      - MicroNMEALocationProvider::stop() macht KEIN nmea.clear().
+        isValid()/getYear/.../getSecond liefern weiter Stand des
+        letzten geparsten RMC.
+      - Beim ersten loop() nach Wake (vor frischen NMEA-Bytes)
+        feuert ggf. sofort der 30-min Time-Sync mit STALEM
+        Timestamp -> RTC springt um die Sleep-Dauer rueckwaerts.
+      - Spaeter kommt frische Zeit, naechster Sync korrigiert
+        vorwaerts. -456 / +457 ist die Signatur.
+
+    Dreischichtiger Fix:
+     (a) src/helpers/sensors/MicroNMEALocationProvider.h: stop()
+         ruft nmea.clear() + time_valid = 0. Korrekte Ebene.
+     (b) Gleiche Datei: begin() macht das gleiche defensiv beim
+         Aufwecken -- doppelt haelt besser, schuetzt auch falls
+         stop() je geskippt wird.
+     (c) examples/companion_radio/MyMesh.cpp manageGpsPower():
+         vor sensors.setSettingValue("gps","0") wird
+         loc->syncTime() gerufen. syncTime() ist die public API
+         der MicroNMEA-Override, die nmea.clear() bereits macht
+         + _time_sync_needed=true. Project-local Defensive --
+         greift weiter wenn (a)/(b) jemals ge-reverted werden.
+
+    Diagnose-Werkzeug: das war die TRACE_RTC-Kategorie aus dem
+    Polish-Round trace-Befehl. Ohne den proaktiv eingebauten
+    rtc-Sprung-Logger waere der Bug nicht aufgefallen, weil die
+    Spruenge nur ein paar Minuten gross waren und sich symmetrisch
+    aufhoben.
+
+UX / Komfort:
+
+ 4) scope advert Output: Werte und Erklaerungen getrennt.
+    Vorher: "auto = prefer (Geo gewinnt vor Default)" -- User las
+    den Klammertext als Doku, nicht als Zustand. Jetzt:
+       auto = prefer
+       active = geo-fallback
+       prefer: Geo gewinnt vor Default
+       geo-fallback: Geo gewinnt vor Default (auto=prefer)
+    BLE-Message-Limit: max 145 Zeichen pro Message (Channelnamen
+    bis 16 Zeichen + Suffixe). Header-Block splittet sich
+    auto-magisch zeilenweise wenn er 145 ueberschreitet.
+
+ 5) date / time (no-arg) als Alias zu clock.
+    Bisher zeigte time (no-arg) nur "Usage: ...". Jetzt zeigt es
+    -- wie clock -- Unix-sec, UTC, lokale Zeit. date dazu als
+    intuitiverer Alias. Top-CMDs-Liste + help-Text aktualisiert.
+
+ 6) gps (no-arg) Status zeigt aktuelle lokale Zeit + valid-Flags + alt.
+    Neue Felder:
+       loc_valid  -- aktueller Position-Fix gueltig (loc->isValid())
+       time_valid -- GPS-Zeit kuerzlich auf RTC ge-synct
+                     (!loc->waitingTimeSync())
+       alt        -- Hoehe ueber NN (m, aus sensors.node_altitude)
+       time       -- aktuelle RTC-Zeit lokal formatiert
+    Block ist auf 2 BLE-Messages gesplittet (status + pos/time).
+    Identische pos/alt/loc_valid/time_valid/t-Felder werden als
+    Suffix an TRACE_GPS-Eintraege angehaengt ([gps] first fix,
+    [gps] wake, [gps] sleep) -- erlaubt GPS-Zustandsuebergaenge
+    direkt mit Position/Hoehe/Zeit zu korrelieren.
+
 ================================================================================
 Build-Status
 ================================================================================
