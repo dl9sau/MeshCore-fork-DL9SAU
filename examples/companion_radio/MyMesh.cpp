@@ -5724,8 +5724,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Spezial:\n"
           "  trace heard on [new|all]   default 'new'\n"
-          "    new: nur neue direkt gehoerte zero-hop-Adverts\n"
           "    all: alle direkt gehoerten zero-hop-Adverts"
+        );
+        pushCompanionMessage(
+          "    new: nur direkt gehoerte zero-hop-Adverts von bisher unbekannten Nodes"
         );
         pushCompanionMessage(
           "Nach Reboot ist aktiv = 0 (keine Logs), bis 'trace on' die "
