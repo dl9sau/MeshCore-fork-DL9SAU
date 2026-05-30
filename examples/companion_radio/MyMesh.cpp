@@ -5757,7 +5757,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "stats-packets")) {
         pushCompanionMessage(
           "stats-packets: Packet-Counters.\n"
-          "  heard direct, rx flood, tx own (per payload-type)."
+          "  heard direct, rx flood,\n"
+          "  tx (self-initiated/repeated/total)."
         );
         pushCompanionMessage(
           "Direct-Pakete sind NICHT erfasst (nur Flood-Pfad).\n"
@@ -7926,7 +7927,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint32_t own_total = 0;
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
     p = snprintf(block, sizeof(block),
-                 "tx own:\n"
+                 "tx self-initiated:\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
                  "  total=%lu",
                  own_of(PAYLOAD_TYPE_ADVERT),
@@ -8080,7 +8081,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(block);
     }
 
-    // ---- Msg 5: tx own (eigene = total - repeated pro Pakettyp) ----
+    // ---- Msg 5: tx self-initiated (= tx_total - repeated pro Pakettyp) ----
     auto own_of = [&](uint8_t pp) -> unsigned {
       uint16_t tot = _tx_total_by_ptype[pp];
       uint16_t rep = _repeat_by_ptype[pp];
@@ -8089,7 +8090,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint32_t own_total = 0;
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
     p = snprintf(block, sizeof(block),
-                 "tx own packets:\n"
+                 "tx self-initiated:\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
                  "  total=%lu",
                  own_of(PAYLOAD_TYPE_ADVERT),
@@ -8104,12 +8105,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     append_rate_hint(block + p, sizeof(block) - p, own_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- Msg 6+7: tx own repeated + tx own total — nur wenn aktiv ----
+    // ---- Msg 6+7: tx repeated + tx total — nur wenn Repeater aktiv ----
     uint32_t rep_total = 0;
     for (int pp = 0; pp < 16; pp++) rep_total += _repeat_by_ptype[pp];
     if (_prefs.client_repeat != 0) {
       p = snprintf(block, sizeof(block),
-                   "tx own repeated:\n"
+                   "tx repeated:\n"
                    "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
                    "  total=%lu",
                    (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ADVERT],
@@ -8126,7 +8127,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
       uint32_t tx_grand_total = own_total + rep_total;
       p = snprintf(block, sizeof(block),
-                   "tx own total:\n"
+                   "tx total:\n"
                    "  total=%lu",
                    (unsigned long)tx_grand_total);
       append_rate_hint(block + p, sizeof(block) - p, tx_grand_total, uptime_s);
@@ -8155,7 +8156,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              "airtime:\n"
              "  usage=%.2f%% free=%.2f%%\n"
              "  rx=%s (%.2f%%)\n"
-             "  tx=%s (%.2f%%) own=%s (%.2f%%) repeat=%s (%.2f%%)",
+             "  tx=%s (%.2f%%) self=%s (%.2f%%) repeat=%s (%.2f%%)",
              usage_pct, free_pct,
              rx_s, rx_pct,
              tx_s, tx_pct, own_s, tx_own_pct, rep_s, tx_rep_pct);
