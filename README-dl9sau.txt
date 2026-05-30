@@ -645,3 +645,14 @@ Runtime-Neighbours (fuer GET_NEIGHBOURS):
   millis()-Delta wenn RTC nicht gesetzt.
   Augmentation: juengere Contacts (lastmod < 1 Woche) werden
   zusaetzlich beigemischt -- nur wenn RTC gesetzt.
+
+---
+
+Weitere Doku im Repo:
+  Changelog-DL9SAU.txt    Chronologische Aenderungs-Historie + Test-Berichte
+  Wunschliste-DL9SAU.txt  Geplante / diskutierte Features (erledigt + offen)
+  README--meshcor-not-for-HAM_RADIO.txt
+                          Analyse warum MeshCore in der aktuellen Architektur
+                          NICHT amateurfunkkonform betreibbar ist. Zur
+                          Beantwortung der wiederkehrenden Frage "kann MC
+                          auf 70cm AFU?"
