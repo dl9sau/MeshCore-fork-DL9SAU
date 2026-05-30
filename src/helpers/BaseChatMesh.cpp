@@ -175,6 +175,15 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
     from->last_advert_timestamp = timestamp;
     from->lastmod = getRTCClock()->getCurrentTime();
 
+    // DL9SAU Patch (Test-Bericht 2026-05-30): wenn der Advert zero-hop
+    // ankam (kein Repeater im Path), wissen wir der Contact ist direkt
+    // erreichbar. Setze out_path_len = 0 falls noch UNKNOWN -- spart
+    // spaeter eine Path-Discovery fuer diese Nachbarn (Funkphysik ist
+    // symmetrisch). User-gesetzte Pfade NICHT ueberschreiben.
+    if (packet->path_len == 0 && from->out_path_len == OUT_PATH_UNKNOWN) {
+      from->out_path_len = 0;
+    }
+
   onDiscoveredContact(*from, is_new, packet->path_len, packet->path);       // let UI know
 }
 
@@ -206,6 +215,16 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
 
   ContactInfo& from = contacts[i];
 
+  // DL9SAU Phase 1a-extension (Test-Bericht 2026-05-30): wenn das Peer-
+  // Data-Paket zero-hop ankam (kein Repeater dazwischen) und wir noch
+  // keinen out_path zu diesem Contact haben, ist die Symmetrie-Annahme
+  // (Funk laeuft beide Richtungen direkt) plausibel -> out_path_len = 0
+  // setzen. Spart die naechste Path-Discovery. User-gesetzte Pfade
+  // werden nicht ueberschrieben.
+  if (packet->path_len == 0 && from.out_path_len == OUT_PATH_UNKNOWN) {
+    from.out_path_len = 0;
+  }
+
   if (type == PAYLOAD_TYPE_TXT_MSG && len > 5) {
     uint32_t timestamp;
     memcpy(&timestamp, data, 4);  // timestamp (by sender's RTC clock - which could be wrong)
@@ -225,7 +244,14 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
         // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the ACK
         mesh::Packet* path = createPathReturn(from.id, secret, packet->path, packet->path_len,
                                                 PAYLOAD_TYPE_ACK, (uint8_t *) &ack_hash, 4);
-        if (path) sendFloodScoped(from, path, TXT_ACK_DELAY);
+        if (path) {
+          // DL9SAU Phase 1b (Test-Bericht 2026-05-30): zero-hop heard -> Path-
+          // Return per sendZeroHop (sender ist direkt erreichbar). Spart
+          // unnoetiges Fluten zurueck durchs Netz; das Path-Info im Payload
+          // unterrichtet den Sender trotzdem ueber den (leeren) Pfad.
+          if (packet->path_len == 0) sendZeroHop(path, TXT_ACK_DELAY);
+          else                       sendFloodScoped(from, path, TXT_ACK_DELAY);
+        }
       } else {
         sendAckTo(from, ack_hash);
       }
@@ -236,7 +262,10 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
       if (packet->isRouteFlood()) {
         // let this sender know path TO here, so they can use sendDirect() (NOTE: no ACK as extra)
         mesh::Packet* path = createPathReturn(from.id, secret, packet->path, packet->path_len, 0, NULL, 0);
-        if (path) sendFloodScoped(from, path);
+        if (path) {
+          if (packet->path_len == 0) sendZeroHop(path);
+          else                       sendFloodScoped(from, path);
+        }
       }
     } else if (flags == TXT_TYPE_SIGNED_PLAIN) {
       if (timestamp > from.sync_since) {  // make sure 'sync_since' is up-to-date
@@ -252,7 +281,11 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
         // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the ACK
         mesh::Packet* path = createPathReturn(from.id, secret, packet->path, packet->path_len,
                                                 PAYLOAD_TYPE_ACK, (uint8_t *) &ack_hash, 4);
-        if (path) sendFloodScoped(from, path, TXT_ACK_DELAY);
+        if (path) {
+          // DL9SAU Phase 1b: zero-hop -> sendZeroHop (s. Erklaerung oben).
+          if (packet->path_len == 0) sendZeroHop(path, TXT_ACK_DELAY);
+          else                       sendFloodScoped(from, path, TXT_ACK_DELAY);
+        }
       } else {
         sendAckTo(from, ack_hash);
       }
@@ -268,7 +301,11 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
         // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
         mesh::Packet* path = createPathReturn(from.id, secret, packet->path, packet->path_len,
                                               PAYLOAD_TYPE_RESPONSE, temp_buf, reply_len);
-        if (path) sendFloodScoped(from, path, SERVER_RESPONSE_DELAY);
+        if (path) {
+          // DL9SAU Phase 1b: zero-hop -> sendZeroHop (s. Erklaerung oben).
+          if (packet->path_len == 0) sendZeroHop(path, SERVER_RESPONSE_DELAY);
+          else                       sendFloodScoped(from, path, SERVER_RESPONSE_DELAY);
+        }
       } else {
         mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, from.id, secret, temp_buf, reply_len);
         if (reply) {
