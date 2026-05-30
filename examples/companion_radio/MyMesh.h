@@ -752,7 +752,10 @@ private:
   // _rx_advert_total bzw _heard_direct; existierende Displays unveraendert.
   uint16_t      _rx_advert_by_scope[5][2];
   uint16_t      _heard_direct_by_scope[5][2];
-  uint16_t      _rx_flood_by_ptype[16];  // Flood-Pakete als Forward-Kandidat (alle Pkt-Typen)
+  // Wunschliste 26 D (2026-05-31): zusaetzliche path_len-Achse.
+  // [ptype][0]=heard-direct (path_len==0), [ptype][1]=repeated (path_len>0).
+  // Summe ist die alte _rx_flood_by_ptype-Semantik.
+  uint16_t      _rx_flood_by_ptype[16][2];
   uint16_t      _repeat_by_ptype[16];    // Pakete die WIR tatsaechlich durchgereicht haben
   uint16_t      _tx_total_by_ptype[16];  // ALLE TX (eigen + repeated); eigen = total - repeat
   uint32_t      _tx_repeat_airtime_ms;   // geschaetzte Airtime nur unserer Repeats

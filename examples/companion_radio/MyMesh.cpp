@@ -1070,8 +1070,14 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   // wir sie am Ende durchreichen oder nicht). Decken nicht die Direct-Pakete
   // ab — die durchlaufen einen anderen Mesh-Pfad. Aber im realen Mesh sind
   // floods der Hauptanteil des Hintergrundsrauschens.
-  if (ptype_raw < 16 && _rx_flood_by_ptype[ptype_raw] < 0xFFFF) {
-    _rx_flood_by_ptype[ptype_raw]++;
+  if (ptype_raw < 16) {
+    // Wunschliste 26 D: split by path_len. heard-direct = noch nicht von
+    // einem Repeater weitergereicht (wir sind in Funkreichweite des
+    // Originators). repeated = ueber mind. einen Repeater eingetroffen.
+    int hop_idx = ((packet->path_len & 63) == 0) ? 0 : 1;
+    if (_rx_flood_by_ptype[ptype_raw][hop_idx] < 0xFFFF) {
+      _rx_flood_by_ptype[ptype_raw][hop_idx]++;
+    }
   }
 
   if (_prefs.client_repeat == 0) {
@@ -7927,20 +7933,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     append_rate_hint(block + p, sizeof(block) - p, hd_total, uptime_s);
     pushCompanionMessage(block);
 
+    // rx flood: in stats-packets bleibt's kompakt (Summe ueber path_len).
+    // Die heard-direct/repeated Aufschluesselung gibt's in 'stats'.
+    auto rxf_sum = [&](uint8_t pp) -> unsigned {
+      return (unsigned)(_rx_flood_by_ptype[pp][0] + _rx_flood_by_ptype[pp][1]);
+    };
     uint32_t rxf_total = 0;
-    for (int pp = 0; pp < 16; pp++) rxf_total += _rx_flood_by_ptype[pp];
+    for (int pp = 0; pp < 16; pp++) rxf_total += rxf_sum((uint8_t)pp);
     p = snprintf(block, sizeof(block),
                  "rx flood:\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
                  "  total=%lu",
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE],
+                 rxf_sum(PAYLOAD_TYPE_ADVERT),
+                 rxf_sum(PAYLOAD_TYPE_PATH),
+                 rxf_sum(PAYLOAD_TYPE_TXT_MSG),
+                 rxf_sum(PAYLOAD_TYPE_GRP_TXT),
+                 rxf_sum(PAYLOAD_TYPE_ACK),
+                 rxf_sum(PAYLOAD_TYPE_REQ),
+                 rxf_sum(PAYLOAD_TYPE_RESPONSE),
+                 rxf_sum(PAYLOAD_TYPE_TRACE),
                  (unsigned long)rxf_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
     pushCompanionMessage(block);
@@ -8005,13 +8016,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage(block);
 
     // RX-Block (Wunschliste 26 D, 2026-05-31): vom User reorganisierte
-    // Reihenfolge fuer bessere Lesbarkeit. Werte zentral vorberechnet:
+    // Reihenfolge. 'rx adv total' und 'rx direct nodes' jeweils mit
+    // by-scope+type UND by-role Sub-Block. 'rx flood' getrennt nach
+    // heard-direct (path_len=0) und repeated (path_len>0).
     uint32_t hd_total = 0;
     for (int t = 0; t < 5; t++) hd_total += _heard_direct[t];
     uint32_t ad_total = 0;
     for (int t = 0; t < 5; t++) ad_total += _rx_advert_total[t];
-    uint32_t rxf_total = 0;
-    for (int pp = 0; pp < 16; pp++) rxf_total += _rx_flood_by_ptype[pp];
+    uint32_t rxf_hd_total = 0, rxf_rep_total = 0;
+    for (int pp = 0; pp < 16; pp++) {
+      rxf_hd_total  += _rx_flood_by_ptype[pp][0];
+      rxf_rep_total += _rx_flood_by_ptype[pp][1];
+    }
+    uint32_t rxf_total = rxf_hd_total + rxf_rep_total;
 
     // ---- 1) rx signal last heard (Noise/RSSI/SNR des letzten Empfangs) ----
     {
@@ -8026,9 +8043,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // ---- 2) rx direct qual (SNR gut/mittel/schlecht pro Typ) ----
-    // Alle 4 Typen werden immer angezeigt (auch mit 0/0/0), damit klar ist
-    // dass die Auswertung greift selbst wenn ein Typ noch nicht aufgetaucht
-    // ist. Schwellen Q4: gut >= 0 dB, mittel >= -8 dB, schlecht < -8 dB.
+    // Alle 4 Typen werden immer angezeigt (auch mit 0/0/0). Schwellen Q4:
+    // gut >= 0 dB, mittel >= -8 dB, schlecht < -8 dB.
     snprintf(block, sizeof(block),
              "rx direct qual good/med/bad:\n"
              "  rep  %u / %u / %u\n"
@@ -8049,22 +8065,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned)_heard_quality[ADV_TYPE_SENSOR][2]);
     pushCompanionMessage(block);
 
-    // ---- 3) rx direct nodes (zero-hop empfangen pro Adv-Typ) ----
-    p = snprintf(block, sizeof(block),
-                 "rx direct nodes:\n"
-                 "  rep=%u cmp=%u room=%u sns=%u\n"
-                 "  total=%lu",
-                 (unsigned)_heard_direct[ADV_TYPE_REPEATER],
-                 (unsigned)_heard_direct[ADV_TYPE_CHAT],
-                 (unsigned)_heard_direct[ADV_TYPE_ROOM],
-                 (unsigned)_heard_direct[ADV_TYPE_SENSOR],
-                 (unsigned long)hd_total);
-    append_rate_hint(block + p, sizeof(block) - p, hd_total, uptime_s);
-    pushCompanionMessage(block);
-
-    // ---- 4) rx adv by scope+type (Wunschliste 26 C, alle Hops) ----
+    // ---- 3) rx adv total -- by scope+type (alle Hops) ----
     snprintf(block, sizeof(block),
-             "rx adv by scope+type:\n"
+             "rx adv total -- by scope+type:\n"
              "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
              "  unscoped: rep=%u cmp=%u room=%u sns=%u",
              (unsigned)_rx_advert_by_scope[ADV_TYPE_REPEATER][1],
@@ -8077,9 +8080,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned)_rx_advert_by_scope[ADV_TYPE_SENSOR][0]);
     pushCompanionMessage(block);
 
-    // ---- 5) rx adv direct by scope+type (zero-hop Subset von #4) ----
+    // ---- 3b) rx adv total -- by role + grand total ----
+    p = snprintf(block, sizeof(block),
+                 "rx adv total -- by role:\n"
+                 "  rep=%u cmp=%u room=%u sns=%u\n"
+                 "  total = %lu",
+                 (unsigned)_rx_advert_total[ADV_TYPE_REPEATER],
+                 (unsigned)_rx_advert_total[ADV_TYPE_CHAT],
+                 (unsigned)_rx_advert_total[ADV_TYPE_ROOM],
+                 (unsigned)_rx_advert_total[ADV_TYPE_SENSOR],
+                 (unsigned long)ad_total);
+    append_rate_hint(block + p, sizeof(block) - p, ad_total, uptime_s);
+    pushCompanionMessage(block);
+
+    // ---- 4) rx direct nodes -- by scope+type (zero-hop Subset von #3) ----
     snprintf(block, sizeof(block),
-             "rx adv direct by scope+type:\n"
+             "rx direct nodes -- by scope+type:\n"
              "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
              "  unscoped: rep=%u cmp=%u room=%u sns=%u",
              (unsigned)_heard_direct_by_scope[ADV_TYPE_REPEATER][1],
@@ -8092,45 +8108,68 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned)_heard_direct_by_scope[ADV_TYPE_SENSOR][0]);
     pushCompanionMessage(block);
 
-    // ---- 6) rx adv total (Summe aller empfangenen Adverts pro Typ) ----
+    // ---- 4b) rx direct nodes -- by role + total ----
     p = snprintf(block, sizeof(block),
-                 "rx adv total:\n"
-                 "  all: rep=%u cmp=%u room=%u sns=%u\n"
-                 "  total=%lu",
-                 (unsigned)_rx_advert_total[ADV_TYPE_REPEATER],
-                 (unsigned)_rx_advert_total[ADV_TYPE_CHAT],
-                 (unsigned)_rx_advert_total[ADV_TYPE_ROOM],
-                 (unsigned)_rx_advert_total[ADV_TYPE_SENSOR],
-                 (unsigned long)ad_total);
-    append_rate_hint(block + p, sizeof(block) - p, ad_total, uptime_s);
+                 "rx direct nodes -- by role:\n"
+                 "  rep=%u cmp=%u room=%u sns=%u\n"
+                 "  total = %lu",
+                 (unsigned)_heard_direct[ADV_TYPE_REPEATER],
+                 (unsigned)_heard_direct[ADV_TYPE_CHAT],
+                 (unsigned)_heard_direct[ADV_TYPE_ROOM],
+                 (unsigned)_heard_direct[ADV_TYPE_SENSOR],
+                 (unsigned long)hd_total);
+    append_rate_hint(block + p, sizeof(block) - p, hd_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- 7) rx flood (alle Pakettypen, nur Flood-Forward-Pfad) ----
+    // ---- 5a) rx flood -- heard-direct (FLOOD-typed, path_len=0) ----
     p = snprintf(block, sizeof(block),
-                 "rx flood:\n"
+                 "rx flood -- heard-direct (path_len=0):\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
                  "  total=%lu",
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH][0],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG][0],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT][0],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK][0],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ][0],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][0],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][0],
+                 (unsigned long)rxf_hd_total);
+    append_rate_hint(block + p, sizeof(block) - p, rxf_hd_total, uptime_s);
+    pushCompanionMessage(block);
+
+    // ---- 5b) rx flood -- repeated (FLOOD-typed, path_len>0) ----
+    p = snprintf(block, sizeof(block),
+                 "rx flood -- repeated (path_len>0):\n"
+                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                 "  total=%lu",
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][1],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH][1],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG][1],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT][1],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK][1],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ][1],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][1],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][1],
+                 (unsigned long)rxf_rep_total);
+    append_rate_hint(block + p, sizeof(block) - p, rxf_rep_total, uptime_s);
+    pushCompanionMessage(block);
+
+    // ---- 5c) rx flood -- grand total ----
+    p = snprintf(block, sizeof(block),
+                 "rx flood -- grand total = %lu",
                  (unsigned long)rxf_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- 8) rx heard total (Pakete die WIR aktiv mitbekommen haben) ----
-    // = zero-hop Adverts (heard_direct) + non-advert flood-Pakete.
-    // Adverts werden NICHT doppelt gezaehlt -- die ADVERT-Eintraege in
-    // rx_flood werden subtrahiert (zero-hop sind in heard_direct, multi-
-    // hop kommen nur via Repeater bei uns an, das ist nicht 'heard').
+    // ---- 6) rx heard total (Pakete die wir DIREKT empfangen haben) ----
+    // = alle zero-hop FLOOD-typed Pakete (rxf_hd_total) plus DIRECT-typed
+    //   zero-hop Adverts (= hd_total minus jene Adverts die FLOOD-typed
+    //   zero-hop ankamen und damit schon in rxf_hd_total stecken).
     {
-      uint32_t rxf_adv = _rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT];
-      uint32_t non_adv_flood = (rxf_total > rxf_adv) ? rxf_total - rxf_adv : 0;
-      uint32_t rx_heard_total = hd_total + non_adv_flood;
+      uint32_t rxf_hd_adv = _rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0];
+      uint32_t direct_typed_advs = (hd_total > rxf_hd_adv) ? (hd_total - rxf_hd_adv) : 0;
+      uint32_t rx_heard_total = rxf_hd_total + direct_typed_advs;
       p = snprintf(block, sizeof(block),
                    "rx heard total:\n"
                    "  total=%lu",
