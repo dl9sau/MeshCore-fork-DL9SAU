@@ -725,6 +725,14 @@ private:
   // der Node schon bekannt ist. CLI: 'trace heard on new|all'.
   // Runtime-only (kein NodePrefs-Feld) -- nach Reboot wieder false.
   bool          _trace_heard_all;
+
+  // Wunschliste 25 (Floodless unscoped channels, User-Wunsch 2026-05-30):
+  // wenn ein Channel-Send ohne Scope rausgeht (kein send_scope, kein Default,
+  // kein Geo-Fallback), wird er statt geflood ALS ZERO-HOP direct gesendet
+  // -- begrenzt Reichweite auf direkt-empfangbare Nachbarn statt Europa-
+  // weiten Flood. Defaullt TRUE.
+  // Runtime-only (nicht persistent). CLI: 'unscoped-channelmessages direct|flood'.
+  bool          _unscoped_channel_direct;
   // Deferred reboot: wenn != 0, dann millis()-Zeitpunkt zu dem die loop()
   // den reboot ausloesen soll. Vermeidet das blockierende delay() im
   // CLI-Handler — sonst wuerde die loop() pausiert und der "Rebooting

@@ -1283,6 +1283,16 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
   } else if (!resolveDefaultOrGeo(eff_scope)) {
     memset(eff_scope.key, 0, sizeof(eff_scope.key));
   }
+  // Wunschliste 25 (Floodless unscoped channels, 2026-05-30): wenn kein
+  // Scope greift (kein send_scope, kein Default, kein Geo-Fallback) UND
+  // unscoped-channel-Direct-Modus aktiv ist (Default), Channel-Msg als
+  // Zero-Hop senden statt fluten. Verhindert dass z.B. ein User-Channel
+  // 'meineHausgemeinschaft' ohne Scope Europa-weit geflood wird.
+  // Override via 'unscoped-channelmessages flood' (runtime-only).
+  if (eff_scope.isNull() && _unscoped_channel_direct) {
+    sendZeroHop(pkt, delay_millis);
+    return;
+  }
   sendFloodScoped(eff_scope, pkt, delay_millis);
 }
 
@@ -2069,6 +2079,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
   _trace_heard_all = false;   // 'trace heard' default mode = new-only
+  _unscoped_channel_direct = true;  // Wunschliste 25: unscoped channel = direct
   _pending_reboot_at = 0;
   memset(_heard_direct,       0, sizeof(_heard_direct));
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
@@ -5269,7 +5280,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
-    "messages", "logging", "clear",
+    "messages", "logging", "unscoped-channelmessages", "clear",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -5558,6 +5569,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "unscoped-channelmessages")) {
+        pushCompanionMessage(
+          "unscoped-channelmessages [direct|flood]:\n"
+          "  Verhalten bei Channel-Send ohne Scope."
+        );
+        pushCompanionMessage(
+          "  direct (Default): zero-hop, nur direkt empfangbare\n"
+          "          Nachbarn sehen die Message.\n"
+          "  flood: klassisches Mesh-Flood durchs Netz."
+        );
+        pushCompanionMessage(
+          "Greift NUR bei Channel-Msgs ohne send_scope/Default/Geo.\n"
+          "Scoped Sends sind unbeeinflusst.\n"
+          "Runtime-only -- Reboot stellt 'direct' wieder her."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "logging")) {
         pushCompanionMessage(
           "logging: Master-Switches fuer Debug-Output-Senken.\n"
@@ -5780,8 +5808,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       "gps, trace, chatname,"
     );
     pushCompanionMessage(
-      "  prefs, set, get, clock, time, messages, "
-      "logging, tempradio, clear, reboot."
+      "  prefs, set, get, clock, time, messages, logging,\n"
+      "  unscoped-channelmessages, tempradio, clear, reboot."
     );
     return;
   }
@@ -7003,6 +7031,41 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   bit 1 = CHANNEL DISABLED (1 = off). Default 0 = ON.
   // -> Default-Verhalten: USB aus, Channel an. Safe fuer USB-Companion-
   //    Builds wo Trace die App-Frames zerschiessen wuerde.
+  // ---------- unscoped-channelmessages [direct|flood] ------------------
+  // Wunschliste 25 (User-Wunsch 2026-05-30, Spazier-Gespraech):
+  // wenn ein Channel-Send ohne Scope rausgeht (kein send_scope, kein
+  // Default-Scope, kein Geo-Fallback), wird er per Default als zero-hop
+  // direct gesendet statt geflooded -- begrenzt z.B. einen Channel
+  // '#meineHausgemeinschaft' ohne Scope auf direkt-empfangbare Nachbarn
+  // statt Europa-weit zu fluten.
+  // Override via 'unscoped-channelmessages flood'. Runtime-only -- nach
+  // Reboot wieder default (direct).
+  if (starts_with_word(cmd, "unscoped-channelmessages")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    if (!arg || *arg == 0) {
+      char block[160];
+      snprintf(block, sizeof(block),
+               "unscoped-channelmessages:\n"
+               "  mode = %s   (default: direct, nicht persistent)",
+               _unscoped_channel_direct ? "direct" : "flood");
+      pushCompanionMessage(block);
+      return;
+    }
+    if (strcmp(arg, "direct") == 0) {
+      _unscoped_channel_direct = true;
+      pushCompanionMessage("OK - unscoped channel-msgs gehen ab jetzt als zero-hop direct.");
+      return;
+    }
+    if (strcmp(arg, "flood") == 0) {
+      _unscoped_channel_direct = false;
+      pushCompanionMessage("OK - unscoped channel-msgs werden ab jetzt geflooded.");
+      return;
+    }
+    pushCompanionMessage("Usage: unscoped-channelmessages [direct|flood]");
+    return;
+  }
+
   if (starts_with_word(cmd, "logging")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
