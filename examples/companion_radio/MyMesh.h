@@ -746,12 +746,18 @@ private:
   uint16_t      _heard_quality[5][3];    // [ADV_TYPE_*][0=gut, 1=mittel, 2=schlecht]
   int8_t        _last_advert_snr_q4;     // SNR (q4) der zuletzt empfangenen Advert
   int8_t        _last_advert_scoped;     // 1=scoped (transport_codes), 0=unscoped
+  int8_t        _last_advert_route_direct; // 1=DIRECT-typed (sendZeroHop), 0=FLOOD-typed
   uint16_t      _rx_advert_total[5];     // ALLE empfangenen Adverts (egal Hop-Count) pro Node-Typ
   // Wunschliste 26 C: Scoped/Unscoped × Adv-Typ Aufschluesselung.
   // Indizes: [ADV_TYPE_*][0=unscoped, 1=scoped]. Increment parallel zu
   // _rx_advert_total bzw _heard_direct; existierende Displays unveraendert.
   uint16_t      _rx_advert_by_scope[5][2];
   uint16_t      _heard_direct_by_scope[5][2];
+  // Wunschliste 26 D (2026-05-31): DIRECT-typed Adverts (= sendZeroHop)
+  // pro Adv-Typ. Komplement zur FLOOD-typed Sicht in _rx_flood_by_ptype.
+  // Non-Advert DIRECT-typed Pakete werden bewusst NICHT gezaehlt
+  // (User-Entscheidung: nicht relevant).
+  uint16_t      _rx_direct_advert_by_role[5];
   // Wunschliste 26 D (2026-05-31): zusaetzliche path_len-Achse.
   // [ptype][0]=heard-direct (path_len==0), [ptype][1]=repeated (path_len>0).
   // Summe ist die alte _rx_flood_by_ptype-Semantik.

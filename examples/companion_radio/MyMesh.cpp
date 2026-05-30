@@ -830,6 +830,9 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
   // Wunschliste 26 C: Scope-Flag fuer die scoped/unscoped × adv-Typ
   // Aufschluesselung in onDiscoveredContact merken.
   _last_advert_scoped = (packet != NULL && packet->hasTransportCodes()) ? 1 : 0;
+  // Wunschliste 26 D: DIRECT-typed (sendZeroHop) Adverts identifizieren.
+  // DIRECT-typed Adverts haben per Definition path_len=0 (= zero-hop).
+  _last_advert_route_direct = (packet != NULL && packet->isRouteDirect()) ? 1 : 0;
   BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
 
   // Wunschliste 15: bei zero-hop heard (path_len==0) zur Runtime-
@@ -891,6 +894,11 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
   int scope_idx = _last_advert_scoped ? 1 : 0;
   if (contact.type < 5 && _rx_advert_by_scope[contact.type][scope_idx] < 0xFFFF) {
     _rx_advert_by_scope[contact.type][scope_idx]++;
+  }
+  // Wunschliste 26 D: DIRECT-typed (sendZeroHop) Adverts pro Rolle.
+  if (_last_advert_route_direct && contact.type < 5
+      && _rx_direct_advert_by_role[contact.type] < 0xFFFF) {
+    _rx_direct_advert_by_role[contact.type]++;
   }
   // Track only adverts received directly (zero-hop, no repeater in the path).
   if ((path_len & 63) == 0) {
@@ -2102,7 +2110,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
   memset(_rx_advert_by_scope, 0, sizeof(_rx_advert_by_scope));
   memset(_heard_direct_by_scope, 0, sizeof(_heard_direct_by_scope));
+  memset(_rx_direct_advert_by_role, 0, sizeof(_rx_direct_advert_by_role));
   _last_advert_scoped = 0;
+  _last_advert_route_direct = 0;
   memset(_rx_flood_by_ptype,  0, sizeof(_rx_flood_by_ptype));
   memset(_repeat_by_ptype,    0, sizeof(_repeat_by_ptype));
   memset(_tx_total_by_ptype,  0, sizeof(_tx_total_by_ptype));
@@ -4970,6 +4980,7 @@ void MyMesh::clearStats() {
   memset(_rx_advert_total,   0, sizeof(_rx_advert_total));
   memset(_rx_advert_by_scope,    0, sizeof(_rx_advert_by_scope));
   memset(_heard_direct_by_scope, 0, sizeof(_heard_direct_by_scope));
+  memset(_rx_direct_advert_by_role, 0, sizeof(_rx_direct_advert_by_role));
   // Duty-Sliding-Window — symmetrisch zur simple_repeater-Logik. Wirkt
   // wie ein 'Duty-Reset bei Stats-Clear', der User hat damit nach
   // 'clear stats' wieder volle 10%/h verfuegbar (was auch unfair sein
@@ -8121,7 +8132,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     append_rate_hint(block + p, sizeof(block) - p, hd_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- 5a) rx flood -- heard-direct (FLOOD-typed, path_len=0) ----
+    // ---- 5) rx zero-hop (DIRECT-typed Adverts = sendZeroHop von Nachbarn) ----
+    // Komplement zu 'rx flood -- heard-direct' (FLOOD-typed). Non-advert
+    // DIRECT-typed Pakete werden bewusst NICHT gezaehlt (User-Entscheidung).
+    {
+      uint32_t rxd_total = 0;
+      for (int t = 0; t < 5; t++) rxd_total += _rx_direct_advert_by_role[t];
+      p = snprintf(block, sizeof(block),
+                   "rx zero-hop (DIRECT-typed adv):\n"
+                   "  total = %lu",
+                   (unsigned long)rxd_total);
+      append_rate_hint(block + p, sizeof(block) - p, rxd_total, uptime_s);
+      pushCompanionMessage(block);
+
+      snprintf(block, sizeof(block),
+               "rx zero-hop -- adv by role:\n"
+               "  rep=%u cmp=%u room=%u sns=%u",
+               (unsigned)_rx_direct_advert_by_role[ADV_TYPE_REPEATER],
+               (unsigned)_rx_direct_advert_by_role[ADV_TYPE_CHAT],
+               (unsigned)_rx_direct_advert_by_role[ADV_TYPE_ROOM],
+               (unsigned)_rx_direct_advert_by_role[ADV_TYPE_SENSOR]);
+      pushCompanionMessage(block);
+    }
+
+    // ---- 6a) rx flood -- heard-direct (FLOOD-typed, path_len=0) ----
     p = snprintf(block, sizeof(block),
                  "rx flood -- heard-direct (path_len=0):\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
@@ -8138,7 +8172,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     append_rate_hint(block + p, sizeof(block) - p, rxf_hd_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- 5b) rx flood -- repeated (FLOOD-typed, path_len>0) ----
+    // ---- 6b) rx flood -- repeated (FLOOD-typed, path_len>0) ----
     p = snprintf(block, sizeof(block),
                  "rx flood -- repeated (path_len>0):\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
@@ -8155,14 +8189,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     append_rate_hint(block + p, sizeof(block) - p, rxf_rep_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- 5c) rx flood -- grand total ----
+    // ---- 6c) rx flood -- grand total ----
     p = snprintf(block, sizeof(block),
                  "rx flood -- grand total = %lu",
                  (unsigned long)rxf_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- 6) rx heard total (Pakete die wir DIREKT empfangen haben) ----
+    // ---- 7) rx heard total (Pakete die wir DIREKT empfangen haben) ----
     // = alle zero-hop FLOOD-typed Pakete (rxf_hd_total) plus DIRECT-typed
     //   zero-hop Adverts (= hd_total minus jene Adverts die FLOOD-typed
     //   zero-hop ankamen und damit schon in rxf_hd_total stecken).
