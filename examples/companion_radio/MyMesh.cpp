@@ -5199,7 +5199,7 @@ static const TraceCat trace_cats[] = {
   { "repeat",  TRACE_REPEAT,  "durchgereichte Packets" },
   { "scope",   TRACE_SCOPE,   "scope override/default/bake Wechsel" },
   { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
-  { "heard",   TRACE_HEARD,   "Direct-heard Nodes (default: nur neue; 'trace heard on all' = jeder Empfang)" },
+  { "heard",   TRACE_HEARD,   "direkt gehoerte zero-hop-Adverts (default: nur neue; 'trace heard on all' = alle)" },
   { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
   { "connect", TRACE_CONNECT, "BLE-App-Connect Events" },
   { "filter",  TRACE_FILTER,  "NICHT-repeatete Pakete + Grund (kann viele Zeilen erzeugen)" },
@@ -5724,8 +5724,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Spezial:\n"
           "  trace heard on [new|all]   default 'new'\n"
-          "    new: nur neue Direct-heard Nodes\n"
-          "    all: jeder Direct-Empfang (auch bekannte)"
+          "    new: nur neue direkt gehoerte zero-hop-Adverts\n"
+          "    all: alle direkt gehoerten zero-hop-Adverts"
         );
         pushCompanionMessage(
           "Nach Reboot ist aktiv = 0 (keine Logs), bis 'trace on' die "
