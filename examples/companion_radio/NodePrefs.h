@@ -206,6 +206,18 @@ struct NodePrefs {  // persisted to file
   // 1..64. CLI: set flood_max <N> (oder flood.max).
   uint8_t        flood_max;
 
+  // Separater Hop-Cap fuer Infrastruktur-Adverts (adv_type != ADV_TYPE_CHAT,
+  // also REPEATER/ROOM/SENSOR). Wenn > 0: Pakete dieses Typs werden ab
+  // path_hash_count > flood_max_adv_infra nicht mehr weitergeleitet --
+  // typisch enger als flood_max um Infrastruktur-Adverts ortsbezogen zu
+  // halten. 0 = deaktiviert (es greift flood_max).
+  // Constraint: 0 oder 1..flood_max. Auto-Cap auf flood_max wenn dieser
+  // unter den gesetzten Wert sinkt. CLI: set flood_max_adv_infra <N>.
+  // Begruendung (Wunschliste 24): User-Adverts (Chat) muessen weit
+  // kommen damit Erstkontakt ohne externen Schluesseltausch moeglich
+  // bleibt; Repeater/Sensor/Room-Adverts sind ortsbezogen.
+  uint8_t        flood_max_adv_infra;
+
   // Geo-vs-Default Send-Hierarchie fuer eigene Adverts (Wunschliste 13).
   //   0 = uninitialisiert (begin() migriert)
   //   1 = off:    Default-Scope gewinnt immer. Geo wird nie verwendet.
