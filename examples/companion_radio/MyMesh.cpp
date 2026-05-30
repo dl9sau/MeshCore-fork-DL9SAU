@@ -827,6 +827,9 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
   // SNR vom Paket fuer die nachfolgende Quality-Klassifikation in
   // onDiscoveredContact() merken (Q4-Format, wie ueblich in MeshCore).
   _last_advert_snr_q4 = (packet != NULL) ? packet->_snr : 0;
+  // Wunschliste 26 C: Scope-Flag fuer die scoped/unscoped × adv-Typ
+  // Aufschluesselung in onDiscoveredContact merken.
+  _last_advert_scoped = (packet != NULL && packet->hasTransportCodes()) ? 1 : 0;
   BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
 
   // Wunschliste 15: bei zero-hop heard (path_len==0) zur Runtime-
@@ -884,12 +887,20 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
   if (contact.type < 5 && _rx_advert_total[contact.type] < 0xFFFF) {
     _rx_advert_total[contact.type]++;
   }
+  // Wunschliste 26 C: scoped/unscoped Aufschluesselung parallel pflegen.
+  int scope_idx = _last_advert_scoped ? 1 : 0;
+  if (contact.type < 5 && _rx_advert_by_scope[contact.type][scope_idx] < 0xFFFF) {
+    _rx_advert_by_scope[contact.type][scope_idx]++;
+  }
   // Track only adverts received directly (zero-hop, no repeater in the path).
   if ((path_len & 63) == 0) {
     markHeardDirect(contact.id.pub_key[0]);
     // Stats: zero-hop direkt empfangene Adverts pro Node-Typ
     if (contact.type < 5 && _heard_direct[contact.type] < 0xFFFF) {
       _heard_direct[contact.type]++;
+      if (_heard_direct_by_scope[contact.type][scope_idx] < 0xFFFF) {
+        _heard_direct_by_scope[contact.type][scope_idx]++;
+      }
       // SNR-Quality-Klassifikation. Schwellen in Q4 (snr*4):
       //   gut:     SNR >= 0 dB  -> q4 >= 0
       //   mittel:  -8 <= SNR < 0 -> -32 <= q4 < 0
@@ -2083,6 +2094,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _pending_reboot_at = 0;
   memset(_heard_direct,       0, sizeof(_heard_direct));
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
+  memset(_rx_advert_by_scope, 0, sizeof(_rx_advert_by_scope));
+  memset(_heard_direct_by_scope, 0, sizeof(_heard_direct_by_scope));
+  _last_advert_scoped = 0;
   memset(_rx_flood_by_ptype,  0, sizeof(_rx_flood_by_ptype));
   memset(_repeat_by_ptype,    0, sizeof(_repeat_by_ptype));
   memset(_tx_total_by_ptype,  0, sizeof(_tx_total_by_ptype));
@@ -4948,6 +4962,8 @@ void MyMesh::clearStats() {
   memset(_heard_direct,      0, sizeof(_heard_direct));
   memset(_heard_quality,     0, sizeof(_heard_quality));
   memset(_rx_advert_total,   0, sizeof(_rx_advert_total));
+  memset(_rx_advert_by_scope,    0, sizeof(_rx_advert_by_scope));
+  memset(_heard_direct_by_scope, 0, sizeof(_heard_direct_by_scope));
   // Duty-Sliding-Window — symmetrisch zur simple_repeater-Logik. Wirkt
   // wie ein 'Duty-Reset bei Stats-Clear', der User hat damit nach
   // 'clear stats' wieder volle 10%/h verfuegbar (was auch unfair sein
@@ -8042,6 +8058,40 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned)_rx_advert_total[ADV_TYPE_SENSOR],
                  (unsigned long)ad_total);
     append_rate_hint(block + p, sizeof(block) - p, ad_total, uptime_s);
+    pushCompanionMessage(block);
+
+    // ---- Msg 3b (Wunschliste 26 C): rx adv scoped/unscoped × Typ ----
+    // Zeigt ob Adverts mit Transport-Codes (Region/Channel-scoped) oder
+    // ohne (global flood) eintreffen. Adv-Typen identisch zu Msg 3.
+    snprintf(block, sizeof(block),
+             "rx adv by scope+type:\n"
+             "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
+             "  unscoped: rep=%u cmp=%u room=%u sns=%u",
+             (unsigned)_rx_advert_by_scope[ADV_TYPE_REPEATER][1],
+             (unsigned)_rx_advert_by_scope[ADV_TYPE_CHAT][1],
+             (unsigned)_rx_advert_by_scope[ADV_TYPE_ROOM][1],
+             (unsigned)_rx_advert_by_scope[ADV_TYPE_SENSOR][1],
+             (unsigned)_rx_advert_by_scope[ADV_TYPE_REPEATER][0],
+             (unsigned)_rx_advert_by_scope[ADV_TYPE_CHAT][0],
+             (unsigned)_rx_advert_by_scope[ADV_TYPE_ROOM][0],
+             (unsigned)_rx_advert_by_scope[ADV_TYPE_SENSOR][0]);
+    pushCompanionMessage(block);
+
+    // ---- Msg 3c (Wunschliste 26 C): heard direct scoped/unscoped × Typ ----
+    // Zero-hop Subset von Msg 3b. Aussagekraft: in unserer Funkreichweite
+    // wie viele Adverts pro Scope+Typ direkt empfangen.
+    snprintf(block, sizeof(block),
+             "heard adv by scope+type (zero-hop):\n"
+             "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
+             "  unscoped: rep=%u cmp=%u room=%u sns=%u",
+             (unsigned)_heard_direct_by_scope[ADV_TYPE_REPEATER][1],
+             (unsigned)_heard_direct_by_scope[ADV_TYPE_CHAT][1],
+             (unsigned)_heard_direct_by_scope[ADV_TYPE_ROOM][1],
+             (unsigned)_heard_direct_by_scope[ADV_TYPE_SENSOR][1],
+             (unsigned)_heard_direct_by_scope[ADV_TYPE_REPEATER][0],
+             (unsigned)_heard_direct_by_scope[ADV_TYPE_CHAT][0],
+             (unsigned)_heard_direct_by_scope[ADV_TYPE_ROOM][0],
+             (unsigned)_heard_direct_by_scope[ADV_TYPE_SENSOR][0]);
     pushCompanionMessage(block);
 
     // ---- Msg 4: rx flood (alle Pakettypen, nur Flood-Forward-Pfad) ----

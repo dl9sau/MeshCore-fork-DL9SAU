@@ -745,7 +745,13 @@ private:
   // in dB: gut >= 0, mittel >= -8, schlecht < -8). Dimensionen: [type][quality]
   uint16_t      _heard_quality[5][3];    // [ADV_TYPE_*][0=gut, 1=mittel, 2=schlecht]
   int8_t        _last_advert_snr_q4;     // SNR (q4) der zuletzt empfangenen Advert
+  int8_t        _last_advert_scoped;     // 1=scoped (transport_codes), 0=unscoped
   uint16_t      _rx_advert_total[5];     // ALLE empfangenen Adverts (egal Hop-Count) pro Node-Typ
+  // Wunschliste 26 C: Scoped/Unscoped × Adv-Typ Aufschluesselung.
+  // Indizes: [ADV_TYPE_*][0=unscoped, 1=scoped]. Increment parallel zu
+  // _rx_advert_total bzw _heard_direct; existierende Displays unveraendert.
+  uint16_t      _rx_advert_by_scope[5][2];
+  uint16_t      _heard_direct_by_scope[5][2];
   uint16_t      _rx_flood_by_ptype[16];  // Flood-Pakete als Forward-Kandidat (alle Pkt-Typen)
   uint16_t      _repeat_by_ptype[16];    // Pakete die WIR tatsaechlich durchgereicht haben
   uint16_t      _tx_total_by_ptype[16];  // ALLE TX (eigen + repeated); eigen = total - repeat
