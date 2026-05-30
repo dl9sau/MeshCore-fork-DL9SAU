@@ -6843,6 +6843,56 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
     }
 
+    // Offline-Message-Queue (Wunschliste 19). msg_store_flash = Bit-Field
+    // (1 = flash an pro Bucket), msg_store_limit[5] = per-Bucket Slot-Limit
+    // (0 = type-Default 8/16/16/16/16). CLI: messages flash|limit ...
+    if (show_all || _prefs.msg_store_flash != 0) {
+      uint8_t f = _prefs.msg_store_flash;
+      snprintf(tmp, sizeof(tmp),
+               "  msg_store_flash = 0x%02X%s%s%s%s%s%s",
+               (unsigned)f,
+               f == 0 ? " [default]" : " (default: 0x00)",
+               (f & 0x01) ? " PUB"      : "",
+               (f & 0x02) ? " HT"       : "",
+               (f & 0x04) ? " PRIV"     : "",
+               (f & 0x08) ? " DM"       : "",
+               (f & 0x10) ? " COMP"     : "");
+      add_line(tmp);
+      if (f != 0) non_default_count++;
+    }
+    {
+      bool any_lim = false;
+      for (int i = 0; i < 5; i++) if (_prefs.msg_store_limit[i] != 0) { any_lim = true; break; }
+      if (show_all || any_lim) {
+        snprintf(tmp, sizeof(tmp),
+                 "  msg_store_limit = %u,%u,%u,%u,%u%s",
+                 (unsigned)_prefs.msg_store_limit[0],
+                 (unsigned)_prefs.msg_store_limit[1],
+                 (unsigned)_prefs.msg_store_limit[2],
+                 (unsigned)_prefs.msg_store_limit[3],
+                 (unsigned)_prefs.msg_store_limit[4],
+                 any_lim ? " (0=Default: 8/16/16/16/16)" : " [default]");
+        add_line(tmp);
+        if (any_lim) non_default_count++;
+      }
+    }
+
+    // Logging (Wunschliste 21). Asymmetrische Bit-Semantik: bit0 = USB on
+    // (default off), bit1 = Channel off (default on). CLI: logging ...
+    if (show_all || _prefs.log_flags != 0) {
+      uint8_t lf = _prefs.log_flags;
+      bool usb_on  =  (lf & 0x01) != 0;
+      bool chan_on = !(lf & 0x02);
+      snprintf(tmp, sizeof(tmp),
+               "  log_flags = 0x%02X (usb=%s channel=%s)%s",
+               (unsigned)lf,
+               usb_on  ? "on " : "off",
+               chan_on ? "on " : "off",
+               lf == 0 ? " [default]" : " (default: 0x00 usb=off channel=on)");
+      add_line(tmp);
+      if (lf != 0) non_default_count++;
+    }
+
     if (!show_all && non_default_count == 0) {
       add_line("  (alle Werte auf Default)");
     }
