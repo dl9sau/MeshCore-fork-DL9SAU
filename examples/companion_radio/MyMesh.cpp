@@ -3876,7 +3876,15 @@ void MyMesh::loop() {
   if ((_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)
       && next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
     doPeriodicZeroHopAdvert();
-    next_periodic_advert_at = futureMillis(computeNextAdvertIntervalMs());
+    // Jitter 0..120s addieren (User-Wunsch 2026-05-30): bei mehreren
+    // Fix-Position-Clients die gleichzeitig booten oder die selbe
+    // Cadence-Klasse haben (3h/1h/15min) wuerden ihre Adverts sonst
+    // synchron landen -> Frame-Kollisionen. Positive-only Jitter (keine
+    // Drift in Mittel-Cadence) und im Anteil des Basis-Intervalls
+    // vernachlaessigbar (0.5..7%) je nach Klasse.
+    unsigned long base = computeNextAdvertIntervalMs();
+    unsigned long jitter = (unsigned long)getRNG()->nextInt(0, 120000);
+    next_periodic_advert_at = futureMillis(base + jitter);
   }
 
   // Nightly scoped flood advert: random instant in 23:00-05:00 local

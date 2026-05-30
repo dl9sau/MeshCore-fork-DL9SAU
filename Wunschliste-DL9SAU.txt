@@ -1191,6 +1191,44 @@ Quelle: User-Spezifikation 2026-05-30 als Folge des Meshtastic-Vergleichs.
 
 ================================================================================
 20. stats-Subkategorien (MeshCore-Docs-Konvention) -- ERLEDIGT
+
+================================================================================
+22. Advert-Path-Mode separat von Message-Path-Mode konfigurierbar
+================================================================================
+
+Aktueller Stand:
+   sendFloodScoped() ruft sendFlood(pkt, codes, delay, path_hash_mode + 1)
+   (siehe MyMesh.cpp:1232/1237). Damit gilt _prefs.path_hash_mode fuer
+   ALLE Flood-Sends, also auch Nightly-Flood-Advert und ggf. zukuenftige
+   gefloodete Eigen-Adverts.
+
+User-Beobachtung (Spazieren-Gespraech 2026-05-30):
+   Bei multi-byte-path=3 (3 Hash-Bytes pro Hop) sehen Empfaenger den
+   vollstaendigen Pfad ohne traceroute machen zu muessen. Vorteil:
+   transparent. Nachteil: pro Hop +2 Byte = airtime-Kosten Netz-weit.
+
+Vorschlag:
+ - Separate Pref 'advert_path_hash_mode' default 2 (= 2-Byte Hashes).
+ - Pro Advert verwendet sendFloodScoped (oder spezifischer Advert-
+   Wrapper) diesen separaten Wert.
+ - Optional: "use_app_default" als Sentinel-Wert. Wenn gesetzt,
+   verwendet Advert den App-Default. Sonst der explizite User-Wert
+   (gepinned).
+
+Open Questions:
+ - Welcher Pfad ruft konkret sendFloodScoped fuer Adverts? doNight-
+   FloodAdvert() ja, doPeriodicZeroHopAdvert() nein (zero-hop, kein
+   Flood). Klare Stelle muesste der einzige Konsument von Advert-
+   Path-Mode sein.
+ - Wer "muss" den vollen Pfad sehen? Nur Diagnose-Use-Cases? Wenn
+   normale Nutzer den nicht brauchen, ist 2-Byte fuer 99% OK.
+ - Lohnt die Komplexitaet? Aufwand ~30 LoC fuer separate Pref +
+   CLI 'set advert_path_hash_mode <N>'.
+
+Defer: Implementation wenn User es konkret braucht. Sonst bleibt das
+Single-Pref-Schema einfach.
+
+Quelle: User-Idee Spazier-Gespraech 2026-05-30.
 ================================================================================
 
 User-Hinweis 2026-05-30 (nach Phase-C-Test): die MeshCore-Docs
