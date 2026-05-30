@@ -5618,7 +5618,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "messages limit <type> <N>\n"
           "  Slot-Limit setzen. 0 = type-Default.\n"
-          "  Max: 16 fuer alle ausser DM (32)."
+          "  Max: public 8, companion 16,\n"
+          "       hashtag/private/dm je 24."
         );
         pushCompanionMessage(
           "messages clear <type|all>\n"
