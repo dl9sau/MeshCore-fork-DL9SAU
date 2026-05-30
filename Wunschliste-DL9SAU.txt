@@ -443,6 +443,33 @@ Phase 3+4 nachziehen sobald die Antworten substantiell werden sollen.
 Quelle: User-Frage in dieser Session, 2026-05-28.
 
 
+Empirischer App-Verhaltens-Test 2026-05-30 (DL9SAU)
+----------------------------------------------------
+Offene Frage war: bietet die Companion-App noch eine Chat-UI fuer einen
+Peer der sich als SENSOR advertet?
+
+Test-Methode (ohne Zweitgeraet): neuer Diagnose-Befehl 'contact <prefix>
+type sensor' umschreibt den ADV_TYPE eines gespeicherten Kontakts lokal
+in unserer Contact-DB und pusht das Update an die App.
+
+Ergebnis: kein Chat moeglich. SENSOR verhaelt sich in der App
+praktisch wie REPEATER -- keine Chat-Eingabe, nur Telemetry-Queries.
+Unterschied SENSOR vs REPEATER: bei SENSOR geht der Telemetry-Request
+direkt raus, bei REPEATER kommt vorher eine Passwortabfrage.
+
+Konsequenz fuer den oben skizzierten Default-Matrix-Plan:
+  - CHAT-Default in profile=defensive ist die korrekte Wahl
+    (User koennen uns sonst nicht mehr anschreiben).
+  - SENSOR / ROOM advertisen wir nur, wenn der User es per
+    'advert role fixed sensor' / 'fixed room' explizit setzt -- mit
+    der bewussten Konsequenz, dass Chat dann nicht mehr funktioniert.
+  - REPEATER hat denselben Nebeneffekt (kein Chat in der App).
+
+D.h. ein REPEATER-Companion der ABER auch chat-erreichbar bleiben will,
+muesste sich als CHAT advertisen und intern trotzdem repeaten -- das
+ist exakt das was die Default-Matrix in profile=defensive macht.
+
+
 --------------------------------------------------------------------------------
 8. repeater profile [defensive | normal] — temporaerer "wie ein Repeater"  ERLEDIGT
 --------------------------------------------------------------------------------

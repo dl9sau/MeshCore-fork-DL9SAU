@@ -5281,6 +5281,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
     "messages", "logging", "unscoped-channelmessages", "clear",
+    "contact",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -5625,6 +5626,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "contact")) {
+        pushCompanionMessage(
+          "contact <name-prefix> type [chat|repeater|sensor|room]\n"
+          "Diagnose-CLI: setzt ADV_TYPE eines gespeicherten Kontakts um."
+        );
+        pushCompanionMessage(
+          "Ohne 'type ...' -> aktuellen Typ anzeigen.\n"
+          "Beispiel: contact DL9SAU type sensor"
+        );
+        pushCompanionMessage(
+          "Zweck: testen ob die App weiter Chat anbietet wenn ein Peer\n"
+          "sich als SENSOR/REPEATER advertet (Wunschliste 7)."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "tempradio")) {
         pushCompanionMessage(
           "tempradio: temporaere Funk-Parameter.\n"
@@ -5815,7 +5831,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     );
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
-      "  tempradio, clear, reboot."
+      "  contact, tempradio, clear, reboot."
     );
     return;
   }
@@ -7119,6 +7135,97 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     savePrefs();
     char r[80];
     snprintf(r, sizeof(r), "OK - logging %s = %s.", sub, m ? "on" : "off");
+    pushCompanionMessage(r);
+    return;
+  }
+
+  // ---------- contact <name-prefix> [type <role>] -----------------------
+  // Diagnose-CLI fuer Wunschliste 7: setzt den ADV_TYPE eines gespeicherten
+  // Kontakts um, OHNE dass dieser dazu einen neuen Advert senden muss.
+  // Damit laesst sich z.B. testen, ob die App weiterhin Chat anbietet wenn
+  // ein Peer sich als SENSOR (oder REPEATER/ROOM) advertet.
+  if (starts_with_word(cmd, "contact")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    if (!arg || *arg == 0) {
+      pushCompanionMessage(
+        "Usage: contact <name-prefix> type [chat|repeater|sensor|room]\n"
+        "Ohne 'type ...' -> aktuellen Typ anzeigen.");
+      return;
+    }
+    // Prefix bis Whitespace extrahieren. Suche im raw_cmd damit Case
+    // erhalten bleibt (Contact-Namen sind case-sensitiv).
+    const char* rp = raw_cmd;
+    while (*rp == ' ' || *rp == '\t') rp++;
+    while (*rp && *rp != ' ' && *rp != '\t') rp++;  // skip "contact"
+    while (*rp == ' ' || *rp == '\t') rp++;
+    char prefix[32];
+    size_t pi = 0;
+    while (*rp && *rp != ' ' && *rp != '\t' && pi + 1 < sizeof(prefix)) {
+      prefix[pi++] = *rp++;
+    }
+    prefix[pi] = 0;
+    // Im lower-Buffer entsprechend weitergehen (fuer 'type ...' Parsing)
+    while (*arg && *arg != ' ' && *arg != '\t') arg++;
+    while (*arg == ' ' || *arg == '\t') arg++;
+
+    ContactInfo* c = searchContactsByPrefix(prefix);
+    if (!c) {
+      char r[100];
+      snprintf(r, sizeof(r), "Kein Kontakt gefunden: '%s'", prefix);
+      pushCompanionMessage(r);
+      return;
+    }
+    const char* type_name = (c->type == ADV_TYPE_CHAT)     ? "chat"
+                          : (c->type == ADV_TYPE_REPEATER) ? "repeater"
+                          : (c->type == ADV_TYPE_ROOM)     ? "room"
+                          : (c->type == ADV_TYPE_SENSOR)   ? "sensor"
+                          : "?";
+    if (!*arg) {
+      char r[120];
+      snprintf(r, sizeof(r), "%s: type = %s (%u)", c->name, type_name, c->type);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (strncmp(arg, "type", 4) != 0 || (arg[4] != ' ' && arg[4] != '\t')) {
+      pushCompanionMessage("Usage: contact <name-prefix> type [chat|repeater|sensor|room]");
+      return;
+    }
+    arg += 4;
+    while (*arg == ' ' || *arg == '\t') arg++;
+    if (!*arg) {
+      pushCompanionMessage("type ohne Argument. Erwartet: chat|repeater|sensor|room");
+      return;
+    }
+    uint8_t new_type = 0;
+    if      (strcmp(arg, "chat") == 0)     new_type = ADV_TYPE_CHAT;
+    else if (strcmp(arg, "repeater") == 0) new_type = ADV_TYPE_REPEATER;
+    else if (strcmp(arg, "room") == 0)     new_type = ADV_TYPE_ROOM;
+    else if (strcmp(arg, "sensor") == 0)   new_type = ADV_TYPE_SENSOR;
+    else {
+      pushCompanionMessage("Unbekannter type. Erwartet: chat|repeater|sensor|room");
+      return;
+    }
+    if (c->type == new_type) {
+      char r[120];
+      snprintf(r, sizeof(r), "%s war bereits type=%s. Nichts zu tun.",
+               c->name, arg);
+      pushCompanionMessage(r);
+      return;
+    }
+    uint8_t old = c->type;
+    c->type = new_type;
+    saveContacts();
+    // Push an die App: bestehender Contact-Update-Frame mit neuem Typ.
+    // App kann den UI-Status (Chat-Button etc.) ggf. ohne Reconnect updaten.
+    if (_serial->isConnected()) {
+      writeContactRespFrame(PUSH_CODE_ADVERT, *c);
+    }
+    char r[160];
+    snprintf(r, sizeof(r),
+             "OK - %s: type %u -> %u (%s).\n"
+             "App ggf. trennen+neu verbinden falls UI nicht aktualisiert.",
+             c->name, old, new_type, arg);
     pushCompanionMessage(r);
     return;
   }
