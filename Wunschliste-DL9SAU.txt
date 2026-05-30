@@ -1193,10 +1193,27 @@ Quelle: User-Spezifikation 2026-05-30 als Folge des Meshtastic-Vergleichs.
 20. stats-Subkategorien (MeshCore-Docs-Konvention) -- ERLEDIGT
 
 ================================================================================
-22. Advert-Path-Mode separat von Message-Path-Mode konfigurierbar
+22. Advert-Path-Mode separat von Message-Path-Mode konfigurierbar -- OBSOLET
 ================================================================================
 
-Aktueller Stand:
+STATUS 2026-05-30 (User-Check nach erstem Wunschliste-Eintrag):
+Die Annahme im urspruenglichen Eintrag (Nightly-Flood-Advert nutzt
+_prefs.path_hash_mode + 1) war FALSCH. doNightFloodAdvert in
+MyMesh.cpp:4625 bypassed sendFloodScoped() bewusst und ruft
+   sendFlood(pkt, codes, 0, /*path_hash_size=*/3);
+mit hartkodiertem 3-Byte-Pfad. Code-Kommentar: "caps max hop count to
+~21 instead of 64 with the default 1-byte hashes".
+
+Damit ist die Asymmetrie schon im Code: Nightly-Advert pinned auf 3
+(absichtliche geringere Reichweite), Messages konfigurierbar via
+_prefs.path_hash_mode.
+
+Wunsch-Item gegenstandslos -- Eintrag bleibt als Doku-Spur erhalten
+warum es UNNOETIG ist. Bei zukuenftigem Bedarf z.B. Periodic-Advert
+gefloodet zu senden (aktuell zero-hop) muesste der dortige Code dann
+auch explizit eine path_hash_size waehlen.
+
+Frueherer Eintrags-Text (zur Doku, historisch falsch):
    sendFloodScoped() ruft sendFlood(pkt, codes, delay, path_hash_mode + 1)
    (siehe MyMesh.cpp:1232/1237). Damit gilt _prefs.path_hash_mode fuer
    ALLE Flood-Sends, also auch Nightly-Flood-Advert und ggf. zukuenftige

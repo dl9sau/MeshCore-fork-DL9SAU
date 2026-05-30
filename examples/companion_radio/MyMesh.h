@@ -720,6 +720,11 @@ private:
   // reset bei Reboot — verhindert dass eine Trace-Kategorie versehentlich
   // unbegrenzt die Offline-Queue mit Events flutet.
   uint16_t      _trace_flags;
+  // Modus fuer TRACE_HEARD: false (Default) = nur NEUE Direct-Nodes loggen
+  // (HeardList-Insertion); true = jeder Direct-Empfang loggen auch wenn
+  // der Node schon bekannt ist. CLI: 'trace heard on new|all'.
+  // Runtime-only (kein NodePrefs-Feld) -- nach Reboot wieder false.
+  bool          _trace_heard_all;
   // Deferred reboot: wenn != 0, dann millis()-Zeitpunkt zu dem die loop()
   // den reboot ausloesen soll. Vermeidet das blockierende delay() im
   // CLI-Handler — sonst wuerde die loop() pausiert und der "Rebooting

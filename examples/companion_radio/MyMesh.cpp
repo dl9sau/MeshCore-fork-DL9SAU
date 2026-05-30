@@ -801,8 +801,14 @@ void MyMesh::markHeardDirect(uint8_t hash) {
     slot->hash = hash;
   }
   slot->last_heard = now;
-  if (is_new) {
-    traceCompanion(TRACE_HEARD, "[heard] neuer Direct-Node hash=0x%02X", hash);
+  // Default ('trace heard on' = mode 'new'): nur neue Direct-Nodes loggen.
+  // Optional 'trace heard on all': jeder Empfang -> mehr Volumen, aber
+  // sichtbare Hoer-Aktivitaet pro Node.
+  if (is_new || _trace_heard_all) {
+    traceCompanion(TRACE_HEARD,
+                   is_new ? "[heard] NEW Direct-Node hash=0x%02X"
+                          : "[heard] Direct-Node hash=0x%02X",
+                   hash);
   }
 }
 
@@ -2042,6 +2048,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _geo_reco_anchor_lon = 0.0;
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
+  _trace_heard_all = false;   // 'trace heard' default mode = new-only
   _pending_reboot_at = 0;
   memset(_heard_direct,       0, sizeof(_heard_direct));
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
@@ -5192,7 +5199,7 @@ static const TraceCat trace_cats[] = {
   { "repeat",  TRACE_REPEAT,  "durchgereichte Packets" },
   { "scope",   TRACE_SCOPE,   "scope override/default/bake Wechsel" },
   { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
-  { "heard",   TRACE_HEARD,   "neue Direct-heard Nodes (HeardList)" },
+  { "heard",   TRACE_HEARD,   "Direct-heard Nodes (default: nur neue; 'trace heard on all' = jeder Empfang)" },
   { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
   { "connect", TRACE_CONNECT, "BLE-App-Connect Events" },
   { "filter",  TRACE_FILTER,  "NICHT-repeatete Pakete + Grund (kann viele Zeilen erzeugen)" },
@@ -5714,6 +5721,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "trace off\n  aktiv = leer (pause; Auswahl bleibt)");
         pushCompanionMessage(
           "trace all on|off\n  setzt aktiv UND Auswahl auf alle/keine");
+        pushCompanionMessage(
+          "Spezial:\n"
+          "  trace heard on [new|all]   default 'new'\n"
+          "    new: nur neue Direct-heard Nodes\n"
+          "    all: jeder Direct-Empfang (auch bekannte)"
+        );
         pushCompanionMessage(
           "Nach Reboot ist aktiv = 0 (keine Logs), bis 'trace on' die "
           "gespeicherte Auswahl wiederherstellt."
@@ -8005,8 +8018,33 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (cm == 1) {
       _trace_flags                  |= trace_cats[tc_idx].flag;
       _prefs.trace_flags_persistent |= trace_cats[tc_idx].flag;
+      // Spezial-Erweiterung 'trace heard on [new|all]' (User-Wunsch
+      // 2026-05-30): default 'new' (nur neue Direct-Nodes loggen) oder
+      // 'all' (jeder Empfang inkl. bekannten Nodes).
+      bool heard_mode_set = false;
+      if (strcmp(trace_cats[tc_idx].name, "heard") == 0) {
+        const char* mode_arg = sub ? strchr(sub, ' ') : NULL;
+        if (mode_arg) { while (*mode_arg == ' ') mode_arg++; }
+        if (mode_arg && *mode_arg) {
+          if (strcmp(mode_arg, "all") == 0)      { _trace_heard_all = true;  heard_mode_set = true; }
+          else if (strcmp(mode_arg, "new") == 0) { _trace_heard_all = false; heard_mode_set = true; }
+          else {
+            pushCompanionMessage("Usage: trace heard on [new|all]   (default: new)");
+            return;
+          }
+        } else {
+          _trace_heard_all = false;  // 'trace heard on' default = new
+        }
+      }
       savePrefs();
-      char r[80]; snprintf(r, sizeof(r), "OK - trace %s an.", trace_cats[tc_idx].name);
+      char r[100];
+      if (strcmp(trace_cats[tc_idx].name, "heard") == 0) {
+        snprintf(r, sizeof(r), "OK - trace heard an, mode = %s%s.",
+                 _trace_heard_all ? "all" : "new",
+                 heard_mode_set ? "" : " (default)");
+      } else {
+        snprintf(r, sizeof(r), "OK - trace %s an.", trace_cats[tc_idx].name);
+      }
       pushCompanionMessage(r);
     } else if (cm == 0) {
       _trace_flags                  &= ~trace_cats[tc_idx].flag;
