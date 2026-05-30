@@ -2520,6 +2520,60 @@ RAM-Delta gegenueber single-16-queue: +~12 KB (Phase B war +9 KB,
 Belegung -- Daten-Partition (1.4 MB) hat reichlich Headroom.
 Default-Verhalten unveraendert RAM-only -- Privacy-konsistent.
 
+------------------------------------------------------------------------
+GPS-Week-Rollover-Bug: Erklaerung 2038-11-16 (User-Frage 2026-05-30)
+------------------------------------------------------------------------
+
+Im Test wurde beobachtet dass die RTC gelegentlich nach 2038-11-16
+22:32:32 sprang (= +393466090 sec ab realer Zeit). User-Frage:
+"Gibt es einen Ueberlauf eines Zahlenwertes der gen 2038-11-16
+schlaegt?"
+
+Analyse:
+ - Klassischer Y2038 (signed int32 UNIX-time wrap) liegt bei
+   2038-01-19 03:14:07 UTC. Das ist NICHT die beobachtete Zeit.
+ - Beobachtetes Datum 2038-11-16 ist 10 Monate spaeter als Y2038
+   und damit ein anderes Phaenomen.
+
+Echte Ursache: GPS-Week-Rollover.
+ GPS-Zeitsystem zaehlt Wochen seit GPS-Epoch 1980-01-06 in einem
+ 10-bit Counter (1024 Wochen ~ 19.6 Jahre), der zyklisch ueberlaeuft.
+
+   1. Rollover: 1999-08-22
+   2. Rollover: 2019-04-07
+   3. Rollover: 2038-11-21  <-- 5 Tage NACH unseren Frankenframes!
+
+ Der GPS-Chip hat einen korrupten oder uninitialisierten Week-
+ Counter nahe dieser kommenden 2038-11-21-Grenze. Bei Cold-Start
+ ohne vollen Almanac (z.B. nach Power-Cycle ohne Backup-Battery
+ oder bei schwachem Signal/Antenna-Issue) faellt das Modul auf
+ einen modulspezifischen Default-Wert zurueck, der zufaellig nahe
+ der Rollover-Boundary liegt.
+
+ Die 5-Tage-Abweichung (16 vs 21) erklaert sich durch Time-of-Week-
+ Offset, Leap-Seconds-Behandlung oder modulspezifische Fallback-
+ Defaults.
+
+ Klassischer GPS-Hardware-Bug, NICHT Software-Overflow auf unserer
+ Seite. Module mit aelterem Firmware ohne 2019-Rollover-Patch zeigen
+ das Verhalten gehaeuft.
+
+MicroNMEA-Library Side-Note: bei *complete* invalid Frame liefert
+getYear() == 0. Ein DateTime(0,0,0,...) ergibt Unix-Time von
+~-473353600 (pre-1970) -- waere also signed negativ und damit ganz
+anderer Symptomatik (unsere Sanity-Schranke wuerde es als
+ts < cur - 1 Jahr verwerfen).
+
+Unsere Gegenmassnahme: Sanity-Guard in MicroNMEALocationProvider::loop()
+verwirft Sync wenn |gps_ts - rtc| > 1 Jahr UND rtc plausibel
+(>1500000000 = post-2017). Verwerfungs-Event wird via Serial-Konsole
+geloggt:
+   [+1234567ms] [NMEA] sync REJECTED: gps_ts=... vs rtc=... (delta ...)
+
+Quellen:
+ - User-Bericht 2026-05-30 (Boot + 19min runtime, RTC jumped 393466090s)
+ - GPS-Week-Rollover Doku: en.wikipedia.org/wiki/GPS_week_number_rollover
+
 ================================================================================
 Build-Status
 ================================================================================
