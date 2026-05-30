@@ -1337,3 +1337,77 @@ merkbar senkt -- aktuell unklar wie viel Air-Time die initiale
 Discovery vs spaetere Re-Discoveries kostet.
 
 Quelle: User-Idee Spazier-Gespraech 2026-05-30.
+
+================================================================================
+26. Stats-Refactor: tx-own-Naming, rx-us Tracking, scoped/unscoped × adv-Typ
+================================================================================
+
+User-Beobachtungen 2026-05-30 (nach Detail-Review der stats-Ausgabe):
+
+Punkt A) 'tx own packets' Wording verwirrend
+   Aktuelle Spalten:
+     tx own packets    = tx_total - repeated (selbst-initiiert)
+     tx own repeated   = was wir als Repeater weitergeleitet haben
+     tx own total      = own + repeated
+   Das Wort "own" wird in beiden Kontexten verwendet, fuehrt zu Konfusion:
+   "own" sollte heissen "von uns selbst initiiert", nicht "wir waren am
+   Senden beteiligt".
+
+   Vorschlag:
+     tx self-initiated  (statt 'tx own packets')
+     tx repeated         (statt 'tx own repeated')
+     tx total            (statt 'tx own total')
+
+   Aufwand: Strings + Kommentare aendern. App / Stats-Frame: keine
+   Aenderung (App-seitige Daten kommen ueber n_sent_flood/direct nicht
+   ueber unsere _tx_total_by_ptype).
+
+Punkt B) 'rx us' Tracking -- Self-Packet-Echo
+   Frage des Users: wie haeufig werden eigene Pakete von anderen Knoten
+   gehoert/repeated?
+   Ist im aktuellen Mesh-Code NICHT zaehlbar weil:
+     - Wir kennen den Hash unserer eigenen Pakete nur waehrend des
+       Sendens.
+     - Beim Empfang machen wir hasSeen()-Check + droppen wenn vorher
+       gesehen -- aber der Counter dabei ist global (Duplikate).
+
+   Implementation:
+     - Self-Sent-Hash-Set (z.B. LRU 32 Eintraege oder ringbuffer).
+     - Bei jedem TX: hash speichern (mit ptype + own/repeated-Flag).
+     - Bei jedem RX: gegen Set matchen. Wenn match -> entsprechenden
+       Counter erhoehen.
+     - Neue stats-Zeilen:
+         rx us self-initiated   (= eigene Sendung weiter wo gehoert)
+         rx us repeated          (= Repeat weiter wo gehoert)
+         rx us total             (Summe)
+     - Aussagekraft: zeigt wieviel Echo durch's Netz unsere Pakete
+       erzeugen -- "Wir sind nicht allein, jemand hat uns gehoert".
+
+   Aufwand: ~100 LoC. Hash-Set + Counters + Display.
+
+Punkt C) Scoped/Unscoped × Adv-Typ Aufschluesselung
+   Aktuell:
+     rx flood          (per ptype, kein scoped/unscoped Split)
+     rx heard direct   (per adv_type, kein scoped/unscoped Split)
+
+   Wunsch:
+     rx flood scoped       per Adv-Typ (chat/rep/room/sens)
+     rx flood unscoped     per Adv-Typ
+     rx heard scoped       per Adv-Typ
+     rx heard unscoped     per Adv-Typ
+
+   Counters benoetigt: 4 (adv_type) * 2 (scoped/unscoped) * 2 (flood/heard) = 16
+   Plus existing rx_flood_by_ptype / heard_direct.
+   Memory: 16 * 2 byte = 32 byte RAM, minimal.
+
+   Klassifikation: bei Receive die Scope-Kennzeichnung des Pakets
+   pruefen (packet->hasTransportCodes()). Adv-Typ aus payload[100] & 0x0F
+   wie in Wunschliste 24.
+
+   Aufwand: ~80 LoC. Counter-Arrays + Increment-Helpers + Display.
+
+Zusammen-Aufwand:
+   ~200-250 LoC plus Help-Text-Updates und Doku.
+   Eigene Test-Runde noetig weil Display-Layout veraendert wird.
+
+Quelle: User-Detail-Review 2026-05-30 nach Test-Session.

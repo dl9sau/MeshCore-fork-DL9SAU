@@ -5745,8 +5745,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "stats")) {
         pushCompanionMessage(
-          "stats: Sammel-Output (alle Kategorien).\n"
-          "Filter: 'stats-core', 'stats-radio', 'stats-packets'."
+          "stats: Sammel-Output (alle Kategorien)."
+        );
+        pushCompanionMessage(
+          "stats-core, stats-radio, stats-packets sind\n"
+          "EIGENE Befehle (keine stats-Argumente!)."
         );
         pushCompanionMessage(
           "Aufschluesselung nach Node-Typ + Payload-Typ.\n"
@@ -5801,15 +5804,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     // 'Befehle: ...' war zu lang fuer MAX_TEXT_LEN (160 inkl. 'Sender: '-
     // Prefix, effektiv ~145 Bytes). Output wurde bei 'time' abgeschnitten.
-    // -> in 2 BLE-Messages gesplittet.
+    // -> in 3 BLE-Messages gesplittet (mit stats-Varianten Sichtbarkeit).
     pushCompanionMessage(
-      "Befehle: help [topic], status, stats, uptime, "
-      "neighbors, advert, autoadv, repeater, duty, scope, "
-      "gps, trace, chatname,"
+      "Befehle: help [topic], status, uptime, neighbors,\n"
+      "  advert, autoadv, repeater, duty, scope, gps,"
     );
     pushCompanionMessage(
-      "  prefs, set, get, clock, time, messages, logging,\n"
-      "  unscoped-channelmessages, tempradio, clear, reboot."
+      "  stats, stats-core, stats-radio, stats-packets,\n"
+      "  trace, chatname, prefs, set, get, clock, time,"
+    );
+    pushCompanionMessage(
+      "  messages, logging, unscoped-channelmessages,\n"
+      "  tempradio, clear, reboot."
     );
     return;
   }
@@ -7832,6 +7838,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     char block[200];
     int p;
 
+    // ---- Msg 0 (NEU 2026-05-30): Summary tx/rx total + flood/direct ----
+    // Klassische Repeater-Zusammenfassung. Werte aus mesh::Mesh-Basis
+    // (radio-Level Zaehler -- jedes empfangene/gesendete Paket).
+    uint32_t n_sent_flood  = getNumSentFlood();
+    uint32_t n_sent_direct = getNumSentDirect();
+    uint32_t n_recv_flood  = getNumRecvFlood();
+    uint32_t n_recv_direct = getNumRecvDirect();
+    uint32_t n_sent_total  = n_sent_flood + n_sent_direct;
+    uint32_t n_recv_total  = n_recv_flood + n_recv_direct;
+    p = snprintf(block, sizeof(block),
+                 "gesendet (tx):\n  total=%lu",
+                 (unsigned long)n_sent_total);
+    p += append_rate_hint(block + p, sizeof(block) - p, n_sent_total, uptime_s);
+    snprintf(block + p, sizeof(block) - p,
+             "\n  flood=%lu  direct=%lu",
+             (unsigned long)n_sent_flood, (unsigned long)n_sent_direct);
+    pushCompanionMessage(block);
+    p = snprintf(block, sizeof(block),
+                 "empfangen (rx):\n  total=%lu",
+                 (unsigned long)n_recv_total);
+    p += append_rate_hint(block + p, sizeof(block) - p, n_recv_total, uptime_s);
+    snprintf(block + p, sizeof(block) - p,
+             "\n  flood=%lu  direct=%lu",
+             (unsigned long)n_recv_flood, (unsigned long)n_recv_direct);
+    pushCompanionMessage(block);
+
     // ---- Msg 1: heard direct nodes ----
     uint32_t hd_total = 0;
     for (int t = 0; t < 5; t++) hd_total += _heard_direct[t];
@@ -7871,6 +7903,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned)_heard_quality[ADV_TYPE_SENSOR][2]);
     pushCompanionMessage(block);
 
+    // ---- Msg 2b (NEU 2026-05-30): Radio-State (letzter Empfang) ----
+    {
+      int16_t noise_floor = (int16_t)_radio->getNoiseFloor();
+      int8_t  last_rssi   = (int8_t)radio_driver.getLastRSSI();
+      float   last_snr    = radio_driver.getLastSNR();
+      snprintf(block, sizeof(block),
+               "radio (letzter Empfang):\n"
+               "  noise=%d dBm  rssi=%d dBm  snr=%.1f dB",
+               (int)noise_floor, (int)last_rssi, (double)last_snr);
+      pushCompanionMessage(block);
+    }
+
     // ---- Msg 3: rx adv (all hops) ----
     uint32_t ad_total = 0;
     for (int t = 0; t < 5; t++) ad_total += _rx_advert_total[t];
@@ -7904,6 +7948,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned long)rxf_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
     pushCompanionMessage(block);
+
+    // ---- Msg 4b (NEU 2026-05-30): rx (heard) total ----
+    // Summe der Pakete die WIR aktiv mitbekommen haben:
+    //   zero-hop Adverts (heard_direct) + non-advert flood-Pakete.
+    // Adverts werden NICHT doppelt gezaehlt -- in rx_flood enthaltene
+    // ADVERT-Pakete werden subtrahiert (zero-hop sind in heard_direct,
+    // multi-hop sind dann eben nicht "heard" sondern nur via Repeater).
+    {
+      uint32_t rxf_adv = _rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT];
+      uint32_t non_adv_flood = (rxf_total > rxf_adv) ? rxf_total - rxf_adv : 0;
+      uint32_t rx_heard_total = hd_total + non_adv_flood;
+      p = snprintf(block, sizeof(block),
+                   "rx (heard) total:\n"
+                   "  total=%lu",
+                   (unsigned long)rx_heard_total);
+      append_rate_hint(block + p, sizeof(block) - p, rx_heard_total, uptime_s);
+      pushCompanionMessage(block);
+    }
 
     // ---- Msg 5: tx own (eigene = total - repeated pro Pakettyp) ----
     auto own_of = [&](uint8_t pp) -> unsigned {
