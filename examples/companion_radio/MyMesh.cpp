@@ -5103,9 +5103,9 @@ bool MyMesh::dutyHardReached() const {
 
 void MyMesh::traceCompanion(uint16_t flag, const char* fmt, ...) {
   if ((_trace_flags & flag) == 0) return;
-  // Channel-Output Master-Switch (Wunschliste 21):
-  // _prefs.log_flags bit 1 = $companion-Output ABGESCHALTET.
-  // Default 0 = an. 'logging channel off' setzt bit 1.
+  // Channel-Output Master-Switch (Wunschliste 21, asymmetrisch zu USB):
+  // _prefs.log_flags bit 1 = $companion-Output ABGESCHALTET (1 = off).
+  // Default 0 = AN. 'logging channel off' setzt bit 1.
   if (_prefs.log_flags & 0x02) return;
   char buf[160];
   va_list ap;
@@ -5524,15 +5524,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         pushCompanionMessage(
           "  logging usb on|off       Serial/USB-Output\n"
-          "                           (Wichtig bei USB-Companion-Builds)"
+          "  Default OFF (safe fuer USB-Companion-Builds)."
         );
         pushCompanionMessage(
           "  logging channel on|off   $companion-Channel-Output\n"
-          "                           (Trace-Kategorien gehen dort hin)"
+          "  Default ON. Trace-Kategorien werden dort gezeigt."
         );
         pushCompanionMessage(
-          "Default beide on. App-Debug-Frame bleibt von 'usb off'\n"
-          "unbeeinflusst -- nur die Serial-Console wird stumm."
+          "App-Debug-Frame bleibt von 'usb off' unbeeinflusst --\n"
+          "nur die Serial-Console wird stumm."
         );
         return;
       }
@@ -6949,21 +6949,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   logging                  Status
   //   logging usb on|off       USB-Serial Output von pushDebugLog
   //   logging channel on|off   $companion-Channel-Output von traceCompanion
-  // INVERTIERTE bit-Semantik in _prefs.log_flags damit Default 0 = beide an
-  // (backward-compat mit alten Prefs-Files).
+  // ASYMMETRISCHE bit-Semantik in _prefs.log_flags:
+  //   bit 0 = USB ENABLED (1 = on). Default 0 = OFF.
+  //   bit 1 = CHANNEL DISABLED (1 = off). Default 0 = ON.
+  // -> Default-Verhalten: USB aus, Channel an. Safe fuer USB-Companion-
+  //    Builds wo Trace die App-Frames zerschiessen wuerde.
   if (starts_with_word(cmd, "logging")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
-    bool usb_on  = !(_prefs.log_flags & 0x01);
-    bool chan_on = !(_prefs.log_flags & 0x02);
+    bool usb_on  =  (_prefs.log_flags & 0x01) != 0;  // bit=on  -> on
+    bool chan_on = !(_prefs.log_flags & 0x02);       // bit=off -> on
     if (!arg || *arg == 0) {
       char block[200];
       snprintf(block, sizeof(block),
                "logging:\n"
-               "  usb     = %s\n"
-               "  channel = %s",
-               usb_on  ? "on" : "off",
-               chan_on ? "on" : "off");
+               "  usb     = %s   (default: off)\n"
+               "  channel = %s   (default: on)",
+               usb_on  ? "on " : "off",
+               chan_on ? "on " : "off");
       pushCompanionMessage(block);
       return;
     }
@@ -6974,8 +6977,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     sub[si] = 0;
     while (*arg == ' ' || *arg == '\t') arg++;
     int bit = -1;
-    if (strcmp(sub, "usb") == 0)     bit = 0;
-    else if (strcmp(sub, "channel") == 0) bit = 1;
+    bool inverted = false;        // true: bit=1 heisst off (channel-Stil)
+    if (strcmp(sub, "usb") == 0)     { bit = 0; inverted = false; }
+    else if (strcmp(sub, "channel") == 0) { bit = 1; inverted = true; }
     else {
       pushCompanionMessage("Usage: logging usb|channel on|off");
       return;
@@ -6985,10 +6989,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("on/off erwartet.");
       return;
     }
-    if (m == 1) {
-      _prefs.log_flags &= ~(uint8_t)(1 << bit);   // on = clear-bit
+    // bit-setzen-bei = (on XOR inverted): wenn nicht-invertiert
+    // (USB, bit=on), setze bei m==on. Wenn invertiert (channel, bit=off),
+    // setze bei m==off.
+    bool set_bit = (m == 1) ^ inverted;
+    if (set_bit) {
+      _prefs.log_flags |=  (uint8_t)(1 << bit);
     } else {
-      _prefs.log_flags |=  (uint8_t)(1 << bit);   // off = set-bit
+      _prefs.log_flags &= ~(uint8_t)(1 << bit);
     }
     savePrefs();
     char r[80];
@@ -9787,12 +9795,14 @@ void MyMesh::pushDebugLog(const char* fmt, ...) {
   int n = n_pref + n_body;
   if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
 
-  // Serial-Output gated von _prefs.log_flags bit 0 (inverted: 1 = OFF).
-  // Default 0 = an. 'logging usb off' setzt bit 0 -- wichtig fuer
-  // zukuenftige USB-Companion-Builds wo Serial = App-Frame-Pfad ist
-  // und das Trace-Geblubber sonst die App-Frames korrumpieren wuerde.
+  // Serial-Output gated von _prefs.log_flags bit 0 (asymm: 1 = ON).
+  // Default 0 = USB-Serial AUS. 'logging usb on' setzt bit 0. Symmetrisch
+  // fuer BLE- und USB-Companion-Builds: bei USB-Companion wuerde Trace-
+  // Geblubber sonst die App-Frame-Stream zerstoeren -- da der User in
+  // dem Fall auch nicht ueber die App das Logging abschalten koennte,
+  // ist 'per Default aus' universell sicher.
   // CRLF-Uebersetzung wie zuvor (LF -> CRLF, multiline-aware).
-  if (!(_prefs.log_flags & 0x01)) {
+  if (_prefs.log_flags & 0x01) {
     for (int i = 0; i < n; i++) {
       if (buf[i] == '\n' && (i == 0 || buf[i - 1] != '\r')) {
         Serial.write('\r');

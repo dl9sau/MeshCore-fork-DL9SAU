@@ -2574,6 +2574,60 @@ Quellen:
  - User-Bericht 2026-05-30 (Boot + 19min runtime, RTC jumped 393466090s)
  - GPS-Week-Rollover Doku: en.wikipedia.org/wiki/GPS_week_number_rollover
 
+------------------------------------------------------------------------
+GPS-Library-Landschaft: Warum kein Library-Fix moeglich ist
+------------------------------------------------------------------------
+
+User-Frage nach Beobachtung der wilden 2038/2043-Frankenframes:
+"Wir haben GPS doch erst nicht heute erfunden sondern erfreuen uns
+daran seit Jahrzehnten. Wie kann so eine library heute noch so buggy
+sein?"
+
+Recherche-Ergebnisse (2026-05-30):
+
+1) MicroNMEA (unsere Lib, stevemarple/MicroNMEA @ 2.0.6):
+   - Reiner NMEA-Frame-Parser ohne Plausibility-Checks.
+   - Code: '_year = parseUnsignedInt(s + 4, 2) + 2000;'
+     -> Addiert blind 2000 zur Year-Field-Eingabe. Year=43 -> 2043.
+   - Keine GitHub-Releases publiziert (nur Tags + Commits).
+   - Letzter aktiver Stand 2.0.6. Aktiv kaum gewartet.
+
+2) Meshtastic verwendet TinyGPS++ (mikalhart/TinyGPSPlus):
+   - Andere Library, gleiche Klasse von "dumber Parser".
+   - GitHub Issue #75 (2020): "Handling of GPS week number rollover
+     for older GPS modules" -- offen, nicht behoben.
+
+3) Fundamentale Erkenntnis:
+   - Beide Libraries trusten was das GPS-Modul sendet.
+   - Plausibility-Validierung ist Anwender-Verantwortung.
+   - Der Bug ist nicht Library-seitig sondern GPS-MODUL-FIRMWARE.
+
+4) Warum GPS-Modul-Firmware buggy bleibt:
+   - Module-Hersteller patchen nur OEMs, nicht Endkunden.
+   - Viele Module pre-2019 ohne Rollover-Update verkauft + nie
+     geupdated.
+   - Einige Module haben kein Firmware-Update-Mechanismus.
+   - "It works for current dates" als Akzeptanz-Kriterium beim
+     Hersteller -- Future-Dates jenseits Rollover untestbar.
+
+5) Konsequenz fuer unsere Architektur:
+   - Sanity-Guard in MicroNMEALocationProvider::loop() ist die
+     einzige funktionierende Verteidigung.
+   - Switch auf TinyGPS++ wuerde nichts aendern (gleiche Klasse).
+   - MicroNMEA-Update wuerde nichts aendern (selbe Library-Design-
+     Philosophie).
+   - Best-Practice: Externe Libraries IMMER mit Sanity-Layer
+     umwickeln, nie blind trusten.
+
+Quellen:
+ - github.com/stevemarple/MicroNMEA (kein Releases-Eintrag)
+ - github.com/mikalhart/TinyGPSPlus/issues/75 (Week-Rollover, 2020+)
+
+Erkenntnis ist transferierbar auf andere Embedded-Projekte: bei
+externen Sensor-/Modul-Libraries IMMER mit eigenem Plausibility-Layer
+umwickeln. Library-Vertrauen ist Trust-by-Default, nicht Trust-by-
+Verification.
+
 ================================================================================
 Build-Status
 ================================================================================

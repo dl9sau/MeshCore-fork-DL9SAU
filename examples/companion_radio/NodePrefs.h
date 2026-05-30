@@ -284,10 +284,15 @@ struct NodePrefs {  // persisted to file
   uint8_t        msg_store_limit[5];
 
   // Logging-Senken-Steuerung (Wunschliste 21, User-Wunsch 2026-05-30).
-  // INVERTIERTE Bit-Semantik damit Default 0 = beide an (backward-compat
-  // mit alten Prefs-Files ohne dieses Feld):
-  //   bit 0 = USB-Serial Output abschalten (pushDebugLog -> Serial)
-  //   bit 1 = $companion-Channel Output abschalten (traceCompanion-Pushes)
+  // ASYMMETRISCHE Bit-Semantik damit Default 0 = USB off + Channel on:
+  //   bit 0 = USB-Serial Output ENABLED (1 = on, 0 = off). Default off.
+  //           Begruendung: bei USB-Companion-Firmware wuerde Debug-Output
+  //           die App-Frame-Stream zerschiessen. Da der User in dem Fall
+  //           NICHT mehr ueber die App das Logging deaktivieren kann
+  //           (App geht nicht), sicher per Default off. Symmetrisch fuer
+  //           BLE-Builds, kein Build-spezifisches Verhalten noetig.
+  //   bit 1 = $companion-Channel Output DISABLED (1 = off, 0 = on). Default on.
+  //           Klassischer Trace-Pfad zum Lesen via App.
   // App-Debug-Frame (PUSH_CODE_DEBUG_LOG) bleibt unbeeinflusst.
   // CLI: logging usb|channel on|off ; 'logging' zeigt Status.
   uint8_t        log_flags;
