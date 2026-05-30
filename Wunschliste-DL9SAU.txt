@@ -1281,3 +1281,59 @@ Empfehlung: Option (b) -- backward-compatibel und docs-konform.
 Aufwand: ~80 LoC + Help-Texte fuer 3 neue Topics.
 
 Quelle: User-Hinweis 2026-05-30, https://docs.meshcore.io/cli_commands/
+
+================================================================================
+23. Direct-First-Probe Path-Discovery-Retry (Phase 1c)
+================================================================================
+
+Kontext: Phase 1a + 1b (commit c5e02b26) optimieren das Verhalten BEIM
+ERSTEN Hoeren / Antworten an direkt erreichbare Nachbarn. Nicht
+adressiert: was passiert wenn ein etablierter direkter Pfad spaeter
+scheitert (z.B. einer der beiden Knoten hat sich bewegt).
+
+Aktuelles MC-Verhalten:
+   ACK-Timeout (TXT_ACK_DELAY ueberschritten) -> out_path wird gecleart
+   (= UNKNOWN) -> naechste Sendung triggert volle Flood-Path-Discovery.
+
+User-Idee Spazier-Gespraech 2026-05-30:
+   Vor dem Auto-Clear einen Direct-First-Probe-Versuch einbauen:
+     1) ACK ausgeblieben -> erstmal eine direkte (zero-hop) Mini-
+        Path-Discovery senden statt sofort Flood.
+     2) Wenn Direct-Probe ACK kommt -> Pfad funktioniert symmetrisch
+        weiter, kein Flood noetig.
+     3) Wenn keine Antwort -> dann erst Auto-Clear + Flood-Discovery
+        wie bisher.
+
+Vorteile:
+ - Spart Netz-Traffic wenn der direkte Pfad eigentlich noch
+   funktioniert und nur eine Einzel-Ack verloren ging (LoRa hat
+   inherent Packet-Loss-Rate auch bei stabiler Verbindung).
+ - Bestaetigt Symmetrie schnell (1 Direct-Frame vs N gefloodete
+   Pfad-Discovery-Frames durchs ganze Mesh).
+
+Implementations-Skizze:
+ - Bei ACK-Timeout: pruefen ob from.out_path_len == 0 (direkte
+   Verbindung). Wenn ja:
+     -> Sendung "Direct-Probe" mit kleinem Timeout (z.B. 2x TXT_ACK_DELAY).
+     -> Wenn Probe-ACK kommt: weiter mit direkt-Pfad, evtl. zurueck
+        Original-Sendung retry.
+     -> Wenn kein Probe-ACK: out_path = UNKNOWN, Flood-Discovery.
+ - Erfordert: Retry-Zustand pro Contact (oder global pending_probes).
+   Timeout-Logik. Probe-Packet-Format (kann eine Mini-REQ sein).
+
+Aufwand: ~150-200 LoC. Retry-State-Machine, Timeout-Handling,
+zusaetzliche Counter fuer "direct probes sent/succeeded/failed"
+in Stats.
+
+Risiken:
+ - Subtile Race-Conditions wenn Original-Sendung und Probe sich
+   ueberlappen.
+ - Defacto-Doppel-Sendungen wenn Probe + Original beide raus gehen.
+
+Daher zurueckgestellt: braucht eigene Test-Runde mit reproduzier-
+baren Pfad-Verlust-Szenarien (Tracker bewegen, Antenne abdecken).
+Lohnt nur wenn Phase 1a/1b real-world die Path-Discovery-Frequenz
+merkbar senkt -- aktuell unklar wie viel Air-Time die initiale
+Discovery vs spaetere Re-Discoveries kostet.
+
+Quelle: User-Idee Spazier-Gespraech 2026-05-30.
