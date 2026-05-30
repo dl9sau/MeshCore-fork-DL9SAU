@@ -2629,6 +2629,124 @@ umwickeln. Library-Vertrauen ist Trust-by-Default, nicht Trust-by-
 Verification.
 
 ================================================================================
+NodePrefs Bit-Field Reference (2026-05-31)
+================================================================================
+
+Einige DL9SAU-Prefs sind Bit-Felder. Anbei die Semantik damit die
+in 'prefs' / 'prefs all' angezeigten Hex-Werte lesbar werden.
+
+--- auto_advert_enabled (Wunschliste 18 / 22) ---
+  bit 0 (0x01, AUTO_ADV_ZEROHOP) -> periodic zero-hop alle 15/60/180 min
+                                    (motion-adaptiv)
+  bit 1 (0x02, AUTO_ADV_NIGHTLY) -> nightly scoped flood (random 23:00-05:00
+                                    lokal)
+  Default: 0x00 (beides aus). Migration: alter Wert 1 wird auf 3 erhoben
+  (= beide an, backward-compat).
+  CLI: autoadv on|off | autoadv zerohop on|off | autoadv nightly on|off
+
+
+--- msg_store_flash (Wunschliste 19 Phase C) ---
+  Bit-Field, 1 = Flash-Persistenz fuer den Bucket aktiviert.
+  bit 0 (0x01) -> PUBLIC
+  bit 1 (0x02) -> HASHTAG
+  bit 2 (0x04) -> PRIVATE
+  bit 3 (0x08) -> DM
+  bit 4 (0x10) -> COMPANION
+
+  Default 0x00 -- alles RAM-only (privacy-konsistent). Bei aktivem Bit
+  ueberlebt der entsprechende Bucket Reboots.
+
+  Anzeige in 'prefs': aktive Bits werden als Tags ausgegeben, z.B.
+  'msg_store_flash = 0x18 (default: 0x00) DM COMP'.
+
+  CLI: messages flash <type> on|off
+       (type = public|hashtag|private|dm|companion; Prefix erlaubt)
+
+
+--- msg_store_limit[5] (Wunschliste 19 Phase C) ---
+  Per-Bucket Slot-Limit. Indizierung [PUB,HT,PRIV,DM,COMP].
+  Wert 0 = type-spezifischer Default:
+    PUB=8, HT=16, PRIV=16, DM=16, COMP=16.
+  Cap pro Bucket: PUB=8, COMP=16, HT/PRIV/DM=24.
+
+  Anzeige in 'prefs': als 5-Tupel kommagetrennt, z.B.
+  'msg_store_limit = 0,0,0,4,0 (0=Default: 8/16/16/16/16)'.
+
+  CLI: messages limit <type> <N>
+
+
+--- log_flags (Wunschliste 21) -- ACHTUNG asymmetrische Semantik ---
+  bit 0 (0x01) = USB-Serial Output ENABLED (1=on, 0=off). Default OFF.
+                 Begruendung: bei USB-Companion-Firmware wuerde Debug-
+                 Output die App-Frame-Stream zerschiessen. Da der User
+                 in dem Fall NICHT mehr ueber die App das Logging
+                 deaktivieren kann (App geht nicht), sicher per Default
+                 off. Symmetrisch fuer BLE-Builds.
+  bit 1 (0x02) = $companion-Channel Output DISABLED (1=off, 0=on).
+                 Default ON. Klassischer Trace-Pfad zum Lesen via App.
+
+  Default 0x00 = usb=off + channel=on.
+
+  Anzeige in 'prefs' zerlegt die Bits explizit:
+    'log_flags = 0x00 (usb=off channel=on ) [default]'
+    'log_flags = 0x01 (usb=on  channel=on ) (default: 0x00 ...)'
+
+  App-Debug-Frame (PUSH_CODE_DEBUG_LOG) bleibt unbeeinflusst -- das
+  ist Companion-Protokoll, nicht der DL9SAU-Trace-Pfad.
+
+  CLI: logging usb|channel on|off ; 'logging' ohne Arg zeigt Status.
+
+
+--- trace_flags_persistent (TRACE_*) ---
+  Bit-Maske (uint16_t) ueber TRACE_*-Kategorien. Persistente Selektion;
+  Active flags (_trace_flags im RAM) starten bei Reboot auf 0 und
+  werden per 'trace on' aus trace_flags_persistent wiederhergestellt.
+
+  TRACE_*-Kategorien siehe MyMesh.h (trace_*_bit-Defines). Aktuelle
+  Anzeige in 'prefs all': 'trace_flags_persistent = 0xNNNN'.
+
+  CLI: trace on|off | trace <category> on|off | trace help
+
+
+--- repeater_profile (Wunschliste 8) ---
+  0 = defensive (Default): PATH nur fuer lokal-bekannte Endpoints
+                           weiterleiten, Repeats mit reduzierter Power
+                           + CR5 (Wunschliste 6/8 'client-repeater').
+  1 = normal:              wie ein echter Repeater. ALLE PATH repeaten,
+                           Repeats mit voller Power + konfigurierter CR.
+                           Use-Case: voruebergehender Standortwechsel
+                           an einen exponierten Spot.
+  CLI: repeater profile [defensive | normal]
+
+
+--- loop_detect (Wunschliste 6b) ---
+  Gating: nur aktiv wenn repeater_profile == 1 (normal). Defensive
+  Profile leitet ohnehin nur an lokal-bekannte Endpoints weiter.
+  0 = off  (Default; greift nur im normal-Profile)
+  1 = minimal   { 1B:4, 2B:2, 3B:1 } self-occurrence cap
+  2 = moderate  { 1B:2, 2B:1, 3B:1 }
+  3 = strict    { 1B:1, 2B:1, 3B:1 }
+  CLI: set loop_detect <mode>   (oder loop.detect fuer CommonCLI)
+
+
+--- scope_advert_auto (Wunschliste 13) ---
+  Geo-vs-Default Send-Hierarchie fuer eigene Adverts.
+  1 = off:    Default-Scope gewinnt immer; Geo wird nie verwendet.
+  2 = on  (Default): Geo als Fallback wenn Default leer.
+  3 = prefer: Geo gewinnt vor Default wenn ortliche Region != Default
+              (= altes scope_geo_prefers=1).
+  Migration aus altem scope_geo_prefers: 0 -> 2, 1 -> 3.
+  CLI: scope advert auto off|on|prefer
+
+
+--- scope_repeater_auto (Wunschliste 13) ---
+  Globaler Auto-Schalter fuer Repeat von scoped Paketen.
+  1 = off (alle auto-rep-Eintraege werden ignoriert; nur Pin + OFF zaehlen)
+  2 = on  (Default; auto-rep-Eintraege greifen wenn GPS in Bbox)
+  CLI: scope repeater auto on|off
+
+
+================================================================================
 Build-Status
 ================================================================================
 
