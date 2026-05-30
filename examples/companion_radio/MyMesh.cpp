@@ -5898,11 +5898,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage(line);
     const char* zh = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) ? "on" : "off";
     const char* nl = (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) ? "on" : "off";
-    snprintf(line, sizeof(line),
-             "autoadv: zerohop=%s nightly=%s  repeater=%s%s",
-             zh, nl,
-             _prefs.client_repeat ? "on" : "off",
-             _prefs.client_repeat_force ? " (force)" : "");
+    if (_prefs.client_repeat) {
+      // Wunschliste 26 D (User 2026-05-31): Mode + Force-Flag in einer
+      // Klammer. profile==1 -> 'full' (= 'normal' im Code), sonst
+      // 'defensive'. Bei aktiver Repeater-Funktion ist der Modus immer
+      // sinnvoll; bei off lassen wir die Klammer weg.
+      const char* prof = (_prefs.repeater_profile == 1) ? "full" : "defensive";
+      const char* frc  = _prefs.client_repeat_force ? ",force" : "";
+      snprintf(line, sizeof(line),
+               "autoadv: zerohop=%s nightly=%s  repeater=on (%s%s)",
+               zh, nl, prof, frc);
+    } else {
+      snprintf(line, sizeof(line),
+               "autoadv: zerohop=%s nightly=%s  repeater=off",
+               zh, nl);
+    }
     pushCompanionMessage(line);
     return;
   }
@@ -7994,27 +8004,33 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned long)n_recv_flood, (unsigned long)n_recv_direct);
     pushCompanionMessage(block);
 
-    // ---- Msg 1: heard direct nodes ----
+    // RX-Block (Wunschliste 26 D, 2026-05-31): vom User reorganisierte
+    // Reihenfolge fuer bessere Lesbarkeit. Werte zentral vorberechnet:
     uint32_t hd_total = 0;
     for (int t = 0; t < 5; t++) hd_total += _heard_direct[t];
-    p = snprintf(block, sizeof(block),
-                 "heard direct nodes:\n"
-                 "  rep=%u cmp=%u room=%u sns=%u\n"
-                 "  total=%lu",
-                 (unsigned)_heard_direct[ADV_TYPE_REPEATER],
-                 (unsigned)_heard_direct[ADV_TYPE_CHAT],
-                 (unsigned)_heard_direct[ADV_TYPE_ROOM],
-                 (unsigned)_heard_direct[ADV_TYPE_SENSOR],
-                 (unsigned long)hd_total);
-    append_rate_hint(block + p, sizeof(block) - p, hd_total, uptime_s);
-    pushCompanionMessage(block);
+    uint32_t ad_total = 0;
+    for (int t = 0; t < 5; t++) ad_total += _rx_advert_total[t];
+    uint32_t rxf_total = 0;
+    for (int pp = 0; pp < 16; pp++) rxf_total += _rx_flood_by_ptype[pp];
 
-    // ---- Msg 2: heard direct qual (SNR gut/mittel/schlecht) ----
+    // ---- 1) rx signal last heard (Noise/RSSI/SNR des letzten Empfangs) ----
+    {
+      int16_t noise_floor = (int16_t)_radio->getNoiseFloor();
+      int8_t  last_rssi   = (int8_t)radio_driver.getLastRSSI();
+      float   last_snr    = radio_driver.getLastSNR();
+      snprintf(block, sizeof(block),
+               "rx signal last heard:\n"
+               "  noise=%d dBm  rssi=%d dBm  snr=%.1f dB",
+               (int)noise_floor, (int)last_rssi, (double)last_snr);
+      pushCompanionMessage(block);
+    }
+
+    // ---- 2) rx direct qual (SNR gut/mittel/schlecht pro Typ) ----
     // Alle 4 Typen werden immer angezeigt (auch mit 0/0/0), damit klar ist
     // dass die Auswertung greift selbst wenn ein Typ noch nicht aufgetaucht
     // ist. Schwellen Q4: gut >= 0 dB, mittel >= -8 dB, schlecht < -8 dB.
     snprintf(block, sizeof(block),
-             "heard direct qual good/med/bad:\n"
+             "rx direct qual good/med/bad:\n"
              "  rep  %u / %u / %u\n"
              "  cmp  %u / %u / %u\n"
              "  room %u / %u / %u\n"
@@ -8033,36 +8049,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned)_heard_quality[ADV_TYPE_SENSOR][2]);
     pushCompanionMessage(block);
 
-    // ---- Msg 2b (NEU 2026-05-30): Radio-State (letzter Empfang) ----
-    {
-      int16_t noise_floor = (int16_t)_radio->getNoiseFloor();
-      int8_t  last_rssi   = (int8_t)radio_driver.getLastRSSI();
-      float   last_snr    = radio_driver.getLastSNR();
-      snprintf(block, sizeof(block),
-               "radio (letzter Empfang):\n"
-               "  noise=%d dBm  rssi=%d dBm  snr=%.1f dB",
-               (int)noise_floor, (int)last_rssi, (double)last_snr);
-      pushCompanionMessage(block);
-    }
-
-    // ---- Msg 3: rx adv (all hops) ----
-    uint32_t ad_total = 0;
-    for (int t = 0; t < 5; t++) ad_total += _rx_advert_total[t];
+    // ---- 3) rx direct nodes (zero-hop empfangen pro Adv-Typ) ----
     p = snprintf(block, sizeof(block),
-                 "rx adv:\n"
-                 "  all: rep=%u cmp=%u room=%u sns=%u\n"
+                 "rx direct nodes:\n"
+                 "  rep=%u cmp=%u room=%u sns=%u\n"
                  "  total=%lu",
-                 (unsigned)_rx_advert_total[ADV_TYPE_REPEATER],
-                 (unsigned)_rx_advert_total[ADV_TYPE_CHAT],
-                 (unsigned)_rx_advert_total[ADV_TYPE_ROOM],
-                 (unsigned)_rx_advert_total[ADV_TYPE_SENSOR],
-                 (unsigned long)ad_total);
-    append_rate_hint(block + p, sizeof(block) - p, ad_total, uptime_s);
+                 (unsigned)_heard_direct[ADV_TYPE_REPEATER],
+                 (unsigned)_heard_direct[ADV_TYPE_CHAT],
+                 (unsigned)_heard_direct[ADV_TYPE_ROOM],
+                 (unsigned)_heard_direct[ADV_TYPE_SENSOR],
+                 (unsigned long)hd_total);
+    append_rate_hint(block + p, sizeof(block) - p, hd_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- Msg 3b (Wunschliste 26 C): rx adv scoped/unscoped × Typ ----
-    // Zeigt ob Adverts mit Transport-Codes (Region/Channel-scoped) oder
-    // ohne (global flood) eintreffen. Adv-Typen identisch zu Msg 3.
+    // ---- 4) rx adv by scope+type (Wunschliste 26 C, alle Hops) ----
     snprintf(block, sizeof(block),
              "rx adv by scope+type:\n"
              "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
@@ -8077,11 +8077,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned)_rx_advert_by_scope[ADV_TYPE_SENSOR][0]);
     pushCompanionMessage(block);
 
-    // ---- Msg 3c (Wunschliste 26 C): heard direct scoped/unscoped × Typ ----
-    // Zero-hop Subset von Msg 3b. Aussagekraft: in unserer Funkreichweite
-    // wie viele Adverts pro Scope+Typ direkt empfangen.
+    // ---- 5) rx adv direct by scope+type (zero-hop Subset von #4) ----
     snprintf(block, sizeof(block),
-             "heard adv by scope+type (zero-hop):\n"
+             "rx adv direct by scope+type:\n"
              "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
              "  unscoped: rep=%u cmp=%u room=%u sns=%u",
              (unsigned)_heard_direct_by_scope[ADV_TYPE_REPEATER][1],
@@ -8094,9 +8092,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              (unsigned)_heard_direct_by_scope[ADV_TYPE_SENSOR][0]);
     pushCompanionMessage(block);
 
-    // ---- Msg 4: rx flood (alle Pakettypen, nur Flood-Forward-Pfad) ----
-    uint32_t rxf_total = 0;
-    for (int pp = 0; pp < 16; pp++) rxf_total += _rx_flood_by_ptype[pp];
+    // ---- 6) rx adv total (Summe aller empfangenen Adverts pro Typ) ----
+    p = snprintf(block, sizeof(block),
+                 "rx adv total:\n"
+                 "  all: rep=%u cmp=%u room=%u sns=%u\n"
+                 "  total=%lu",
+                 (unsigned)_rx_advert_total[ADV_TYPE_REPEATER],
+                 (unsigned)_rx_advert_total[ADV_TYPE_CHAT],
+                 (unsigned)_rx_advert_total[ADV_TYPE_ROOM],
+                 (unsigned)_rx_advert_total[ADV_TYPE_SENSOR],
+                 (unsigned long)ad_total);
+    append_rate_hint(block + p, sizeof(block) - p, ad_total, uptime_s);
+    pushCompanionMessage(block);
+
+    // ---- 7) rx flood (alle Pakettypen, nur Flood-Forward-Pfad) ----
     p = snprintf(block, sizeof(block),
                  "rx flood:\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
@@ -8113,18 +8122,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- Msg 4b (NEU 2026-05-30): rx (heard) total ----
-    // Summe der Pakete die WIR aktiv mitbekommen haben:
-    //   zero-hop Adverts (heard_direct) + non-advert flood-Pakete.
-    // Adverts werden NICHT doppelt gezaehlt -- in rx_flood enthaltene
-    // ADVERT-Pakete werden subtrahiert (zero-hop sind in heard_direct,
-    // multi-hop sind dann eben nicht "heard" sondern nur via Repeater).
+    // ---- 8) rx heard total (Pakete die WIR aktiv mitbekommen haben) ----
+    // = zero-hop Adverts (heard_direct) + non-advert flood-Pakete.
+    // Adverts werden NICHT doppelt gezaehlt -- die ADVERT-Eintraege in
+    // rx_flood werden subtrahiert (zero-hop sind in heard_direct, multi-
+    // hop kommen nur via Repeater bei uns an, das ist nicht 'heard').
     {
       uint32_t rxf_adv = _rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT];
       uint32_t non_adv_flood = (rxf_total > rxf_adv) ? rxf_total - rxf_adv : 0;
       uint32_t rx_heard_total = hd_total + non_adv_flood;
       p = snprintf(block, sizeof(block),
-                   "rx (heard) total:\n"
+                   "rx heard total:\n"
                    "  total=%lu",
                    (unsigned long)rx_heard_total);
       append_rate_hint(block + p, sizeof(block) - p, rx_heard_total, uptime_s);
