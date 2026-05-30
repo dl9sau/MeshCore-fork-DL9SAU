@@ -5608,8 +5608,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "messages")) {
         pushCompanionMessage(
-          "messages (no arg): Status pro Bucket.\n"
-          "Typen: public, hashtag, private, dm, companion."
+          "messages (no arg):\n"
+          "  Status pro bucket.\n"
+          "  2/8 zeigt: 2 neue\n"
+          "  Nachrichten von max 8.\n"
+          "Typen:\n"
+          "  public, hashtag,\n"
+          "  private, dm, companion."
         );
         pushCompanionMessage(
           "messages flash <type> on|off\n"
