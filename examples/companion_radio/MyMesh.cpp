@@ -4805,9 +4805,14 @@ void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
   pushDebugLog("[GEO-SCOPE] %s -> %s", ll, buf);
   // Zusätzlich im Companion-Channel anzeigen, damit die Info auch bei
   // verbundener App sichtbar wird (nicht nur im Debug-Protokoll-View).
-  char chat[256];
-  snprintf(chat, sizeof(chat), "GEO-SCOPE @ %s: %s", ll, buf);
-  pushCompanionMessage(chat);
+  // Wunschliste 21 (2026-05-30): durch logging-channel-Master-Switch
+  // gegated -- bei 'logging channel off' wird die Info-Push unterdrueckt
+  // (vorher kam sie auch bei trace-off + logging-usb-off durch).
+  if (!(_prefs.log_flags & 0x02)) {
+    char chat[256];
+    snprintf(chat, sizeof(chat), "GEO-SCOPE @ %s: %s", ll, buf);
+    pushCompanionMessage(chat);
+  }
 }
 
 // Helper-Implementation. Siehe Header fuer Format-Doku.
