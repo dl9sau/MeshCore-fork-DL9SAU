@@ -282,4 +282,13 @@ struct NodePrefs {  // persisted to file
   // DM (32). Indizes [PUB,HT,PRIV,DM,COMP].
   // CLI: messages limit <type> <N>
   uint8_t        msg_store_limit[5];
+
+  // Logging-Senken-Steuerung (Wunschliste 21, User-Wunsch 2026-05-30).
+  // INVERTIERTE Bit-Semantik damit Default 0 = beide an (backward-compat
+  // mit alten Prefs-Files ohne dieses Feld):
+  //   bit 0 = USB-Serial Output abschalten (pushDebugLog -> Serial)
+  //   bit 1 = $companion-Channel Output abschalten (traceCompanion-Pushes)
+  // App-Debug-Frame (PUSH_CODE_DEBUG_LOG) bleibt unbeeinflusst.
+  // CLI: logging usb|channel on|off ; 'logging' zeigt Status.
+  uint8_t        log_flags;
 };

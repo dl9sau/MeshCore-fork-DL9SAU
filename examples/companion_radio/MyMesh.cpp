@@ -5103,6 +5103,10 @@ bool MyMesh::dutyHardReached() const {
 
 void MyMesh::traceCompanion(uint16_t flag, const char* fmt, ...) {
   if ((_trace_flags & flag) == 0) return;
+  // Channel-Output Master-Switch (Wunschliste 21):
+  // _prefs.log_flags bit 1 = $companion-Output ABGESCHALTET.
+  // Default 0 = an. 'logging channel off' setzt bit 1.
+  if (_prefs.log_flags & 0x02) return;
   char buf[160];
   va_list ap;
   va_start(ap, fmt);
@@ -5225,7 +5229,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "uptime", "advert", "autoadv",
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
-    "messages", "clear",
+    "messages", "logging", "clear",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -5513,6 +5517,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "logging")) {
+        pushCompanionMessage(
+          "logging: Master-Switches fuer Debug-Output-Senken.\n"
+          "  logging                  zeigt Status"
+        );
+        pushCompanionMessage(
+          "  logging usb on|off       Serial/USB-Output\n"
+          "                           (Wichtig bei USB-Companion-Builds)"
+        );
+        pushCompanionMessage(
+          "  logging channel on|off   $companion-Channel-Output\n"
+          "                           (Trace-Kategorien gehen dort hin)"
+        );
+        pushCompanionMessage(
+          "Default beide on. App-Debug-Frame bleibt von 'usb off'\n"
+          "unbeeinflusst -- nur die Serial-Console wird stumm."
+        );
+        return;
+      }
       if (topic_prefix_match(topic, "messages")) {
         pushCompanionMessage(
           "messages (no arg): Status pro Bucket.\n"
@@ -5709,7 +5732,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     );
     pushCompanionMessage(
       "  prefs, set, get, clock, time, messages, "
-      "tempradio, clear, reboot."
+      "logging, tempradio, clear, reboot."
     );
     return;
   }
@@ -6918,6 +6941,59 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                          "  messages flash <type> on|off\n"
                          "  messages limit <type> <N>\n"
                          "  messages clear <type|all>");
+    return;
+  }
+
+  // ---------- logging [usb|channel] [on|off] ----------------------------
+  // Wunschliste 21 (User-Wunsch 2026-05-30):
+  //   logging                  Status
+  //   logging usb on|off       USB-Serial Output von pushDebugLog
+  //   logging channel on|off   $companion-Channel-Output von traceCompanion
+  // INVERTIERTE bit-Semantik in _prefs.log_flags damit Default 0 = beide an
+  // (backward-compat mit alten Prefs-Files).
+  if (starts_with_word(cmd, "logging")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    bool usb_on  = !(_prefs.log_flags & 0x01);
+    bool chan_on = !(_prefs.log_flags & 0x02);
+    if (!arg || *arg == 0) {
+      char block[200];
+      snprintf(block, sizeof(block),
+               "logging:\n"
+               "  usb     = %s\n"
+               "  channel = %s",
+               usb_on  ? "on" : "off",
+               chan_on ? "on" : "off");
+      pushCompanionMessage(block);
+      return;
+    }
+    // Sub-Befehl extrahieren
+    char sub[16];
+    size_t si = 0;
+    while (*arg && *arg != ' ' && si + 1 < sizeof(sub)) sub[si++] = *arg++;
+    sub[si] = 0;
+    while (*arg == ' ' || *arg == '\t') arg++;
+    int bit = -1;
+    if (strcmp(sub, "usb") == 0)     bit = 0;
+    else if (strcmp(sub, "channel") == 0) bit = 1;
+    else {
+      pushCompanionMessage("Usage: logging usb|channel on|off");
+      return;
+    }
+    int m = match_on_off(arg);
+    if (m < 0) {
+      pushCompanionMessage("on/off erwartet.");
+      return;
+    }
+    if (m == 1) {
+      _prefs.log_flags &= ~(uint8_t)(1 << bit);   // on = clear-bit
+    } else {
+      _prefs.log_flags |=  (uint8_t)(1 << bit);   // off = set-bit
+    }
+    savePrefs();
+    char r[80];
+    snprintf(r, sizeof(r), "OK - logging %s = %s.", sub, m ? "on" : "off");
+    pushCompanionMessage(r);
     return;
   }
 
@@ -9711,21 +9787,22 @@ void MyMesh::pushDebugLog(const char* fmt, ...) {
   int n = n_pref + n_body;
   if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
 
-  // Always to Serial -- jede '\n' im Buffer in '\r\n' uebersetzen, sonst
-  // bleibt der Cursor in seriellen Terminals (USB-Serial, putty, screen)
-  // in der vorherigen Spalte stehen und die Folge-Zeile haengt rechts
-  // angeklatscht raus statt am linken Rand zu beginnen. Funktioniert
-  // auch bei multiline-Logs (mehrere \n im Buffer). Doppel-CR vermeiden
-  // falls vor einem \n schon ein \r steht.
-  for (int i = 0; i < n; i++) {
-    if (buf[i] == '\n' && (i == 0 || buf[i - 1] != '\r')) {
-      Serial.write('\r');
+  // Serial-Output gated von _prefs.log_flags bit 0 (inverted: 1 = OFF).
+  // Default 0 = an. 'logging usb off' setzt bit 0 -- wichtig fuer
+  // zukuenftige USB-Companion-Builds wo Serial = App-Frame-Pfad ist
+  // und das Trace-Geblubber sonst die App-Frames korrumpieren wuerde.
+  // CRLF-Uebersetzung wie zuvor (LF -> CRLF, multiline-aware).
+  if (!(_prefs.log_flags & 0x01)) {
+    for (int i = 0; i < n; i++) {
+      if (buf[i] == '\n' && (i == 0 || buf[i - 1] != '\r')) {
+        Serial.write('\r');
+      }
+      Serial.write(buf[i]);
     }
-    Serial.write(buf[i]);
-  }
-  if (buf[n - 1] != '\n') {
-    Serial.write('\r');
-    Serial.write('\n');
+    if (buf[n - 1] != '\n') {
+      Serial.write('\r');
+      Serial.write('\n');
+    }
   }
 
   // Push to app debug log if connected. Frame: [PUSH_CODE][text bytes, no null].
