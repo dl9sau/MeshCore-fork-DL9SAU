@@ -462,8 +462,9 @@ private:
   struct DiscoverEntry {
     uint8_t pub_key[32];     // 32 byte voll oder 8 byte prefix + Rest 0
     uint8_t adv_type;        // ADV_TYPE_*
-    int8_t  their_snr_q4;    // ihre SNR-Sicht auf unseren REQ
+    int8_t  their_snr_q4;    // ihre SNR-Sicht auf unseren REQ (aus RESP-Payload)
     int8_t  our_snr_q4;      // unsere SNR-Sicht auf ihren RESP
+    int8_t  our_rssi_dbm;    // unsere RSSI-Sicht (dBm, int8); their_rssi nicht im Protokoll
     bool    full_pubkey;     // true wenn 32 byte, false wenn 8 byte prefix
   };
   static const int MAX_DISCOVER_ENTRIES = 16;
@@ -501,7 +502,10 @@ private:
                                 // wir den fuer den Legenden-Lookup
     bool     from_chain;        // true=chain-buffered, false=manual immediate-push
   };
-  static const int MAX_PENDING_REGIONS = 8;
+  // Limit 16 fuer Paritaet mit MAX_DISCOVER_ENTRIES (alle drei Strukturen
+  // -- CTL-Antworten, in-flight Tags, gebufferte ANON-RESPs -- sind im
+  // Chain-Modus 1:1 verbunden).
+  static const int MAX_PENDING_REGIONS = 16;
   PendingRegionsEntry _regions_pending[MAX_PENDING_REGIONS];
   uint8_t  _regions_pending_count;
   // Chain-mode Buffered-Responses (Aggregator)
@@ -510,7 +514,7 @@ private:
     int8_t   our_snr_q4;        // unsere SNR-Sicht der RESP
     char     csv[120];          // CSV der Regions vom Responder
   };
-  static const int MAX_COMPLETED_REGIONS = 12;
+  static const int MAX_COMPLETED_REGIONS = 16;
   CompletedRegionsEntry _regions_completed[MAX_COMPLETED_REGIONS];
   uint8_t  _regions_completed_count;
   // Flag: 'discover regions' (no args) hat CTL-Discover ausgeloest und
@@ -519,6 +523,14 @@ private:
   unsigned long _regions_chain_finalize_at;  // millis() Zeitpunkt fuer Aggregat
   bool sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name);
   void finalizeRegionsChain();
+  // Einheitlicher Legend-Entry fuer 'discover' (CTL-only) UND
+  // 'discover regions' (Chain mit Region-CSV). entry liefert
+  // SNR + role + name, csv_or_null fuegt ggf. Region-Info hinzu.
+  // verbose=true: zeigt raw SNR/RSSI-Werte (fuer 'discover')
+  // verbose=false: nur Quality-Klassifikation (fuer 'discover regions' chain)
+  void printRepeaterLegendEntry(const DiscoverEntry& entry,
+                                const CompletedRegionsEntry* csv_or_null,
+                                bool verbose);
   // Wunschliste 28: backup save -- schreibt zwei JSON-Bloecke nach
   // USB-Serial (DL9SAU prefs + node main).
   void backupSaveToSerial();

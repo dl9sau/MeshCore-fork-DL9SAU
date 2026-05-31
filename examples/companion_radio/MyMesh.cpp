@@ -2230,6 +2230,7 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   e.adv_type = node_type;
   e.their_snr_q4 = their_snr_q4;
   e.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
+  e.our_rssi_dbm = (int8_t)radio_driver.getLastRSSI();
 
   // Chain-Modus: 'discover regions' (no args) hat den CTL-REQ getriggert.
   // Pro REPEATER-RESP sofort eine zero-hop ANON_REQ_TYPE_REGIONS abfeuern.
@@ -2289,27 +2290,92 @@ static int dl9sau_bearing_deg(double lat1, double lon1, double lat2, double lon2
   return deg;
 }
 
+// Einheitlicher Legend-Entry (CTL + Chain teilen sich diesen Helper).
+// Pro Repeater eine kompakte Zeile unter 145 byte:
+//   "aabbcc Name [REP good +2.5/-3.0] 12km @45° (no regions response)"
+// 'csv_or_null' ist nur im Chain-Modus interessant -- NULL = wir haben
+// keinen Region-CSV fuer diesen Knoten.
+void MyMesh::printRepeaterLegendEntry(const DiscoverEntry& e,
+                                       const CompletedRegionsEntry* csv_or_null,
+                                       bool verbose) {
+  char prefix6[7];
+  for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", e.pub_key[j]);
+  prefix6[6] = 0;
+  ContactInfo* known = lookupContactByPubKey(
+      (const uint8_t*)e.pub_key, e.full_pubkey ? PUB_KEY_SIZE : 8);
+  const char* role = (e.adv_type == ADV_TYPE_REPEATER) ? "REP"
+                   : (e.adv_type == ADV_TYPE_SENSOR)   ? "SNS"
+                   : (e.adv_type == ADV_TYPE_CHAT)     ? "CMP"
+                   : (e.adv_type == ADV_TYPE_ROOM)     ? "ROOM" : "?";
+  // Quality: schlechtere der beiden SNR-Richtungen entscheidet
+  int8_t worse = (e.our_snr_q4 < e.their_snr_q4) ? e.our_snr_q4 : e.their_snr_q4;
+  const char* qual = (worse >= 0)   ? "good"
+                   : (worse >= -32) ? "mid"
+                   : "bad";
+  char dist_buf[32]; dist_buf[0] = 0;
+  bool have_my_gps = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
+  if (known && have_my_gps && (known->gps_lat != 0 || known->gps_lon != 0)) {
+    double their_lat = (double)known->gps_lat / 1000000.0;
+    double their_lon = (double)known->gps_lon / 1000000.0;
+    double km  = dl9sau_haversine_km(sensors.node_lat, sensors.node_lon,
+                                      their_lat, their_lon);
+    int    brg = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
+                                      their_lat, their_lon);
+    snprintf(dist_buf, sizeof(dist_buf), " %.0fkm @%d°", km, brg);
+  }
+  // 'no regions' nur wenn Chain-Modus aktiv UND wir haben keine CSV
+  const char* suffix = (_discover_regions_chained && !csv_or_null)
+                       ? " (no regions)" : "";
+  const char* name = known ? known->name : "unknown";
+  char line[160];
+  if (verbose) {
+    // Fuer 'discover': raw Werte mitausgeben. their=ihre RX unseres REQ,
+    // our=unsere RX ihrer RESP (SNR + RSSI). their RSSI ist im Protokoll
+    // nicht enthalten -- darum nur SNR-Wert fuer 'their'.
+    snprintf(line, sizeof(line),
+             "%s %.30s [%s %s] our=%+.1fdB/%ddBm their=%+.1fdB%s%s",
+             prefix6, name, role, qual,
+             (double)e.our_snr_q4 / 4.0, (int)e.our_rssi_dbm,
+             (double)e.their_snr_q4 / 4.0,
+             dist_buf, suffix);
+  } else {
+    // Fuer 'discover regions' chain: kompakt nur Quality-Klassifikation.
+    snprintf(line, sizeof(line),
+             "%s %.30s [%s %s]%s%s",
+             prefix6, name, role, qual, dist_buf, suffix);
+  }
+  pushCompanionMessage(line);
+}
+
 // Aggregator: alle bisherigen REGIONS-RESPs nach Region gruppieren und
 // als '#name (prefix1, prefix2, ...)' ausgeben, dann eine Legende mit
 // vollen Namen (falls in der Kontaktliste) + Entfernung/Bearing falls
 // GPS bekannt.
 void MyMesh::finalizeRegionsChain() {
-  if (_regions_completed_count == 0 && _regions_pending_count == 0) {
-    pushCompanionMessage("discover regions: keine Antworten in 30s.");
+  if (_discover_count == 0) {
+    pushCompanionMessage("discover regions: keine REPEATER gefunden.");
     _discover_regions_chained = false;
     _regions_chain_finalize_at = 0;
     return;
   }
+  // CSV-by-pubkey Lookup helper
+  auto find_csv = [&](const uint8_t* pk) -> const CompletedRegionsEntry* {
+    for (uint8_t i = 0; i < _regions_completed_count; i++) {
+      if (memcmp(_regions_completed[i].pubkey, pk, PUB_KEY_SIZE) == 0) {
+        return &_regions_completed[i];
+      }
+    }
+    return NULL;
+  };
   // Region-Aggregator
   struct AggRegion {
     char    name[28];
-    char    prefix_list[110];  // appended "aaaaaa, bbbbbb, ..."
+    char    prefix_list[110];
     uint8_t plen;
   };
   static const int MAX_AGG = 24;
   AggRegion agg[MAX_AGG];
   uint8_t agg_count = 0;
-
   auto find_or_add_region = [&](const char* nm, size_t nlen) -> int {
     for (uint8_t i = 0; i < agg_count; i++) {
       if (strlen(agg[i].name) == nlen && memcmp(agg[i].name, nm, nlen) == 0) return i;
@@ -2335,9 +2401,9 @@ void MyMesh::finalizeRegionsChain() {
     agg[idx].plen += (uint8_t)strlen(prefix6);
   };
 
-  // CSV parsen, Regions zuordnen
-  for (uint8_t e = 0; e < _regions_completed_count; e++) {
-    CompletedRegionsEntry& ce = _regions_completed[e];
+  // CSV parsen, Regions nach pubkey-prefix gruppieren
+  for (uint8_t i = 0; i < _regions_completed_count; i++) {
+    CompletedRegionsEntry& ce = _regions_completed[i];
     char prefix6[7];
     for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", ce.pubkey[j]);
     prefix6[6] = 0;
@@ -2356,55 +2422,35 @@ void MyMesh::finalizeRegionsChain() {
   }
 
   // Header
-  char hdr[120];
-  uint8_t still_pending = _regions_pending_count;
+  char hdr[140];
   snprintf(hdr, sizeof(hdr),
-           "discover regions: %u Antworten / %u offen.\n"
-           "Regionen:",
-           (unsigned)_regions_completed_count, (unsigned)still_pending);
+           "discover regions: %u REPEATER,\n"
+           "  %u mit Region-Antworten.",
+           (unsigned)_discover_count,
+           (unsigned)_regions_completed_count);
   pushCompanionMessage(hdr);
 
-  // Region-Tabelle (eine Zeile pro Region)
-  char line[180];
-  for (uint8_t i = 0; i < agg_count; i++) {
-    snprintf(line, sizeof(line), "#%s (%s)", agg[i].name, agg[i].prefix_list);
-    pushCompanionMessage(line);
-  }
-
-  // Legende mit vollen Namen + SNR-Quality + ggf. Distanz/Bearing
-  pushCompanionMessage("Legende:");
-  bool have_my_gps = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
-  for (uint8_t e = 0; e < _regions_completed_count; e++) {
-    CompletedRegionsEntry& ce = _regions_completed[e];
-    char prefix6[7];
-    for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", ce.pubkey[j]);
-    prefix6[6] = 0;
-    ContactInfo* known = lookupContactByPubKey(ce.pubkey, PUB_KEY_SIZE);
-    const char* nm = known ? known->name : "unknown";
-    // SNR-Quality (Q4-Schwellen wie bei rx direct qual)
-    const char* qual = (ce.our_snr_q4 >= 0)   ? "good"
-                     : (ce.our_snr_q4 >= -32) ? "mid"
-                     : "bad";
-    char dist_buf[40];
-    dist_buf[0] = 0;
-    if (known && have_my_gps && (known->gps_lat != 0 || known->gps_lon != 0)) {
-      double their_lat = (double)known->gps_lat / 1000000.0;
-      double their_lon = (double)known->gps_lon / 1000000.0;
-      double km  = dl9sau_haversine_km(sensors.node_lat, sensors.node_lon,
-                                        their_lat, their_lon);
-      int    brg = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
-                                        their_lat, their_lon);
-      snprintf(dist_buf, sizeof(dist_buf), " (%.1fkm, %d°)", km, brg);
+  // Region-Tabelle
+  if (agg_count > 0) {
+    pushCompanionMessage("Regionen:");
+    char line[160];
+    for (uint8_t i = 0; i < agg_count; i++) {
+      snprintf(line, sizeof(line), "#%s (%s)", agg[i].name, agg[i].prefix_list);
+      pushCompanionMessage(line);
     }
-    snprintf(line, sizeof(line),
-             "%s: %s (snr=%s)%s",
-             prefix6, nm, qual, dist_buf);
-    pushCompanionMessage(line);
   }
 
-  // Buffer leeren, chain-Status zuruecksetzen
+  // Legende: ALLE CTL-Antworten einschliesslich derer ohne Region-Antwort.
+  // Format kompakt, <145 Byte pro Zeile (siehe Helper).
+  pushCompanionMessage("Legende:");
+  for (uint8_t i = 0; i < _discover_count; i++) {
+    const DiscoverEntry& e = _discover_entries[i];
+    const CompletedRegionsEntry* c = find_csv(e.pub_key);
+    printRepeaterLegendEntry(e, c, /*verbose=*/false);
+  }
+
   _regions_completed_count = 0;
-  _regions_pending_count   = 0;  // verbleibende offene tags ignorieren
+  _regions_pending_count   = 0;
   _discover_regions_chained = false;
   _regions_chain_finalize_at = 0;
 }
@@ -2469,40 +2515,13 @@ void MyMesh::discoverFinishAndPrint() {
     pushCompanionMessage("discover: keine Antworten in 30s.");
     return;
   }
-  // Tabelle: pro Eintrag eine Zeile. Bekannte Kontakte mit Name, sonst
-  // pub_key-Prefix als Hex. tx_snr = unsere RX-Sicht, rx_snr = ihre RX-Sicht.
+  // Tabelle via gemeinsamem Legend-Helper (gleiche Format wie chain-
+  // Modus). Keine Region-CSV in diesem Pfad, daher 2. Arg = NULL.
   char header[80];
   snprintf(header, sizeof(header), "discover: %u Antworten:", (unsigned)_discover_count);
   pushCompanionMessage(header);
-  char line[200];
   for (uint8_t i = 0; i < _discover_count; i++) {
-    DiscoverEntry& e = _discover_entries[i];
-    // Bekannter Kontakt? -- nur bei full_pubkey verlaesslich; bei prefix
-    // matchen wir die ersten 8 byte.
-    ContactInfo* known = NULL;
-    if (e.full_pubkey) {
-      known = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
-    } else {
-      known = lookupContactByPubKey(e.pub_key, 8);
-    }
-    char id_str[40];
-    if (known) {
-      StrHelper::strzcpy(id_str, known->name, sizeof(id_str));
-    } else {
-      // pub_key Prefix in Hex (8 Bytes = 16 hex chars)
-      for (int j = 0; j < 8; j++) snprintf(id_str + j*2, 3, "%02x", e.pub_key[j]);
-      id_str[16] = 0;
-    }
-    const char* role = (e.adv_type == ADV_TYPE_REPEATER) ? "rep"
-                     : (e.adv_type == ADV_TYPE_SENSOR)   ? "sns"
-                     : (e.adv_type == ADV_TYPE_CHAT)     ? "cmp"
-                     : (e.adv_type == ADV_TYPE_ROOM)     ? "room" : "?";
-    snprintf(line, sizeof(line),
-             "  %-20s %s  tx_snr=%+.1f rx_snr=%+.1f",
-             id_str, role,
-             (double)e.our_snr_q4 / 4.0,
-             (double)e.their_snr_q4 / 4.0);
-    pushCompanionMessage(line);
+    printRepeaterLegendEntry(_discover_entries[i], NULL, /*verbose=*/true);
   }
 }
 
