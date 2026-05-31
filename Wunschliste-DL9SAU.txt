@@ -1563,29 +1563,38 @@ Bedingungen:
   - eigener advert-role egal (jeder darf fragen)
 
 
-Sub-Feature (b) -- Companion antwortet auf eingehende REQs [UNENTSCHIEDEN]
--------------------------------------------------------------------------
-Companion als full-Repeater (profile=normal + advert_role=repeater)
-koennte auf eingehende CTL_TYPE_NODE_DISCOVER_REQ antworten -- dann
-sind wir fuer andere als Repeater-Nachbar findbar.
+Sub-Feature (b) -- Companion antwortet auf REQs anderer Repeater [BAUEN]
+-----------------------------------------------------------------------
+Im full-repeater-mode (profile=normal + advert_role=repeater) soll sich
+der Companion gegenueber anderen Repeatern verhalten wie ein normaler
+Repeater. Das schliesst Antworten auf CTL_TYPE_NODE_DISCOVER_REQ ein --
+andere Repeater erwarten das vom Protokoll. Im full-repeater-mode ist
+die App ohnehin oft nicht verbunden; der Companion muss autonom
+funktionieren wie simple_repeater.
 
-Diskussion 2026-06-01: User-Entscheidung dass im full-repeater-mode
-die App vermutlich gar nicht verbunden ist, der Companion also
-autonom agieren koennen sollte. Damit waere (b) konsistent.
+User-Konsens 2026-06-01: ja, das passt zum Profil. Wenn wir uns als
+full-repeater advertisen, sollen wir uns auch wie einer benehmen.
 
-Bedingungen falls umgesetzt:
+Bedingungen fuer Respond-Pfad:
   - effectiveAdvertRole() == ADV_TYPE_REPEATER
   - _prefs.client_repeat != 0
   - _prefs.repeater_profile == 1 (normal/full)
-  - duty-cycle nicht ueber hard-limit
-  - Rate-Limit gegen Spam (z.B. analog discover_limiter(4, 120))
+  - duty-cycle Soft/Hard noch nicht erreicht
+  - Rate-Limit gegen Spam (analog discover_limiter(4, 120) in simple_
+    repeater)
   - filter aus REQ matched 1<<ADV_TYPE_REPEATER
 
-Aktuell unentschieden weil:
-  - Airtime-Kosten in dichtem Mesh nicht trivial (10 antwortende
-    Repeater = ~4 s Funkfeld dicht)
-  - Nutzen fuer User schmal (man wird "gefunden" -- braucht das ein
-    Companion-Repeater?)
-  - Im full-repeater-mode ist airtime ohnehin knapp
+Bewusst NICHT gegeben in defensive-Profile oder mit advert_role != REPEATER
+-- da spielen wir nicht "Repeater" und antworten daher nicht.
+
+Implementation: onControlDataRecv erweitern (MyMesh.cpp:2018) analog
+zu simple_repeater MyMesh.cpp:772-825. Pub_key + SNR + tag echo. Send
+via createControlData + sendZeroHop mit getRetransmitDelay*4 als Jitter.
+
+
+Implementations-Status (2026-06-01):
+  Beide Sub-Features sind bestaetigt zum Bauen. Reihenfolge:
+  - (a) Diagnose-CLI als naechstes konkret implementieren (User-Wunsch).
+  - (b) parallel oder direkt danach -- gehoert konzeptuell zusammen.
 
 Quelle: User-Anregung 2026-05-31 + Verfeinerung 2026-06-01.
