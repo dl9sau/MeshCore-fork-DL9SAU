@@ -5787,11 +5787,14 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
     if (val_type == 'n') {
       // Radio-Params: Restore landet im _prefs, aber das Radio bleibt
       // auf den Boot-Werten bis radio_set_params -- daher reboot empfohlen.
-      if (strcmp(key, "freq") == 0)                  { _prefs.freq                  = as_float();        _br_applied++; _br_reboot_recommended = true; return; }
-      if (strcmp(key, "sf") == 0)                    { _prefs.sf                    = (uint8_t)as_uint(); _br_applied++; _br_reboot_recommended = true; return; }
-      if (strcmp(key, "bw") == 0)                    { _prefs.bw                    = as_float();        _br_applied++; _br_reboot_recommended = true; return; }
-      if (strcmp(key, "cr") == 0)                    { _prefs.cr                    = (uint8_t)as_uint(); _br_applied++; _br_reboot_recommended = true; return; }
-      if (strcmp(key, "tx_power") == 0)              { _prefs.tx_power_dbm          = (int8_t)as_int();   _br_applied++; return; }
+      // Per-Feld-Debug-Print fuer Diagnose: User-Bugreport 2026-06-01
+      // 'cr=5 im Paste landet als 8 auf der App'. So sehen wir was beim
+      // Apply tatsaechlich rauskommt.
+      if (strcmp(key, "freq") == 0)                  { _prefs.freq                  = as_float();        _br_applied++; _br_reboot_recommended = true; Serial.print("\r\n# applied freq="); Serial.println(_prefs.freq, 4); return; }
+      if (strcmp(key, "sf") == 0)                    { _prefs.sf                    = (uint8_t)as_uint(); _br_applied++; _br_reboot_recommended = true; Serial.print("\r\n# applied sf="); Serial.println(_prefs.sf); return; }
+      if (strcmp(key, "bw") == 0)                    { _prefs.bw                    = as_float();        _br_applied++; _br_reboot_recommended = true; Serial.print("\r\n# applied bw="); Serial.println(_prefs.bw, 1); return; }
+      if (strcmp(key, "cr") == 0)                    { _prefs.cr                    = (uint8_t)as_uint(); _br_applied++; _br_reboot_recommended = true; Serial.print("\r\n# applied cr="); Serial.println(_prefs.cr); return; }
+      if (strcmp(key, "tx_power") == 0)              { _prefs.tx_power_dbm          = (int8_t)as_int();   _br_applied++; Serial.print("\r\n# applied tx_power="); Serial.println(_prefs.tx_power_dbm); return; }
       if (strcmp(key, "repeat") == 0)                { _prefs.client_repeat         = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps") == 0)                   { _prefs.gps_enabled           = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_interval") == 0)          { _prefs.gps_interval          = as_uint();          _br_applied++; return; }
