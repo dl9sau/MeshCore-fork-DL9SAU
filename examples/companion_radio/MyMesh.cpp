@@ -6502,7 +6502,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Identity (Reboot noetig!):\n"
           "  set prv.key <128 hex chars>\n"
-          "  set prv.key \"\"    (neu generieren)");
+          "  set prv.key NEW    (neu generieren)");
         pushCompanionMessage(
           "Hinweise: Lat/Lon Sued/West negativ.\n"
           "  freq MHz, bw kHz.\n"
@@ -8376,9 +8376,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // -- set prv.key <128 hex> oder "" (neu generieren) --
+    // -- set prv.key <128 hex> oder NEW (neu generieren) --
     // Identitaet wechseln. Reboot empfohlen (BLE-Pairing-Key, gecachte
     // Shared-Secrets). Analog CommonCLI/simple_repeater 'set prv.key'.
+    //
+    // Keyword 'NEW' (case-sensitive, GROSS) statt "" um iOS-Smart-Quotes-
+    // Probleme zu umgehen: iOS schreibt typografische Anfuehrungszeichen
+    // (U+201C/U+201D, 3 Byte UTF-8 jeweils) statt ASCII " -- da kam dann
+    // 'got 6 chars' raus. NEW (gross) signalisiert auch dass der User
+    // weiss was er tut (= alle bisherigen Kontakte koennen uns nicht mehr
+    // erreichen unter dem alten Pubkey).
     if (strcmp(key, "prv.key") == 0 || strcmp(key, "prv_key") == 0) {
       // Token aus RAW (case-sensitive, kein lower-case)
       const char* rp = raw_cmd;
@@ -8387,35 +8394,35 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       while (*rp == ' ' || *rp == '\t') rp++;
       while (*rp && *rp != ' ' && *rp != '\t') rp++;        // skip key
       while (*rp == ' ' || *rp == '\t') rp++;
-      // Trailing whitespace + ggf. ""-Quotes abstreifen
-      const char* hex_start = rp;
-      const char* hex_end = rp + strlen(rp);
-      while (hex_end > hex_start && (hex_end[-1] == ' ' || hex_end[-1] == '\t'
-                                      || hex_end[-1] == '\r' || hex_end[-1] == '\n')) hex_end--;
-      if (hex_end > hex_start && hex_start[0] == '"' && hex_end[-1] == '"') {
-        hex_start++;
-        if (hex_end > hex_start) hex_end--;
-      }
+      const char* arg_start = rp;
+      const char* arg_end = rp + strlen(rp);
+      while (arg_end > arg_start && (arg_end[-1] == ' ' || arg_end[-1] == '\t'
+                                      || arg_end[-1] == '\r' || arg_end[-1] == '\n')) arg_end--;
 
       mesh::LocalIdentity new_id;
-      if (hex_start == hex_end) {
-        // leer -> neu generieren
+      // Spezial-Keyword: NEW (case-sensitive, GROSS) -> neu generieren
+      size_t arg_len = (size_t)(arg_end - arg_start);
+      bool is_new_keyword = (arg_len == 3
+                             && arg_start[0] == 'N'
+                             && arg_start[1] == 'E'
+                             && arg_start[2] == 'W');
+      if (is_new_keyword) {
         new_id = mesh::LocalIdentity(getRNG());
       } else {
         size_t expected_hex = PRV_KEY_SIZE * 2;
-        if ((size_t)(hex_end - hex_start) != expected_hex) {
-          char e[100];
+        if (arg_len != expected_hex) {
+          char e[120];
           snprintf(e, sizeof(e),
                    "Usage: set prv.key <128 hex chars>\n"
-                   "       set prv.key \"\"  (neu generieren)\n"
+                   "       set prv.key NEW  (neu generieren)\n"
                    "(got %u chars)",
-                   (unsigned)(hex_end - hex_start));
+                   (unsigned)arg_len);
           pushCompanionMessage(e);
           return;
         }
         uint8_t prv_buf[PRV_KEY_SIZE];
         char buf_copy[PRV_KEY_SIZE * 2 + 1];
-        memcpy(buf_copy, hex_start, expected_hex);
+        memcpy(buf_copy, arg_start, expected_hex);
         buf_copy[expected_hex] = 0;
         if (!mesh::Utils::fromHex(prv_buf, PRV_KEY_SIZE, buf_copy)) {
           pushCompanionMessage("Fehler: ungueltige hex-Zeichen.");
