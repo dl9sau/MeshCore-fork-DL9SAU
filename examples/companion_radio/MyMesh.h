@@ -758,6 +758,32 @@ private:
   // Non-Advert DIRECT-typed Pakete werden bewusst NICHT gezaehlt
   // (User-Entscheidung: nicht relevant).
   uint16_t      _rx_direct_advert_by_role[5];
+
+  // Wunschliste 26 B (2026-05-31): rx-us Echo-Tracking.
+  // Wir merken uns 32 Hashes selbst-initiierter Sendungen und 128 Hashes
+  // repeateter Sendungen (4-Byte truncated MAX_HASH). Auf jedem empfangenen
+  // Flood-Paket (filterRecvFloodPacket -- laeuft VOR hasSeen-Dedup) wird
+  // gegen beide Sets gematched; Match -> entsprechender rx_us-Counter
+  // erhoeht. Aussagekraft: 'wie haeufig werden eigene Pakete weiter ins
+  // Netz hineingetragen' -- niedrig = wir sind isoliert, hoch = wir
+  // werden propagiert.
+  //
+  // Sizing-Rationale: ein vollausgenutzter Repeater (10% Airtime) kann ca.
+  // 720 Pakete/h repeaten (0.5s avg Sendung). 128 Slots decken so ~10 min
+  // Echo-Window ab. Self-initiated ist deutlich seltener (Adverts/User-
+  // Chat) -- 32 Slots decken viele Stunden ab.
+  uint32_t      _self_initiated_hashes[32];
+  uint8_t       _self_initiated_head;       // naechster Schreib-Index (ringbuffer)
+  uint32_t      _self_repeated_hashes[128];
+  uint8_t       _self_repeated_head;
+  uint16_t      _rx_us_self_initiated_count;  // Echo-Counter
+  uint16_t      _rx_us_repeated_count;
+  // Hash-Helper (4-Byte truncated MAX_HASH_SIZE=8).
+  uint32_t calcShortHash(const mesh::Packet* packet) const;
+  void     markSelfInitiated(const mesh::Packet* packet);
+  void     markSelfRepeated(const mesh::Packet* packet);
+  // Lookup-Resultat: 0=kein Match, 1=self-initiated, 2=repeated.
+  uint8_t  matchSelfHash(uint32_t h) const;
   // Wunschliste 26 D (2026-05-31): zusaetzliche path_len-Achse.
   // [ptype][0]=heard-direct (path_len==0), [ptype][1]=repeated (path_len>0).
   // Summe ist die alte _rx_flood_by_ptype-Semantik.

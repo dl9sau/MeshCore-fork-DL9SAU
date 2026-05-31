@@ -1066,7 +1066,56 @@ static const char* ptypeName(uint8_t pt) {
   }
 }
 
+// Wunschliste 26 B: 4-Byte truncated MAX_HASH (= SHA-Trunc) als
+// kompakte Identifizierung des Pakets. Kollisionswahrscheinlichkeit ueber
+// 128 Eintraege ~2^-25 -- vernachlaessigbar.
+uint32_t MyMesh::calcShortHash(const mesh::Packet* packet) const {
+  if (!packet) return 0;
+  uint8_t h[MAX_HASH_SIZE];
+  // calculatePacketHash ist const-ueblich aber im aufrufenden Code nicht
+  // immer const-zugaenglich -- cast.
+  const_cast<mesh::Packet*>(packet)->calculatePacketHash(h);
+  uint32_t hh;
+  memcpy(&hh, h, 4);
+  return hh;
+}
+
+void MyMesh::markSelfInitiated(const mesh::Packet* packet) {
+  uint32_t h = calcShortHash(packet);
+  if (h == 0) return;
+  _self_initiated_hashes[_self_initiated_head] = h;
+  _self_initiated_head = (uint8_t)((_self_initiated_head + 1) % 32);
+}
+
+void MyMesh::markSelfRepeated(const mesh::Packet* packet) {
+  uint32_t h = calcShortHash(packet);
+  if (h == 0) return;
+  _self_repeated_hashes[_self_repeated_head] = h;
+  _self_repeated_head = (uint8_t)((_self_repeated_head + 1) % 128);
+}
+
+uint8_t MyMesh::matchSelfHash(uint32_t h) const {
+  if (h == 0) return 0;
+  for (int i = 0; i < 32; i++) {
+    if (_self_initiated_hashes[i] == h) return 1;
+  }
+  for (int i = 0; i < 128; i++) {
+    if (_self_repeated_hashes[i] == h) return 2;
+  }
+  return 0;
+}
+
 bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
+  // Wunschliste 26 B: rx-us Echo-Tracking. filterRecvFloodPacket laeuft
+  // VOR der hasSeen-Dedup, also sehen wir hier auch Echos eigener Sendungen.
+  // Match gegen unsere self-sent/repeated Hash-Ringe.
+  uint32_t h = calcShortHash(packet);
+  uint8_t m = matchSelfHash(h);
+  if (m == 1 && _rx_us_self_initiated_count < 0xFFFF) {
+    _rx_us_self_initiated_count++;
+  } else if (m == 2 && _rx_us_repeated_count < 0xFFFF) {
+    _rx_us_repeated_count++;
+  }
   // REVISIT: try to determine which Region (from transport_codes[1]) that Sender is indicating for replies/responses
   //    if unknown, fallback to finding Region from transport_codes[0], the 'scope' used by Sender
   return false;
@@ -1263,6 +1312,9 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     if (ptype < 16 && _repeat_by_ptype[ptype] < 0xFFFF) {
       _repeat_by_ptype[ptype]++;
     }
+    // Wunschliste 26 B: Hash dieses Repeats in den self_repeated-Ring.
+    // Match in filterRecvFloodPacket erkennt Echos -> _rx_us_repeated_count.
+    markSelfRepeated(packet);
     // Geschaetzte Airtime des Repeats (vor TX, gleiche Formel wie an
     // anderen Stellen im Code: pathBytes + payload + 2 Header-Bytes).
     _tx_repeat_airtime_ms += _radio->getEstAirtimeFor(
@@ -2113,6 +2165,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(_rx_direct_advert_by_role, 0, sizeof(_rx_direct_advert_by_role));
   _last_advert_scoped = 0;
   _last_advert_route_direct = 0;
+  // Wunschliste 26 B: rx-us Echo-Tracking
+  memset(_self_initiated_hashes, 0, sizeof(_self_initiated_hashes));
+  memset(_self_repeated_hashes,  0, sizeof(_self_repeated_hashes));
+  _self_initiated_head = 0;
+  _self_repeated_head  = 0;
+  _rx_us_self_initiated_count = 0;
+  _rx_us_repeated_count       = 0;
   memset(_rx_flood_by_ptype,  0, sizeof(_rx_flood_by_ptype));
   memset(_repeat_by_ptype,    0, sizeof(_repeat_by_ptype));
   memset(_tx_total_by_ptype,  0, sizeof(_tx_total_by_ptype));
@@ -2491,6 +2550,14 @@ void MyMesh::applyPacketTxOverrides(const mesh::Packet* packet) {
   uint8_t pt = packet->getPayloadType();
   if (pt < 16 && _tx_total_by_ptype[pt] < 0xFFFF) {
     _tx_total_by_ptype[pt]++;
+  }
+  // Wunschliste 26 B: self-initiated Hash-Ring. Wenn der Hash schon im
+  // self_repeated-Ring liegt, ist's ein Repeat (in allowPacketForward
+  // bereits markiert) -- nicht erneut adden. Sonst self-initiated.
+  uint32_t h = calcShortHash(packet);
+  if (h != 0 && matchSelfHash(h) != 2) {
+    _self_initiated_hashes[_self_initiated_head] = h;
+    _self_initiated_head = (uint8_t)((_self_initiated_head + 1) % 32);
   }
   uint8_t flags = packet->tx_flags;
   if (flags == 0) return;
@@ -4981,6 +5048,12 @@ void MyMesh::clearStats() {
   memset(_rx_advert_by_scope,    0, sizeof(_rx_advert_by_scope));
   memset(_heard_direct_by_scope, 0, sizeof(_heard_direct_by_scope));
   memset(_rx_direct_advert_by_role, 0, sizeof(_rx_direct_advert_by_role));
+  // Wunschliste 26 B: rx-us Counter resetten. Hash-Ringe behalten wir
+  // bewusst -- die sind kurze rolling-windows und werden naturwuechsig
+  // ueberschrieben. Bei einem 'clear stats' direkt nach TX wuerden sonst
+  // legitime Echos der naechsten Sekunden verloren gehen.
+  _rx_us_self_initiated_count = 0;
+  _rx_us_repeated_count       = 0;
   // Duty-Sliding-Window — symmetrisch zur simple_repeater-Logik. Wirkt
   // wie ein 'Duty-Reset bei Stats-Clear', der User hat damit nach
   // 'clear stats' wieder volle 10%/h verfuegbar (was auch unfair sein
@@ -8259,6 +8332,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                    "  total=%lu",
                    (unsigned long)rx_heard_total);
       append_rate_hint(block + p, sizeof(block) - p, rx_heard_total, uptime_s);
+      pushCompanionMessage(block);
+    }
+
+    // ---- 8) rx us (Echo eigener Pakete im Mesh) -- Wunschliste 26 B ----
+    // Match-Hash-Ringe: 32 self-initiated + 128 repeated Slots (4-Byte
+    // truncated MAX_HASH). Hoch = unsere Pakete werden propagiert, niedrig
+    // = isoliert oder Echo-Ring zu klein. Bei vollausgelastetem Repeater
+    // deckt 128 Slots ca. 10 Min Echo-Window ab.
+    {
+      uint32_t rxu_self = _rx_us_self_initiated_count;
+      uint32_t rxu_rep  = _rx_us_repeated_count;
+      uint32_t rxu_tot  = rxu_self + rxu_rep;
+      p = snprintf(block, sizeof(block),
+                   "rx us (own echoes):\n"
+                   "  self-initiated = %lu\n"
+                   "  repeated       = %lu\n"
+                   "  total          = %lu",
+                   (unsigned long)rxu_self,
+                   (unsigned long)rxu_rep,
+                   (unsigned long)rxu_tot);
+      append_rate_hint(block + p, sizeof(block) - p, rxu_tot, uptime_s);
       pushCompanionMessage(block);
     }
 
