@@ -6815,6 +6815,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "discover")) {
+        pushCompanionMessage(
+          "discover [flags]: pro-aktiv REQ via sendZeroHop\n"
+          "an direkte Nachbarn. Sammelt RESPs 30s lang.");
+        pushCompanionMessage(
+          "Flags (kombinierbar, Reihenfolge egal):\n"
+          "  repeater - nur REPEATER\n"
+          "  sensor   - nur SENSOR\n"
+          "  all      - beide (Default)\n"
+          "  prefix   - kurze RESP (8B pub_key)");
+        pushCompanionMessage(
+          "Output-Tabelle: name|pubkey, role,\n"
+          "  tx_snr (unsere RX-Sicht ihrer RESP),\n"
+          "  rx_snr (ihre RX-Sicht unseres REQ).");
+        pushCompanionMessage(
+          "Rate-Limit: 60s zwischen 'discover'-Aufrufen.\n"
+          "Auch im client-mode verfuegbar.\n"
+          "Komplement: 'discoverable' (passiv, full-rep-mode).");
+        return;
+      }
       if (topic_prefix_match(topic, "tempradio")) {
         pushCompanionMessage(
           "tempradio: temporaere Funk-Parameter.\n"
@@ -8407,7 +8427,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* t = p;
       while (*p && *p != ' ' && *p != '\t') p++;
       size_t tlen = (size_t)(p - t);
-      if      (tlen == 4 && memcmp(t, "help", 4) == 0) {
+      if ((tlen == 4 && memcmp(t, "help", 4) == 0)
+          || (tlen == 1 && t[0] == '?')) {
         pushCompanionMessage("discover [flags]: REQ via sendZeroHop.");
         pushCompanionMessage("Flags (kombinierbar):\n"
                              "  repeater - nur REPEATER\n"
