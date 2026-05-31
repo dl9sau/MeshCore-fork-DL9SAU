@@ -2057,10 +2057,30 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
   return BaseChatMesh::onContactPathRecv(contact, in_path, in_path_len, out_path, out_path_len, extra_type, extra, extra_len);
 }
 
+// Wunschliste 27: CTL_TYPE_NODE_DISCOVER hooks.
+// Konstanten analog simple_repeater MyMesh.cpp:769-770.
+#define CTL_TYPE_NODE_DISCOVER_REQ   0x80
+#define CTL_TYPE_NODE_DISCOVER_RESP  0x90
+
 void MyMesh::onControlDataRecv(mesh::Packet *packet) {
   if (packet->payload_len + 4 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onControlDataRecv(), payload_len too long: %d", packet->payload_len);
     return;
+  }
+  // Wunschliste 27: NODE_DISCOVER REQ/RESP vorab abfangen, dann ggf.
+  // weiter an die App durchreichen (alte Default-Behavior).
+  if (packet->payload_len >= 1) {
+    uint8_t type_high = packet->payload[0] & 0xF0;
+    if (type_high == CTL_TYPE_NODE_DISCOVER_RESP) {
+      discoverHandleResp(packet);
+      // weiterleiten an App ist optional; wir behandeln den RESP
+      // lokal und droppen ihn nicht weiter -- die App soll diagnose-
+      // RESPs ja auch sehen koennen falls jemand mit App-CTL was macht.
+    } else if (type_high == CTL_TYPE_NODE_DISCOVER_REQ) {
+      // Responder-Logik
+      discoverHandleReq(packet);
+      // Auch hier nicht droppen -- App-CTL relay.
+    }
   }
   int i = 0;
   out_frame[i++] = PUSH_CODE_CONTROL_DATA;
@@ -2074,6 +2094,165 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
     _serial->writeFrame(out_frame, i);
   } else {
     MESH_DEBUG_PRINTLN("onControlDataRecv(), data received while app offline");
+  }
+}
+
+// Wunschliste 27 (a): Diagnose-Sender 'discover'.
+// Baut einen CTL_TYPE_NODE_DISCOVER_REQ und sendet ihn via sendZeroHop.
+void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
+  if (filter == 0) filter = (1 << ADV_TYPE_REPEATER) | (1 << ADV_TYPE_SENSOR);
+  // Rate-Limit: max 1 discover pro 60s damit User nicht selbst spammt.
+  if (!millisHasNowPassed(_discover_next_allowed_ms) && _discover_next_allowed_ms != 0) {
+    char r[80];
+    unsigned long left_ms = _discover_next_allowed_ms - millis();
+    snprintf(r, sizeof(r), "discover: rate-limited. %lu s noch.", left_ms / 1000);
+    pushCompanionMessage(r);
+    return;
+  }
+  // Tag generieren (random uint32). Eindeutig fuer Matching.
+  uint8_t tag_bytes[4];
+  getRNG()->random(tag_bytes, 4);
+  memcpy(&_discover_tag, tag_bytes, 4);
+
+  // Payload bauen
+  uint8_t data[10];
+  data[0] = CTL_TYPE_NODE_DISCOVER_REQ | (prefix_only ? 1 : 0);
+  data[1] = filter;
+  memcpy(&data[2], &_discover_tag, 4);
+  uint32_t since = 0;
+  memcpy(&data[6], &since, 4);
+
+  auto pkt = createControlData(data, sizeof(data));
+  if (!pkt) {
+    pushCompanionMessage("discover: createControlData FAILED (Packet-Pool voll?).");
+    return;
+  }
+  sendZeroHop(pkt);
+
+  // Listening-Window: 30 s
+  _discover_active = true;
+  _discover_count = 0;
+  _discover_expiry_ms = futureMillis(30000);
+  _discover_next_allowed_ms = futureMillis(60000);  // 60 s bis naechster discover
+
+  char r[120];
+  const char* what =
+      (filter == ((1 << ADV_TYPE_REPEATER) | (1 << ADV_TYPE_SENSOR))) ? "all"
+    : (filter == (1 << ADV_TYPE_REPEATER)) ? "REPEATER"
+    : (filter == (1 << ADV_TYPE_SENSOR))   ? "SENSOR"
+    : "custom";
+  snprintf(r, sizeof(r),
+           "discover: REQ sent (filter=%s%s).\n"
+           "Listening 30s, Tabelle folgt.",
+           what, prefix_only ? ", prefix" : "");
+  pushCompanionMessage(r);
+}
+
+void MyMesh::discoverHandleResp(mesh::Packet *packet) {
+  if (!_discover_active) return;
+  if (packet->payload_len < 6) return;
+  // Layout: [0]type|adv_type, [1]snr, [2..5]tag, [6..]pub_key
+  uint8_t node_type = packet->payload[0] & 0x0F;
+  int8_t  their_snr_q4 = (int8_t)packet->payload[1];
+  uint32_t echo_tag;
+  memcpy(&echo_tag, &packet->payload[2], 4);
+  if (echo_tag != _discover_tag) return;  // nicht zu unserem REQ
+  // Pub_key extrahieren (32 byte full ODER 8 byte prefix)
+  size_t pk_len = packet->payload_len - 6;
+  if (pk_len != 32 && pk_len != 8) return;
+  if (_discover_count >= MAX_DISCOVER_ENTRIES) return;
+  DiscoverEntry& e = _discover_entries[_discover_count++];
+  memset(e.pub_key, 0, sizeof(e.pub_key));
+  memcpy(e.pub_key, &packet->payload[6], pk_len);
+  e.full_pubkey = (pk_len == 32);
+  e.adv_type = node_type;
+  e.their_snr_q4 = their_snr_q4;
+  e.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
+}
+
+void MyMesh::discoverHandleReq(mesh::Packet *packet) {
+  // Wunschliste 27 (b): Responder. Nur im full-repeater-mode antworten.
+  if (_prefs.client_repeat == 0) return;
+  if (_prefs.repeater_profile != 1) return;             // nur normal/full
+  if (effectiveAdvertRole() != ADV_TYPE_REPEATER) return;
+  if (dutyHardReached()) return;
+  if (packet->payload_len < 6) return;
+  uint8_t filter = packet->payload[1];
+  if ((filter & (1 << ADV_TYPE_REPEATER)) == 0) return; // wir sind nicht gemeint
+
+  // Rate-Limit: max 4 RESPs pro 2-min Window (analog simple_repeater).
+  unsigned long now = millis();
+  if (_discover_resp_window_start_ms == 0
+      || (long)(now - _discover_resp_window_start_ms) > 120000) {
+    _discover_resp_window_start_ms = now;
+    _discover_resp_count_window = 0;
+  }
+  if (_discover_resp_count_window >= 4) return;
+  _discover_resp_count_window++;
+
+  bool prefix_only = (packet->payload[0] & 1) != 0;
+  uint32_t tag;
+  memcpy(&tag, &packet->payload[2], 4);
+
+  uint8_t data[6 + PUB_KEY_SIZE];
+  data[0] = CTL_TYPE_NODE_DISCOVER_RESP | ADV_TYPE_REPEATER;
+  data[1] = (uint8_t)(int8_t)(_radio->getLastSNR() * 4);  // unsere SNR-Sicht
+  memcpy(&data[2], &tag, 4);
+  memcpy(&data[6], self_id.pub_key, PUB_KEY_SIZE);
+  size_t resp_len = prefix_only ? (6 + 8) : (6 + PUB_KEY_SIZE);
+  auto resp = createControlData(data, resp_len);
+  if (resp) {
+    sendZeroHop(resp, getRetransmitDelay(resp) * 4);  // Jitter
+  }
+}
+
+void MyMesh::discoverFinishAndPrint() {
+  _discover_active = false;
+  if (_discover_count == 0) {
+    pushCompanionMessage("discover: keine Antworten in 30s.");
+    return;
+  }
+  // Tabelle: pro Eintrag eine Zeile. Bekannte Kontakte mit Name, sonst
+  // pub_key-Prefix als Hex. tx_snr = unsere RX-Sicht, rx_snr = ihre RX-Sicht.
+  char header[80];
+  snprintf(header, sizeof(header), "discover: %u Antworten:", (unsigned)_discover_count);
+  pushCompanionMessage(header);
+  char line[200];
+  for (uint8_t i = 0; i < _discover_count; i++) {
+    DiscoverEntry& e = _discover_entries[i];
+    // Bekannter Kontakt? -- nur bei full_pubkey verlaesslich; bei prefix
+    // matchen wir die ersten 8 byte.
+    ContactInfo* known = NULL;
+    if (e.full_pubkey) {
+      known = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
+    } else {
+      known = lookupContactByPubKey(e.pub_key, 8);
+    }
+    char id_str[40];
+    if (known) {
+      StrHelper::strzcpy(id_str, known->name, sizeof(id_str));
+    } else {
+      // pub_key Prefix in Hex (8 Bytes = 16 hex chars)
+      for (int j = 0; j < 8; j++) snprintf(id_str + j*2, 3, "%02x", e.pub_key[j]);
+      id_str[16] = 0;
+    }
+    const char* role = (e.adv_type == ADV_TYPE_REPEATER) ? "rep"
+                     : (e.adv_type == ADV_TYPE_SENSOR)   ? "sns"
+                     : (e.adv_type == ADV_TYPE_CHAT)     ? "cmp"
+                     : (e.adv_type == ADV_TYPE_ROOM)     ? "room" : "?";
+    snprintf(line, sizeof(line),
+             "  %-20s %s  tx_snr=%+.1f rx_snr=%+.1f",
+             id_str, role,
+             (double)e.our_snr_q4 / 4.0,
+             (double)e.their_snr_q4 / 4.0);
+    pushCompanionMessage(line);
+  }
+}
+
+void MyMesh::discoverLoop() {
+  if (!_discover_active) return;
+  if (millisHasNowPassed(_discover_expiry_ms)) {
+    discoverFinishAndPrint();
   }
 }
 
@@ -2219,6 +2398,15 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _br_skipped = 0;
   _br_errors = 0;
   _br_reboot_recommended = false;
+  // Wunschliste 27: CTL_TYPE_NODE_DISCOVER state
+  _discover_active = false;
+  _discover_count = 0;
+  _discover_tag = 0;
+  _discover_expiry_ms = 0;
+  _discover_next_allowed_ms = 0;
+  _discover_resp_window_start_ms = 0;
+  _discover_resp_count_window = 0;
+  memset(_discover_entries, 0, sizeof(_discover_entries));
   _last_advert_route_direct = 0;
   // Wunschliste 26 B: rx-us Echo-Tracking
   memset(_self_initiated_hashes, 0, sizeof(_self_initiated_hashes));
@@ -4037,6 +4225,9 @@ void MyMesh::loop() {
   updateDutyWindow();
 
   BaseChatMesh::loop();
+
+  // Wunschliste 27: discover-Listen-Window check
+  discoverLoop();
 
   // Wunschliste 28 Phase B: backup restore Serial-Read State-Machine.
   // Liest rohe USB-CDC bytes (Serial.*). Laeuft PARALLEL zum BLE-Frame-
@@ -6246,7 +6437,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
     "messages", "logging", "unscoped-channelmessages", "clear",
-    "contact", "backup", "save",
+    "contact", "backup", "save", "discover",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -6814,7 +7005,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     );
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
-      "  contact, backup, save, tempradio, clear, reboot."
+      "  contact, backup, save, discover, tempradio,\n"
+      "  clear, reboot."
     );
     return;
   }
@@ -8197,6 +8389,50 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Kontakts um, OHNE dass dieser dazu einen neuen Advert senden muss.
   // Damit laesst sich z.B. testen, ob die App weiterhin Chat anbietet wenn
   // ein Peer sich als SENSOR (oder REPEATER/ROOM) advertet.
+  // Wunschliste 27: 'discover' -- Diagnose-Sender fuer CTL_TYPE_NODE_DISCOVER.
+  // Sub-Optionen als Flags (Reihenfolge egal):
+  //   prefix    -> bittet um kurze RESP (8 byte pub_key statt 32)
+  //   repeater  -> filter nur REPEATER
+  //   sensor    -> filter nur SENSOR
+  //   all       -> beide (= Default)
+  if (starts_with_word(cmd, "discover")) {
+    uint8_t filter = 0;
+    bool prefix_only = false;
+    // Tokens parsen
+    const char* p = strchr(cmd, ' ');
+    while (p && *p) {
+      while (*p == ' ' || *p == '\t') p++;
+      if (!*p) break;
+      const char* t = p;
+      while (*p && *p != ' ' && *p != '\t') p++;
+      size_t tlen = (size_t)(p - t);
+      if      (tlen == 4 && memcmp(t, "help", 4) == 0) {
+        pushCompanionMessage("discover [flags]: REQ via sendZeroHop.");
+        pushCompanionMessage("Flags (kombinierbar):\n"
+                             "  repeater - nur REPEATER\n"
+                             "  sensor   - nur SENSOR\n"
+                             "  all      - beide (Default)\n"
+                             "  prefix   - kurze RESP (8B pub_key)");
+        pushCompanionMessage("Wartet 30s, dann Tabelle.\n"
+                             "Rate-Limit: 60s zwischen 'discover'.");
+        return;
+      }
+      else if (tlen == 6 && memcmp(t, "prefix", 6) == 0) prefix_only = true;
+      else if (tlen == 8 && memcmp(t, "repeater", 8) == 0) filter |= (1 << ADV_TYPE_REPEATER);
+      else if (tlen == 6 && memcmp(t, "sensor", 6) == 0)   filter |= (1 << ADV_TYPE_SENSOR);
+      else if (tlen == 3 && memcmp(t, "all", 3) == 0)      filter |= (1 << ADV_TYPE_REPEATER) | (1 << ADV_TYPE_SENSOR);
+      else {
+        char e[80];
+        snprintf(e, sizeof(e), "Unbekanntes Flag '%.*s'. 'discover help' fuer Optionen.",
+                 (int)tlen, t);
+        pushCompanionMessage(e);
+        return;
+      }
+    }
+    discoverStart(filter, prefix_only);
+    return;
+  }
+
   // Wunschliste 28: 'save' (Top-Level) -- Klar-Begriff. Persistiert die
   // gesamte NodePrefs-Struktur (DL9SAU + Main). Synonym zu 'prefs save'
   // ohne Namespace-Verwirrung. Speichert NICHT Channels/Contacts/Identity
