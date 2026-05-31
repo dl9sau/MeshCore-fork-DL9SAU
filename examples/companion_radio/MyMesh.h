@@ -444,9 +444,20 @@ private:
   bool isCompanionChannel(uint8_t channel_idx);
 
   // ===== Wunschliste 27: CTL_TYPE_NODE_DISCOVER =============================
-  // Diagnose-CLI 'discover' (Sender) + Responder im full-repeater-mode.
+  // Zwei separate Konzepte mit eigener Namens-Konvention:
+  //
+  //   discover*      -- WIR senden REQ, sammeln RESPs. PRO-AKTIV.
+  //                     Diagnose-CLI 'discover'. Im Client- und im
+  //                     Repeater-Mode verfuegbar. "ich gehe finden".
+  //
+  //   discoverable*  -- WIR antworten auf eingehende REQs. PASSIV.
+  //                     Nur aktiv im full-repeater-mode (profile=normal +
+  //                     advert_role=repeater). "ich bin auffindbar".
+  //
+  // Beide nutzen dasselbe Wire-Protokoll, sind aber konzeptuell verschieden.
+  //
   // Protokoll-Refresher (simple_repeater MyMesh.cpp:772-826):
-  //   REQ-Payload: [type|prefix_only][filter][tag×4][since×4] = 10 byte
+  //   REQ-Payload:  [type|prefix_only][filter][tag×4][since×4] = 10 byte
   //   RESP-Payload: [type|adv_type][snr][tag×4][pub_key×32 oder ×8] = 14/38 byte
   struct DiscoverEntry {
     uint8_t pub_key[32];     // 32 byte voll oder 8 byte prefix + Rest 0
@@ -456,21 +467,24 @@ private:
     bool    full_pubkey;     // true wenn 32 byte, false wenn 8 byte prefix
   };
   static const int MAX_DISCOVER_ENTRIES = 16;
+  // ---- (a) Sender 'discover*' ---------------------------------------------
   DiscoverEntry _discover_entries[MAX_DISCOVER_ENTRIES];
   uint8_t       _discover_count;
   uint32_t      _discover_tag;
   bool          _discover_active;
   unsigned long _discover_expiry_ms;
-  unsigned long _discover_next_allowed_ms; // rate-limit: 60 s ab letztem REQ
-  // Responder-Seite (sub-feature b)
-  unsigned long _discover_resp_window_start_ms;
-  uint8_t       _discover_resp_count_window;  // max 4 pro 2-min Window
-
+  unsigned long _discover_next_allowed_ms; // rate-limit: 60s seit letztem REQ
   void discoverStart(uint8_t filter, bool prefix_only);
   void discoverFinishAndPrint();
   void discoverHandleResp(mesh::Packet* packet);
-  void discoverHandleReq(mesh::Packet* packet);
   void discoverLoop();    // in main loop() -- prueft Expiry
+
+  // ---- (b) Responder 'discoverable*' --------------------------------------
+  // Rate-Limit auf Responder-Seite: max 4 RESPs pro 2-min Window
+  // (analog simple_repeater discover_limiter(4, 120)).
+  unsigned long _discoverable_window_start_ms;
+  uint8_t       _discoverable_count_window;
+  void discoverableHandleReq(mesh::Packet* packet);
   // Wunschliste 28: backup save -- schreibt zwei JSON-Bloecke nach
   // USB-Serial (DL9SAU prefs + node main).
   void backupSaveToSerial();

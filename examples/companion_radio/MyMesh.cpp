@@ -2077,8 +2077,8 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
       // lokal und droppen ihn nicht weiter -- die App soll diagnose-
       // RESPs ja auch sehen koennen falls jemand mit App-CTL was macht.
     } else if (type_high == CTL_TYPE_NODE_DISCOVER_REQ) {
-      // Responder-Logik
-      discoverHandleReq(packet);
+      // Responder-Logik (sub-feature b: 'discoverable')
+      discoverableHandleReq(packet);
       // Auch hier nicht droppen -- App-CTL relay.
     }
   }
@@ -2170,8 +2170,9 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   e.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
 }
 
-void MyMesh::discoverHandleReq(mesh::Packet *packet) {
-  // Wunschliste 27 (b): Responder. Nur im full-repeater-mode antworten.
+void MyMesh::discoverableHandleReq(mesh::Packet *packet) {
+  // Wunschliste 27 (b) 'discoverable': passive Antwort-Logik.
+  // Wir antworten nur wenn wir auch wirklich ein 'full repeater' sind.
   if (_prefs.client_repeat == 0) return;
   if (_prefs.repeater_profile != 1) return;             // nur normal/full
   if (effectiveAdvertRole() != ADV_TYPE_REPEATER) return;
@@ -2182,13 +2183,13 @@ void MyMesh::discoverHandleReq(mesh::Packet *packet) {
 
   // Rate-Limit: max 4 RESPs pro 2-min Window (analog simple_repeater).
   unsigned long now = millis();
-  if (_discover_resp_window_start_ms == 0
-      || (long)(now - _discover_resp_window_start_ms) > 120000) {
-    _discover_resp_window_start_ms = now;
-    _discover_resp_count_window = 0;
+  if (_discoverable_window_start_ms == 0
+      || (long)(now - _discoverable_window_start_ms) > 120000) {
+    _discoverable_window_start_ms = now;
+    _discoverable_count_window = 0;
   }
-  if (_discover_resp_count_window >= 4) return;
-  _discover_resp_count_window++;
+  if (_discoverable_count_window >= 4) return;
+  _discoverable_count_window++;
 
   bool prefix_only = (packet->payload[0] & 1) != 0;
   uint32_t tag;
@@ -2404,8 +2405,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _discover_tag = 0;
   _discover_expiry_ms = 0;
   _discover_next_allowed_ms = 0;
-  _discover_resp_window_start_ms = 0;
-  _discover_resp_count_window = 0;
+  _discoverable_window_start_ms = 0;
+  _discoverable_count_window = 0;
   memset(_discover_entries, 0, sizeof(_discover_entries));
   _last_advert_route_direct = 0;
   // Wunschliste 26 B: rx-us Echo-Tracking
