@@ -5287,8 +5287,17 @@ void MyMesh::backupRestoreStart() {
   _br_errors = 0;
   _br_reboot_recommended = false;
   _br_timeout_at = futureMillis(60000);  // 60 s
-  // Mit CRLF damit Terminal sauber bricht (manche USB-CDC-Konfigs
-  // schicken nur \n, was 'staircase'-Effekt in raw-modus terminals macht).
+  // RX-Buffer aufstocken damit ein 3-4 KB Paste-Burst nicht im
+  // USB-CDC-FIFO ueberlaeuft bevor wir drain'en koennen.
+  // (Default ist klein, ~256 byte.)
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  Serial.setRxBufferSize(4096);
+  // Echo-TX zuverlaessiger machen waehrend Restore -- 50 ms Timeout
+  // verhindert Echo-Drops bei Burst, ohne BLE-Disconnects zu
+  // riskieren (Restore ist kurz). Wird in finish() zurueckgesetzt.
+  Serial.setTxTimeoutMs(50);
+#endif
+  // Mit CRLF damit Terminal sauber bricht.
   Serial.print("\r\n# backup restore: waiting for BACKUP ... BEGIN/END markers.\r\n");
   Serial.print("# Paste backup content now. Ctrl-D = finish, 60 s timeout.\r\n");
   Serial.flush();
@@ -5325,6 +5334,11 @@ void MyMesh::backupRestoreFinish(const char* reason) {
   _br_block_type = 0;
   _br_line_len = 0;
   _br_json_len = 0;
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  // TX-Timeout zurueck auf 0 (non-blocking) damit BLE-Disconnects auf
+  // Powerbank-Betrieb nicht wiederkommen.
+  Serial.setTxTimeoutMs(0);
+#endif
 }
 
 void MyMesh::backupRestoreLoop() {
@@ -5375,7 +5389,8 @@ void MyMesh::backupRestoreLoop() {
             _br_brace_depth = 0;
             _br_in_string = false;
             _br_escape_next = false;
-            Serial.println("# DL9SAU PREFS block: reading JSON...");
+            Serial.print("\r\n# DL9SAU PREFS block: reading JSON...\r\n");
+            Serial.flush();
           } else if (strncmp(type_str, "NODE MAIN BEGIN ---", 19) == 0) {
             _br_block_type = 2;
             _br_state = BR_READING_JSON;
@@ -5383,7 +5398,8 @@ void MyMesh::backupRestoreLoop() {
             _br_brace_depth = 0;
             _br_in_string = false;
             _br_escape_next = false;
-            Serial.println("# NODE MAIN block: reading JSON...");
+            Serial.print("\r\n# NODE MAIN block: reading JSON...\r\n");
+            Serial.flush();
           }
           // andere Marker (z.B. END) ignorieren, bleiben in WAIT_MARKER
         }
@@ -5416,7 +5432,17 @@ void MyMesh::backupRestoreLoop() {
           _br_brace_depth--;
           if (_br_brace_depth == 0) {
             _br_json[_br_json_len] = 0;
+            uint16_t before_applied = _br_applied;
+            uint16_t before_errors  = _br_errors;
             backupRestoreParseBlock();
+            char dbg[80];
+            snprintf(dbg, sizeof(dbg),
+                     "\r\n# block parsed: applied+%u errors+%u (len=%u)\r\n",
+                     (unsigned)(_br_applied - before_applied),
+                     (unsigned)(_br_errors - before_errors),
+                     (unsigned)_br_json_len);
+            Serial.print(dbg);
+            Serial.flush();
             // Zurueck in Marker-Such-Modus fuer naechsten Block
             _br_state = BR_WAIT_MARKER;
             _br_block_type = 0;
