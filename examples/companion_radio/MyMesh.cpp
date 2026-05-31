@@ -6478,26 +6478,37 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (topic_prefix_match(topic, "set")) {
+        // Mehrere kurze Messages -- jede unter 145 Byte BLE-Wire-Limit.
+        // User-Feedback 2026-06-01: alte Version war ueberindentet und
+        // an mehreren Stellen abgeschnitten (App, Hinweise).
         pushCompanionMessage(
-          "set <key> <value>: persistente Settings setzen.");
+          "set <key> <value>: persistente Settings.");
         pushCompanionMessage(
-          "Radio:  freq sf bw cr tx_power\n"
+          "Radio: freq sf bw cr tx_power\n"
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
-          "Repeat:   repeat flood_max flood_max_adv_infra\n"
-          "          scope_regional_hops\n"
-          "          loop_detect (off|minimal|moderate|strict)\n"
-          "Delays:   rxdelay txdelay direct_txdelay\n"
+          "Repeat: repeat flood_max\n"
+          "  flood_max_adv_infra scope_regional_hops\n"
+          "  loop_detect (off|minimal|moderate|strict)");
+        pushCompanionMessage(
+          "Delays: rxdelay txdelay direct_txdelay\n"
           "Telemetry: telemetry_mode_base loc env\n"
-          "          airtime_factor rx_boosted_gain");
+          "  airtime_factor rx_boosted_gain");
         pushCompanionMessage(
-          "App:    name manual_add_contacts multi_acks autoadd_config\n"
-          "        autoadd_max_hops path_hash_mode buzzer_quiet\n"
-          "        owner_info (free-form, max 119 Zeichen, '|' -> Newline)");
+          "App: name manual_add_contacts multi_acks\n"
+          "  autoadd_config autoadd_max_hops\n"
+          "  path_hash_mode buzzer_quiet\n"
+          "  owner_info (max 119, '|' -> Newline)");
         pushCompanionMessage(
-          "Hinweise: Sued/West negativ (lat -10.5). freq MHz, bw kHz. "
-          "Delays = Faktor*Airtime (tx/direct 0..2, rx 0..20). "
-          "Aenderungen sofort applied + savePrefs.");
+          "Identity (Reboot noetig!):\n"
+          "  set prv.key <128 hex chars>\n"
+          "  set prv.key \"\"    (neu generieren)");
+        pushCompanionMessage(
+          "Hinweise: Lat/Lon Sued/West negativ.\n"
+          "  freq MHz, bw kHz.\n"
+          "  Delays = Faktor*Airtime\n"
+          "    (tx/dir 0..2, rx 0..20).\n"
+          "  Aenderungen sofort persistent.");
         return;
       }
       if (topic_prefix_match(topic, "get")) {
@@ -8361,6 +8372,74 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       StrHelper::strncpy(_prefs.node_name, clean, sizeof(_prefs.node_name));
       savePrefs();
       char r[80]; snprintf(r, sizeof(r), "OK - name = \"%s\"", _prefs.node_name);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // -- set prv.key <128 hex> oder "" (neu generieren) --
+    // Identitaet wechseln. Reboot empfohlen (BLE-Pairing-Key, gecachte
+    // Shared-Secrets). Analog CommonCLI/simple_repeater 'set prv.key'.
+    if (strcmp(key, "prv.key") == 0 || strcmp(key, "prv_key") == 0) {
+      // Token aus RAW (case-sensitive, kein lower-case)
+      const char* rp = raw_cmd;
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;        // skip "set"
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;        // skip key
+      while (*rp == ' ' || *rp == '\t') rp++;
+      // Trailing whitespace + ggf. ""-Quotes abstreifen
+      const char* hex_start = rp;
+      const char* hex_end = rp + strlen(rp);
+      while (hex_end > hex_start && (hex_end[-1] == ' ' || hex_end[-1] == '\t'
+                                      || hex_end[-1] == '\r' || hex_end[-1] == '\n')) hex_end--;
+      if (hex_end > hex_start && hex_start[0] == '"' && hex_end[-1] == '"') {
+        hex_start++;
+        if (hex_end > hex_start) hex_end--;
+      }
+
+      mesh::LocalIdentity new_id;
+      if (hex_start == hex_end) {
+        // leer -> neu generieren
+        new_id = mesh::LocalIdentity(getRNG());
+      } else {
+        size_t expected_hex = PRV_KEY_SIZE * 2;
+        if ((size_t)(hex_end - hex_start) != expected_hex) {
+          char e[100];
+          snprintf(e, sizeof(e),
+                   "Usage: set prv.key <128 hex chars>\n"
+                   "       set prv.key \"\"  (neu generieren)\n"
+                   "(got %u chars)",
+                   (unsigned)(hex_end - hex_start));
+          pushCompanionMessage(e);
+          return;
+        }
+        uint8_t prv_buf[PRV_KEY_SIZE];
+        char buf_copy[PRV_KEY_SIZE * 2 + 1];
+        memcpy(buf_copy, hex_start, expected_hex);
+        buf_copy[expected_hex] = 0;
+        if (!mesh::Utils::fromHex(prv_buf, PRV_KEY_SIZE, buf_copy)) {
+          pushCompanionMessage("Fehler: ungueltige hex-Zeichen.");
+          return;
+        }
+        if (!mesh::LocalIdentity::validatePrivateKey(prv_buf)) {
+          pushCompanionMessage("Fehler: ungueltiger private key.");
+          return;
+        }
+        new_id.readFrom(prv_buf, PRV_KEY_SIZE);
+      }
+      if (!_store->saveMainIdentity(new_id)) {
+        pushCompanionMessage("Fehler: saveMainIdentity FAILED.");
+        return;
+      }
+      self_id = new_id;
+      char hexbuf[17];
+      for (int i = 0; i < 8; i++) snprintf(hexbuf + i*2, 3, "%02x", self_id.pub_key[i]);
+      char r[160];
+      snprintf(r, sizeof(r),
+               "OK - prv.key gesetzt + saveIdentity.\n"
+               "neue pubkey-Praefix: %s...\n"
+               "Reboot zum vollen Wirken empfohlen.",
+               hexbuf);
       pushCompanionMessage(r);
       return;
     }
