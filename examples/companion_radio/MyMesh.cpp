@@ -8879,27 +8879,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             pushCompanionMessage(r);
             return;
           }
-          if (chosen.out_path_len != 0) {
-            char r[140];
-            snprintf(r, sizeof(r),
-                     "'%.30s' nicht direkter Nachbar\n"
-                     "(out_path_len=%u). regions geht\n"
-                     "protokoll-bedingt nur zero-hop.",
-                     chosen.name, (unsigned)chosen.out_path_len);
-            pushCompanionMessage(r);
-            return;
-          }
+          // Wir versuchen die zero-hop ANON_REQ unabhaengig von der
+          // gespeicherten Pfad-Info -- der Request geht eh als direct
+          // ohne Pfad raus und schadet dem Netz nicht. Bei nicht-
+          // direkten Kontakten wird zusaetzlich gewarnt; ob der Repeater
+          // unseren direkten Funkruf hoert, klaert sich dann praktisch.
+          bool not_direct = (chosen.out_path_len != 0);
+          bool path_unknown = (chosen.out_path_len == OUT_PATH_UNKNOWN);
           if (!sendRegionsQueryZeroHop(chosen.id.pub_key, chosen.name)) {
             pushCompanionMessage("discover regions: send FAILED.");
             return;
           }
-          char r[130];
+          char r[140];
           snprintf(r, sizeof(r),
-                   "discover regions @%.40s\n"
+                   "discover regions @%.40s:\n"
                    "  REQ gesendet (zero-hop).\n"
                    "  Antwort folgt im channel.",
                    chosen.name);
           pushCompanionMessage(r);
+          if (not_direct) {
+            const char* reason = path_unknown
+              ? "kein direkt-Heard in Kontaktliste"
+              : "geht in Kontaktliste ueber flood-Pfad";
+            char w[145];
+            snprintf(w, sizeof(w), "  Warnung: %s.", reason);
+            pushCompanionMessage(w);
+          }
           return;
         }
       }
