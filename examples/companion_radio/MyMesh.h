@@ -497,15 +497,28 @@ private:
   struct PendingRegionsEntry {
     uint32_t tag;
     char     name[32];          // contact name oder leer
-    uint8_t  pubkey_prefix[8];  // fuer Display falls name leer
+    uint8_t  pubkey[32];        // voller pubkey -- bei chain-mode brauchen
+                                // wir den fuer den Legenden-Lookup
+    bool     from_chain;        // true=chain-buffered, false=manual immediate-push
   };
   static const int MAX_PENDING_REGIONS = 8;
   PendingRegionsEntry _regions_pending[MAX_PENDING_REGIONS];
   uint8_t  _regions_pending_count;
+  // Chain-mode Buffered-Responses (Aggregator)
+  struct CompletedRegionsEntry {
+    uint8_t  pubkey[32];
+    int8_t   our_snr_q4;        // unsere SNR-Sicht der RESP
+    char     csv[120];          // CSV der Regions vom Responder
+  };
+  static const int MAX_COMPLETED_REGIONS = 12;
+  CompletedRegionsEntry _regions_completed[MAX_COMPLETED_REGIONS];
+  uint8_t  _regions_completed_count;
   // Flag: 'discover regions' (no args) hat CTL-Discover ausgeloest und
   // erwartet pro REPEATER-RESP einen automatischen ANON_REQ_TYPE_REGIONS.
-  bool     _discover_regions_chained;
+  bool          _discover_regions_chained;
+  unsigned long _regions_chain_finalize_at;  // millis() Zeitpunkt fuer Aggregat
   bool sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name);
+  void finalizeRegionsChain();
   // Wunschliste 28: backup save -- schreibt zwei JSON-Bloecke nach
   // USB-Serial (DL9SAU prefs + node main).
   void backupSaveToSerial();

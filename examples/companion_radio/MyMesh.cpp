@@ -2018,21 +2018,36 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     // App-Pfad zu stoeren.
     for (uint8_t i = 0; i < _regions_pending_count; i++) {
       if (_regions_pending[i].tag != tag) continue;
-      if (len > 8) {
-        char id_str[40];
-        if (_regions_pending[i].name[0]) {
-          StrHelper::strzcpy(id_str, _regions_pending[i].name, sizeof(id_str));
-        } else {
-          for (int j = 0; j < 8; j++) snprintf(id_str + j*2, 3, "%02x", _regions_pending[i].pubkey_prefix[j]);
-          id_str[16] = 0;
+      bool from_chain = _regions_pending[i].from_chain;
+      if (from_chain) {
+        // Chain-Modus: in den Completed-Buffer fuer spaeteren Aggregat-Output.
+        if (_regions_completed_count < MAX_COMPLETED_REGIONS && len > 8) {
+          CompletedRegionsEntry& ce = _regions_completed[_regions_completed_count++];
+          memcpy(ce.pubkey, _regions_pending[i].pubkey, PUB_KEY_SIZE);
+          ce.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
+          size_t csv_len = len - 8;
+          if (csv_len > sizeof(ce.csv) - 1) csv_len = sizeof(ce.csv) - 1;
+          memcpy(ce.csv, &data[8], csv_len);
+          ce.csv[csv_len] = 0;
         }
-        char buf[200];
-        size_t csv_len = len - 8;
-        if (csv_len > sizeof(buf) - 80) csv_len = sizeof(buf) - 80;
-        snprintf(buf, sizeof(buf),
-                 "discover regions @%s:\n  %.*s",
-                 id_str, (int)csv_len, (const char*)&data[8]);
-        pushCompanionMessage(buf);
+      } else {
+        // Manueller 'discover regions <name>': sofort pushen wie bisher.
+        if (len > 8) {
+          char id_str[40];
+          if (_regions_pending[i].name[0]) {
+            StrHelper::strzcpy(id_str, _regions_pending[i].name, sizeof(id_str));
+          } else {
+            for (int j = 0; j < 8; j++) snprintf(id_str + j*2, 3, "%02x", _regions_pending[i].pubkey[j]);
+            id_str[16] = 0;
+          }
+          char buf[200];
+          size_t csv_len = len - 8;
+          if (csv_len > sizeof(buf) - 80) csv_len = sizeof(buf) - 80;
+          snprintf(buf, sizeof(buf),
+                   "discover regions @%s:\n  %.*s",
+                   id_str, (int)csv_len, (const char*)&data[8]);
+          pushCompanionMessage(buf);
+        }
       }
       // Slot aus Ring entfernen (shift down)
       for (uint8_t j = i+1; j < _regions_pending_count; j++) {
@@ -2247,8 +2262,151 @@ bool MyMesh::sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* displa
   PendingRegionsEntry& e = _regions_pending[_regions_pending_count++];
   e.tag = tag;
   StrHelper::strzcpy(e.name, display_name ? display_name : "", sizeof(e.name));
-  memcpy(e.pubkey_prefix, pubkey32, 8);
+  memcpy(e.pubkey, pubkey32, PUB_KEY_SIZE);
+  e.from_chain = _discover_regions_chained;
   return true;
+}
+
+// Haversine-Distanz in km zwischen zwei lat/lon-Paaren (in degrees).
+static double dl9sau_haversine_km(double lat1, double lon1, double lat2, double lon2) {
+  const double R = 6371.0;
+  const double D2R = M_PI / 180.0;
+  double dlat = (lat2 - lat1) * D2R;
+  double dlon = (lon2 - lon1) * D2R;
+  double a = sin(dlat/2)*sin(dlat/2)
+           + cos(lat1*D2R) * cos(lat2*D2R) * sin(dlon/2)*sin(dlon/2);
+  return R * 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+}
+// Bearing (0..360 grad, 0=Nord, 90=Ost) von (lat1,lon1) nach (lat2,lon2).
+static int dl9sau_bearing_deg(double lat1, double lon1, double lat2, double lon2) {
+  const double D2R = M_PI / 180.0;
+  double dlon = (lon2 - lon1) * D2R;
+  double y = sin(dlon) * cos(lat2*D2R);
+  double x = cos(lat1*D2R)*sin(lat2*D2R)
+           - sin(lat1*D2R)*cos(lat2*D2R)*cos(dlon);
+  double brng = atan2(y, x) * 180.0 / M_PI;
+  int deg = ((int)(brng) % 360 + 360) % 360;
+  return deg;
+}
+
+// Aggregator: alle bisherigen REGIONS-RESPs nach Region gruppieren und
+// als '#name (prefix1, prefix2, ...)' ausgeben, dann eine Legende mit
+// vollen Namen (falls in der Kontaktliste) + Entfernung/Bearing falls
+// GPS bekannt.
+void MyMesh::finalizeRegionsChain() {
+  if (_regions_completed_count == 0 && _regions_pending_count == 0) {
+    pushCompanionMessage("discover regions: keine Antworten in 30s.");
+    _discover_regions_chained = false;
+    _regions_chain_finalize_at = 0;
+    return;
+  }
+  // Region-Aggregator
+  struct AggRegion {
+    char    name[28];
+    char    prefix_list[110];  // appended "aaaaaa, bbbbbb, ..."
+    uint8_t plen;
+  };
+  static const int MAX_AGG = 24;
+  AggRegion agg[MAX_AGG];
+  uint8_t agg_count = 0;
+
+  auto find_or_add_region = [&](const char* nm, size_t nlen) -> int {
+    for (uint8_t i = 0; i < agg_count; i++) {
+      if (strlen(agg[i].name) == nlen && memcmp(agg[i].name, nm, nlen) == 0) return i;
+    }
+    if (agg_count >= MAX_AGG) return -1;
+    int idx = agg_count++;
+    size_t cp = (nlen < sizeof(agg[idx].name) - 1) ? nlen : sizeof(agg[idx].name) - 1;
+    memcpy(agg[idx].name, nm, cp);
+    agg[idx].name[cp] = 0;
+    agg[idx].prefix_list[0] = 0;
+    agg[idx].plen = 0;
+    return idx;
+  };
+  auto append_prefix = [&](int idx, const char* prefix6) {
+    if (idx < 0) return;
+    size_t need = strlen(prefix6) + (agg[idx].plen > 0 ? 2 : 0);
+    if ((size_t)agg[idx].plen + need + 1 > sizeof(agg[idx].prefix_list)) return;
+    if (agg[idx].plen > 0) {
+      strcat(agg[idx].prefix_list, ", ");
+      agg[idx].plen += 2;
+    }
+    strcat(agg[idx].prefix_list, prefix6);
+    agg[idx].plen += (uint8_t)strlen(prefix6);
+  };
+
+  // CSV parsen, Regions zuordnen
+  for (uint8_t e = 0; e < _regions_completed_count; e++) {
+    CompletedRegionsEntry& ce = _regions_completed[e];
+    char prefix6[7];
+    for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", ce.pubkey[j]);
+    prefix6[6] = 0;
+    const char* p = ce.csv;
+    while (*p) {
+      while (*p && (*p == ' ' || *p == ',')) p++;
+      if (!*p) break;
+      const char* rs = p;
+      while (*p && *p != ',') p++;
+      size_t rlen = (size_t)(p - rs);
+      while (rlen > 0 && (rs[rlen-1] == ' ' || rs[rlen-1] == '\t')) rlen--;
+      if (rlen == 0) continue;
+      int idx = find_or_add_region(rs, rlen);
+      append_prefix(idx, prefix6);
+    }
+  }
+
+  // Header
+  char hdr[120];
+  uint8_t still_pending = _regions_pending_count;
+  snprintf(hdr, sizeof(hdr),
+           "discover regions: %u Antworten / %u offen.\n"
+           "Regionen:",
+           (unsigned)_regions_completed_count, (unsigned)still_pending);
+  pushCompanionMessage(hdr);
+
+  // Region-Tabelle (eine Zeile pro Region)
+  char line[180];
+  for (uint8_t i = 0; i < agg_count; i++) {
+    snprintf(line, sizeof(line), "#%s (%s)", agg[i].name, agg[i].prefix_list);
+    pushCompanionMessage(line);
+  }
+
+  // Legende mit vollen Namen + SNR-Quality + ggf. Distanz/Bearing
+  pushCompanionMessage("Legende:");
+  bool have_my_gps = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
+  for (uint8_t e = 0; e < _regions_completed_count; e++) {
+    CompletedRegionsEntry& ce = _regions_completed[e];
+    char prefix6[7];
+    for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", ce.pubkey[j]);
+    prefix6[6] = 0;
+    ContactInfo* known = lookupContactByPubKey(ce.pubkey, PUB_KEY_SIZE);
+    const char* nm = known ? known->name : "unknown";
+    // SNR-Quality (Q4-Schwellen wie bei rx direct qual)
+    const char* qual = (ce.our_snr_q4 >= 0)   ? "good"
+                     : (ce.our_snr_q4 >= -32) ? "mid"
+                     : "bad";
+    char dist_buf[40];
+    dist_buf[0] = 0;
+    if (known && have_my_gps && (known->gps_lat != 0 || known->gps_lon != 0)) {
+      double their_lat = (double)known->gps_lat / 1000000.0;
+      double their_lon = (double)known->gps_lon / 1000000.0;
+      double km  = dl9sau_haversine_km(sensors.node_lat, sensors.node_lon,
+                                        their_lat, their_lon);
+      int    brg = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
+                                        their_lat, their_lon);
+      snprintf(dist_buf, sizeof(dist_buf), " (%.1fkm, %d°)", km, brg);
+    }
+    snprintf(line, sizeof(line),
+             "%s: %s (snr=%s)%s",
+             prefix6, nm, qual, dist_buf);
+    pushCompanionMessage(line);
+  }
+
+  // Buffer leeren, chain-Status zuruecksetzen
+  _regions_completed_count = 0;
+  _regions_pending_count   = 0;  // verbleibende offene tags ignorieren
+  _discover_regions_chained = false;
+  _regions_chain_finalize_at = 0;
 }
 
 void MyMesh::discoverableHandleReq(mesh::Packet *packet) {
@@ -2290,19 +2448,21 @@ void MyMesh::discoverableHandleReq(mesh::Packet *packet) {
 
 void MyMesh::discoverFinishAndPrint() {
   _discover_active = false;
-  // Chain-Modus: keine CTL-Tabelle ausgeben, weil das Hauptinteresse die
-  // Regions-Responses sind (die kommen einzeln per onContactResponse).
-  // Nur Info wieviele REQs abgeschickt wurden.
+  // Chain-Modus: keine CTL-Tabelle ausgeben. Stattdessen Hinweis dass
+  // die ANON-REQs abgesetzt wurden und in 30s ein Aggregat erscheint.
+  // _discover_regions_chained bleibt TRUE bis finalizeRegionsChain
+  // (wir brauchen es im RESP-Pfad fuer from_chain-Klassifikation; aber
+  // sendRegionsQueryZeroHop sieht es nur waehrend dieses CTL-Loops).
   if (_discover_regions_chained) {
-    _discover_regions_chained = false;
-    char r[120];
+    char r[140];
     snprintf(r, sizeof(r),
-             "discover regions chain: %u REPEATER gefunden,\n"
-             "  %u ANON-REQs abgesetzt.\n"
-             "Antworten folgen einzeln.",
+             "discover regions chain: %u REPEATER,\n"
+             "  %u ANON-REQs offen.\n"
+             "Aggregat in 30s (oder nach Abschluss).",
              (unsigned)_discover_count,
              (unsigned)_regions_pending_count);
     pushCompanionMessage(r);
+    _regions_chain_finalize_at = futureMillis(30000);
     return;
   }
   if (_discover_count == 0) {
@@ -2347,9 +2507,15 @@ void MyMesh::discoverFinishAndPrint() {
 }
 
 void MyMesh::discoverLoop() {
-  if (!_discover_active) return;
-  if (millisHasNowPassed(_discover_expiry_ms)) {
-    discoverFinishAndPrint();
+  if (_discover_active) {
+    if (millisHasNowPassed(_discover_expiry_ms)) {
+      discoverFinishAndPrint();
+    }
+  }
+  // Chain-Aggregat-Finalize: separater Timer nach CTL-Window-Ende
+  if (_regions_chain_finalize_at != 0
+      && millisHasNowPassed(_regions_chain_finalize_at)) {
+    finalizeRegionsChain();
   }
 }
 
@@ -2507,7 +2673,10 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _last_anon_req_type = 0;
   memset(_regions_pending, 0, sizeof(_regions_pending));
   _regions_pending_count = 0;
+  memset(_regions_completed, 0, sizeof(_regions_completed));
+  _regions_completed_count = 0;
   _discover_regions_chained = false;
+  _regions_chain_finalize_at = 0;
   _last_advert_route_direct = 0;
   // Wunschliste 26 B: rx-us Echo-Tracking
   memset(_self_initiated_hashes, 0, sizeof(_self_initiated_hashes));
