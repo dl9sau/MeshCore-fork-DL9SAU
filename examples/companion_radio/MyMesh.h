@@ -488,8 +488,24 @@ private:
 
   // ---- (c) ANON-Regions-Discovery: bei ANON_REQ_TYPE_REGIONS-CMD von der
   //          App den Typ merken, beim Response ggf. CSV in $companion pushen.
-  //          Auch als CLI 'discover regions <contact-prefix>'.
+  //          Auch als CLI 'discover regions' (Chain) und 'discover regions
+  //          <contact-prefix>' (direkt).
   uint8_t _last_anon_req_type;
+  // Multi-Tag-Tracking fuer parallele eigene REGIONS-Queries (CLI- und
+  // Chain-getriggert). Notwendig weil pending_req nur 1 outstanding tag
+  // halten kann, der Chain aber N parallele REQs verschickt.
+  struct PendingRegionsEntry {
+    uint32_t tag;
+    char     name[32];          // contact name oder leer
+    uint8_t  pubkey_prefix[8];  // fuer Display falls name leer
+  };
+  static const int MAX_PENDING_REGIONS = 8;
+  PendingRegionsEntry _regions_pending[MAX_PENDING_REGIONS];
+  uint8_t  _regions_pending_count;
+  // Flag: 'discover regions' (no args) hat CTL-Discover ausgeloest und
+  // erwartet pro REPEATER-RESP einen automatischen ANON_REQ_TYPE_REGIONS.
+  bool     _discover_regions_chained;
+  bool sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name);
   // Wunschliste 28: backup save -- schreibt zwei JSON-Bloecke nach
   // USB-Serial (DL9SAU prefs + node main).
   void backupSaveToSerial();

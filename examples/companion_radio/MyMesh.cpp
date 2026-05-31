@@ -2012,12 +2012,40 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     memcpy(&out_frame[i], &data[4], len - 4);
     i += (len - 4);
     _serial->writeFrame(out_frame, i);
-  } else if (len > 4 && tag == pending_req) {  // check for matching response tag
+  } else if (len > 4) {
+    // Wunschliste 27c: erst unseren eigenen Ring (Multi-Tag) pruefen,
+    // damit Chain-/Manual-CLI Antworten in $companion landen ohne den
+    // App-Pfad zu stoeren.
+    for (uint8_t i = 0; i < _regions_pending_count; i++) {
+      if (_regions_pending[i].tag != tag) continue;
+      if (len > 8) {
+        char id_str[40];
+        if (_regions_pending[i].name[0]) {
+          StrHelper::strzcpy(id_str, _regions_pending[i].name, sizeof(id_str));
+        } else {
+          for (int j = 0; j < 8; j++) snprintf(id_str + j*2, 3, "%02x", _regions_pending[i].pubkey_prefix[j]);
+          id_str[16] = 0;
+        }
+        char buf[200];
+        size_t csv_len = len - 8;
+        if (csv_len > sizeof(buf) - 80) csv_len = sizeof(buf) - 80;
+        snprintf(buf, sizeof(buf),
+                 "discover regions @%s:\n  %.*s",
+                 id_str, (int)csv_len, (const char*)&data[8]);
+        pushCompanionMessage(buf);
+      }
+      // Slot aus Ring entfernen (shift down)
+      for (uint8_t j = i+1; j < _regions_pending_count; j++) {
+        _regions_pending[j-1] = _regions_pending[j];
+      }
+      _regions_pending_count--;
+      return;  // nicht an App weiterleiten -- wir initiierten
+    }
+    if (tag != pending_req) return;
+    // App-getriggerter ANON_REQ-Response-Pfad
     pending_req = 0;
 
-    // Wunschliste 27c: bei ANON_REQ_TYPE_REGIONS auch in $companion mit
-    // ausgeben (CSV der aktiven Repeat-Scopes des befragten Repeaters).
-    // Layout: data[0..3]=tag, data[4..7]=remote RTC, data[8..]=payload.
+    // App-Mirror: ANON_REQ_TYPE_REGIONS vom App-Outgoing -> $companion
     if (_last_anon_req_type == ANON_REQ_TYPE_REGIONS && len > 8) {
       char buf[200];
       size_t csv_len = len - 8;
@@ -2187,6 +2215,40 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   e.adv_type = node_type;
   e.their_snr_q4 = their_snr_q4;
   e.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
+
+  // Chain-Modus: 'discover regions' (no args) hat den CTL-REQ getriggert.
+  // Pro REPEATER-RESP sofort eine zero-hop ANON_REQ_TYPE_REGIONS abfeuern.
+  // Sensors koennen REGIONS-Antworten nicht handhaben -- skip.
+  if (_discover_regions_chained && e.full_pubkey && e.adv_type == ADV_TYPE_REPEATER) {
+    ContactInfo* known = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
+    sendRegionsQueryZeroHop(e.pub_key, known ? known->name : "");
+  }
+}
+
+bool MyMesh::sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name) {
+  if (_regions_pending_count >= MAX_PENDING_REGIONS) return false;
+  // Temp ContactInfo. Nur die Felder die sendAnonReq braucht:
+  //   id.pub_key (fuer createAnonDatagram + ECDH shared_secret)
+  //   out_path_len = 0 -> sendAnonReq nimmt sendDirect mit empty path
+  //   = ROUTE_TYPE_DIRECT, zero-hop. Genau was wir wollen.
+  ContactInfo tmp;
+  memset(&tmp, 0, sizeof(tmp));
+  memcpy(tmp.id.pub_key, pubkey32, PUB_KEY_SIZE);
+  tmp.out_path_len = 0;
+  // Payload: [ts×4][type×1][reply_path_meta×1] -- meta=0 = zero-hop reply
+  uint8_t req_data[6];
+  uint32_t ts = getRTCClock()->getCurrentTime();
+  memcpy(req_data, &ts, 4);
+  req_data[4] = ANON_REQ_TYPE_REGIONS;
+  req_data[5] = 0x00;
+  uint32_t tag, est_timeout;
+  int result = sendAnonReq(tmp, req_data, sizeof(req_data), tag, est_timeout);
+  if (result == MSG_SEND_FAILED) return false;
+  PendingRegionsEntry& e = _regions_pending[_regions_pending_count++];
+  e.tag = tag;
+  StrHelper::strzcpy(e.name, display_name ? display_name : "", sizeof(e.name));
+  memcpy(e.pubkey_prefix, pubkey32, 8);
+  return true;
 }
 
 void MyMesh::discoverableHandleReq(mesh::Packet *packet) {
@@ -2228,6 +2290,21 @@ void MyMesh::discoverableHandleReq(mesh::Packet *packet) {
 
 void MyMesh::discoverFinishAndPrint() {
   _discover_active = false;
+  // Chain-Modus: keine CTL-Tabelle ausgeben, weil das Hauptinteresse die
+  // Regions-Responses sind (die kommen einzeln per onContactResponse).
+  // Nur Info wieviele REQs abgeschickt wurden.
+  if (_discover_regions_chained) {
+    _discover_regions_chained = false;
+    char r[120];
+    snprintf(r, sizeof(r),
+             "discover regions chain: %u REPEATER gefunden,\n"
+             "  %u ANON-REQs abgesetzt.\n"
+             "Antworten folgen einzeln.",
+             (unsigned)_discover_count,
+             (unsigned)_regions_pending_count);
+    pushCompanionMessage(r);
+    return;
+  }
   if (_discover_count == 0) {
     pushCompanionMessage("discover: keine Antworten in 30s.");
     return;
@@ -2428,6 +2505,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _discoverable_count_window = 0;
   memset(_discover_entries, 0, sizeof(_discover_entries));
   _last_anon_req_type = 0;
+  memset(_regions_pending, 0, sizeof(_regions_pending));
+  _regions_pending_count = 0;
+  _discover_regions_chained = false;
   _last_advert_route_direct = 0;
   // Wunschliste 26 B: rx-us Echo-Tracking
   memset(_self_initiated_hashes, 0, sizeof(_self_initiated_hashes));
@@ -6856,9 +6936,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  tx_snr (unsere RX-Sicht ihrer RESP),\n"
           "  rx_snr (ihre RX-Sicht unseres REQ).");
         pushCompanionMessage(
-          "discover regions <contact-prefix>:\n"
-          "  ANON_REQ an Kontakt, CSV der Repeat-Scopes\n"
-          "  landet automatisch im $companion.");
+          "discover regions:\n"
+          "  Ohne Arg: CTL-Discover + zero-hop ANON-REQ\n"
+          "  pro REPEATER-RESP -- alle direkten Repeater\n"
+          "  Region-Listen kommen einzeln in $companion.\n"
+          "  Mit <contact-prefix>: direkte Anfrage zero-hop.\n"
+          "  (Multi-hop nicht unterstuetzt: ANON_REQ_TYPE_REGIONS\n"
+          "  wird per Protokoll nur direct-routed angenommen.)");
         pushCompanionMessage(
           "Rate-Limit: 60s zwischen 'discover'-Aufrufen.\n"
           "Auch im client-mode verfuegbar.\n"
@@ -8472,6 +8556,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             prefix_buf[pi++] = *rp++;
           }
           prefix_buf[pi] = 0;
+          // Wenn kein Name angegeben: Chain-Modus -- CTL-Discover triggern,
+          // pro REPEATER-RESP automatisch zero-hop ANON_REQ_TYPE_REGIONS.
+          if (!pi) {
+            _discover_regions_chained = true;
+            // CTL-REQ mit REPEATER-Filter (Sensors handhaben keine REGIONS).
+            // full pubkey (kein prefix) damit wir die ANON-REQ-Empfaenger
+            // ECDH-verschluesseln koennen.
+            discoverStart((1 << ADV_TYPE_REPEATER), false);
+            return;
+          }
           ContactInfo* c = searchContactsByPrefix(prefix_buf);
           if (!c) {
             char r[80];
@@ -8479,23 +8573,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             pushCompanionMessage(r);
             return;
           }
-          // ANON_REQ-Payload: [ts×4][type×1]
-          uint8_t req_data[5];
-          uint32_t ts = getRTCClock()->getCurrentTime();
-          memcpy(req_data, &ts, 4);
-          req_data[4] = ANON_REQ_TYPE_REGIONS;
-          uint32_t tag, est_timeout;
-          int result = sendAnonReq(*c, req_data, sizeof(req_data), tag, est_timeout);
-          if (result == MSG_SEND_FAILED) {
-            pushCompanionMessage("discover regions: sendAnonReq FAILED.");
+          // Nur zero-hop-Nachbarn (out_path_len==0) werden direkt unterstuetzt.
+          // Multi-hop wuerde Reverse-Path-Wissen erfordern, das wir nicht
+          // speichern. Upstream simple_repeater akzeptiert ohnehin nur
+          // isRouteDirect()-Requests -- flood wuerde stillschweigend
+          // gedroppt.
+          if (c->out_path_len != 0) {
+            pushCompanionMessage(
+              "discover regions: kein direkter Nachbar.\n"
+              "Kontakt ueber Repeater erreichbar oder Path noch nicht\n"
+              "entdeckt -- ANON-REQ_TYPE_REGIONS funktioniert protokoll-\n"
+              "bedingt nur zero-hop-direct.");
             return;
           }
-          clearPendingReqs();
-          pending_req = tag;
-          _last_anon_req_type = ANON_REQ_TYPE_REGIONS;
+          if (!sendRegionsQueryZeroHop(c->id.pub_key, c->name)) {
+            pushCompanionMessage("discover regions: send FAILED (Ring voll oder Packet-Pool leer).");
+            return;
+          }
           char r[120];
           snprintf(r, sizeof(r),
-                   "discover regions @%s: REQ gesendet.\n"
+                   "discover regions @%s: REQ gesendet (zero-hop).\n"
                    "Antwort folgt automatisch im channel.",
                    c->name);
           pushCompanionMessage(r);
