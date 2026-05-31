@@ -6923,30 +6923,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "discover")) {
         pushCompanionMessage(
-          "discover [flags]: pro-aktiv REQ via sendZeroHop\n"
-          "an direkte Nachbarn. Sammelt RESPs 30s lang.");
+          "discover [flags]:\n"
+          "  pro-aktiv CTL-REQ via sendZeroHop\n"
+          "  an direkte Nachbarn. 30s Tabelle.");
         pushCompanionMessage(
           "Flags (kombinierbar, Reihenfolge egal):\n"
           "  repeater - nur REPEATER\n"
           "  sensor   - nur SENSOR\n"
-          "  all      - 0xFE (forward-compat)\n"
-          "  prefix   - kurze RESP (8B pub_key)");
+          "  all      - 0xFE (forward-compat)");
         pushCompanionMessage(
-          "Output-Tabelle: name|pubkey, role,\n"
-          "  tx_snr (unsere RX-Sicht ihrer RESP),\n"
-          "  rx_snr (ihre RX-Sicht unseres REQ).");
+          "  prefix   - kurze RESP (8B pub_key)\n"
+          "Output: name|pubkey, role, tx_snr, rx_snr.");
         pushCompanionMessage(
-          "discover regions:\n"
-          "  Ohne Arg: CTL-Discover + zero-hop ANON-REQ\n"
-          "  pro REPEATER-RESP -- alle direkten Repeater\n"
-          "  Region-Listen kommen einzeln in $companion.\n"
-          "  Mit <contact-prefix>: direkte Anfrage zero-hop.\n"
-          "  (Multi-hop nicht unterstuetzt: ANON_REQ_TYPE_REGIONS\n"
-          "  wird per Protokoll nur direct-routed angenommen.)");
+          "discover regions (ohne Arg):\n"
+          "  CTL-Discover REPEATER, dann\n"
+          "  zero-hop ANON-REQ pro RESP.\n"
+          "  Region-Listen einzeln in $companion.");
         pushCompanionMessage(
-          "Rate-Limit: 60s zwischen 'discover'-Aufrufen.\n"
-          "Auch im client-mode verfuegbar.\n"
-          "Komplement: 'discoverable' (passiv, full-rep-mode).");
+          "discover regions <name-prefix>:\n"
+          "  Namesuche, zero-hop direkt.\n"
+          "  Nur direkte Nachbarn (protokoll-bedingt:\n"
+          "  ANON_REQ_TYPE_REGIONS nur isRouteDirect).");
+        pushCompanionMessage(
+          "Rate-Limit: 60s zwischen Aufrufen.\n"
+          "Client + Repeater-Mode.\n"
+          "Komplement: 'discoverable' (passiv, full-rep).");
         return;
       }
       if (topic_prefix_match(topic, "tempradio")) {
@@ -8545,9 +8546,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           while (*rp == ' ' || *rp == '\t') rp++;
           while (*rp && *rp != ' ' && *rp != '\t') rp++;          // "regions"
           while (*rp == ' ' || *rp == '\t') rp++;
+          // Kein Arg = Chain-Modus: CTL-Discover REPEATER triggern,
+          // pro RESP automatisch zero-hop ANON_REQ_TYPE_REGIONS. full
+          // pubkey (kein prefix) damit wir ECDH-verschluesseln koennen.
           if (!*rp) {
-            pushCompanionMessage(
-              "Usage: discover regions <contact-name-prefix>");
+            _discover_regions_chained = true;
+            discoverStart((1 << ADV_TYPE_REPEATER), false);
             return;
           }
           char prefix_buf[32];
@@ -8556,16 +8560,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             prefix_buf[pi++] = *rp++;
           }
           prefix_buf[pi] = 0;
-          // Wenn kein Name angegeben: Chain-Modus -- CTL-Discover triggern,
-          // pro REPEATER-RESP automatisch zero-hop ANON_REQ_TYPE_REGIONS.
-          if (!pi) {
-            _discover_regions_chained = true;
-            // CTL-REQ mit REPEATER-Filter (Sensors handhaben keine REGIONS).
-            // full pubkey (kein prefix) damit wir die ANON-REQ-Empfaenger
-            // ECDH-verschluesseln koennen.
-            discoverStart((1 << ADV_TYPE_REPEATER), false);
-            return;
-          }
           ContactInfo* c = searchContactsByPrefix(prefix_buf);
           if (!c) {
             char r[80];
@@ -8612,14 +8606,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       size_t tlen = (size_t)(p - t);
       if ((tlen == 4 && memcmp(t, "help", 4) == 0)
           || (tlen == 1 && t[0] == '?')) {
-        pushCompanionMessage("discover [flags]: REQ via sendZeroHop.");
-        pushCompanionMessage("Flags (kombinierbar):\n"
-                             "  repeater - nur REPEATER\n"
-                             "  sensor   - nur SENSOR\n"
-                             "  all      - beide (Default)\n"
-                             "  prefix   - kurze RESP (8B pub_key)");
-        pushCompanionMessage("Wartet 30s, dann Tabelle.\n"
-                             "Rate-Limit: 60s zwischen 'discover'.");
+        // Pro pushCompanionMessage <= ~120 Byte (App haengt 'Sender: '
+        // Prefix vor, BLE-Wire-Limit 145).
+        pushCompanionMessage(
+          "discover [flags]:\n"
+          "  pro-aktiv CTL-REQ via sendZeroHop\n"
+          "  an direkte Nachbarn. 30s Tabelle.");
+        pushCompanionMessage(
+          "Flags (kombinierbar, Reihenfolge egal):\n"
+          "  repeater - nur REPEATER\n"
+          "  sensor   - nur SENSOR\n"
+          "  all      - 0xFE (forward-compat)");
+        pushCompanionMessage(
+          "  prefix   - kurze RESP (8B pub_key)\n"
+          "Rate-Limit: 60s zwischen 'discover'.");
+        pushCompanionMessage(
+          "discover regions (ohne Arg):\n"
+          "  CTL-Discover REPEATER, dann\n"
+          "  zero-hop ANON-REQ pro RESP.\n"
+          "  Region-Listen einzeln in $companion.");
+        pushCompanionMessage(
+          "discover regions <name-prefix>:\n"
+          "  Namesuche, zero-hop direkt.\n"
+          "  Nur direkte Nachbarn (protokoll-bedingt).");
+        pushCompanionMessage(
+          "Komplement 'discoverable':\n"
+          "  passive Antwort im full-rep-mode.");
         return;
       }
       else if (tlen == 6 && memcmp(t, "prefix", 6) == 0) prefix_only = true;
