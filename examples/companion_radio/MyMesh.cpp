@@ -2100,7 +2100,12 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
 // Wunschliste 27 (a): Diagnose-Sender 'discover'.
 // Baut einen CTL_TYPE_NODE_DISCOVER_REQ und sendet ihn via sendZeroHop.
 void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
-  if (filter == 0) filter = (1 << ADV_TYPE_REPEATER) | (1 << ADV_TYPE_SENSOR);
+  // Default = ALLE Adv-Type-Bits (forward-kompatibel falls die Spec
+  // jemals CHAT/ROOM responder hinzubekommt). Bit 0 (= ADV_TYPE_NONE)
+  // bleibt 0 -- sinnlos. Heute antworten nur REPEATER + SENSOR;
+  // simple_repeater/simple_sensor pruefen jeweils nur ihr eigenes Bit
+  // mit '(filter & (1<<TYPE)) != 0', stoeren also nicht an anderen Bits.
+  if (filter == 0) filter = 0xFE;
   // Rate-Limit: max 1 discover pro 60s damit User nicht selbst spammt.
   if (!millisHasNowPassed(_discover_next_allowed_ms) && _discover_next_allowed_ms != 0) {
     char r[80];
@@ -2137,7 +2142,7 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
 
   char r[120];
   const char* what =
-      (filter == ((1 << ADV_TYPE_REPEATER) | (1 << ADV_TYPE_SENSOR))) ? "all"
+      (filter == 0xFE) ? "all"
     : (filter == (1 << ADV_TYPE_REPEATER)) ? "REPEATER"
     : (filter == (1 << ADV_TYPE_SENSOR))   ? "SENSOR"
     : "custom";
@@ -8462,7 +8467,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else if (tlen == 6 && memcmp(t, "prefix", 6) == 0) prefix_only = true;
       else if (tlen == 8 && memcmp(t, "repeater", 8) == 0) filter |= (1 << ADV_TYPE_REPEATER);
       else if (tlen == 6 && memcmp(t, "sensor", 6) == 0)   filter |= (1 << ADV_TYPE_SENSOR);
-      else if (tlen == 3 && memcmp(t, "all", 3) == 0)      filter |= (1 << ADV_TYPE_REPEATER) | (1 << ADV_TYPE_SENSOR);
+      else if (tlen == 3 && memcmp(t, "all", 3) == 0)      filter |= 0xFE;
       else {
         char e[80];
         snprintf(e, sizeof(e), "Unbekanntes Flag '%.*s'. 'discover help' fuer Optionen.",
