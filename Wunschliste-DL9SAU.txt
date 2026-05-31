@@ -1605,3 +1605,102 @@ Implementations-Status (2026-06-01):
   - (b) parallel oder direkt danach -- gehoert konzeptuell zusammen.
 
 Quelle: User-Anregung 2026-05-31 + Verfeinerung 2026-06-01.
+
+
+================================================================================
+28. backup / restore -- prefs + node-mirror via USB-Serial JSON
+================================================================================
+
+Problem 2026-06-01:
+  DL9SAU-prefs und App-Mirror (set/get) sind ueber Zeit angewachsen
+  (Wunschliste 7/8/11/13/19/21/24 ...). Normale Firmware-Flashes
+  behalten die LittleFS-Inhalte (prefs + channels + contacts) bei.
+  ABER:
+    - bei 'erase flash' / Vollloeschung (z.B. fuer Fresh-Install)
+      gehen sie verloren.
+    - bei Geraetewechsel (defekt, Upgrade) muss alles neu angelegt
+      werden.
+  Aktuell muss man jeden Wert von Hand neu setzen.
+
+Idee:
+  Backup via USB-Serial. 145-Byte-BLE-Limit ist fuer das volle Set
+  zu eng. Format JSON damit Ende der Eingabe automatisch erkennbar
+  (Klammern-Balance). USB-Serial weil per cut+paste vom Terminal
+  trivial zu speichern und wieder einzuspielen.
+
+CLI:
+  backup
+    Info-Output: erklaert dass save/restore via USB-Serial laeuft,
+    listet die Sub-Befehle.
+
+  backup save
+    Schreibt ZWEI separate JSON-Bloecke nach USB-Serial:
+      1) DL9SAU-prefs   (== 'prefs all' Inhalt als JSON)
+      2) Node-Mirror    (== 'get all' Inhalt als JSON)
+    Mit klaren Marker-Linien begin/end damit der User die Bloecke
+    voneinander abgrenzen kann.
+    Header pro Block: Firmware-Version + Build-Zeit + Node-Pubkey-
+    Prefix fuer Forensik bei misslungenem Restore.
+
+    'all'-Variante bewusst gewaehlt (NICHT non-default-only): bleibt
+    nach Restore das exakte Verhalten erhalten auch wenn sich
+    Firmware-Defaults aendern. Trade-off: laengere Ausgabe.
+
+  backup restore
+    Schaltet Firmware in JSON-Read-Modus.
+    Schreibt Hinweis nach USB-Serial:
+      "waiting for backup JSON, paste now..."
+    Liest bytes von Serial.read() bis Klammern-Balance erreicht
+    (count('{') == count('}'), ohne in Strings zu zaehlen).
+    Tolerant gegen CR/LF/CRLF.
+    Pro Block: erst parsen, dann zur Laufzeit anwenden auf _prefs.
+    KEIN savePrefs / saveChannels automatisch -- runtime only.
+    User entscheidet danach ob persistent (ueber existierende
+    save-Pfade) oder nur testen.
+
+    Spezifik:
+    - Wenn nur prefs-JSON gepasted: nur DL9SAU-prefs wiederhergestellt.
+    - Wenn nur node-mirror-JSON: nur set/get-Werte.
+    - Beide moeglich (concat). Konflikt-frei -- verschiedene Felder.
+    - Bei Parse-Fail oder Range-Fail: bleibt in read-mode, User kann
+      erneut paste machen.
+    - Erfolg / Fail Meldung am Ende mit Count "applied N fields,
+      skipped M, errors E".
+    - Timeout (z.B. 60 s ohne weiteren Input) -> abort + Meldung.
+
+Implementation-Skizze:
+  Save: pro Feld eine JSON-Zeile generieren. Wiederverwendung der
+        existierenden Emit-Funktionen aus prefs/get-all-Code.
+  Restore: minimaler JSON-Parser nur fuer flache Objekte (kein
+           Nesting, kein Array). Lookup Schluessel auf bekannte
+           Feldnamen, Value-Parse (string/int/float/bool).
+           ArduinoJson-Lib pruefen ob im Build verfuegbar (~5 KB
+           Flash-Overhead, sonst hand-rolled ~100 LoC).
+
+Open Points:
+  - JSON-Parser: ArduinoJson vs hand-rolled.
+  - USB-Serial Read-Loop: muss non-blocking sein, Watchdog
+    respektieren. State-Machine in loop() bis read-mode beendet.
+  - log_flags: USB-Output muss enabled sein damit der User die Ausgabe
+    sieht. Backup save soll forciert ueber Serial schreiben unabhaengig
+    von log_flags? Oder klare Fehlermeldung wenn (log_flags & 0x01)==0
+    und User-Aufforderung "logging usb on" vorher?
+  - $companion-Channel sollte den read-mode-Status anzeigen
+    (Sichtbarkeit fuer User der nur App offen hat ohne Terminal).
+  - Format der Marker-Linien: Vorschlag
+      --- BACKUP DL9SAU PREFS BEGIN ---
+      { ... }
+      --- BACKUP DL9SAU PREFS END ---
+      --- BACKUP NODE MIRROR BEGIN ---
+      { ... }
+      --- BACKUP NODE MIRROR END ---
+    Macht auch grep / sed leicht moeglich.
+
+Aufwand: ~300-400 LoC. Save-Pfad ist mechanisch (Emit-Funktionen
+schon vorhanden, nur JSON-Format statt key=value). Restore braucht
+den Parser + State-Machine.
+
+Sicherheit: bewusst nur ueber USB-Serial, nicht ueber BLE oder HF --
+keine Remote-Attack-Surface, physische Kabel-Praesenz noetig.
+
+Quelle: User-Wunsch 2026-06-01.
