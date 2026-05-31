@@ -5313,7 +5313,7 @@ void MyMesh::backupRestoreFinish(const char* reason) {
   int n = snprintf(r, sizeof(r),
            "backup restore %s.\n"
            "applied=%u skipped=%u errors=%u\n"
-           "(runtime only -- 'prefs save' fuer persistent)",
+           "(runtime only -- 'save' (USB-Serial oder $companion) fuer persistent)",
            reason ? reason : "done",
            (unsigned)_br_applied, (unsigned)_br_skipped, (unsigned)_br_errors);
   if (_br_reboot_recommended && n > 0 && n < (int)sizeof(r)) {
@@ -6238,7 +6238,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
     "messages", "logging", "unscoped-channelmessages", "clear",
-    "contact", "backup",
+    "contact", "backup", "save",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -6795,7 +6795,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     );
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
-      "  contact, backup, tempradio, clear, reboot."
+      "  contact, backup, save, tempradio, clear, reboot."
     );
     return;
   }
@@ -7541,7 +7541,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Wunschliste 28: zur Persistenz nach 'backup restore' (oder
       // anderen runtime-Aenderungen). Schreibt _prefs + lat/lon raus.
       savePrefs();
-      pushCompanionMessage("OK - prefs persistent gespeichert.");
+      pushCompanionMessage("OK - prefs persistent gespeichert.\n"
+                           "Hinweis: 'save' macht das Gleiche.");
       return;
     }
 
@@ -8177,6 +8178,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Kontakts um, OHNE dass dieser dazu einen neuen Advert senden muss.
   // Damit laesst sich z.B. testen, ob die App weiterhin Chat anbietet wenn
   // ein Peer sich als SENSOR (oder REPEATER/ROOM) advertet.
+  // Wunschliste 28: 'save' (Top-Level) -- Klar-Begriff. Persistiert die
+  // gesamte NodePrefs-Struktur (DL9SAU + Main). Synonym zu 'prefs save'
+  // ohne Namespace-Verwirrung. Speichert NICHT Channels/Contacts/Identity
+  // (haben eigene Speicher-Pfade).
+  if (starts_with_word(cmd, "save")) {
+    savePrefs();
+    pushCompanionMessage("OK - settings (DL9SAU + Main) persistent gespeichert.\n"
+                         "(Channels/Contacts/Identity haben eigene Pfade.)");
+    return;
+  }
+
   if (starts_with_word(cmd, "contact")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
