@@ -1558,9 +1558,16 @@ known-Contact-Name nachschlagen falls der pub_key schon bekannt ist.
 
 Bedingungen:
   - per CLI/App-Button on-demand, nicht auto-getriggert
-  - Spam-Schutz auf Sender-Seite (z.B. min 60s zwischen 'discover')
-  - default off / opt-in nicht noetig: ist eine User-Aktion
+  - Spam-Schutz auf Sender-Seite (z.B. min 60s zwischen 'discover',
+    plus globaler discover_limiter analog (b) damit auch User selbst
+    nicht das Netz spammen kann)
   - eigener advert-role egal (jeder darf fragen)
+  - explizit AUCH im client-mode verfuegbar (nicht nur full-repeater):
+    User-Argument 2026-06-01: wer nur fuer Diagnose auf full-repeater
+    schaltet, erzeugt durch das Repeating viel mehr Netzlast als ein
+    einzelner DISCOVER-REQ. Daher Client-mode-Diagnose ist NETZ-
+    SCHONENDER als die Alternative.
+  - duty-cycle Soft/Hard wird respektiert (auch Diagnose ist tx)
 
 
 Sub-Feature (b) -- Companion antwortet auf REQs anderer Repeater [BAUEN]
