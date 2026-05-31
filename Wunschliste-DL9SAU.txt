@@ -1510,48 +1510,82 @@ Adverts, User-Chat, ACK).
 
 
 ================================================================================
-27. Companion-side CTL_TYPE_NODE_DISCOVER -- "zu pruefen"
+27. Companion-side CTL_TYPE_NODE_DISCOVER
 ================================================================================
 
-Idee aus Diskussion 2026-05-31 nach Erklaerung von CTL_TYPE_NODE_DISCOVER_
-REQ/RESP (heute repeater-zu-repeater, simple_repeater MyMesh.cpp:828):
+Idee aus Diskussion 2026-05-31 + Verfeinerung 2026-06-01 nach
+Protokoll-Klaerung. Zwei separate Sub-Features.
 
-  Companion bekommt einen Diagnose-Button/CLI, der einen
-  CTL_TYPE_NODE_DISCOVER_REQ via sendZeroHop schickt -> direkte Repeater-
-  Nachbarn antworten mit ihrer pub_key + SNR-Sicht-auf-uns. Liefert
-  symmetrische Link-Qualitaet die aus Adverts allein nicht herauskommt
-  (Adverts geben nur eine Richtung).
+--- Protokoll-Refresher (aus simple_repeater MyMesh.cpp:772-826) ---
+REQ-Format (10 Byte payload, sendZeroHop):
+  [0] type|prefix_only-bit
+  [1] filter-Maske (z.B. 1<<ADV_TYPE_REPEATER)
+  [2..5] tag (uint32 random)
+  [6..9] since (uint32 timestamp, 0 = alle)
+
+RESP-Format (38 Byte full ODER 14 Byte prefix-only):
+  [0] type|adv_type
+  [1] SNR (Q4, der RX-Wert beim Antwortenden)
+  [2..5] tag echo
+  [6..N] pub_key (32 byte full ODER 8 byte prefix)
+  Name NICHT enthalten. Adverts liefern Name + Felder separat.
+
+Airtime (SF8/BW62.5/CR8):
+  REQ          ~0.18 s
+  RESP prefix  ~0.21 s
+  RESP full    ~0.41 s
+
+Sub-Feature (a) -- Companion-Diagnose-CLI 'discover' [BAUEN]
+------------------------------------------------------------
+Companion sendet einen CTL_TYPE_NODE_DISCOVER_REQ via sendZeroHop ->
+direkte Repeater-Nachbarn antworten mit pub_key + ihrem SNR-RX-von-uns.
+Liefert symmetrische Link-Qualitaet die aus Adverts allein nicht
+herauskommt (Adverts geben nur eine Richtung).
 
 Beispiel-Output:
   discover (zero-hop):
     DL9SAU-Repeater-Friedrichshain   tx_snr=+2.5  rx_snr=-3.0
     DK7EE-Repeater-Kreuzberg         tx_snr=-1.0  rx_snr=-6.5
-    ...
 
 Vorteile:
   - Symmetrie-Test fuer Antennen-/Standort-Tuning.
-  - Schnell aufgelistet wer in direkter Funkreichweite ist (vs adverts
-    abwarten 60 min).
-  - Companion-Diagnose ohne Mesh-Discovery-Tool extern.
+  - Schnell wer in direkter Funkreichweite ist (vs Adverts 60-min-cycle).
+  - Diagnose ohne externes Tool.
 
-Nachteile / zu pruefen:
-  - "Spammy" wie der Befehl im Repeater-Code schon ist. Bei einem
-    grossen Mesh koennten N Repeater alle gleichzeitig antworten ->
-    Air-Storm. Repeater-Code hat dafuer einen Limiter (discover_limiter)
-    + getRetransmitDelay*4 als Jitter.
-  - User-Use-Case schmal: 95% des Nutzens (sehen wer da ist) kommt
-    bereits aus Adverts. Symmetrische SNR-Info ist nice-to-have, nicht
-    kritisch.
-  - Companion ist primaer Client, kein Topologie-Werkzeug. Wenn jemand
-    Topologie will, hat der den externen Analyzer.
-  - companion-CTL-RX-Pfad (onControlDataRecv in MyMesh.cpp:2018) muesste
-    erweitert werden um DISCOVER_RESP-Frames als Diagnose-Output an die
-    App durchzureichen.
+Pub_key wird NICHT gemerkt -- Adverts liefern den ohnehin mit Name +
+Sig. Wir zeigen nur tx_snr + rx_snr in der RESP-Liste, eventuell den
+known-Contact-Name nachschlagen falls der pub_key schon bekannt ist.
 
-Konsens 2026-05-31: zurueckgestellt zur Pruefung. Wenn umgesetzt, dann:
-  - per CLI-Befehl, nicht per Auto-Trigger
-  - mit klarem Spam-Schutz (Rate-Limit pro Sender)
-  - default off, opt-in
-  - ausschliesslich diagnostisch (kein Auto-Anlegen von Kontakten o.ae.)
+Bedingungen:
+  - per CLI/App-Button on-demand, nicht auto-getriggert
+  - Spam-Schutz auf Sender-Seite (z.B. min 60s zwischen 'discover')
+  - default off / opt-in nicht noetig: ist eine User-Aktion
+  - eigener advert-role egal (jeder darf fragen)
 
-Quelle: User-Anregung 2026-05-31 nach Protokoll-Erklaerung-Session.
+
+Sub-Feature (b) -- Companion antwortet auf eingehende REQs [UNENTSCHIEDEN]
+-------------------------------------------------------------------------
+Companion als full-Repeater (profile=normal + advert_role=repeater)
+koennte auf eingehende CTL_TYPE_NODE_DISCOVER_REQ antworten -- dann
+sind wir fuer andere als Repeater-Nachbar findbar.
+
+Diskussion 2026-06-01: User-Entscheidung dass im full-repeater-mode
+die App vermutlich gar nicht verbunden ist, der Companion also
+autonom agieren koennen sollte. Damit waere (b) konsistent.
+
+Bedingungen falls umgesetzt:
+  - effectiveAdvertRole() == ADV_TYPE_REPEATER
+  - _prefs.client_repeat != 0
+  - _prefs.repeater_profile == 1 (normal/full)
+  - duty-cycle nicht ueber hard-limit
+  - Rate-Limit gegen Spam (z.B. analog discover_limiter(4, 120))
+  - filter aus REQ matched 1<<ADV_TYPE_REPEATER
+
+Aktuell unentschieden weil:
+  - Airtime-Kosten in dichtem Mesh nicht trivial (10 antwortende
+    Repeater = ~4 s Funkfeld dicht)
+  - Nutzen fuer User schmal (man wird "gefunden" -- braucht das ein
+    Companion-Repeater?)
+  - Im full-repeater-mode ist airtime ohnehin knapp
+
+Quelle: User-Anregung 2026-05-31 + Verfeinerung 2026-06-01.
