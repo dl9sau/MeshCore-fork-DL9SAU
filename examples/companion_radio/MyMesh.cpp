@@ -5059,23 +5059,62 @@ void MyMesh::backupSaveToSerial() {
     first = false;
     Serial.print("  \""); Serial.print(name); Serial.print("\": "); Serial.print(v, prec);
   };
-  // String-Emit. Druckbare ASCII (0x20..0x7E) direkt; alles andere
-  // (Steuerzeichen, UTF-8 multi-byte) als \xHH Byte-Hex-Escape.
-  // ACHTUNG: \xHH ist NICHT Standard-JSON, sondern unser eigenes Format
-  // damit Backup-Datei pure ASCII bleibt (terminal-copy-safe) und der
-  // Restore-Parser byte-genau wiederherstellen kann. " und \ klassisch
-  // backslash-escaped.
+  // String-Emit -- Standard-JSON-Escape:
+  //   " \ -> \" \\
+  //   \b \f \n \r \t -> Standard-Kurzform
+  //   andere Steuerzeichen < 0x20 -> \u00XX
+  //   ASCII 0x20..0x7E direkt
+  //   UTF-8 multi-byte -> Codepoint dekodiert, dann \uXXXX (BMP)
+  //     bzw Surrogate-Pair \uHHHH\uLLLL (Supplementary Plane,
+  //     Codepoint > U+FFFF; Emojis etc.)
+  // Pure ASCII Output -> terminal-copy-safe. Standard-JSON-konform
+  // damit externe Tools (jq, Python json) den Backup lesen koennen.
   auto kv_str = [&](const char* name, const char* s) {
     if (!first) Serial.println(",");
     first = false;
     Serial.print("  \""); Serial.print(name); Serial.print("\": \"");
     while (*s) {
       unsigned char c = (unsigned char)*s++;
-      if (c == '"')       { Serial.print("\\\""); }
-      else if (c == '\\') { Serial.print("\\\\"); }
-      else if (c >= 0x20 && c <= 0x7E) { Serial.print((char)c); }
-      else {
-        char b[5]; snprintf(b, sizeof(b), "\\x%02X", c); Serial.print(b);
+      if (c == '"')       { Serial.print("\\\""); continue; }
+      if (c == '\\')      { Serial.print("\\\\"); continue; }
+      if (c == '\b')      { Serial.print("\\b");  continue; }
+      if (c == '\f')      { Serial.print("\\f");  continue; }
+      if (c == '\n')      { Serial.print("\\n");  continue; }
+      if (c == '\r')      { Serial.print("\\r");  continue; }
+      if (c == '\t')      { Serial.print("\\t");  continue; }
+      if (c < 0x20) {
+        char b[8]; snprintf(b, sizeof(b), "\\u%04X", c); Serial.print(b);
+        continue;
+      }
+      if (c < 0x80) {
+        Serial.print((char)c);
+        continue;
+      }
+      // UTF-8 multi-byte. Codepoint dekodieren.
+      uint32_t cp = 0;
+      int rem = 0;
+      if      ((c & 0xE0) == 0xC0) { cp = c & 0x1F; rem = 1; }
+      else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; rem = 2; }
+      else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; rem = 3; }
+      else { Serial.print("\\uFFFD"); continue; } // invalides leading byte
+      bool ok = true;
+      for (int j = 0; j < rem; j++) {
+        unsigned char cb = (unsigned char)*s;
+        if (cb == 0 || (cb & 0xC0) != 0x80) { ok = false; break; }
+        cp = (cp << 6) | (cb & 0x3F);
+        s++;
+      }
+      if (!ok) { Serial.print("\\uFFFD"); continue; }
+      if (cp <= 0xFFFF) {
+        char b[8]; snprintf(b, sizeof(b), "\\u%04X", (unsigned)cp); Serial.print(b);
+      } else {
+        // Supplementary Plane -> Surrogate Pair
+        cp -= 0x10000;
+        uint32_t hi = 0xD800u + (cp >> 10);
+        uint32_t lo = 0xDC00u + (cp & 0x3FFu);
+        char b[16];
+        snprintf(b, sizeof(b), "\\u%04X\\u%04X", (unsigned)hi, (unsigned)lo);
+        Serial.print(b);
       }
     }
     Serial.print('"');
