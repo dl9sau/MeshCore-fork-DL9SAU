@@ -112,16 +112,25 @@ void halt() {
 
 void setup() {
   Serial.begin(115200);
-  // DL9SAU 2026-06-01: USB-CDC write non-blocking. Verhindert loop()-Stalls
-  // wenn das Geraet ohne USB-Host laeuft (z.B. Powerbank) und der TX-FIFO
-  // sich fuellt -- ohne diesen Hint koennte Serial.write() bis zu 250 ms
-  // blocken, was iOS-BLE-Verbindungen abreissen laesst. Bei timeout=0
-  // werden Bytes silently gedroppt wenn FIFO voll und kein Host liest;
-  // mit Host laeuft alles normal weil OS-seitig kontinuierlich gedrained
-  // wird. Guard auf ARDUINO_USB_CDC_ON_BOOT: nur dann ist Serial = HWCDC
-  // (nicht UART) und hat die Methode.
+  // DL9SAU 2026-06-01 v2: USB-CDC TX-Timeout sehr klein halten. Verhindert
+  // loop()-Stalls wenn das Geraet ohne USB-Host laeuft (z.B. Powerbank) und
+  // der TX-FIFO sich fuellt -- ohne diesen Hint koennte Serial.write() bis
+  // zu 100 ms blocken (HWCDC-Default), was iOS-BLE-Verbindungen abreissen
+  // laesst.
+  //
+  // ACHTUNG: setTxTimeoutMs(0) NICHT benutzen. Arduino-ESP32 HWCDC.cpp hat
+  // einen Underflow-Bug -- die innere 'tries'-Variable (uint32_t) startet
+  // bei tx_timeout_ms, wird auf 'kein Progress' dekrementiert, und wrappt
+  // zu 0xFFFFFFFF wenn sie bei 0 startet. Die 'tries == 0'-Abbruchbedingung
+  // wird dann nie wahr. Folge: Serial.write() blockiert effektiv unendlich
+  // wenn HWCDC den Host als 'connected' sieht aber das FIFO nicht drained
+  // (Boot ohne USB-Host -> Tracker bleibt an "Loading..." haengen, bis
+  // jemand cu / Serial-Console oeffnet). Empirisch nachgewiesen 2026-05-31.
+  //
+  // Mit einem kleinen aber non-zero Wert (5 ms) wird der Underflow vermieden
+  // und Blockzeiten sind unter der BLE-Supervision-Schwelle.
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
-  Serial.setTxTimeoutMs(0);
+  Serial.setTxTimeoutMs(5);
 #endif
 
 #if defined(ESP32) && !defined(WIFI_SSID)
