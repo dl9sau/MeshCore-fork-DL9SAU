@@ -8076,7 +8076,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     for (int pp = 0; pp < 16; pp++) rxf_total += rxf_sum((uint8_t)pp);
     p = snprintf(block, sizeof(block),
                  "rx flood:\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
                  "  total=%lu",
                  rxf_sum(PAYLOAD_TYPE_ADVERT),
                  rxf_sum(PAYLOAD_TYPE_PATH),
@@ -8085,6 +8085,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  rxf_sum(PAYLOAD_TYPE_ACK),
                  rxf_sum(PAYLOAD_TYPE_REQ),
                  rxf_sum(PAYLOAD_TYPE_RESPONSE),
+                 rxf_sum(PAYLOAD_TYPE_ANON_REQ),
                  rxf_sum(PAYLOAD_TYPE_TRACE),
                  (unsigned long)rxf_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
@@ -8099,7 +8100,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
     p = snprintf(block, sizeof(block),
                  "tx self-initiated:\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
                  "  total=%lu",
                  own_of(PAYLOAD_TYPE_ADVERT),
                  own_of(PAYLOAD_TYPE_PATH),
@@ -8108,6 +8109,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  own_of(PAYLOAD_TYPE_ACK),
                  own_of(PAYLOAD_TYPE_REQ),
                  own_of(PAYLOAD_TYPE_RESPONSE),
+                 own_of(PAYLOAD_TYPE_ANON_REQ),
                  own_of(PAYLOAD_TYPE_TRACE),
                  (unsigned long)own_total);
     append_rate_hint(block + p, sizeof(block) - p, own_total, uptime_s);
@@ -8281,7 +8283,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // ---- 6a) rx flood -- heard-direct (FLOOD-typed, path_len=0) ----
     p = snprintf(block, sizeof(block),
                  "rx flood -- heard-direct (path_len=0):\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
                  "  total=%lu",
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0],
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH][0],
@@ -8290,6 +8292,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK][0],
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ][0],
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][0],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][0],
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][0],
                  (unsigned long)rxf_hd_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_hd_total, uptime_s);
@@ -8298,7 +8301,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // ---- 6b) rx flood -- repeated (FLOOD-typed, path_len>0) ----
     p = snprintf(block, sizeof(block),
                  "rx flood -- repeated (path_len>0):\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
                  "  total=%lu",
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][1],
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH][1],
@@ -8307,6 +8310,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK][1],
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ][1],
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][1],
+                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][1],
                  (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][1],
                  (unsigned long)rxf_rep_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_rep_total, uptime_s);
@@ -8366,7 +8370,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
     p = snprintf(block, sizeof(block),
                  "tx self-initiated:\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
                  "  total=%lu",
                  own_of(PAYLOAD_TYPE_ADVERT),
                  own_of(PAYLOAD_TYPE_PATH),
@@ -8375,6 +8379,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  own_of(PAYLOAD_TYPE_ACK),
                  own_of(PAYLOAD_TYPE_REQ),
                  own_of(PAYLOAD_TYPE_RESPONSE),
+                 own_of(PAYLOAD_TYPE_ANON_REQ),
                  own_of(PAYLOAD_TYPE_TRACE),
                  (unsigned long)own_total);
     append_rate_hint(block + p, sizeof(block) - p, own_total, uptime_s);
@@ -8386,7 +8391,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (_prefs.client_repeat != 0) {
       p = snprintf(block, sizeof(block),
                    "tx repeated:\n"
-                   "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u trc=%u\n"
+                   "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
                    "  total=%lu",
                    (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ADVERT],
                    (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_PATH],
@@ -8395,6 +8400,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                    (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ACK],
                    (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_REQ],
                    (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_RESPONSE],
+                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ANON_REQ],
                    (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_TRACE],
                    (unsigned long)rep_total);
       append_rate_hint(block + p, sizeof(block) - p, rep_total, uptime_s);
