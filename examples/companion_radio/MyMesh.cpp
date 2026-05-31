@@ -5375,9 +5375,15 @@ void MyMesh::backupRestoreLoop() {
     // unleserlich werden).
 
     if (_br_state == BR_WAIT_MARKER) {
-      // Zeilenakkumulator. CR ignorieren (CRLF/LF/CR tolerant).
-      if (c == '\r') continue;
-      if (c == '\n') {
+      // Zeilen-Ende-Erkennung -- akzeptieren ALLE Conventions:
+      //   LF only (Unix):     \n triggert line-processing
+      //   CR only (old Mac):  \r triggert line-processing
+      //   CRLF (DOS/Win):     \r triggert line-processing; das folgende
+      //                       \n trifft auf leeren Buffer -> no-op
+      // Vorherige Version triggerte nur auf \n, was bei \r-only Paste
+      // dazu fuehrte dass Marker NIE erkannt wurden (User-Bug 2026-06-01).
+      if (c == '\r' || c == '\n') {
+        if (_br_line_len == 0) continue;  // leere Zeile (z.B. \n nach \r)
         _br_line[_br_line_len] = 0;
         // Marker erkennen
         if (strncmp(_br_line, "--- BACKUP ", 11) == 0) {
