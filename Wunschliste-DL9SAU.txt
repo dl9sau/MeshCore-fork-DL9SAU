@@ -1438,3 +1438,72 @@ Zusammen-Aufwand:
    Eigene Test-Runde noetig weil Display-Layout veraendert wird.
 
 Quelle: User-Detail-Review 2026-05-30 nach Test-Session.
+
+
+Abschluss-Notizen 2026-05-31 (alle vier Teile implementiert)
+------------------------------------------------------------
+
+Commits:
+  ed6f6795  Wunschliste 26 A  -- tx-Naming entwirrt
+  9a22acbd  Wunschliste 26 C  -- scoped/unscoped × adv-Typ
+  6fccf0f5  Wunschliste 26 D  -- rx adv konsolidiert + rx flood path_len-Split
+  b0988dba  Stats-Layout D    -- rx-Section reorganisiert + status Mode
+  8d6ef329  Wunschliste 26 D2 -- 'rx zero-hop' Block (DIRECT-typed Adverts)
+  334ddbae  Wunschliste 26 B  -- rx-us Echo-Tracking
+
+Implementations-Reihenfolge entsprach NICHT der urspruenglichen
+A-B-C-Sortierung; A->C->D->B war pragmatischer:
+  - A (Naming) risk-free, erst.
+  - C (Scope-Aufschluesselung) brauchte neue Counter aber kein RX-Hook.
+  - D (rx adv Konsolidierung + rx flood path_len-Split + rx zero-hop) war
+    der groessere strukturelle Refactor, kam in zwei Schritten (D + D2).
+  - B (Echo-Tracking) zum Schluss weil's am komplexesten ist (Hash-Ringe +
+    Hook ueber mehrere Schichten).
+
+Block-Reihenfolge Endstand (kombiniertes 'stats'):
+  1) rx signal last heard           (Noise/RSSI/SNR letzter Empfang)
+  2) rx direct qual                 (SNR-Klassen pro Rolle)
+  3) rx adv total                   (alle Adverts; by scope+type + by role)
+  4) rx direct nodes                (zero-hop Subset; gleiche Sub-Struktur)
+  5) rx zero-hop                    (DIRECT-typed Adverts; total + by role)
+  6) rx flood                       (FLOOD-typed; heard-direct + repeated
+                                     + grand total)
+  7) rx heard total                 (sauberer Direkt-Empfang)
+  8) rx us                          (own echoes -- B)
+
+Math-Beziehungen (zum Cross-Checken):
+  rx direct nodes total adv  = rx zero-hop adv + rx flood heard-direct adv
+  rx adv total adv           = rx direct nodes + rx flood repeated adv
+  rx heard total             = rxf_hd_total + (hd_total - rxf_hd_adv)
+
+
+Airtime-Sanity (User-Frage 2026-05-31, EU Narrow SF8 BW62.5 CR8)
+----------------------------------------------------------------
+Hintergrund fuer das Sizing der rx-us Hash-Ringe (B):
+
+  T_sym = 2^SF / BW = 256 / 62500 Hz = 4.096 ms/Symbol
+  T_preamble = (8 + 4.25) * T_sym = 50.18 ms
+
+Pro typischem Pakettyp (Payload-Schaetzungen):
+  Advert    PL=120 B  -> 256 sym  -> ~1049 ms payload  -> ca. 1.10 s
+  PATH      PL= 40 B  ->  88 sym  ->  ~360 ms payload  -> ca. 0.41 s
+  Short TXT PL= 30 B  ->  72 sym  ->  ~295 ms payload  -> ca. 0.35 s
+  ACK       PL=  5 B  ->  24 sym  ->   ~98 ms payload  -> ca. 0.15 s
+
+10 % Airtime / h = 360 s Budget:
+  Pure-Advert-Region:   360 / 1.10 = ~325 Pakete/h
+  Gemischter Verkehr:   360 / 0.50 = ~720 Pakete/h    (USER-Estimat)
+  ACK-/Path-Storm:      360 / 0.20 = ~1800 Pakete/h   (Burst-Maximum)
+
+Konsequenz fuer rx-us Ring-Sizing:
+  128 Repeated-Slots / 12 pkt/min (bei 720/h) = ~10.6 min Echo-Window
+  bei ACK-Storm 30/min          =  ~4.3 min Echo-Window
+  bei Advert-only ~5.4/min      = ~23 min Echo-Window
+
+Echo-Erkennung passiert typischerweise innerhalb 1-2 Mesh-Propagations-
+Zyklen (<60 s nach unserem TX) -- 128 Slots also tragfaehig. Bei
+nachweislicher ACK-Storm-Luecke koennte spaeter auf 256 hoch.
+
+Self-initiated Ring (32 Slots) deckt mehrere Stunden auch bei voller
+Repeat-Last weil eigene Sendungen niedrige Rate haben (1-2 Pakete/min:
+Adverts, User-Chat, ACK).
