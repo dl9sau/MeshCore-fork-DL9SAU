@@ -5059,17 +5059,24 @@ void MyMesh::backupSaveToSerial() {
     first = false;
     Serial.print("  \""); Serial.print(name); Serial.print("\": "); Serial.print(v, prec);
   };
+  // String-Emit. Druckbare ASCII (0x20..0x7E) direkt; alles andere
+  // (Steuerzeichen, UTF-8 multi-byte) als \xHH Byte-Hex-Escape.
+  // ACHTUNG: \xHH ist NICHT Standard-JSON, sondern unser eigenes Format
+  // damit Backup-Datei pure ASCII bleibt (terminal-copy-safe) und der
+  // Restore-Parser byte-genau wiederherstellen kann. " und \ klassisch
+  // backslash-escaped.
   auto kv_str = [&](const char* name, const char* s) {
     if (!first) Serial.println(",");
     first = false;
     Serial.print("  \""); Serial.print(name); Serial.print("\": \"");
     while (*s) {
-      char c = *s++;
-      if (c == '\\' || c == '"') Serial.print('\\');
-      if (c == '\r') { Serial.print("\\r"); continue; }
-      if (c == '\n') { Serial.print("\\n"); continue; }
-      if (c == '\t') { Serial.print("\\t"); continue; }
-      Serial.print(c);
+      unsigned char c = (unsigned char)*s++;
+      if (c == '"')       { Serial.print("\\\""); }
+      else if (c == '\\') { Serial.print("\\\\"); }
+      else if (c >= 0x20 && c <= 0x7E) { Serial.print((char)c); }
+      else {
+        char b[5]; snprintf(b, sizeof(b), "\\x%02X", c); Serial.print(b);
+      }
     }
     Serial.print('"');
   };
@@ -5093,13 +5100,45 @@ void MyMesh::backupSaveToSerial() {
     Serial.print("]");
   };
 
+  // Identity ueber Public-API auslesen: LocalIdentity::writeTo schreibt
+  // PRV (64) + PUB (32) = 96 Byte hintereinander.
+  uint8_t id_buf[PRV_KEY_SIZE + PUB_KEY_SIZE];
+  size_t  id_len = self_id.writeTo(id_buf, sizeof(id_buf));
+  (void)id_len;  // immer 96 bei aktueller Impl
+
+  // Helper: nested _meta-Block schreiben. Enthaelt fw_version,
+  // pubkey (64 hex = full PUB_KEY_SIZE), prv_key (128 hex = full
+  // PRV_KEY_SIZE Ed25519 expanded form).
+  // ACHTUNG: prv_key ist GEHEIM -- wer ihn besitzt kann diese Node
+  // imitieren. Backup-Datei entsprechend behandeln.
+  auto emit_meta = [&]() {
+    if (!first) Serial.println(",");
+    first = false;
+    Serial.println("  \"_meta\": {");
+    Serial.print("    \"fw_version\": \"");
+    Serial.print(FIRMWARE_VERSION);
+    Serial.println("\",");
+    Serial.print("    \"pubkey\": \"");
+    for (int i = 0; i < PUB_KEY_SIZE; i++) {
+      char b[3]; snprintf(b, sizeof(b), "%02x", self_id.pub_key[i]); Serial.print(b);
+    }
+    Serial.println("\",");
+    Serial.print("    \"prv_key\": \"");
+    // id_buf-Layout: [0..PRV_KEY_SIZE) = prv_key, [PRV..PRV+PUB) = pub_key
+    for (size_t i = 0; i < PRV_KEY_SIZE; i++) {
+      char b[3]; snprintf(b, sizeof(b), "%02x", id_buf[i]); Serial.print(b);
+    }
+    Serial.println("\"");
+    Serial.print("  }");
+  };
+
   // -------- Block 1: DL9SAU prefs --------
   Serial.println();
+  Serial.println("# !!! Enthaelt private Schluessel im _meta-Block. Geheim halten. !!!");
   Serial.println("--- BACKUP DL9SAU PREFS BEGIN ---");
   Serial.println("{");
   first = true;
-  kv_str("_fw_version", FIRMWARE_VERSION);
-  kv_hex("_pubkey_prefix", self_id.pub_key, 4);
+  emit_meta();
   kv_uint("chat_name_mode",        _prefs.chat_name_mode);
   kv_str ("chat_name_custom",      _prefs.chat_name_custom);
   kv_uint("auto_advert_enabled",   _prefs.auto_advert_enabled);
@@ -5134,8 +5173,7 @@ void MyMesh::backupSaveToSerial() {
   Serial.println("--- BACKUP NODE MIRROR BEGIN ---");
   Serial.println("{");
   first = true;
-  kv_str  ("_fw_version",          FIRMWARE_VERSION);
-  kv_hex  ("_pubkey_prefix",       self_id.pub_key, 4);
+  emit_meta();
   kv_str  ("name",                 _prefs.node_name);
   kv_float("freq",                 _prefs.freq, 4);
   kv_uint ("sf",                   _prefs.sf);
