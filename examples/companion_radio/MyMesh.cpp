@@ -8554,41 +8554,116 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             discoverStart((1 << ADV_TYPE_REPEATER), false);
             return;
           }
-          char prefix_buf[32];
-          size_t pi = 0;
-          while (*rp && *rp != ' ' && *rp != '\t' && pi + 1 < sizeof(prefix_buf)) {
-            prefix_buf[pi++] = *rp++;
+          // Prefix-Match: case-INSENSITIVE, names DUERFEN Leerzeichen
+          // haben -> der ganze Rest der Zeile ist das Prefix (trim trailing).
+          // Wir matchen alle Kontakte, filtern auf REPEATER:
+          //   0 REPEATER, aber non-REPEATER gefunden -> Hinweis dass Kontakt
+          //                                              kein Repeater ist.
+          //   1 REPEATER                              -> verwenden.
+          //   N REPEATER + exact-Name-Match           -> exact wird gewaehlt.
+          //   N REPEATER ohne exact                   -> Mehrdeutig, listen.
+          const char* prefix_start = rp;
+          const char* prefix_end   = rp + strlen(rp);
+          while (prefix_end > prefix_start
+                 && (prefix_end[-1] == ' ' || prefix_end[-1] == '\t'
+                  || prefix_end[-1] == '\r' || prefix_end[-1] == '\n')) prefix_end--;
+          size_t input_len = (size_t)(prefix_end - prefix_start);
+
+          int n_total_matches = 0;
+          int n_repeater = 0;
+          ContactInfo cand_repeater;       // wenn n_repeater==1: das ist's
+          ContactInfo cand_exact_repeater; // exact-Name-Match (Repeater)
+          ContactInfo cand_nonrepeater;    // erster non-REPEATER match
+          bool has_exact = false;
+          bool has_nonrepeater = false;
+          char ambig[180] = "";
+          size_t ambig_used = 0;
+
+          int total = getNumContacts();
+          for (int i = 0; i < total; i++) {
+            ContactInfo ci;
+            if (!getContactByIdx((uint32_t)i, ci)) continue;
+            // case-insensitive Prefix-Vergleich
+            bool match = true;
+            for (size_t k = 0; k < input_len; k++) {
+              char a = ci.name[k];
+              char b = prefix_start[k];
+              if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+              if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+              if (a != b) { match = false; break; }
+            }
+            if (!match) continue;
+            n_total_matches++;
+            if (ci.type == ADV_TYPE_REPEATER) {
+              n_repeater++;
+              if (n_repeater == 1) cand_repeater = ci;
+              if (strlen(ci.name) == input_len) {
+                cand_exact_repeater = ci;
+                has_exact = true;
+              }
+              if (ambig_used + 35 < sizeof(ambig)) {
+                ambig_used += snprintf(ambig + ambig_used, sizeof(ambig) - ambig_used,
+                                       "\n  %.30s", ci.name);
+              }
+            } else if (!has_nonrepeater) {
+              cand_nonrepeater = ci;
+              has_nonrepeater = true;
+            }
           }
-          prefix_buf[pi] = 0;
-          ContactInfo* c = searchContactsByPrefix(prefix_buf);
-          if (!c) {
+
+          if (n_total_matches == 0) {
             char r[80];
-            snprintf(r, sizeof(r), "Kein Kontakt: '%s'", prefix_buf);
+            snprintf(r, sizeof(r), "Kein Kontakt mit Prefix '%.40s'.", prefix_start);
             pushCompanionMessage(r);
             return;
           }
-          // Nur zero-hop-Nachbarn (out_path_len==0) werden direkt unterstuetzt.
-          // Multi-hop wuerde Reverse-Path-Wissen erfordern, das wir nicht
-          // speichern. Upstream simple_repeater akzeptiert ohnehin nur
-          // isRouteDirect()-Requests -- flood wuerde stillschweigend
-          // gedroppt.
-          if (c->out_path_len != 0) {
-            pushCompanionMessage(
-              "discover regions: kein direkter Nachbar.\n"
-              "Kontakt ueber Repeater erreichbar oder Path noch nicht\n"
-              "entdeckt -- ANON-REQ_TYPE_REGIONS funktioniert protokoll-\n"
-              "bedingt nur zero-hop-direct.");
+          if (n_repeater == 0) {
+            const char* tn = (cand_nonrepeater.type == ADV_TYPE_CHAT)   ? "CHAT"
+                           : (cand_nonrepeater.type == ADV_TYPE_SENSOR) ? "SENSOR"
+                           : (cand_nonrepeater.type == ADV_TYPE_ROOM)   ? "ROOM"
+                           : "?";
+            char r[130];
+            snprintf(r, sizeof(r),
+                     "'%.30s' ist kein REPEATER (%s).\n"
+                     "discover regions geht nur fuer Repeater.",
+                     cand_nonrepeater.name, tn);
+            pushCompanionMessage(r);
             return;
           }
-          if (!sendRegionsQueryZeroHop(c->id.pub_key, c->name)) {
-            pushCompanionMessage("discover regions: send FAILED (Ring voll oder Packet-Pool leer).");
+          ContactInfo chosen;
+          if (has_exact) {
+            chosen = cand_exact_repeater;
+          } else if (n_repeater == 1) {
+            chosen = cand_repeater;
+          } else {
+            char r[220];
+            snprintf(r, sizeof(r),
+                     "Mehrdeutig (%d Repeater-Treffer):%s\n"
+                     "Bitte praeziser angeben.",
+                     n_repeater, ambig);
+            pushCompanionMessage(r);
             return;
           }
-          char r[120];
+          if (chosen.out_path_len != 0) {
+            char r[140];
+            snprintf(r, sizeof(r),
+                     "'%.30s' nicht direkter Nachbar\n"
+                     "(out_path_len=%u). regions geht\n"
+                     "protokoll-bedingt nur zero-hop.",
+                     chosen.name, (unsigned)chosen.out_path_len);
+            pushCompanionMessage(r);
+            return;
+          }
+          if (!sendRegionsQueryZeroHop(chosen.id.pub_key, chosen.name)) {
+            pushCompanionMessage("discover regions: send FAILED.");
+            return;
+          }
+          char r[130];
           snprintf(r, sizeof(r),
-                   "discover regions @%s: REQ gesendet (zero-hop).\n"
-                   "Antwort folgt automatisch im channel.",
-                   c->name);
+                   "discover regions @%.40s\n"
+                   "  REQ gesendet (zero-hop).\n"
+                   "  Antwort folgt im channel.",
+                   chosen.name);
           pushCompanionMessage(r);
           return;
         }
