@@ -112,6 +112,17 @@ void halt() {
 
 void setup() {
   Serial.begin(115200);
+  // DL9SAU 2026-06-01: USB-CDC write non-blocking. Verhindert loop()-Stalls
+  // wenn das Geraet ohne USB-Host laeuft (z.B. Powerbank) und der TX-FIFO
+  // sich fuellt -- ohne diesen Hint koennte Serial.write() bis zu 250 ms
+  // blocken, was iOS-BLE-Verbindungen abreissen laesst. Bei timeout=0
+  // werden Bytes silently gedroppt wenn FIFO voll und kein Host liest;
+  // mit Host laeuft alles normal weil OS-seitig kontinuierlich gedrained
+  // wird. Guard auf ARDUINO_USB_CDC_ON_BOOT: nur dann ist Serial = HWCDC
+  // (nicht UART) und hat die Methode.
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  Serial.setTxTimeoutMs(0);
+#endif
 
 #if defined(ESP32) && !defined(WIFI_SSID)
   // Power down the WiFi side of the radio when only BLE/USB is used.
