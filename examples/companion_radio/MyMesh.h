@@ -438,6 +438,10 @@ private:
   // "companion" an (oder findet ihn falls schon persistiert) und merkt sich
   // den Index in _companion_channel_idx.
   void setupCompanionChannel();
+  // PSK-basierte Identifikation eines beliebigen Channel-Slots als
+  // unseren lokalen $companion-Channel (Magic-PSK match). Robust gegen
+  // App-Rename + App-Index-Drift.
+  bool isCompanionChannel(uint8_t channel_idx);
   // Pusht einen Text als synthetische incoming-channel-message für den
   // Companion-Channel. Sendername = board.getManufacturerName(). Wenn die App
   // nicht connected ist landet die Nachricht in der Offline-Queue (16 Slots,

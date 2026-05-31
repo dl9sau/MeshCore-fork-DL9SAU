@@ -227,6 +227,27 @@ static const uint8_t s_public_psk[16] = {
   0xC9, 0xE5, 0xED, 0xBA, 0xA1, 0x15, 0xCD, 0x72
 };
 
+// Magic-PSK fuer den lokalen $companion-Channel.
+// 16 Bytes: 8x 0x00 + 8x 0x99 -- als Hex-String "00..00 99..99" (32 Zeichen)
+// einfach von Hand in die App einzugeben falls jemals manuell wieder
+// herzustellen. PSK-basierte Identifikation statt Name-Match macht den
+// Channel robust gegen Rename + Sync-Race (User-Bugreport 2026-06-01).
+static const uint8_t s_companion_psk_magic[16] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99
+};
+
+// True wenn das Channel an channel_idx unsere companion-Magic-PSK traegt.
+// Zentrale Identitaetspruefung -- wird sowohl beim RX-Klassifizieren als
+// auch beim TX-Annehmen verwendet damit App-Index-Drift egal ist.
+// Nicht const weil getChannel() in der Basis-Klasse non-const ist
+// (verlangt ChannelDetails& by reference, nicht von uns geaendert).
+bool MyMesh::isCompanionChannel(uint8_t channel_idx) {
+  ChannelDetails ch;
+  if (!getChannel(channel_idx, ch)) return false;
+  return memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0;
+}
+
 // out_cap = Hardware-Kapazitaet (Array-Groesse). Runtime-Limit (slot count
 // das tatsaechlich benutzt wird) ist getBucketLimit() -- kann kleiner sein.
 void MyMesh::getBucket(MsgBucket b, Frame*& out_arr, int& out_cap) {
@@ -535,7 +556,10 @@ MyMesh::MsgBucket MyMesh::classifyFrame(const uint8_t* frame, int len) {
   // $companion VOR allen anderen Channel-Klassifizierungen abfangen:
   // Trace-Output landet in $companion und wuerde sonst alle anderen
   // "private" Channel-Nachrichten aus dem 16er-Bucket verdraengen.
-  if (_companion_channel_idx != 0xFF && channel_idx == _companion_channel_idx) {
+  // PSK-Identifikation statt Index-Match (User-Bugreport 2026-06-01):
+  // App-Index-Drift waehrend Sync kann sonst alte Slot-Nummer als companion
+  // fehlinterpretieren. Magic-PSK ist eindeutig.
+  if (isCompanionChannel(channel_idx)) {
     return BUCKET_COMPANION;
   }
   ChannelDetails ch;
@@ -2803,8 +2827,11 @@ void MyMesh::handleCmdFrame(size_t len) {
 
     if (txt_type != TXT_TYPE_PLAIN) {
       writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
-    } else if (channel_idx == _companion_channel_idx && _companion_channel_idx != 0xFF) {
+    } else if (isCompanionChannel(channel_idx)) {
       // Lokaler Companion-Channel: NICHT senden, sondern als Befehl parsen.
+      // PSK-Identifikation statt Index-Match -- App kann Channels intern
+      // umsortieren, Sync-Race-Drift waere sonst ein 'Command fliegt aufs
+      // Funknetz' Bug (User-Befund 2026-06-01).
       // text im cmd_frame ist NICHT null-terminiert (Mesh-Protokoll arbeitet
       // text+len getrennt). In lokalen Buffer kopieren, terminieren, trailing
       // Whitespace/Newlines abschneiden (manche Apps senden CRLF mit).
@@ -4993,15 +5020,40 @@ void MyMesh::formatLatLonDM(char* out, size_t out_size, double lat, double lon) 
 void MyMesh::setupCompanionChannel() {
   ChannelDetails ch;
 
-  // Schon vorhanden (aus persistiertem /channels2 geladen)?
+  // (1) PSK-Match (neue Welt). Stabilste Identifikation -- ueberlebt
+  //     Rename durch die App.
   for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-    if (getChannel(i, ch) &&
-        strncmp(ch.name, COMPANION_CHANNEL_NAME, sizeof(ch.name)) == 0) {
+    if (getChannel(i, ch)
+        && memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) {
+      _companion_channel_idx = (uint8_t)i;
+      // Heilung: Name auf "companion" zuruecksetzen falls App umbenannt
+      // hat. Optional, nicht funktional kritisch (Identifikation laeuft
+      // ueber PSK), aber sorgt fuer konsistente Anzeige in der App.
+      if (strncmp(ch.name, COMPANION_CHANNEL_NAME, sizeof(ch.name)) != 0) {
+        StrHelper::strncpy(ch.name, COMPANION_CHANNEL_NAME, sizeof(ch.name));
+        setChannel(i, ch);
+        saveChannels();
+      }
+      return;
+    }
+  }
+
+  // (2) Migration alter Installationen: Name-Match "companion" mit
+  //     non-magic PSK (vermutlich legacy all-zero oder vom User
+  //     manuell gesetzt). PSK auf Magic umschreiben.
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    if (getChannel(i, ch)
+        && strncmp(ch.name, COMPANION_CHANNEL_NAME, sizeof(ch.name)) == 0) {
+      memcpy(ch.channel.secret, s_companion_psk_magic, 16);
+      memset(&ch.channel.secret[16], 0, 16);
+      setChannel(i, ch);   // recomputes hash automatisch
+      saveChannels();
       _companion_channel_idx = (uint8_t)i;
       return;
     }
   }
-  // Nicht gefunden — ersten freien Slot suchen und Channel manuell anlegen.
+
+  // (3) Nicht gefunden -- ersten freien Slot suchen und neu anlegen.
   int target = -1;
   for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
     if (getChannel(i, ch) && ch.name[0] == 0) { target = i; break; }
@@ -5010,17 +5062,14 @@ void MyMesh::setupCompanionChannel() {
     _companion_channel_idx = 0xFF; // kein Slot frei
     return;
   }
-  // Neue ChannelDetails komponieren und über setChannel() schreiben — das
-  // berechnet auch den Hash und respektiert die internen Datenstrukturen.
   ChannelDetails nch;
   memset(&nch, 0, sizeof(nch));
   StrHelper::strncpy(nch.name, COMPANION_CHANNEL_NAME, sizeof(nch.name));
-  // 16 Null-Bytes als Pseudo-Key. Über diesen Channel wird NIE transmittet,
-  // der Key dient nur als Channel-Identität für die App-Liste.
-  // setChannel berechnet den hash aus secret automatisch (siehe BaseChatMesh).
+  memcpy(nch.channel.secret, s_companion_psk_magic, 16);
+  // secret[16..32] bleibt 0 -> setChannel berechnet 128-bit-Hash
   setChannel(target, nch);
   _companion_channel_idx = (uint8_t)target;
-  saveChannels(); // persistieren, damit der Index über Reboots stabil bleibt
+  saveChannels(); // persistieren, damit der Index ueber Reboots stabil bleibt
 }
 
 // Setzt alle RAM-Statistik-Counter zurueck (analog simple_repeater
