@@ -2015,6 +2015,20 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
   } else if (len > 4 && tag == pending_req) {  // check for matching response tag
     pending_req = 0;
 
+    // Wunschliste 27c: bei ANON_REQ_TYPE_REGIONS auch in $companion mit
+    // ausgeben (CSV der aktiven Repeat-Scopes des befragten Repeaters).
+    // Layout: data[0..3]=tag, data[4..7]=remote RTC, data[8..]=payload.
+    if (_last_anon_req_type == ANON_REQ_TYPE_REGIONS && len > 8) {
+      char buf[200];
+      size_t csv_len = len - 8;
+      if (csv_len > sizeof(buf) - 80) csv_len = sizeof(buf) - 80;
+      snprintf(buf, sizeof(buf),
+               "discover regions @%s:\n  %.*s",
+               contact.name, (int)csv_len, (const char*)&data[8]);
+      pushCompanionMessage(buf);
+    }
+    _last_anon_req_type = 0;
+
     int i = 0;
     out_frame[i++] = PUSH_CODE_BINARY_RESPONSE;
     out_frame[i++] = 0; // reserved
@@ -2413,6 +2427,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _discoverable_window_start_ms = 0;
   _discoverable_count_window = 0;
   memset(_discover_entries, 0, sizeof(_discover_entries));
+  _last_anon_req_type = 0;
   _last_advert_route_direct = 0;
   // Wunschliste 26 B: rx-us Echo-Tracking
   memset(_self_initiated_hashes, 0, sizeof(_self_initiated_hashes));
@@ -3571,6 +3586,12 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint8_t *pub_key = &cmd_frame[1];
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     uint8_t *data = &cmd_frame[1 + PUB_KEY_SIZE];
+    // Wunschliste 27c: anon_req-Typ merken damit onContactResponse die
+    // typ-spezifische Antwort (z.B. REGIONS-CSV) parsen + in $companion
+    // pushen kann. Anon-REQ-Payload-Layout: [ts×4][type×1][...].
+    if ((size_t)(len - (1 + PUB_KEY_SIZE)) > 4) {
+      _last_anon_req_type = data[4];
+    }
     if (recipient) {
       uint32_t tag, est_timeout;
       int result = sendAnonReq(*recipient, data, len - (1 + PUB_KEY_SIZE), tag, est_timeout);
@@ -3976,26 +3997,6 @@ void MyMesh::handleCmdFrame(size_t len) {
       _serial->writeFrame(out_frame, 1);   // no name or key means null
     }
   } else if (cmd_frame[0] == CMD_SEND_CONTROL_DATA && len >= 2 && (cmd_frame[1] & 0x80) != 0) {
-    // Diagnose-Trace (Wunschliste 27 nachgelagert): bei NODE_DISCOVER_REQ
-    // protokollieren ob die App prefix_only gesetzt hat. User-Frage
-    // 2026-06-01 'was schickt die App?'.
-    uint8_t type_high = cmd_frame[1] & 0xF0;
-    if (type_high == CTL_TYPE_NODE_DISCOVER_REQ) {
-      char filter_str[64] = "";
-      uint8_t filt = (len >= 3) ? cmd_frame[2] : 0;
-      if (filt & (1 << ADV_TYPE_REPEATER)) strcat(filter_str, "REP ");
-      if (filt & (1 << ADV_TYPE_SENSOR))   strcat(filter_str, "SNS ");
-      if (filt & (1 << ADV_TYPE_ROOM))     strcat(filter_str, "ROOM ");
-      if (filt & (1 << ADV_TYPE_CHAT))     strcat(filter_str, "CHAT ");
-      char dbg[120];
-      snprintf(dbg, sizeof(dbg),
-               "[app-discover] prefix_only=%s filter=0x%02X (%s) len=%u",
-               (cmd_frame[1] & 1) ? "yes" : "no",
-               (unsigned)filt,
-               filter_str[0] ? filter_str : "(none)",
-               (unsigned)(len - 1));
-      pushCompanionMessage(dbg);
-    }
     auto resp = createControlData(&cmd_frame[1], len - 1);
     if (resp) {
       sendZeroHop(resp);
@@ -6848,12 +6849,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Flags (kombinierbar, Reihenfolge egal):\n"
           "  repeater - nur REPEATER\n"
           "  sensor   - nur SENSOR\n"
-          "  all      - beide (Default)\n"
+          "  all      - 0xFE (forward-compat)\n"
           "  prefix   - kurze RESP (8B pub_key)");
         pushCompanionMessage(
           "Output-Tabelle: name|pubkey, role,\n"
           "  tx_snr (unsere RX-Sicht ihrer RESP),\n"
           "  rx_snr (ihre RX-Sicht unseres REQ).");
+        pushCompanionMessage(
+          "discover regions <contact-prefix>:\n"
+          "  ANON_REQ an Kontakt, CSV der Repeat-Scopes\n"
+          "  landet automatisch im $companion.");
         pushCompanionMessage(
           "Rate-Limit: 60s zwischen 'discover'-Aufrufen.\n"
           "Auch im client-mode verfuegbar.\n"
@@ -8442,6 +8447,62 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   sensor    -> filter nur SENSOR
   //   all       -> beide (= Default)
   if (starts_with_word(cmd, "discover")) {
+    // Sub-Mode 'regions <contact>': ANON_REQ_TYPE_REGIONS an einen Kontakt.
+    // Anderes Protokoll als CTL_TYPE_NODE_DISCOVER -- daher separater Pfad.
+    {
+      const char* pp = strchr(cmd, ' ');
+      if (pp) {
+        while (*pp == ' ' || *pp == '\t') pp++;
+        if (memcmp(pp, "regions", 7) == 0 && (pp[7] == ' ' || pp[7] == '\t' || pp[7] == 0)) {
+          // Token nach "regions" extrahieren (case-sensitive Name-Prefix)
+          const char* rp = raw_cmd;
+          while (*rp == ' ' || *rp == '\t') rp++;
+          while (*rp && *rp != ' ' && *rp != '\t') rp++;          // "discover"
+          while (*rp == ' ' || *rp == '\t') rp++;
+          while (*rp && *rp != ' ' && *rp != '\t') rp++;          // "regions"
+          while (*rp == ' ' || *rp == '\t') rp++;
+          if (!*rp) {
+            pushCompanionMessage(
+              "Usage: discover regions <contact-name-prefix>");
+            return;
+          }
+          char prefix_buf[32];
+          size_t pi = 0;
+          while (*rp && *rp != ' ' && *rp != '\t' && pi + 1 < sizeof(prefix_buf)) {
+            prefix_buf[pi++] = *rp++;
+          }
+          prefix_buf[pi] = 0;
+          ContactInfo* c = searchContactsByPrefix(prefix_buf);
+          if (!c) {
+            char r[80];
+            snprintf(r, sizeof(r), "Kein Kontakt: '%s'", prefix_buf);
+            pushCompanionMessage(r);
+            return;
+          }
+          // ANON_REQ-Payload: [ts×4][type×1]
+          uint8_t req_data[5];
+          uint32_t ts = getRTCClock()->getCurrentTime();
+          memcpy(req_data, &ts, 4);
+          req_data[4] = ANON_REQ_TYPE_REGIONS;
+          uint32_t tag, est_timeout;
+          int result = sendAnonReq(*c, req_data, sizeof(req_data), tag, est_timeout);
+          if (result == MSG_SEND_FAILED) {
+            pushCompanionMessage("discover regions: sendAnonReq FAILED.");
+            return;
+          }
+          clearPendingReqs();
+          pending_req = tag;
+          _last_anon_req_type = ANON_REQ_TYPE_REGIONS;
+          char r[120];
+          snprintf(r, sizeof(r),
+                   "discover regions @%s: REQ gesendet.\n"
+                   "Antwort folgt automatisch im channel.",
+                   c->name);
+          pushCompanionMessage(r);
+          return;
+        }
+      }
+    }
     uint8_t filter = 0;
     bool prefix_only = false;
     // Tokens parsen

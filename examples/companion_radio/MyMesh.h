@@ -485,6 +485,11 @@ private:
   unsigned long _discoverable_window_start_ms;
   uint8_t       _discoverable_count_window;
   void discoverableHandleReq(mesh::Packet* packet);
+
+  // ---- (c) ANON-Regions-Discovery: bei ANON_REQ_TYPE_REGIONS-CMD von der
+  //          App den Typ merken, beim Response ggf. CSV in $companion pushen.
+  //          Auch als CLI 'discover regions <contact-prefix>'.
+  uint8_t _last_anon_req_type;
   // Wunschliste 28: backup save -- schreibt zwei JSON-Bloecke nach
   // USB-Serial (DL9SAU prefs + node main).
   void backupSaveToSerial();
