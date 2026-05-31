@@ -468,6 +468,9 @@ private:
   uint16_t _br_applied;
   uint16_t _br_skipped;
   uint16_t _br_errors;
+  // True wenn restorerte Felder einen Reboot empfehlen (Radio-Params,
+  // prv_key). Wird in der End-Statusmeldung gehinted, kein auto-action.
+  bool     _br_reboot_recommended;
   // CLI-Einstieg
   void backupRestoreStart();
   // In loop() pollen

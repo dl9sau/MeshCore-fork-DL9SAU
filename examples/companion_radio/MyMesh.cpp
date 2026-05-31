@@ -2218,6 +2218,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _br_applied = 0;
   _br_skipped = 0;
   _br_errors = 0;
+  _br_reboot_recommended = false;
   _last_advert_route_direct = 0;
   // Wunschliste 26 B: rx-us Echo-Tracking
   memset(_self_initiated_hashes, 0, sizeof(_self_initiated_hashes));
@@ -5284,25 +5285,40 @@ void MyMesh::backupRestoreStart() {
   _br_applied = 0;
   _br_skipped = 0;
   _br_errors = 0;
+  _br_reboot_recommended = false;
   _br_timeout_at = futureMillis(60000);  // 60 s
-  Serial.println();
-  Serial.println("# backup restore: waiting for BACKUP ... BEGIN/END markers.");
-  Serial.println("# Paste backup content now. Ctrl-D = finish, 60 s timeout.");
+  // Mit CRLF damit Terminal sauber bricht (manche USB-CDC-Konfigs
+  // schicken nur \n, was 'staircase'-Effekt in raw-modus terminals macht).
+  Serial.print("\r\n# backup restore: waiting for BACKUP ... BEGIN/END markers.\r\n");
+  Serial.print("# Paste backup content now. Ctrl-D = finish, 60 s timeout.\r\n");
   Serial.flush();
   pushCompanionMessage("backup restore: paste JSON via USB-Serial.\n"
                        "Ctrl-D (0x04) zum Beenden. 60s Timeout.");
 }
 
 void MyMesh::backupRestoreFinish(const char* reason) {
-  char r[160];
-  snprintf(r, sizeof(r),
+  // End-Statusmeldung. Bei reboot-relevanten Feldern (Radio-Params,
+  // prv_key) wird zusaetzlich ein Reboot-Hinweis angehaengt -- kein
+  // auto-Reboot, User entscheidet.
+  char r[200];
+  int n = snprintf(r, sizeof(r),
            "backup restore %s.\n"
            "applied=%u skipped=%u errors=%u\n"
            "(runtime only -- 'prefs save' fuer persistent)",
            reason ? reason : "done",
            (unsigned)_br_applied, (unsigned)_br_skipped, (unsigned)_br_errors);
-  Serial.println();
-  Serial.print("# "); Serial.println(r);
+  if (_br_reboot_recommended && n > 0 && n < (int)sizeof(r)) {
+    snprintf(r + n, sizeof(r) - n,
+             "\nreboot empfohlen (radio/identity geaendert).");
+  }
+  // Auf USB-Serial: pro embedded '\n' ein '\r\n' + '# ' praefix damit
+  // jede Zeile sauber im Terminal landet.
+  Serial.print("\r\n# ");
+  for (const char* p = r; *p; p++) {
+    if (*p == '\n') Serial.print("\r\n# ");
+    else if (*p != '\r') Serial.write(*p);
+  }
+  Serial.print("\r\n");
   Serial.flush();
   pushCompanionMessage(r);
   _br_state = BR_IDLE;
@@ -5322,13 +5338,27 @@ void MyMesh::backupRestoreLoop() {
     int b = Serial.read();
     if (b < 0) break;
     unsigned char c = (unsigned char)b;
-    // Ctrl-D = sauberes Beenden
+    // Ctrl-D = sauberes Beenden. '^D' im Terminal echoen damit der
+    // User sieht dass er Ctrl-D gesendet hat.
     if (c == 0x04) {
+      Serial.print("^D");
       backupRestoreFinish("done (Ctrl-D)");
       return;
     }
     // Reset Timeout bei jedem byte (User schreibt aktiv).
     _br_timeout_at = futureMillis(60000);
+
+    // Echo fuer User-Feedback waehrend cut+paste. Druckbare ASCII
+    // direkt zurueck; CR/LF als \r\n damit Terminal sauber umbricht.
+    // Wir tracken nicht ob CRLF / LF / CR -- alle line-ends werden zu
+    // \r\n, was harmlos doppelt wirken kann aber nie fehlt.
+    if (c == '\r' || c == '\n') {
+      Serial.write('\r'); Serial.write('\n');
+    } else if (c >= 0x20 && c < 0x7F) {
+      Serial.write(c);
+    }
+    // Steuerzeichen ausser \r\n nicht echoen (z.B. paste mit \x... wuerde
+    // unleserlich werden).
 
     if (_br_state == BR_WAIT_MARKER) {
       // Zeilenakkumulator. CR ignorieren (CRLF/LF/CR tolerant).
@@ -5670,6 +5700,7 @@ void MyMesh::brApplyMeta(const char* val_start, size_t val_len) {
   }
   self_id = new_id;
   _br_applied++;
+  _br_reboot_recommended = true;
   Serial.println("# meta.prv_key: applied + saved. Identity changed.");
 }
 
@@ -5722,10 +5753,12 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
   if (block_type == 2) {
     // ===== NODE MAIN =====
     if (val_type == 'n') {
-      if (strcmp(key, "freq") == 0)                  { _prefs.freq                  = as_float();        _br_applied++; return; }
-      if (strcmp(key, "sf") == 0)                    { _prefs.sf                    = (uint8_t)as_uint(); _br_applied++; return; }
-      if (strcmp(key, "bw") == 0)                    { _prefs.bw                    = as_float();        _br_applied++; return; }
-      if (strcmp(key, "cr") == 0)                    { _prefs.cr                    = (uint8_t)as_uint(); _br_applied++; return; }
+      // Radio-Params: Restore landet im _prefs, aber das Radio bleibt
+      // auf den Boot-Werten bis radio_set_params -- daher reboot empfohlen.
+      if (strcmp(key, "freq") == 0)                  { _prefs.freq                  = as_float();        _br_applied++; _br_reboot_recommended = true; return; }
+      if (strcmp(key, "sf") == 0)                    { _prefs.sf                    = (uint8_t)as_uint(); _br_applied++; _br_reboot_recommended = true; return; }
+      if (strcmp(key, "bw") == 0)                    { _prefs.bw                    = as_float();        _br_applied++; _br_reboot_recommended = true; return; }
+      if (strcmp(key, "cr") == 0)                    { _prefs.cr                    = (uint8_t)as_uint(); _br_applied++; _br_reboot_recommended = true; return; }
       if (strcmp(key, "tx_power") == 0)              { _prefs.tx_power_dbm          = (int8_t)as_int();   _br_applied++; return; }
       if (strcmp(key, "repeat") == 0)                { _prefs.client_repeat         = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps") == 0)                   { _prefs.gps_enabled           = (uint8_t)as_uint(); _br_applied++; return; }
