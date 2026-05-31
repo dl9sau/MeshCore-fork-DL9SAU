@@ -3971,6 +3971,26 @@ void MyMesh::handleCmdFrame(size_t len) {
       _serial->writeFrame(out_frame, 1);   // no name or key means null
     }
   } else if (cmd_frame[0] == CMD_SEND_CONTROL_DATA && len >= 2 && (cmd_frame[1] & 0x80) != 0) {
+    // Diagnose-Trace (Wunschliste 27 nachgelagert): bei NODE_DISCOVER_REQ
+    // protokollieren ob die App prefix_only gesetzt hat. User-Frage
+    // 2026-06-01 'was schickt die App?'.
+    uint8_t type_high = cmd_frame[1] & 0xF0;
+    if (type_high == CTL_TYPE_NODE_DISCOVER_REQ) {
+      char filter_str[64] = "";
+      uint8_t filt = (len >= 3) ? cmd_frame[2] : 0;
+      if (filt & (1 << ADV_TYPE_REPEATER)) strcat(filter_str, "REP ");
+      if (filt & (1 << ADV_TYPE_SENSOR))   strcat(filter_str, "SNS ");
+      if (filt & (1 << ADV_TYPE_ROOM))     strcat(filter_str, "ROOM ");
+      if (filt & (1 << ADV_TYPE_CHAT))     strcat(filter_str, "CHAT ");
+      char dbg[120];
+      snprintf(dbg, sizeof(dbg),
+               "[app-discover] prefix_only=%s filter=0x%02X (%s) len=%u",
+               (cmd_frame[1] & 1) ? "yes" : "no",
+               (unsigned)filt,
+               filter_str[0] ? filter_str : "(none)",
+               (unsigned)(len - 1));
+      pushCompanionMessage(dbg);
+    }
     auto resp = createControlData(&cmd_frame[1], len - 1);
     if (resp) {
       sendZeroHop(resp);
