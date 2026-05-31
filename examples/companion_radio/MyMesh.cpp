@@ -8720,13 +8720,60 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   sensor    -> filter nur SENSOR
   //   all       -> beide (= Default)
   if (starts_with_word(cmd, "discover")) {
-    // Sub-Mode 'regions <contact>': ANON_REQ_TYPE_REGIONS an einen Kontakt.
-    // Anderes Protokoll als CTL_TYPE_NODE_DISCOVER -- daher separater Pfad.
+    // Sub-Token-Resolver mit Prefix-Match. Damit funktionieren
+    // Kuerzungen: 'rep' -> repeater, 'regi' -> regions, 'p' -> prefix,
+    // 's' -> sensor, 'a' -> all. Bei Mehrdeutigkeit ('re' matched
+    // regions + repeater) -> Kandidaten-Liste.
+    static const char* const DISC_WORDS[] = {
+      "regions", "help", "prefix", "repeater", "sensor", "all"
+    };
+    static const int DISC_N = (int)(sizeof(DISC_WORDS) / sizeof(DISC_WORDS[0]));
+    auto disc_resolve = [&](const char* tok, size_t tlen,
+                            const char** out_ambig_list, size_t* out_n_amb) -> const char* {
+      *out_n_amb = 0;
+      if (tlen == 1 && tok[0] == '?') return "help";  // '?' Alias
+      const char* canon = NULL;
+      int n_hits = 0;
+      for (int i = 0; i < DISC_N; i++) {
+        size_t wlen = strlen(DISC_WORDS[i]);
+        if (tlen > wlen) continue;
+        bool match = true;
+        for (size_t k = 0; k < tlen; k++) {
+          char a = tok[k], b = DISC_WORDS[i][k];
+          if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+          if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+          if (a != b) { match = false; break; }
+        }
+        if (!match) continue;
+        if (tlen == wlen) return DISC_WORDS[i]; // exact match wins sofort
+        if (canon == NULL) canon = DISC_WORDS[i];
+        if (*out_n_amb < 6) out_ambig_list[(*out_n_amb)++] = DISC_WORDS[i];
+        n_hits++;
+      }
+      if (n_hits == 1) return canon;
+      return NULL;
+    };
+
+    // Sub-Mode 'regions [<contact>]': ANON_REQ_TYPE_REGIONS Pfad.
+    // Erkennung via Token-Resolver auf erstem Token nach 'discover'.
     {
       const char* pp = strchr(cmd, ' ');
       if (pp) {
         while (*pp == ' ' || *pp == '\t') pp++;
-        if (memcmp(pp, "regions", 7) == 0 && (pp[7] == ' ' || pp[7] == '\t' || pp[7] == 0)) {
+        const char* first_tok = pp;
+        size_t first_len = 0;
+        while (first_tok[first_len] && first_tok[first_len] != ' ' && first_tok[first_len] != '\t') first_len++;
+        const char* ambig[6]; size_t n_amb = 0;
+        const char* canon = first_len ? disc_resolve(first_tok, first_len, ambig, &n_amb) : NULL;
+        if (!canon && n_amb > 1) {
+          char e[140]; int n = snprintf(e, sizeof(e), "Mehrdeutig:");
+          for (size_t i = 0; i < n_amb && n < (int)sizeof(e); i++) {
+            n += snprintf(e + n, sizeof(e) - n, " %s", ambig[i]);
+          }
+          pushCompanionMessage(e);
+          return;
+        }
+        if (canon && strcmp(canon, "regions") == 0) {
           // Token nach "regions" extrahieren (case-sensitive Name-Prefix)
           const char* rp = raw_cmd;
           while (*rp == ' ' || *rp == '\t') rp++;
@@ -8857,9 +8904,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
       }
     }
+    // Flag-Parsing-Loop -- nutzt denselben Resolver fuer Prefix-Match.
     uint8_t filter = 0;
     bool prefix_only = false;
-    // Tokens parsen
     const char* p = strchr(cmd, ' ');
     while (p && *p) {
       while (*p == ' ' || *p == '\t') p++;
@@ -8867,16 +8914,29 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* t = p;
       while (*p && *p != ' ' && *p != '\t') p++;
       size_t tlen = (size_t)(p - t);
-      if ((tlen == 4 && memcmp(t, "help", 4) == 0)
-          || (tlen == 1 && t[0] == '?')) {
-        // Pro pushCompanionMessage <= ~120 Byte (App haengt 'Sender: '
-        // Prefix vor, BLE-Wire-Limit 145).
+      const char* ambig[6]; size_t n_amb = 0;
+      const char* canon = disc_resolve(t, tlen, ambig, &n_amb);
+      if (!canon) {
+        char e[140];
+        if (n_amb > 1) {
+          int n = snprintf(e, sizeof(e), "Mehrdeutig '%.*s':", (int)tlen, t);
+          for (size_t i = 0; i < n_amb && n < (int)sizeof(e); i++) {
+            n += snprintf(e + n, sizeof(e) - n, " %s", ambig[i]);
+          }
+        } else {
+          snprintf(e, sizeof(e), "Unbekanntes Flag '%.*s'.\n'discover help' fuer Optionen.",
+                   (int)tlen, t);
+        }
+        pushCompanionMessage(e);
+        return;
+      }
+      if (strcmp(canon, "help") == 0) {
         pushCompanionMessage(
           "discover [flags]:\n"
           "  pro-aktiv CTL-REQ via sendZeroHop\n"
           "  an direkte Nachbarn. 30s Tabelle.");
         pushCompanionMessage(
-          "Flags (kombinierbar, Reihenfolge egal):\n"
+          "Flags (kombinierbar, Prefix-Match ok):\n"
           "  repeater - nur REPEATER\n"
           "  sensor   - nur SENSOR\n"
           "  all      - 0xFE (forward-compat)");
@@ -8897,15 +8957,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  passive Antwort im full-rep-mode.");
         return;
       }
-      else if (tlen == 6 && memcmp(t, "prefix", 6) == 0) prefix_only = true;
-      else if (tlen == 8 && memcmp(t, "repeater", 8) == 0) filter |= (1 << ADV_TYPE_REPEATER);
-      else if (tlen == 6 && memcmp(t, "sensor", 6) == 0)   filter |= (1 << ADV_TYPE_SENSOR);
-      else if (tlen == 3 && memcmp(t, "all", 3) == 0)      filter |= 0xFE;
-      else {
-        char e[80];
-        snprintf(e, sizeof(e), "Unbekanntes Flag '%.*s'. 'discover help' fuer Optionen.",
-                 (int)tlen, t);
-        pushCompanionMessage(e);
+      else if (strcmp(canon, "prefix") == 0)   prefix_only = true;
+      else if (strcmp(canon, "repeater") == 0) filter |= (1 << ADV_TYPE_REPEATER);
+      else if (strcmp(canon, "sensor") == 0)   filter |= (1 << ADV_TYPE_SENSOR);
+      else if (strcmp(canon, "all") == 0)      filter |= 0xFE;
+      else if (strcmp(canon, "regions") == 0) {
+        // 'regions' inmitten der Flag-Liste? Nicht erwartet -- separater Pfad.
+        pushCompanionMessage(
+          "'regions' ist Sub-Befehl, nicht Flag.\n"
+          "Nutze 'discover regions [<name>]'.");
         return;
       }
     }
