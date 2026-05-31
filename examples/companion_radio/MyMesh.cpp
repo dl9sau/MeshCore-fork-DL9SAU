@@ -1419,6 +1419,16 @@ void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uin
 
 void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
                                   const char *text) {
+  // Schutz 2026-06-01: $companion ist STRICT LOCAL -- von aussen darf
+  // hier NICHTS reinkommen, auch nicht wenn jemand die Magic-PSK kennt
+  // und in unser Funkfeld schickt. Sonst koennte ein Angreifer den
+  // $companion-Bucket fluten und legitime lokale Pushes (Geo-Reco etc.)
+  // verdraengen.
+  uint8_t ch_idx_check = findChannelIdx(channel);
+  if (isCompanionChannel(ch_idx_check)) {
+    MESH_DEBUG_PRINTLN("onChannelMessageRecv: dropping external $companion text");
+    return;
+  }
   // Build an augmented text that exposes the packet's scope (region) name
   // to the app, using a text-convention "Sender (#scope): msg". No
   // wire-protocol change required.
@@ -1499,6 +1509,14 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
 
 void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint16_t data_type,
                                const uint8_t *data, size_t data_len) {
+  // Schutz 2026-06-01: siehe onChannelMessageRecv -- gleicher Grund.
+  // Da andere DL9SAU-Firmware-User die Magic-PSK kennen koennen
+  // (Source-Code ist offen), ist External-Drop hier obligatorisch.
+  uint8_t ch_idx_check = findChannelIdx(channel);
+  if (isCompanionChannel(ch_idx_check)) {
+    MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping external $companion data");
+    return;
+  }
   if (data_len > MAX_CHANNEL_DATA_LENGTH) {
     MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping payload_len=%d exceeds frame limit=%d",
                        (uint32_t)data_len, (uint32_t)MAX_CHANNEL_DATA_LENGTH);
