@@ -442,6 +442,9 @@ private:
   // unseren lokalen $companion-Channel (Magic-PSK match). Robust gegen
   // App-Rename + App-Index-Drift.
   bool isCompanionChannel(uint8_t channel_idx);
+  // Wunschliste 28: backup save -- schreibt zwei JSON-Bloecke nach
+  // USB-Serial (DL9SAU prefs + node mirror). Phase A; restore folgt.
+  void backupSaveToSerial();
   // Pusht einen Text als synthetische incoming-channel-message für den
   // Companion-Channel. Sendername = board.getManufacturerName(). Wenn die App
   // nicht connected ist landet die Nachricht in der Offline-Queue (16 Slots,

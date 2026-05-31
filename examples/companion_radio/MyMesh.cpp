@@ -5035,6 +5035,143 @@ void MyMesh::formatLatLonDM(char* out, size_t out_size, double lat, double lon) 
 // ---------------------------------------------------------------------------
 #define COMPANION_CHANNEL_NAME "companion"
 
+// Wunschliste 28 Phase A: Backup-Save nach USB-Serial.
+// Zwei JSON-Bloecke mit Marker-Linien.
+// Format: pretty-printed multi-line, eine "key": value Zeile pro Feld
+// (Komma davor wenn nicht erste Zeile -> Tracking via 'first' Flag).
+void MyMesh::backupSaveToSerial() {
+  bool first;
+  // Hilfs-Lambdas. Schreiben direkt auf Serial -- USB-CDC mit
+  // setTxTimeoutMs(0) ist non-blocking, mit angeschlossenem Host (was
+  // fuer Backup zwingend ist) drained das OS schnell genug.
+  auto kv_uint = [&](const char* name, uint32_t v) {
+    if (!first) Serial.println(",");
+    first = false;
+    Serial.print("  \""); Serial.print(name); Serial.print("\": "); Serial.print(v);
+  };
+  auto kv_int = [&](const char* name, int32_t v) {
+    if (!first) Serial.println(",");
+    first = false;
+    Serial.print("  \""); Serial.print(name); Serial.print("\": "); Serial.print(v);
+  };
+  auto kv_float = [&](const char* name, double v, int prec) {
+    if (!first) Serial.println(",");
+    first = false;
+    Serial.print("  \""); Serial.print(name); Serial.print("\": "); Serial.print(v, prec);
+  };
+  auto kv_str = [&](const char* name, const char* s) {
+    if (!first) Serial.println(",");
+    first = false;
+    Serial.print("  \""); Serial.print(name); Serial.print("\": \"");
+    while (*s) {
+      char c = *s++;
+      if (c == '\\' || c == '"') Serial.print('\\');
+      if (c == '\r') { Serial.print("\\r"); continue; }
+      if (c == '\n') { Serial.print("\\n"); continue; }
+      if (c == '\t') { Serial.print("\\t"); continue; }
+      Serial.print(c);
+    }
+    Serial.print('"');
+  };
+  auto kv_hex = [&](const char* name, const uint8_t* bytes, size_t len) {
+    if (!first) Serial.println(",");
+    first = false;
+    Serial.print("  \""); Serial.print(name); Serial.print("\": \"");
+    for (size_t i = 0; i < len; i++) {
+      char b[3]; snprintf(b, sizeof(b), "%02x", bytes[i]); Serial.print(b);
+    }
+    Serial.print('"');
+  };
+  auto kv_arr_uint8 = [&](const char* name, const uint8_t* arr, size_t n) {
+    if (!first) Serial.println(",");
+    first = false;
+    Serial.print("  \""); Serial.print(name); Serial.print("\": [");
+    for (size_t i = 0; i < n; i++) {
+      if (i > 0) Serial.print(", ");
+      Serial.print((unsigned)arr[i]);
+    }
+    Serial.print("]");
+  };
+
+  // -------- Block 1: DL9SAU prefs --------
+  Serial.println();
+  Serial.println("--- BACKUP DL9SAU PREFS BEGIN ---");
+  Serial.println("{");
+  first = true;
+  kv_str("_fw_version", FIRMWARE_VERSION);
+  kv_hex("_pubkey_prefix", self_id.pub_key, 4);
+  kv_uint("chat_name_mode",        _prefs.chat_name_mode);
+  kv_str ("chat_name_custom",      _prefs.chat_name_custom);
+  kv_uint("auto_advert_enabled",   _prefs.auto_advert_enabled);
+  kv_uint("client_repeat_force",   _prefs.client_repeat_force);
+  kv_uint("repeater_profile",      _prefs.repeater_profile);
+  kv_uint("loop_detect",           _prefs.loop_detect);
+  kv_uint("duty_soft_pct",         _prefs.duty_soft_pct);
+  kv_uint("duty_hard_pct",         _prefs.duty_hard_pct);
+  kv_str ("bake_scope_name",       _prefs.bake_scope_name);
+  kv_hex ("bake_scope_key",        _prefs.bake_scope_key, 16);
+  kv_str ("override_scope_name",   _prefs.override_scope_name);
+  kv_hex ("override_scope_key",    _prefs.override_scope_key, 16);
+  kv_uint("override_expiry",       _prefs.override_expiry);
+  kv_uint("scope_advert_auto",     _prefs.scope_advert_auto);
+  kv_uint("scope_repeater_auto",   _prefs.scope_repeater_auto);
+  kv_uint("advert_role",           _prefs.advert_role);
+  kv_str ("owner_info",            _prefs.owner_info);
+  kv_uint("trace_flags_persistent",_prefs.trace_flags_persistent);
+  kv_uint("gps_power_mode",        _prefs.gps_power_mode);
+  kv_uint("gps_lead_min",          _prefs.gps_lead_min);
+  kv_uint("repeat_scope_mode",     _prefs.repeat_scope_mode);
+  kv_uint("msg_store_flash",       _prefs.msg_store_flash);
+  kv_arr_uint8("msg_store_limit",  _prefs.msg_store_limit, 5);
+  kv_uint("log_flags",             _prefs.log_flags);
+  Serial.println();
+  Serial.println("}");
+  Serial.println("--- BACKUP DL9SAU PREFS END ---");
+  Serial.flush();
+
+  // -------- Block 2: Node Mirror (App-Settings) --------
+  Serial.println();
+  Serial.println("--- BACKUP NODE MIRROR BEGIN ---");
+  Serial.println("{");
+  first = true;
+  kv_str  ("_fw_version",          FIRMWARE_VERSION);
+  kv_hex  ("_pubkey_prefix",       self_id.pub_key, 4);
+  kv_str  ("name",                 _prefs.node_name);
+  kv_float("freq",                 _prefs.freq, 4);
+  kv_uint ("sf",                   _prefs.sf);
+  kv_float("bw",                   _prefs.bw, 1);
+  kv_uint ("cr",                   _prefs.cr);
+  kv_int  ("tx_power",             _prefs.tx_power_dbm);
+  kv_uint ("repeat",               _prefs.client_repeat);
+  kv_uint ("gps",                  _prefs.gps_enabled);
+  kv_uint ("gps_interval",         _prefs.gps_interval);
+  kv_uint ("advert_loc_policy",    _prefs.advert_loc_policy);
+  kv_float("airtime_factor",       _prefs.airtime_factor, 3);
+  kv_uint ("rx_boosted_gain",      _prefs.rx_boosted_gain);
+  kv_uint ("manual_add_contacts",  _prefs.manual_add_contacts);
+  kv_uint ("multi_acks",           _prefs.multi_acks);
+  kv_uint ("path_hash_mode",       _prefs.path_hash_mode);
+  kv_uint ("autoadd_config",       _prefs.autoadd_config);
+  kv_uint ("autoadd_max_hops",     _prefs.autoadd_max_hops);
+  kv_uint ("telemetry_mode_base",  _prefs.telemetry_mode_base);
+  kv_uint ("telemetry_mode_loc",   _prefs.telemetry_mode_loc);
+  kv_uint ("telemetry_mode_env",   _prefs.telemetry_mode_env);
+  kv_uint ("buzzer_quiet",         _prefs.buzzer_quiet);
+  kv_float("rxdelay",              _prefs.rx_delay_base, 3);
+  kv_float("txdelay",              _prefs.tx_delay_factor, 3);
+  kv_float("direct_txdelay",       _prefs.direct_tx_delay_factor, 3);
+  kv_uint ("scope_regional_hops",  _prefs.scope_regional_hop_limit);
+  kv_uint ("flood_max",            _prefs.flood_max);
+  kv_uint ("flood_max_adv_infra",  _prefs.flood_max_adv_infra);
+  kv_float("lat",                  sensors.node_lat, 6);
+  kv_float("lon",                  sensors.node_lon, 6);
+  Serial.println();
+  Serial.println("}");
+  Serial.println("--- BACKUP NODE MIRROR END ---");
+  Serial.println();
+  Serial.flush();
+}
+
 void MyMesh::setupCompanionChannel() {
   ChannelDetails ch;
 
@@ -5454,7 +5591,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
     "messages", "logging", "unscoped-channelmessages", "clear",
-    "contact",
+    "contact", "backup",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -6011,7 +6148,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     );
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
-      "  contact, tempradio, clear, reboot."
+      "  contact, backup, tempradio, clear, reboot."
     );
     return;
   }
@@ -7467,6 +7604,33 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              "App ggf. trennen+neu verbinden falls UI nicht aktualisiert.",
              c->name, old, new_type, arg);
     pushCompanionMessage(r);
+    return;
+  }
+
+  // ---------- backup [save|restore] -------------------------------------
+  // Wunschliste 28: backup / restore von DL9SAU-prefs + node-mirror
+  // ueber USB-Serial JSON. Phase A (save) implementiert, Phase B
+  // (restore) folgt.
+  if (starts_with_word(cmd, "backup")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    if (!arg || *arg == 0) {
+      pushCompanionMessage(
+        "backup save     -- JSON-Backup nach USB-Serial\n"
+        "backup restore  -- JSON-Restore (NOCH NICHT implementiert)");
+      return;
+    }
+    if (strcmp(arg, "save") == 0) {
+      backupSaveToSerial();
+      pushCompanionMessage("backup save: 2 JSON-Bloecke nach USB-Serial geschrieben.\n"
+                           "Terminal-Cut+Paste in eine Datei zum Sichern.");
+      return;
+    }
+    if (strcmp(arg, "restore") == 0) {
+      pushCompanionMessage("backup restore: noch nicht implementiert (Phase B folgt).");
+      return;
+    }
+    pushCompanionMessage("Usage: backup [save|restore]");
     return;
   }
 
