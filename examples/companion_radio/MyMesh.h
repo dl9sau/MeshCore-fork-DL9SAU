@@ -443,8 +443,50 @@ private:
   // App-Rename + App-Index-Drift.
   bool isCompanionChannel(uint8_t channel_idx);
   // Wunschliste 28: backup save -- schreibt zwei JSON-Bloecke nach
-  // USB-Serial (DL9SAU prefs + node mirror). Phase A; restore folgt.
+  // USB-Serial (DL9SAU prefs + node main).
   void backupSaveToSerial();
+  // Wunschliste 28 Phase B: Backup-Restore State-Machine.
+  // 'backup restore' versetzt die Firmware in Read-Modus auf USB-Serial.
+  // Sie liest paste-bytes, erkennt Marker-Linien ('--- BACKUP X BEGIN ---'),
+  // sammelt JSON-Body bis brace-balance, parsiert, wendet bekannte Felder
+  // an. Ctrl-D (0x04) terminiert sauber, 60 s Timeout abort.
+  enum {
+    BR_IDLE = 0,
+    BR_WAIT_MARKER,   // suche naechste BEGIN-Marker-Linie
+    BR_READING_JSON,  // sammle JSON-Body
+  };
+  uint8_t  _br_state;
+  uint8_t  _br_block_type;          // 0=none, 1=dl9sau, 2=main
+  char     _br_line[96];
+  uint16_t _br_line_len;
+  char     _br_json[2560];
+  uint16_t _br_json_len;
+  int16_t  _br_brace_depth;
+  bool     _br_in_string;
+  bool     _br_escape_next;
+  unsigned long _br_timeout_at;
+  uint16_t _br_applied;
+  uint16_t _br_skipped;
+  uint16_t _br_errors;
+  // CLI-Einstieg
+  void backupRestoreStart();
+  // In loop() pollen
+  void backupRestoreLoop();
+  // Block-Parser nach komplettem JSON-Body
+  void backupRestoreParseBlock();
+  // Beenden / abbrechen
+  void backupRestoreFinish(const char* reason);
+  // Field-Dispatcher (block_type 1 = DL9SAU, 2 = MAIN)
+  void brApplyField(uint8_t block_type, const char* key,
+                    const char* val_start, size_t val_len, char val_type);
+  void brApplyMeta(const char* val_start, size_t val_len);
+  // String/Hex/Array Extraktoren mit JSON-Escape-Dekodierung
+  void brExtractString(const char* val_start, size_t val_len,
+                       char* dest, size_t dest_max);
+  void brExtractHex(const char* val_start, size_t val_len,
+                    uint8_t* dest, size_t dest_max);
+  void brExtractUint8Array(const char* val_start, size_t val_len,
+                           uint8_t* dest, size_t dest_count);
   // Pusht einen Text als synthetische incoming-channel-message für den
   // Companion-Channel. Sendername = board.getManufacturerName(). Wenn die App
   // nicht connected ist landet die Nachricht in der Offline-Queue (16 Slots,

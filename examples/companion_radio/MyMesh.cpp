@@ -2206,6 +2206,18 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(_heard_direct_by_scope, 0, sizeof(_heard_direct_by_scope));
   memset(_rx_direct_advert_by_role, 0, sizeof(_rx_direct_advert_by_role));
   _last_advert_scoped = 0;
+  // Backup-Restore State (Wunschliste 28 Phase B)
+  _br_state = BR_IDLE;
+  _br_block_type = 0;
+  _br_line_len = 0;
+  _br_json_len = 0;
+  _br_brace_depth = 0;
+  _br_in_string = false;
+  _br_escape_next = false;
+  _br_timeout_at = 0;
+  _br_applied = 0;
+  _br_skipped = 0;
+  _br_errors = 0;
   _last_advert_route_direct = 0;
   // Wunschliste 26 B: rx-us Echo-Tracking
   memset(_self_initiated_hashes, 0, sizeof(_self_initiated_hashes));
@@ -4025,6 +4037,14 @@ void MyMesh::loop() {
 
   BaseChatMesh::loop();
 
+  // Wunschliste 28 Phase B: backup restore Serial-Read State-Machine.
+  // Liest rohe USB-CDC bytes (Serial.*). Laeuft PARALLEL zum BLE-Frame-
+  // Pfad (_serial->checkRecvFrame in checkSerialInterface), weil im
+  // BLE-Build die beiden Streams (USB-Serial vs BLE) physisch getrennt
+  // sind. App kann waehrend Restore weiter operieren.
+  if (_br_state != BR_IDLE) {
+    backupRestoreLoop();
+  }
   if (_cli_rescue) {
     checkCLIRescueCmd();
   } else {
@@ -5207,9 +5227,9 @@ void MyMesh::backupSaveToSerial() {
   Serial.println("--- BACKUP DL9SAU PREFS END ---");
   Serial.flush();
 
-  // -------- Block 2: Node Mirror (App-Settings) --------
+  // -------- Block 2: Node Main (App-Settings) --------
   Serial.println();
-  Serial.println("--- BACKUP NODE MIRROR BEGIN ---");
+  Serial.println("--- BACKUP NODE MAIN BEGIN ---");
   Serial.println("{");
   first = true;
   emit_meta();
@@ -5244,9 +5264,500 @@ void MyMesh::backupSaveToSerial() {
   kv_float("lon",                  sensors.node_lon, 6);
   Serial.println();
   Serial.println("}");
-  Serial.println("--- BACKUP NODE MIRROR END ---");
+  Serial.println("--- BACKUP NODE MAIN END ---");
   Serial.println();
   Serial.flush();
+}
+
+// =========================================================================
+// Wunschliste 28 Phase B: backup restore -- State-Machine + JSON-Parser
+// =========================================================================
+
+void MyMesh::backupRestoreStart() {
+  _br_state = BR_WAIT_MARKER;
+  _br_block_type = 0;
+  _br_line_len = 0;
+  _br_json_len = 0;
+  _br_brace_depth = 0;
+  _br_in_string = false;
+  _br_escape_next = false;
+  _br_applied = 0;
+  _br_skipped = 0;
+  _br_errors = 0;
+  _br_timeout_at = futureMillis(60000);  // 60 s
+  Serial.println();
+  Serial.println("# backup restore: waiting for BACKUP ... BEGIN/END markers.");
+  Serial.println("# Paste backup content now. Ctrl-D = finish, 60 s timeout.");
+  Serial.flush();
+  pushCompanionMessage("backup restore: paste JSON via USB-Serial.\n"
+                       "Ctrl-D (0x04) zum Beenden. 60s Timeout.");
+}
+
+void MyMesh::backupRestoreFinish(const char* reason) {
+  char r[160];
+  snprintf(r, sizeof(r),
+           "backup restore %s.\n"
+           "applied=%u skipped=%u errors=%u\n"
+           "(runtime only -- 'prefs save' fuer persistent)",
+           reason ? reason : "done",
+           (unsigned)_br_applied, (unsigned)_br_skipped, (unsigned)_br_errors);
+  Serial.println();
+  Serial.print("# "); Serial.println(r);
+  Serial.flush();
+  pushCompanionMessage(r);
+  _br_state = BR_IDLE;
+  _br_block_type = 0;
+  _br_line_len = 0;
+  _br_json_len = 0;
+}
+
+void MyMesh::backupRestoreLoop() {
+  if (_br_state == BR_IDLE) return;
+  if (millisHasNowPassed(_br_timeout_at)) {
+    backupRestoreFinish("timeout (60s)");
+    return;
+  }
+  // Read all currently available bytes.
+  while (Serial.available() > 0) {
+    int b = Serial.read();
+    if (b < 0) break;
+    unsigned char c = (unsigned char)b;
+    // Ctrl-D = sauberes Beenden
+    if (c == 0x04) {
+      backupRestoreFinish("done (Ctrl-D)");
+      return;
+    }
+    // Reset Timeout bei jedem byte (User schreibt aktiv).
+    _br_timeout_at = futureMillis(60000);
+
+    if (_br_state == BR_WAIT_MARKER) {
+      // Zeilenakkumulator. CR ignorieren (CRLF/LF/CR tolerant).
+      if (c == '\r') continue;
+      if (c == '\n') {
+        _br_line[_br_line_len] = 0;
+        // Marker erkennen
+        if (strncmp(_br_line, "--- BACKUP ", 11) == 0) {
+          const char* type_str = _br_line + 11;
+          if (strncmp(type_str, "DL9SAU PREFS BEGIN ---", 22) == 0) {
+            _br_block_type = 1;
+            _br_state = BR_READING_JSON;
+            _br_json_len = 0;
+            _br_brace_depth = 0;
+            _br_in_string = false;
+            _br_escape_next = false;
+            Serial.println("# DL9SAU PREFS block: reading JSON...");
+          } else if (strncmp(type_str, "NODE MAIN BEGIN ---", 19) == 0) {
+            _br_block_type = 2;
+            _br_state = BR_READING_JSON;
+            _br_json_len = 0;
+            _br_brace_depth = 0;
+            _br_in_string = false;
+            _br_escape_next = false;
+            Serial.println("# NODE MAIN block: reading JSON...");
+          }
+          // andere Marker (z.B. END) ignorieren, bleiben in WAIT_MARKER
+        }
+        _br_line_len = 0;
+      } else if (_br_line_len < sizeof(_br_line) - 1) {
+        _br_line[_br_line_len++] = c;
+      }
+      // else: Zeile zu lang, ignorieren bis \n
+    }
+    else if (_br_state == BR_READING_JSON) {
+      if (_br_json_len >= sizeof(_br_json) - 1) {
+        _br_errors++;
+        Serial.println("# error: JSON buffer overflow, skipping block.");
+        _br_state = BR_WAIT_MARKER;
+        _br_json_len = 0;
+        _br_line_len = 0;
+        continue;
+      }
+      _br_json[_br_json_len++] = c;
+      // Brace-Depth tracking mit String-Awareness
+      if (_br_escape_next) {
+        _br_escape_next = false;
+      } else if (_br_in_string) {
+        if (c == '\\') _br_escape_next = true;
+        else if (c == '"') _br_in_string = false;
+      } else {
+        if (c == '"') _br_in_string = true;
+        else if (c == '{') _br_brace_depth++;
+        else if (c == '}') {
+          _br_brace_depth--;
+          if (_br_brace_depth == 0) {
+            _br_json[_br_json_len] = 0;
+            backupRestoreParseBlock();
+            // Zurueck in Marker-Such-Modus fuer naechsten Block
+            _br_state = BR_WAIT_MARKER;
+            _br_block_type = 0;
+            _br_line_len = 0;
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- Extractors ----------------------------------------------------------
+
+void MyMesh::brExtractString(const char* val_start, size_t val_len,
+                             char* dest, size_t dest_max) {
+  if (val_len < 2 || val_start[0] != '"' || dest_max == 0) {
+    if (dest_max > 0) dest[0] = 0;
+    return;
+  }
+  const char* p = val_start + 1;
+  const char* end = val_start + val_len - 1;  // exclude closing "
+  size_t dlen = 0;
+  auto enc_utf8 = [&](uint32_t cp) {
+    if (cp < 0x80) {
+      if (dlen + 1 < dest_max) dest[dlen++] = (char)cp;
+    } else if (cp < 0x800) {
+      if (dlen + 2 < dest_max) {
+        dest[dlen++] = (char)(0xC0 | (cp >> 6));
+        dest[dlen++] = (char)(0x80 | (cp & 0x3F));
+      }
+    } else if (cp < 0x10000) {
+      if (dlen + 3 < dest_max) {
+        dest[dlen++] = (char)(0xE0 | (cp >> 12));
+        dest[dlen++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        dest[dlen++] = (char)(0x80 | (cp & 0x3F));
+      }
+    } else {
+      if (dlen + 4 < dest_max) {
+        dest[dlen++] = (char)(0xF0 | (cp >> 18));
+        dest[dlen++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        dest[dlen++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        dest[dlen++] = (char)(0x80 | (cp & 0x3F));
+      }
+    }
+  };
+  auto read_hex4 = [&]() -> uint32_t {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) {
+      if (p >= end) return 0xFFFFFFFFu;
+      char h = *p++;
+      int d;
+      if (h >= '0' && h <= '9') d = h - '0';
+      else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+      else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+      else return 0xFFFFFFFFu;
+      v = (v << 4) | (uint32_t)d;
+    }
+    return v;
+  };
+  while (p < end && dlen + 1 < dest_max) {
+    if (*p != '\\') {
+      dest[dlen++] = *p++;
+      continue;
+    }
+    p++;  // skip backslash
+    if (p >= end) break;
+    char c = *p++;
+    if      (c == '"')  dest[dlen++] = '"';
+    else if (c == '\\') dest[dlen++] = '\\';
+    else if (c == '/')  dest[dlen++] = '/';
+    else if (c == 'b')  dest[dlen++] = '\b';
+    else if (c == 'f')  dest[dlen++] = '\f';
+    else if (c == 'n')  dest[dlen++] = '\n';
+    else if (c == 'r')  dest[dlen++] = '\r';
+    else if (c == 't')  dest[dlen++] = '\t';
+    else if (c == 'u') {
+      uint32_t cp = read_hex4();
+      if (cp == 0xFFFFFFFFu) break;
+      if (cp >= 0xD800 && cp <= 0xDBFF) {
+        // High surrogate, erwarte \uLLLL
+        if (p + 2 <= end && p[0] == '\\' && p[1] == 'u') {
+          p += 2;
+          uint32_t lo = read_hex4();
+          if (lo >= 0xDC00 && lo <= 0xDFFF) {
+            cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+          }
+        }
+      }
+      enc_utf8(cp);
+    }
+    // sonst: unbekannte Escape-Sequenz, ignorieren
+  }
+  if (dlen < dest_max) dest[dlen] = 0;
+  else dest[dest_max - 1] = 0;
+}
+
+void MyMesh::brExtractHex(const char* val_start, size_t val_len,
+                          uint8_t* dest, size_t dest_max) {
+  memset(dest, 0, dest_max);
+  if (val_len < 2 || val_start[0] != '"') return;
+  const char* p = val_start + 1;
+  const char* end = val_start + val_len - 1;
+  size_t out = 0;
+  uint8_t cur = 0;
+  int nyb = 0;
+  while (p < end && out < dest_max) {
+    char c = *p++;
+    int v = -1;
+    if (c >= '0' && c <= '9')      v = c - '0';
+    else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    if (v < 0) continue;
+    cur = (uint8_t)((cur << 4) | (uint8_t)v);
+    if (++nyb == 2) {
+      dest[out++] = cur;
+      cur = 0;
+      nyb = 0;
+    }
+  }
+}
+
+void MyMesh::brExtractUint8Array(const char* val_start, size_t val_len,
+                                 uint8_t* dest, size_t dest_count) {
+  for (size_t i = 0; i < dest_count; i++) dest[i] = 0;
+  const char* p = val_start;
+  const char* end = val_start + val_len;
+  if (p >= end || *p != '[') return;
+  p++;
+  for (size_t i = 0; i < dest_count; i++) {
+    while (p < end && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    if (p >= end || *p == ']') return;
+    dest[i] = (uint8_t)atoi(p);
+    while (p < end && *p != ',' && *p != ']') p++;
+  }
+}
+
+// --- Block Parser ---------------------------------------------------------
+
+void MyMesh::backupRestoreParseBlock() {
+  const char* p = _br_json;
+  const char* end = _br_json + _br_json_len;
+  // Skip whitespace, opening brace
+  while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+  if (p >= end || *p != '{') {
+    _br_errors++;
+    Serial.println("# parse error: expected '{' at start of JSON block.");
+    return;
+  }
+  p++;
+  while (p < end) {
+    // Skip whitespace + commas
+    while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ',')) p++;
+    if (p >= end || *p == '}') break;
+    // Expect "key"
+    if (*p != '"') {
+      _br_errors++;
+      break;
+    }
+    p++;
+    char key[64];
+    int klen = 0;
+    while (p < end && *p != '"' && klen < (int)sizeof(key) - 1) {
+      if (*p == '\\' && p + 1 < end) {
+        // simplification: skip escaped char as raw (keys are ASCII)
+        key[klen++] = p[1];
+        p += 2;
+      } else {
+        key[klen++] = *p++;
+      }
+    }
+    key[klen] = 0;
+    if (p < end && *p == '"') p++;
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    if (p < end && *p == ':') p++;
+    while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+    // Read value range based on first char
+    const char* val_start = p;
+    char val_type = 0;
+    if (p < end) {
+      if (*p == '"') {
+        val_type = 's';
+        p++;
+        bool esc = false;
+        while (p < end) {
+          char c = *p++;
+          if (esc) { esc = false; continue; }
+          if (c == '\\') { esc = true; continue; }
+          if (c == '"') break;
+        }
+      } else if (*p == '{') {
+        val_type = 'o';
+        int d = 1;
+        bool in_str = false, en = false;
+        p++;
+        while (p < end && d > 0) {
+          char c = *p++;
+          if (en) en = false;
+          else if (in_str) {
+            if (c == '\\') en = true;
+            else if (c == '"') in_str = false;
+          } else {
+            if (c == '"') in_str = true;
+            else if (c == '{') d++;
+            else if (c == '}') d--;
+          }
+        }
+      } else if (*p == '[') {
+        val_type = 'a';
+        int d = 1;
+        p++;
+        while (p < end && d > 0) {
+          char c = *p++;
+          if (c == '[') d++;
+          else if (c == ']') d--;
+        }
+      } else {
+        val_type = 'n';
+        while (p < end && *p != ',' && *p != '}' && *p != '\n' && *p != '\r') p++;
+        // trim trailing whitespace
+        while (p > val_start && (p[-1] == ' ' || p[-1] == '\t')) p--;
+      }
+    }
+    size_t val_len = (size_t)(p - val_start);
+    // Dispatch
+    if (strcmp(key, "_meta") == 0 && val_type == 'o') {
+      brApplyMeta(val_start, val_len);
+    } else if (_br_block_type == 1 || _br_block_type == 2) {
+      brApplyField(_br_block_type, key, val_start, val_len, val_type);
+    }
+  }
+}
+
+// --- _meta: nur prv_key wird angewendet (Identity-Restore + Save) --------
+
+void MyMesh::brApplyMeta(const char* val_start, size_t val_len) {
+  // Wir suchen "prv_key": "..." -- alles andere im _meta-Block ignorieren.
+  const char* p = val_start;
+  const char* end = val_start + val_len;
+  const char* needle = "\"prv_key\"";
+  size_t needle_len = 9;
+  // Naive Suche -- _meta ist klein.
+  const char* hit = NULL;
+  for (const char* q = p; q + needle_len <= end; q++) {
+    if (memcmp(q, needle, needle_len) == 0) { hit = q; break; }
+  }
+  if (!hit) return;
+  // Nach Doppelpunkt und Anfuehrungszeichen suchen
+  const char* q = hit + needle_len;
+  while (q < end && (*q == ' ' || *q == '\t')) q++;
+  if (q >= end || *q != ':') return;
+  q++;
+  while (q < end && (*q == ' ' || *q == '\t')) q++;
+  if (q >= end || *q != '"') return;
+  const char* str_start = q;
+  q++;
+  bool esc = false;
+  while (q < end) {
+    if (esc) { esc = false; q++; continue; }
+    if (*q == '\\') { esc = true; q++; continue; }
+    if (*q == '"') { q++; break; }
+    q++;
+  }
+  size_t str_len = (size_t)(q - str_start);
+  // Hex extrahieren
+  uint8_t prv[PRV_KEY_SIZE];
+  brExtractHex(str_start, str_len, prv, PRV_KEY_SIZE);
+  // Validieren
+  if (!mesh::LocalIdentity::validatePrivateKey(prv)) {
+    _br_errors++;
+    Serial.println("# meta.prv_key: invalid -- ignored.");
+    return;
+  }
+  // Anwenden + persistieren (Identity wird IMMER persistiert weil
+  // halbierter Zustand "RAM != Disk" gefaehrlich ist).
+  mesh::LocalIdentity new_id;
+  new_id.readFrom(prv, PRV_KEY_SIZE);
+  if (!_store->saveMainIdentity(new_id)) {
+    _br_errors++;
+    Serial.println("# meta.prv_key: saveMainIdentity FAILED.");
+    return;
+  }
+  self_id = new_id;
+  _br_applied++;
+  Serial.println("# meta.prv_key: applied + saved. Identity changed.");
+}
+
+// --- Field-Dispatcher fuer die zwei Block-Typen -------------------------
+
+void MyMesh::brApplyField(uint8_t block_type, const char* key,
+                          const char* val_start, size_t val_len, char val_type) {
+  auto as_uint = [&]() -> uint32_t { return (uint32_t)atoll(val_start); };
+  auto as_int  = [&]() -> int32_t  { return (int32_t)atoll(val_start); };
+  auto as_float = [&]() -> float   { return (float)atof(val_start); };
+
+  if (block_type == 1) {
+    // ===== DL9SAU PREFS =====
+    if (val_type == 'n') {
+      if (strcmp(key, "chat_name_mode") == 0)        { _prefs.chat_name_mode        = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "auto_advert_enabled") == 0)   { _prefs.auto_advert_enabled   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "client_repeat_force") == 0)   { _prefs.client_repeat_force   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "repeater_profile") == 0)      { _prefs.repeater_profile      = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "loop_detect") == 0)           { _prefs.loop_detect           = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "duty_soft_pct") == 0)         { _prefs.duty_soft_pct         = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "duty_hard_pct") == 0)         { _prefs.duty_hard_pct         = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "override_expiry") == 0)       { _prefs.override_expiry       = as_uint();         _br_applied++; return; }
+      if (strcmp(key, "scope_advert_auto") == 0)     { _prefs.scope_advert_auto     = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "scope_repeater_auto") == 0)   { _prefs.scope_repeater_auto   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "advert_role") == 0)           { _prefs.advert_role           = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "trace_flags_persistent") == 0){ _prefs.trace_flags_persistent= (uint16_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "gps_power_mode") == 0)        { _prefs.gps_power_mode        = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "gps_lead_min") == 0)          { _prefs.gps_lead_min          = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "repeat_scope_mode") == 0)     { _prefs.repeat_scope_mode     = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "msg_store_flash") == 0)       { _prefs.msg_store_flash       = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "log_flags") == 0)             { _prefs.log_flags             = (uint8_t)as_uint(); _br_applied++; return; }
+    }
+    if (val_type == 's') {
+      if (strcmp(key, "chat_name_custom") == 0)    { brExtractString(val_start, val_len, _prefs.chat_name_custom, sizeof(_prefs.chat_name_custom)); _br_applied++; return; }
+      if (strcmp(key, "bake_scope_name") == 0)     { brExtractString(val_start, val_len, _prefs.bake_scope_name, sizeof(_prefs.bake_scope_name)); _br_applied++; return; }
+      if (strcmp(key, "bake_scope_key") == 0)      { brExtractHex(val_start, val_len, _prefs.bake_scope_key, sizeof(_prefs.bake_scope_key)); _br_applied++; return; }
+      if (strcmp(key, "override_scope_name") == 0) { brExtractString(val_start, val_len, _prefs.override_scope_name, sizeof(_prefs.override_scope_name)); _br_applied++; return; }
+      if (strcmp(key, "override_scope_key") == 0)  { brExtractHex(val_start, val_len, _prefs.override_scope_key, sizeof(_prefs.override_scope_key)); _br_applied++; return; }
+      if (strcmp(key, "owner_info") == 0)          { brExtractString(val_start, val_len, _prefs.owner_info, sizeof(_prefs.owner_info)); _br_applied++; return; }
+    }
+    if (val_type == 'a' && strcmp(key, "msg_store_limit") == 0) {
+      brExtractUint8Array(val_start, val_len, _prefs.msg_store_limit, 5);
+      _br_applied++;
+      return;
+    }
+    _br_skipped++;
+    return;
+  }
+
+  if (block_type == 2) {
+    // ===== NODE MAIN =====
+    if (val_type == 'n') {
+      if (strcmp(key, "freq") == 0)                  { _prefs.freq                  = as_float();        _br_applied++; return; }
+      if (strcmp(key, "sf") == 0)                    { _prefs.sf                    = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "bw") == 0)                    { _prefs.bw                    = as_float();        _br_applied++; return; }
+      if (strcmp(key, "cr") == 0)                    { _prefs.cr                    = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "tx_power") == 0)              { _prefs.tx_power_dbm          = (int8_t)as_int();   _br_applied++; return; }
+      if (strcmp(key, "repeat") == 0)                { _prefs.client_repeat         = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "gps") == 0)                   { _prefs.gps_enabled           = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "gps_interval") == 0)          { _prefs.gps_interval          = as_uint();          _br_applied++; return; }
+      if (strcmp(key, "advert_loc_policy") == 0)     { _prefs.advert_loc_policy     = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "airtime_factor") == 0)        { _prefs.airtime_factor        = as_float();        _br_applied++; return; }
+      if (strcmp(key, "rx_boosted_gain") == 0)       { _prefs.rx_boosted_gain       = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "manual_add_contacts") == 0)   { _prefs.manual_add_contacts   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "multi_acks") == 0)            { _prefs.multi_acks            = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "path_hash_mode") == 0)        { _prefs.path_hash_mode        = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "autoadd_config") == 0)        { _prefs.autoadd_config        = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "autoadd_max_hops") == 0)      { _prefs.autoadd_max_hops      = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "telemetry_mode_base") == 0)   { _prefs.telemetry_mode_base   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "telemetry_mode_loc") == 0)    { _prefs.telemetry_mode_loc    = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "telemetry_mode_env") == 0)    { _prefs.telemetry_mode_env    = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "buzzer_quiet") == 0)          { _prefs.buzzer_quiet          = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "rxdelay") == 0)               { _prefs.rx_delay_base         = as_float();        _br_applied++; return; }
+      if (strcmp(key, "txdelay") == 0)               { _prefs.tx_delay_factor       = as_float();        _br_applied++; return; }
+      if (strcmp(key, "direct_txdelay") == 0)        { _prefs.direct_tx_delay_factor= as_float();        _br_applied++; return; }
+      if (strcmp(key, "scope_regional_hops") == 0)   { _prefs.scope_regional_hop_limit = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "flood_max") == 0)             { _prefs.flood_max             = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "flood_max_adv_infra") == 0)   { _prefs.flood_max_adv_infra   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start);   _br_applied++; return; }
+      if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start);   _br_applied++; return; }
+    }
+    if (val_type == 's') {
+      if (strcmp(key, "name") == 0) { brExtractString(val_start, val_len, _prefs.node_name, sizeof(_prefs.node_name)); _br_applied++; return; }
+    }
+    _br_skipped++;
+    return;
+  }
+  _br_skipped++;
 }
 
 void MyMesh::setupCompanionChannel() {
@@ -6965,6 +7476,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ') arg++; }
     bool show_all = (arg && strcmp(arg, "all") == 0);
     bool do_reset = (arg && strcmp(arg, "reset") == 0);
+    bool do_save  = (arg && strcmp(arg, "save") == 0);
+
+    if (do_save) {
+      // Wunschliste 28: zur Persistenz nach 'backup restore' (oder
+      // anderen runtime-Aenderungen). Schreibt _prefs + lat/lon raus.
+      savePrefs();
+      pushCompanionMessage("OK - prefs persistent gespeichert.");
+      return;
+    }
 
     if (do_reset) {
       _prefs.chat_name_mode = 0;
@@ -7685,7 +8205,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   }
 
   // ---------- backup [save|restore] -------------------------------------
-  // Wunschliste 28: backup / restore von DL9SAU-prefs + node-mirror
+  // Wunschliste 28: backup / restore von DL9SAU-prefs + node-main
   // ueber USB-Serial JSON. Phase A (save) implementiert, Phase B
   // (restore) folgt.
   if (starts_with_word(cmd, "backup")) {
@@ -7704,7 +8224,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     if (strcmp(arg, "restore") == 0) {
-      pushCompanionMessage("backup restore: noch nicht implementiert (Phase B folgt).");
+      backupRestoreStart();
       return;
     }
     pushCompanionMessage("Usage: backup [save|restore]");
