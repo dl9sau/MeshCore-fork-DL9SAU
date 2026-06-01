@@ -8111,9 +8111,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(hop, sizeof(hop), "%u", (unsigned)c.out_path_len);
       }
 
+      // Distanz / Bearing anhaengen wenn beide GPS-Positionen bekannt.
+      // Format wie bei 'discover': " <km>km @<bearing>°".
+      char dist_buf[24]; dist_buf[0] = 0;
+      bool have_my_gps = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
+      if (have_my_gps && (c.gps_lat != 0 || c.gps_lon != 0)) {
+        double their_lat = (double)c.gps_lat / 1000000.0;
+        double their_lon = (double)c.gps_lon / 1000000.0;
+        double km  = dl9sau_haversine_km(sensors.node_lat, sensors.node_lon,
+                                          their_lat, their_lon);
+        int    brg = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
+                                          their_lat, their_lon);
+        snprintf(dist_buf, sizeof(dist_buf), " %.0fkm @%d°", km, brg);
+      }
+
       char line[160];
-      snprintf(line, sizeof(line), "  %s %-18.18s %6s hops=%s",
-               tname, c.name, age, hop);
+      snprintf(line, sizeof(line), "  %s %-18.18s %6s hops=%s%s",
+               tname, c.name, age, hop, dist_buf);
       add_line(line);
       shown++;
     }

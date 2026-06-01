@@ -1803,3 +1803,75 @@ Warum nicht jetzt:
 Mehr Details / Diskussion: spaeter.
 
 Quelle: User-Wunsch 2026-06-01.
+
+
+--------------------------------------------------------------------------------
+31. RTC-Sync aus signiertem Advert (NTP-aehnlich)
+--------------------------------------------------------------------------------
+
+Idee:
+  Adverts in MeshCore sind kryptografisch signiert (Ed25519 mit
+  Sender-Pub-Key) und enthalten einen Timestamp. Damit haben wir eine
+  AUTHENTISCHE Zeitquelle ohne GPS und ohne dass die App involviert ist.
+  Use-Case: Tracker laeuft auf Powerbank ohne GPS-Fix, RTC drifted ueber
+  Stunden -- ein gehoerter Advert eines vertrauenswuerdigen Repeaters
+  korrigiert die Zeit.
+
+Ist-Zustand:
+  - Wir speichern last_advert_timestamp pro Contact, nutzen ihn aber
+    nicht zur RTC-Korrektur.
+  - CMD_SET_DEVICE_TIME existiert (App-Pfad, GPS-Pfad).
+  - Kein Eintrag in der Wunschliste -- Idee war in einer frueheren
+    Session diskutiert worden, ging aber verloren.
+
+Soll-Verhalten (User-Design 2026-06-01):
+
+  Trust-Source-Identifikation:
+    - Per Public-Key-Prefix, NICHT per Name (Name spoofbar).
+    - Default 6-Byte-Prefix, optional bis 32 Byte (volles Pub-Key).
+    - Bis zu 3 Sources konfigurierbar.
+
+  Source-Selektions-Logik (NTP-Style Pinning):
+    - Direkte Nachbarn bevorzugt (kuerzere Latenz).
+    - 2-3 Hops sind akzeptabel (Sekundengenauigkeit nicht noetig).
+    - Wenn mehrere Sources configured und gerade gehoert:
+        Auswahl jene, deren Werte am dichtesten beieinander liegen.
+        (Schutz gegen einzelne ausgerissene Quelle.)
+    - Nach initialer Sync: an gewaehlte Quelle "pinnen", um Time-
+      Flipflop zu vermeiden.
+    - Ausstieg aus Pinning: wenn gepinnte Quelle mehrere Minuten von
+      anderer abweicht oder laenger nicht mehr gehoert wird ->
+      naechste Quelle aus der Liste.
+    - Nur 1 Quelle configured: schwierig. Bei groesserer Abweichung
+      muss heuristisch entschieden werden -- entweder vertrauen und
+      die eigene Uhr korrigieren, oder Source als unzuverlaessig
+      ignorieren. (User-Entscheidung was lieber.)
+
+  Plausibilitaets-Check:
+    - Quelle mit unplausibler Zeit (z.B. Jahr 2020 oder Jahr 2099)
+      verwerfen, naechste Quelle versuchen.
+
+CLI-Vorschlag (User skizzierte zwei Varianten):
+  (a) Bestehenden 'set time'-Befehl erweitern -- Sources via Argument:
+        set time sync aaaaaa [bbbbbb [cccccc]]
+        set time sync off
+  (b) Neue Section in 'advert':
+        advert timesync aaaaaa [bbbbbb [cccccc]]
+        advert timesync off
+
+  Entscheidung: spaeter. (b) wirkt thematisch sauberer (Sync = Advert-
+  Eigenschaft), (a) ist konsistent mit dem bestehenden 'set time'.
+
+Caveats:
+  - Replay-Schutz: alte Adverts (re-injected) duerfen die RTC nicht
+    zurueckdrehen. Vermutlich: nur akzeptieren wenn timestamp > letzter
+    akzeptierter timestamp dieser Source.
+  - Propagation-Delay: bei 2-3 Hops mehrere Sekunden bis Minuten alt.
+    Akzeptabel laut User-Vorgabe, aber dokumentieren.
+  - GPS-Konflikt: wenn GPS-Fix gerade gueltig ist, hat GPS-Zeit prioritaet
+    ueber Advert. Reihenfolge: GPS > App-Override (CMD_SET_DEVICE_TIME)
+    > Advert-Sync. (Diskussion noetig.)
+
+Quelle: User-Wunsch 2026-06-01, eingefroren als Wunschliste-Eintrag
+nach erneutem Hinweis ("Wir hatten mal besprochen ... finde keinen
+help-Befehl ... haben wir wohl nicht umgesetzt").
