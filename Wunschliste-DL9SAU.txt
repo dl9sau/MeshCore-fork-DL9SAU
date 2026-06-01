@@ -1755,3 +1755,51 @@ Quelle: User-Wunsch 2026-06-01 "Bei Gelegenheit braucheen wir eine
 Dokumentation ueber die neuen features ... das machen wir aber spaeter
 wenn wir den branch nach main ueberfuehren ... mit Trigger Erinnerung
 wenn wir den branch mergen".
+
+
+--------------------------------------------------------------------------------
+30. Lokalisierung -- language english|german
+--------------------------------------------------------------------------------
+
+Ist-Zustand:
+  Alle DL9SAU-Companion-Strings (Help, Usage, Fehler-Messages, Trace-
+  Output, set/get-Antworten, prefs-Print, Boot-Greeting, discover-
+  Ausgaben, etc.) sind deutsch. Original-MeshCore-Strings (CommonCLI,
+  Mesh-Stack) sind englisch.
+
+  Die App hat eigene Lokalisierung (system default | english | german
+  | ...), aber diese Information wird uns nicht via Protokoll mitgeteilt
+  -- die App rendert nur das was wir senden.
+
+Soll-Verhalten:
+  CLI: 'set language <english|german>' (Default: german, weil das ist
+  was wir aktuell haben). Beim Boot anhand pref entscheiden welche
+  String-Tabelle aktiv ist.
+
+  Betroffen: Help, Usage, Fehler-Messages, Trace-Output, set/get-
+  Antworten, prefs-Print, Boot-Greeting, discover-Ausgaben.
+
+  NICHT betroffen:
+  - Backup save/restore Marker '--- BACKUP ... ---' (Format ist Daten-
+    Protokoll, nicht User-Text).
+  - JSON-Keys im Backup (sind Daten-Schluessel, sprachneutral).
+  - Memory-Map Kommentare und Datei-Layouts (Code/Doku).
+  - Original-MeshCore-Strings im CommonCLI etc. (bleiben englisch wie
+    upstream).
+
+Umsetzungs-Ueberlegungen:
+  - String-Tabelle nicht inline -- entweder zwei separate Source-Dateien
+    (de.cpp/en.cpp) oder ein zentrales Mapping (msg_id -> de_str | en_str).
+  - Flash-Footprint: jede aktuelle Companion-Message-String 2x =
+    deutlicher Flash-Verbrauch. Vor Umsetzung pruefen ob noch Reserve.
+  - Stringtabelle muss konsistent gepflegt werden -- jeder neue String-
+    Eintrag muss IMMER beide Sprachen bekommen, sonst Mischmasch.
+
+Warum nicht jetzt:
+  Aufwand erheblich (mehrere hundert Strings zu uebersetzen + zu
+  pflegen). Erst sammeln, dann strukturieren. Wuerde sich anbieten wenn
+  wir ohnehin gerade ein groesseres Refactor im Help-System machen.
+
+Mehr Details / Diskussion: spaeter.
+
+Quelle: User-Wunsch 2026-06-01.
