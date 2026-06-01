@@ -1,6 +1,12 @@
 #pragma once
 #include <cstdint> // For uint8_t, uint32_t
 
+// Sentinel-Wert fuer flood_max_infra: "folge flood_max persistent".
+// Wert 254 -- gross genug dass path_hash_count > eff_cap nie wahr wird
+// (Pfade max 64 Hops), klein genug dass uint8_t-Storage trivial bleibt
+// und kein Konflikt mit 0xFF (potentielles "uninitialisiert"-Pattern).
+#define FLOOD_MAX_INFRA_FOLLOW   254
+
 #define TELEM_MODE_DENY            0
 #define TELEM_MODE_ALLOW_FLAGS     1     // use contact.flags
 #define TELEM_MODE_ALLOW_ALL       2
@@ -233,6 +239,10 @@ struct NodePrefs {  // persisted to file
   // laesst und Repeater darunter trotzdem flooded abfragen koennen will.
   // Auto-Cap wenn flood_max_infra oder flood_max unter den gesetzten Wert
   // sinken. CLI: set flood_max_req_resp <N>.
+  //
+  // flood_max_infra kann den Wert FLOOD_MAX_INFRA_FOLLOW (254) tragen --
+  // "folgt flood_max persistent". Wird beim Boot nicht zurueck-gebumpt
+  // und beim flood_max-Senken nicht ueberschrieben.
   // Sub-Typ-Differenzierung (Telemetrie vs. Owner-Info) ist beim Forwarding
   // protokoll-bedingt nicht moeglich: REQ-Sub-Typ ist im verschluesselten
   // Payload, dest_hash ist nur 1 Byte (kollidiert), ADV_TYPE des Empfaengers

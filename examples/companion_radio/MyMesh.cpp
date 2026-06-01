@@ -2940,7 +2940,8 @@ void MyMesh::begin(bool has_display) {
   // gebumpt. User-Erwartung "0 = aus" ist NICHT die Default-Bedeutung.
   if (_prefs.flood_max_infra == 0) {
     _prefs.flood_max_infra = (_prefs.flood_max < 16) ? _prefs.flood_max : 16;
-  } else if (_prefs.flood_max_infra > _prefs.flood_max) {
+  } else if (_prefs.flood_max_infra != FLOOD_MAX_INFRA_FOLLOW
+             && _prefs.flood_max_infra > _prefs.flood_max) {
     _prefs.flood_max_infra = _prefs.flood_max;
   }
   // flood_max_req_resp: 0 = persistente Kaskade auf flood_max_infra. Kein
@@ -7030,7 +7031,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
           "Repeat: repeat flood_max (1..64, def 16)\n"
-          "  flood_max_infra (def 16, 0=flood_max)\n"
+          "  flood_max_infra (def 16, 'follow'=fmax)\n"
           "  flood_max_req_resp (def 0=erbt infra)");
         pushCompanionMessage(
           "  scope_regional_hops\n"
@@ -9199,12 +9200,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
         pushCompanionMessage(
-          "set flood_max_infra <0..flood_max>:\n"
+          "set flood_max_infra <0..flood_max | follow>:\n"
           "  Cap fuer REPEATER/SENSOR/ROOM-Adverts.\n"
           "  Default 16. User-Chat-Adverts unbetroffen.");
         pushCompanionMessage(
-          "  0 = wirkt wie flood_max (kein extra Cap).\n"
-          "  Reboot bumpt 0 zurueck auf 16.");
+          "  0 = wirkt wie flood_max (Reboot bumpt auf 16)\n"
+          "  follow (oder 'max') = persistent gleichauf mit\n"
+          "    flood_max, folgt Aenderungen automatisch.");
         return;
       }
       if (strcmp(key, "flood_max_req_resp") == 0 || strcmp(key, "flood.max.req.resp") == 0) {
@@ -9603,9 +9605,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (_prefs.scope_regional_hop_limit > _prefs.flood_max) {
         _prefs.scope_regional_hop_limit = _prefs.flood_max;
       }
-      // Auch flood_max_infra auto-cappen falls > flood_max.
+      // Auch flood_max_infra auto-cappen falls > flood_max. Aber das
+      // FOLLOW-Sentinel (254) bleibt unangetastet -- dessen Semantik
+      // IST "folge flood_max", also genau das was wir nicht ueberschreiben
+      // wollen wenn flood_max gesenkt wird.
       bool infra_clipped = false;
-      if (_prefs.flood_max_infra > _prefs.flood_max) {
+      if (_prefs.flood_max_infra != FLOOD_MAX_INFRA_FOLLOW
+          && _prefs.flood_max_infra > _prefs.flood_max) {
         _prefs.flood_max_infra = _prefs.flood_max;
         infra_clipped = true;
       }
@@ -9633,15 +9639,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     // Wunschliste 24: Hop-Cap fuer Nicht-Chat-Adverts (Repeater/Sensor/
     // Room). Range 0..flood_max. 0 = deaktiviert (es gilt flood_max).
+    // Plus Sondersyntax: "follow" / "max" -> Sentinel 254 = persistent
+    // gleichauf mit flood_max (folgt automatisch).
     if (strcmp(key, "flood_max_infra") == 0
         || strcmp(key, "flood.max.infra") == 0) {
-      int v = atoi(value_lc);
-      if (v < 0 || v > _prefs.flood_max) {
-        char r[80]; snprintf(r, sizeof(r),
-          "Wert ausserhalb 0..%u (flood_max-Cap)",
-          (unsigned)_prefs.flood_max);
-        pushCompanionMessage(r);
-        return;
+      bool is_follow_kw = (strcmp(value_lc, "follow") == 0
+                          || strcmp(value_lc, "max") == 0);
+      int v;
+      if (is_follow_kw) {
+        v = FLOOD_MAX_INFRA_FOLLOW;
+      } else {
+        v = atoi(value_lc);
+        if (v < 0 || v > _prefs.flood_max) {
+          char r[110]; snprintf(r, sizeof(r),
+            "Wert ausserhalb 0..%u (flood_max-Cap).\n"
+            "Tipp: 'follow' oder 'max' fuer persistent gleichauf.",
+            (unsigned)_prefs.flood_max);
+          pushCompanionMessage(r);
+          return;
+        }
       }
       _prefs.flood_max_infra = (uint8_t)v;
       // flood_max_req_resp ggf. mit-runter ziehen, wenn neuer infra-Wert
@@ -9653,9 +9669,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         rr_clipped = true;
       }
       savePrefs();
-      char r[120]; snprintf(r, sizeof(r),
-        "OK - flood_max_infra = %d%s",
-        v, v == 0 ? " (deaktiviert, es gilt flood_max)" : "");
+      char r[140];
+      if (v == FLOOD_MAX_INFRA_FOLLOW) {
+        snprintf(r, sizeof(r),
+          "OK - flood_max_infra = follow (-> %u)\n"
+          "  bleibt persistent gleichauf mit flood_max.",
+          (unsigned)_prefs.flood_max);
+      } else {
+        snprintf(r, sizeof(r),
+          "OK - flood_max_infra = %d%s",
+          v, v == 0 ? " (deaktiviert, es gilt flood_max)" : "");
+      }
       pushCompanionMessage(r);
       if (rr_clipped) {
         char r2[80]; snprintf(r2, sizeof(r2),
@@ -9828,7 +9852,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
       emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
-      emit_uint  ("flood_max_infra", _prefs.flood_max_infra,    0);
+      // flood_max_infra: Sentinel 254 = follow flood_max. Eigene Anzeige
+      // statt nackter Zahl.
+      if (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW) {
+        if (!list_changed) changed++;
+        snprintf(tmp, sizeof(tmp),
+          "  flood_max_infra = follow (-> %u)",
+          (unsigned)_prefs.flood_max);
+        gline(tmp);
+      } else {
+        emit_uint  ("flood_max_infra", _prefs.flood_max_infra,    0);
+      }
       emit_uint  ("flood_max_req_resp", _prefs.flood_max_req_resp, 0);
       // loop_detect (Wunschliste 6b) -- enum, eigene Anzeige.
       {
@@ -9890,6 +9924,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
       if (_prefs.flood_max_infra == 0)
         snprintf(r, sizeof(r), "flood_max_infra = 0 (deaktiviert, es gilt flood_max=%u)", (unsigned)_prefs.flood_max);
+      else if (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW)
+        snprintf(r, sizeof(r), "flood_max_infra = follow (-> %u)", (unsigned)_prefs.flood_max);
       else
         snprintf(r, sizeof(r), "flood_max_infra = %u", (unsigned)_prefs.flood_max_infra);
     }
