@@ -2930,11 +2930,24 @@ void MyMesh::begin(bool has_display) {
       || _prefs.scope_regional_hop_limit > _prefs.flood_max) {
     _prefs.scope_regional_hop_limit = (_prefs.flood_max < 3) ? _prefs.flood_max : 3;
   }
-  // flood_max_req_resp: 0 = kaskade auf flood_max_infra (oder flood_max
-  // falls infra=0). Kein Auto-Bump auf einen Default -- frische Installation
-  // verhaelt sich identisch zur vorherigen Firmware. User-Konfiguration via
-  // 'set flood_max_req_resp 4' (Help-Empfehlung 4..8). Hier nur Sanity-Cap
-  // an den jeweiligen Obergrenzen falls Wert > flood_max_infra/flood_max.
+  // flood_max_infra: 0 = uninitialisiert -> bump auf 16 (oder flood_max
+  // falls kleiner). Analog zu flood_max=0->16. Hintergrund: wir wollen
+  // Infrastruktur-Adverts (REPEATER/SENSOR/ROOM) per Default begrenzen,
+  // auch wenn User flood_max spaeter auf z.B. 20 hochsetzt -- infra
+  // bleibt dann bei 16, bis aktiv geaendert.
+  // 'set flood_max_infra 0' bleibt als transienter Escape Hatch erhalten
+  // (fallback auf flood_max), wird aber beim naechsten Reboot zurueck-
+  // gebumpt. User-Erwartung "0 = aus" ist NICHT die Default-Bedeutung.
+  if (_prefs.flood_max_infra == 0) {
+    _prefs.flood_max_infra = (_prefs.flood_max < 16) ? _prefs.flood_max : 16;
+  } else if (_prefs.flood_max_infra > _prefs.flood_max) {
+    _prefs.flood_max_infra = _prefs.flood_max;
+  }
+  // flood_max_req_resp: 0 = persistente Kaskade auf flood_max_infra. Kein
+  // Auto-Bump auf einen Default -- frische Installation verhaelt sich
+  // bzgl REQ/RESP identisch zur vorherigen Firmware (es greift der
+  // flood_max_infra-Cap = 16). User-Empfehlung 4..8 via 'set' explizit.
+  // Sanity-Cap an Obergrenzen.
   if (_prefs.flood_max_req_resp > _prefs.flood_max) {
     _prefs.flood_max_req_resp = _prefs.flood_max;
   }
@@ -2985,6 +2998,15 @@ void MyMesh::begin(bool has_display) {
   // Order schmuggeln. loadBucketsFromFlash() setzt _msg_seq_next auf
   // max(seq_no) der restaurierten Eintraege.
   loadBucketsFromFlash();
+
+  // Boot-Greeting als ALLERERSTE Nachricht: erlaubt der iOS-Companion-App
+  // bei Referenzierung des eigenen Namens einen Ton abzuspielen, sodass
+  // der User mitbekommt dass der Tracker neu gestartet hat.
+  {
+    char greet[64];
+    snprintf(greet, sizeof(greet), "Booted. Hello %.40s", _prefs.node_name);
+    pushCompanionMessage(greet);
+  }
 
   // Boot-Geo-Push (Channel ist jetzt vorhanden, Output erscheint im Chat):
   if (_boot_pos_known) {
@@ -7004,10 +7026,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Radio: freq sf bw cr tx_power\n"
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
-          "Repeat: repeat flood_max\n"
-          "  flood_max_infra flood_max_req_resp\n"
+          "Repeat: repeat flood_max (1..64, def 16)\n"
+          "  flood_max_infra (def 16, 0=transient)\n"
+          "  flood_max_req_resp (def 0=erbt infra)");
+        pushCompanionMessage(
           "  scope_regional_hops\n"
-          "  loop_detect (off|minimal|moderate|strict)");
+          "  loop_detect (off|minimal|moderate|strict)\n"
+          "  ('set <key>' ohne Wert -> Detailhilfe)");
         pushCompanionMessage(
           "Delays: rxdelay txdelay direct_txdelay\n"
           "Telemetry: telemetry_mode_base loc env\n"
@@ -9158,6 +9183,103 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     key[key_len] = 0;
     while (*p == ' ' || *p == '\t') p++;
     if (!*p) {
+      // Per-Key Discoverability: bei Keys mit nicht-offensichtlicher
+      // 0-Semantik (Kaskade / transienter Fallback) explizite Erklaerung
+      // statt nur "Usage: set X <value>". Sonst landet der User in der
+      // 0-vs-deaktiviert-Falle. Jede Message bleibt < 145 Byte.
+      if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) {
+        pushCompanionMessage(
+          "set flood_max <1..64>: globale Hop-Obergrenze.\n"
+          "  Default 16. Bei Senken werden infra und\n"
+          "  req_resp automatisch mit-gecapped.");
+        return;
+      }
+      if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
+        pushCompanionMessage(
+          "set flood_max_infra <0..flood_max>:\n"
+          "  Cap fuer REPEATER/SENSOR/ROOM-Adverts.\n"
+          "  Default 16. User-Chat-Adverts unbetroffen.");
+        pushCompanionMessage(
+          "  0 = transienter Fallback (nur flood_max).\n"
+          "  Reboot setzt 0 zurueck auf 16.");
+        return;
+      }
+      if (strcmp(key, "flood_max_req_resp") == 0 || strcmp(key, "flood.max.req.resp") == 0) {
+        pushCompanionMessage(
+          "set flood_max_req_resp <0..flood_max_infra>:\n"
+          "  Cap fuer REQ/RESP/ANON_REQ (Telemetrie,\n"
+          "  Owner-Info, Login). Default 0.");
+        pushCompanionMessage(
+          "  0 = persistente Kaskade auf flood_max_infra.\n"
+          "  Empfehlung 4..8 (4=Stadt, 8=weiter).");
+        return;
+      }
+      if (strcmp(key, "scope_regional_hops") == 0) {
+        pushCompanionMessage(
+          "set scope_regional_hops <1..flood_max>:\n"
+          "  Hop-Cap fuer #region/#regional-scoped Pakete.\n"
+          "  Default 3.");
+        return;
+      }
+      if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
+        pushCompanionMessage(
+          "set loop_detect <off|minimal|moderate|strict>:\n"
+          "  Loop-Drop bei Flood-Repeat (full-rep nur).\n"
+          "  Default off. Numerisch 0..3 auch erlaubt.");
+        return;
+      }
+      if (strcmp(key, "advert_loc_policy") == 0 || strcmp(key, "advert.loc.policy") == 0) {
+        pushCompanionMessage(
+          "set advert_loc_policy <0|1|2>:\n"
+          "  0=NONE (kein Standort im Advert),\n"
+          "  1=SHARE (aktueller GPS-Fix),\n"
+          "  2=PREFS (gespeicherte lat/lon).");
+        return;
+      }
+      if (strcmp(key, "path_hash_mode") == 0 || strcmp(key, "path.hash.mode") == 0) {
+        pushCompanionMessage(
+          "set path_hash_mode <0..2>:\n"
+          "  Path-Hash-Bytes pro Hop bei eigenen Floods.\n"
+          "  0=1byte (Default), 1=2byte, 2=3byte.");
+        pushCompanionMessage(
+          "  Mehr Bytes = weniger Kollisionen, kuerzere\n"
+          "  Max-Pfade (1B*64 vs 3B*21 in Path-Feld).");
+        return;
+      }
+      if (strcmp(key, "autoadd_max_hops") == 0) {
+        pushCompanionMessage(
+          "set autoadd_max_hops <0..64>:\n"
+          "  Max Hops fuer Auto-Add neuer Kontakte.\n"
+          "  0=ohne Limit, 1=nur direkt (0 Hops),");
+        pushCompanionMessage(
+          "  N=bis N-1 Hops. Off-by-one ist App-Design,\n"
+          "  nicht aenderbar.");
+        return;
+      }
+      if (strcmp(key, "gps") == 0) {
+        pushCompanionMessage(
+          "set gps <0|1>:\n"
+          "  0=GPS aus, 1=ein. 'gps_interval' bestimmt\n"
+          "  separat ob/wie oft auto-gepollt wird.");
+        return;
+      }
+      if (strcmp(key, "gps_interval") == 0) {
+        pushCompanionMessage(
+          "set gps_interval <0..86400>:\n"
+          "  Auto-Poll-Frequenz in Sekunden.\n"
+          "  0=keine Auto-Polls. Default 0.");
+        return;
+      }
+      if (strcmp(key, "telemetry_mode_base") == 0
+          || strcmp(key, "telemetry_mode_loc") == 0
+          || strcmp(key, "telemetry_mode_env") == 0) {
+        pushCompanionMessage(
+          "set telemetry_mode_<base|loc|env> <0|1|2>:\n"
+          "  0=DENY (nie senden),\n"
+          "  1=ALLOW_FLAGS (contact.flags entscheidet),\n"
+          "  2=ALLOW_ALL (immer senden).");
+        return;
+      }
       char r[100]; snprintf(r, sizeof(r), "Usage: set %s <value>", key);
       pushCompanionMessage(r);
       return;
