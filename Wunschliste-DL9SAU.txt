@@ -1704,3 +1704,54 @@ Sicherheit: bewusst nur ueber USB-Serial, nicht ueber BLE oder HF --
 keine Remote-Attack-Surface, physische Kabel-Praesenz noetig.
 
 Quelle: User-Wunsch 2026-06-01.
+
+
+--------------------------------------------------------------------------------
+29. [MERGE-TRIGGER] Feature-Uebersicht der DL9SAU-Fork schreiben
+--------------------------------------------------------------------------------
+
+TRIGGER: Beim Merge dieses Branches (feat/nearly-real-repeater bzw.
+Nachfolger) nach main muss dieser Eintrag abgearbeitet werden BEVOR
+das Merge committed wird. Wenn Du diesen Eintrag liest waehrend
+einer Branch-zu-main-Vorbereitung: nicht ignorieren.
+
+Ziel:
+  Ein User-orientiertes Uebersichtsdokument der neuen Features
+  unserer Fork gegenueber der Original-MeshCore-Firmware. Format:
+  README-DL9SAU-features.md (oder .txt) im Repo-Root. Sprache:
+  Deutsch, optional Englisch parallel.
+
+  NICHT zu technisch -- Zielgruppe ist ein interessierter
+  HAM-Operator / Mesh-Nutzer, nicht ein Code-Reviewer.
+
+Gliederung (Vorschlag):
+  - Einleitung: warum diese Fork, was ist anders.
+  - Hauptfunktionen mit kurzer 2-3-Zeilen-Beschreibung:
+      * GPS / Position (Smart-Cadence, GPS-Sleep, Sanity-Guard,
+        Geo-Scope-Auto, Geo-Recommendation beim Boot)
+      * Repeater-Modi (defensive/normal, Loop-Detection,
+        Duty-Cycle-Schutz)
+      * Hop-Caps (flood_max, flood_max_infra, flood_max_req_resp)
+      * Scope-System (Region, Default, Override, geo-Tags)
+      * Stats / Telemetrie / Trace-Kategorien
+      * Backup / Restore via USB-Serial
+      * Companion-Channel mit PSK-Identifikation
+      * Offline-Message-Queue (Buckets)
+      * 'discover' fuer Mesh-Inspektion (REPEATER + regions)
+      * 'discoverable' Responder
+      * Wunschliste-System (transparente Roadmap)
+  - Migration: Sind alte Configs kompatibel? (Antwort: ja, mit
+    den Default-Bumps und Scope-Auto-Migration.)
+  - Wo finden? Befehle als Stichworte: prefs, set, get, help <topic>.
+
+Quelle der Inhalte:
+  - Changelog-DL9SAU.txt (technisch, eher nicht direkt zitieren)
+  - Wunschliste-DL9SAU.txt (was wurde umgesetzt -- Status "ERLEDIGT")
+  - git log --oneline --grep DL9SAU (Commit-Titel)
+
+Aufwand: ~1-2 Stunden konzentrierter Schreibarbeit. Kein Code.
+
+Quelle: User-Wunsch 2026-06-01 "Bei Gelegenheit braucheen wir eine
+Dokumentation ueber die neuen features ... das machen wir aber spaeter
+wenn wir den branch nach main ueberfuehren ... mit Trigger Erinnerung
+wenn wir den branch mergen".
