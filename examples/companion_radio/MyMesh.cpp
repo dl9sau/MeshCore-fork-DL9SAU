@@ -8192,7 +8192,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char age[16];
       uint32_t s = now - c.lastmod;
       if      (s < 60)     snprintf(age, sizeof(age), "%us", (unsigned)s);
-      else if (s < 3600)   snprintf(age, sizeof(age), "%um", (unsigned)(s / 60));
+      else if (s < 3600)   snprintf(age, sizeof(age), "%umin", (unsigned)(s / 60));
       else if (s < 86400)  snprintf(age, sizeof(age), "%uh%02um",
                                     (unsigned)(s / 3600), (unsigned)((s % 3600) / 60));
       else                 snprintf(age, sizeof(age), "%ud%02uh",
@@ -8252,7 +8252,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char dage[16];
       uint32_t s = now - _discover_last_at_rtc;
       if      (s < 60)     snprintf(dage, sizeof(dage), "%us", (unsigned)s);
-      else if (s < 3600)   snprintf(dage, sizeof(dage), "%um", (unsigned)(s / 60));
+      else if (s < 3600)   snprintf(dage, sizeof(dage), "%umin", (unsigned)(s / 60));
       else if (s < 86400)  snprintf(dage, sizeof(dage), "%uh%02um",
                                     (unsigned)(s / 3600), (unsigned)((s % 3600) / 60));
       else                 snprintf(dage, sizeof(dage), "%ud%02uh",
