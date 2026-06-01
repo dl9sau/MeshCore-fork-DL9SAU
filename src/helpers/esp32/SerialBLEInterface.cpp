@@ -32,21 +32,46 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   // Obergrenze. "MeshCore-Thomas-Test" (20 chars) funktioniert sicher,
   // volle 32-Byte node_name kann scheitern.
   //
-  // Fix: nur druckbares ASCII (0x20..0x7E) durchlassen, hartes Truncate
-  // auf 28 Byte. Wenn nach dem Filter nichts vom name-Teil uebrig bleibt
-  // (User hat z.B. nur Emoji oder Kanji): MAC-basiertes Fallback, damit
-  // das Geraet ueberhaupt erkennbar in der BLE-Liste auftaucht.
+  // Vorgehen:
+  //   1) Sanitize: nur druckbares ASCII (0x20..0x7E) durchlassen.
+  //   2) Word-boundary-Truncate: wenn > BLE_NAME_MAX, am letzten Space
+  //      <= BLE_NAME_MAX abschneiden statt mid-word -- vermeidet das
+  //      angeschnittene 3. Wort wie "MeshCore-Foo Bar Ba" -> "...Bar".
+  //      Kein Space im Bereich? -> hartes Truncate.
+  //   3) Trailing Spaces trimmen (sonst "MeshCore-Foo " im BT-Listing).
+  //   4) Wenn nach Filter+Truncate nur der Prefix uebrig ist (z.B. User-
+  //      Name war komplett UTF-8): MAC-basiertes Fallback.
   // Aenderung wirkt nur fuer BLE -- _prefs.node_name (Chat, Advert) bleibt
   // unveraendert mit User-Originalstring inklusive UTF-8 / Sonderzeichen.
-  char clean[32];
+  static const size_t BLE_NAME_MAX = 28;
+  char clean[64];  // gross genug fuer Pre-Truncate-Filter
   size_t cn = 0;
-  for (size_t i = 0; dev_name[i] && cn < 28; i++) {
+  for (size_t i = 0; dev_name[i] && cn < sizeof(clean) - 1; i++) {
     unsigned char c = (unsigned char)dev_name[i];
     if (c >= 0x20 && c < 0x7F) {
       clean[cn++] = (char)c;
     }
   }
   clean[cn] = 0;
+
+  if (cn > BLE_NAME_MAX) {
+    // Letzten Space im Bereich [0..BLE_NAME_MAX-1] suchen.
+    int cut = -1;
+    for (int i = (int)BLE_NAME_MAX - 1; i >= 0; i--) {
+      if (clean[i] == ' ') { cut = i; break; }
+    }
+    if (cut > 0) {
+      clean[cut] = 0;
+    } else {
+      clean[BLE_NAME_MAX] = 0;
+    }
+    cn = strlen(clean);
+  }
+  // Trailing-Space-Trim (Name kann auch ohne Truncate auf Space enden)
+  while (cn > 0 && clean[cn - 1] == ' ') {
+    clean[--cn] = 0;
+  }
+
   if (cn <= strlen(prefix)) {
     // Name-Teil komplett rausgefiltert. Fallback.
     snprintf(clean, sizeof(clean), "%sNode-%02X%02X",
