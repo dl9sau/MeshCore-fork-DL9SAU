@@ -7019,9 +7019,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "neighbors")) {
         pushCompanionMessage(
-          "neighbors: Liste der Contacts die in den letzten 48h via Advert "
-          "gehoert wurden. Zeigt Typ (rep/cmp/room/sns), Name, Alter, Hops."
-        );
+          "neighbors [hops <N> | km <D>]:\n"
+          "  ohne Arg: nur direkt-gehoerte (out_path_len=0).");
+        pushCompanionMessage(
+          "  hops <N>: direkt + bis zu N Hops.\n"
+          "  km <D>:   direkt + alle <= D km Distanz.");
+        pushCompanionMessage(
+          "Zeigt Typ (rep/cmp/room/sns), Name, Alter,\n"
+          "Distanz/Bearing wenn Positionen bekannt.\n"
+          "Cutoff 48h fuer stale-Eintraege.");
         return;
       }
       if (topic_prefix_match(topic, "set")) {
@@ -8047,12 +8053,63 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  // ---------- neighbors -------------------------------------------------
-  // Listet alle bekannten Contacts die wir in den letzten 48h ueber einen
-  // Advert gehoert haben (direkt oder ueber Repeats). Sortierung in der
-  // Reihenfolge wie die contacts[]-Tabelle aufgebaut ist (kein Sort um
-  // Speicher/Zeit zu sparen).
+  // ---------- neighbors [hops <N> | km <D>] -----------------------------
+  // Default: nur direkt-gehoerte Contacts (out_path_len == 0). Drop hops-
+  // Spalte da redundant.
+  // 'neighbors hops N': direkt + bis zu N Hops einschliessen.
+  // 'neighbors km D':   direkt + alle bekannt-positionierten Contacts
+  //                     innerhalb D km. Direkte werden IMMER gezeigt --
+  //                     auch wenn deren Position unbekannt -- weil
+  //                     direkt-gehoert per se interessant ist.
+  // Immer 48h-Fenster als Stale-Cutoff.
   if (starts_with_word(cmd, "neighbors")) {
+    enum NbMode { NB_DIRECT, NB_HOPS, NB_KM };
+    NbMode mode = NB_DIRECT;
+    int    max_hops = 0;
+    double max_km = 0.0;
+
+    const char* arg = strchr(cmd, ' ');
+    if (arg) {
+      while (*arg == ' ' || *arg == '\t') arg++;
+      if (*arg) {
+        if (strncmp(arg, "help", 4) == 0 || arg[0] == '?') {
+          pushCompanionMessage(
+            "neighbors [hops <N> | km <D>]:\n"
+            "  ohne Arg: nur direkt-gehoerte (hops=0).");
+          pushCompanionMessage(
+            "  hops <N>: direkt + bis zu N Hops.\n"
+            "  km <D>:   direkt + alle <= D km Distanz\n"
+            "            (Position noetig fuer km-Filter).");
+          return;
+        }
+        if (strncmp(arg, "hops", 4) == 0
+            && (arg[4] == ' ' || arg[4] == '\t')) {
+          const char* nstart = arg + 4;
+          while (*nstart == ' ' || *nstart == '\t') nstart++;
+          max_hops = atoi(nstart);
+          if (max_hops <= 0 || max_hops > 63) {
+            pushCompanionMessage("Usage: neighbors hops <1..63>");
+            return;
+          }
+          mode = NB_HOPS;
+        } else if (strncmp(arg, "km", 2) == 0
+                   && (arg[2] == ' ' || arg[2] == '\t')) {
+          const char* nstart = arg + 2;
+          while (*nstart == ' ' || *nstart == '\t') nstart++;
+          max_km = atof(nstart);
+          if (max_km <= 0.0 || max_km > 99999.0) {
+            pushCompanionMessage("Usage: neighbors km <distance>");
+            return;
+          }
+          mode = NB_KM;
+        } else {
+          pushCompanionMessage(
+            "Usage: neighbors [hops <N> | km <D> | help]");
+          return;
+        }
+      }
+    }
+
     uint32_t now = getRTCClock()->getCurrentTime();
     int num = getNumContacts();
     int shown = 0;
@@ -8077,13 +8134,54 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       flush(false);
     };
 
-    add_line("neighbors (heard < 48h):");
+    // Header gemaess Modus.
+    if (mode == NB_DIRECT) {
+      add_line("neighbors (direct, < 48h):");
+    } else if (mode == NB_HOPS) {
+      char h[64];
+      snprintf(h, sizeof(h), "neighbors (direct + <=%d hops, < 48h):", max_hops);
+      add_line(h);
+    } else {
+      char h[64];
+      snprintf(h, sizeof(h), "neighbors (direct + <=%.0fkm, < 48h):", max_km);
+      add_line(h);
+    }
+
+    bool have_my_gps = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
 
     for (int i = 0; i < num; i++) {
       ContactInfo c;
       if (!getContactByIdx(i, c)) continue;
       if (c.lastmod == 0) continue;
       if (now - c.lastmod > CR_HEARD_MAX_AGE_SECS) continue;
+
+      // Distanz/Bearing einmal berechnen wenn beide GPS-Positionen
+      // bekannt -- wird sowohl fuer den km-Mode-Filter als auch fuer
+      // die Anzeige genutzt.
+      char dist_buf[24]; dist_buf[0] = 0;
+      double their_km = -1.0;
+      if (have_my_gps && (c.gps_lat != 0 || c.gps_lon != 0)) {
+        double their_lat = (double)c.gps_lat / 1000000.0;
+        double their_lon = (double)c.gps_lon / 1000000.0;
+        their_km  = dl9sau_haversine_km(sensors.node_lat, sensors.node_lon,
+                                         their_lat, their_lon);
+        int brg   = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
+                                         their_lat, their_lon);
+        snprintf(dist_buf, sizeof(dist_buf), " %.0fkm @%d°", their_km, brg);
+      }
+
+      // Filter gemaess Modus. Direkt-gehoerte werden IMMER gezeigt.
+      bool is_direct = (c.out_path_len == 0);
+      bool include = is_direct;
+      if (mode == NB_HOPS
+          && c.out_path_len != OUT_PATH_UNKNOWN
+          && c.out_path_len <= max_hops) {
+        include = true;
+      }
+      if (mode == NB_KM && their_km >= 0 && their_km <= max_km) {
+        include = true;
+      }
+      if (!include) continue;
 
       // Age formatieren (RTC-relativ).
       char age[16];
@@ -8111,23 +8209,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(hop, sizeof(hop), "%u", (unsigned)c.out_path_len);
       }
 
-      // Distanz / Bearing anhaengen wenn beide GPS-Positionen bekannt.
-      // Format wie bei 'discover': " <km>km @<bearing>°".
-      char dist_buf[24]; dist_buf[0] = 0;
-      bool have_my_gps = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
-      if (have_my_gps && (c.gps_lat != 0 || c.gps_lon != 0)) {
-        double their_lat = (double)c.gps_lat / 1000000.0;
-        double their_lon = (double)c.gps_lon / 1000000.0;
-        double km  = dl9sau_haversine_km(sensors.node_lat, sensors.node_lon,
-                                          their_lat, their_lon);
-        int    brg = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
-                                          their_lat, their_lon);
-        snprintf(dist_buf, sizeof(dist_buf), " %.0fkm @%d°", km, brg);
-      }
-
       char line[160];
-      snprintf(line, sizeof(line), "  %s %-18.18s %6s hops=%s%s",
-               tname, c.name, age, hop, dist_buf);
+      if (mode == NB_DIRECT) {
+        // Direkt-Mode: hops-Spalte droppen (immer 0, redundant).
+        snprintf(line, sizeof(line), "  %s %-18.18s %6s%s",
+                 tname, c.name, age, dist_buf);
+      } else {
+        snprintf(line, sizeof(line), "  %s %-18.18s %6s hops=%s%s",
+                 tname, c.name, age, hop, dist_buf);
+      }
       add_line(line);
       shown++;
     }
