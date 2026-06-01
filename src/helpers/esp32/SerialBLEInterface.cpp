@@ -13,18 +13,48 @@
 void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code) {
   _pin_code = pin_code;
 
+  uint8_t addr[8];
+  memset(addr, 0, sizeof(addr));
+  esp_efuse_mac_get_default(addr);
+
   if (strcmp(name, "@@MAC") == 0) {
-    uint8_t addr[8];
-    memset(addr, 0, sizeof(addr));
-    esp_efuse_mac_get_default(addr);
     sprintf(name, "%02X%02X%02X%02X%02X%02X",    // modify (IN-OUT param)
           addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
   }
   char dev_name[32+16];
   sprintf(dev_name, "%s%s", prefix, name);
 
+  // DL9SAU 2026-06-01: BLE-Name sanitisieren.
+  // esp_ble_gap_set_device_name() lehnt Namen mit Non-ASCII-Bytes ab
+  // (UTF-8-Multibyte, Steuerzeichen) und schlaegt mit ESP_ERR_INVALID_ARG
+  // (rc=258) fehl -- das Geraet erscheint dann generisch als "ESP32".
+  // Empirisch zusaetzlich eine (nicht formal dokumentierte) Laengen-
+  // Obergrenze. "MeshCore-Thomas-Test" (20 chars) funktioniert sicher,
+  // volle 32-Byte node_name kann scheitern.
+  //
+  // Fix: nur druckbares ASCII (0x20..0x7E) durchlassen, hartes Truncate
+  // auf 28 Byte. Wenn nach dem Filter nichts vom name-Teil uebrig bleibt
+  // (User hat z.B. nur Emoji oder Kanji): MAC-basiertes Fallback, damit
+  // das Geraet ueberhaupt erkennbar in der BLE-Liste auftaucht.
+  // Aenderung wirkt nur fuer BLE -- _prefs.node_name (Chat, Advert) bleibt
+  // unveraendert mit User-Originalstring inklusive UTF-8 / Sonderzeichen.
+  char clean[32];
+  size_t cn = 0;
+  for (size_t i = 0; dev_name[i] && cn < 28; i++) {
+    unsigned char c = (unsigned char)dev_name[i];
+    if (c >= 0x20 && c < 0x7F) {
+      clean[cn++] = (char)c;
+    }
+  }
+  clean[cn] = 0;
+  if (cn <= strlen(prefix)) {
+    // Name-Teil komplett rausgefiltert. Fallback.
+    snprintf(clean, sizeof(clean), "%sNode-%02X%02X",
+             prefix, addr[1], addr[0]);
+  }
+
   // Create the BLE Device
-  BLEDevice::init(dev_name);
+  BLEDevice::init(clean);
   BLEDevice::setSecurityCallbacks(this);
   BLEDevice::setMTU(MAX_FRAME_SIZE);
 
