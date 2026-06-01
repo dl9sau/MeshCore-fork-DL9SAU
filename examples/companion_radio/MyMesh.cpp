@@ -2344,7 +2344,7 @@ void MyMesh::printRepeaterLegendEntry(const DiscoverEntry& e,
   // 'no regions' nur wenn Chain-Modus aktiv UND wir haben keine CSV
   const char* suffix = (_discover_regions_chained && !csv_or_null)
                        ? " (no regions)" : "";
-  const char* name = known ? known->name : "unknown";
+  const char* name = known ? known->name : "(unknown)";
   char line[160];
   if (verbose) {
     // Fuer 'discover': raw Werte mitausgeben. their=ihre RX unseres REQ,
@@ -8214,14 +8214,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(hop, sizeof(hop), "%u", (unsigned)c.out_path_len);
       }
 
+      // Layout-Praefix: 3-Byte-Hex (= 6 hex chars) vor dem Namen, fuer
+      // Konsistenz mit printRepeaterLegendEntry und mit der discover-
+      // Augmentation unten. So steht der Hex-Stempel immer an gleicher
+      // Position, egal ob Kontakt-Name bekannt oder nicht.
+      char prefix6[7];
+      for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", c.id.pub_key[j]);
+      prefix6[6] = 0;
+      char idstr[64];
+      snprintf(idstr, sizeof(idstr), "%s %s", prefix6, c.name);
+
       char line[160];
       if (mode == NB_DIRECT) {
         // Direkt-Mode: hops-Spalte droppen (immer 0, redundant).
-        snprintf(line, sizeof(line), "  %s %-18.18s %6s%s",
-                 tname, c.name, age, dist_buf);
+        snprintf(line, sizeof(line), "  %s %-25.25s %6s%s",
+                 tname, idstr, age, dist_buf);
       } else {
-        snprintf(line, sizeof(line), "  %s %-18.18s %6s hops=%s%s",
-                 tname, c.name, age, hop, dist_buf);
+        snprintf(line, sizeof(line), "  %s %-25.25s %6s hops=%s%s",
+                 tname, idstr, age, hop, dist_buf);
       }
       add_line(line);
       shown++;
@@ -8264,20 +8274,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           case ADV_TYPE_SENSOR:   dtname = "sns "; break;
           default:                dtname = "?   "; break;
         }
-        // Identifier: 4-Byte-Hex-Prefix + Markierung 'disc' damit klar
-        // ist dass die Info aus dem discover-Cache stammt, nicht Kontakt.
-        char id[24];
-        snprintf(id, sizeof(id), "%02x%02x%02x%02x.disc",
-                 e.pub_key[0], e.pub_key[1], e.pub_key[2], e.pub_key[3]);
+        // Konsistent zur Kontakt-Zeile oben: 6-hex-Prefix vorn, dann
+        // '(unknown)' im Namens-Slot. Discover-Cache liefert mindestens
+        // 8 Byte Pub-Key (short-discover) bzw. 32 Byte (full); die ersten
+        // 3 Byte (6 hex chars) genuegen fuer Visual-Identifikation.
+        char dprefix6[7];
+        for (int j = 0; j < 3; j++) snprintf(dprefix6 + j*2, 3, "%02x", e.pub_key[j]);
+        dprefix6[6] = 0;
+        char did[40];
+        snprintf(did, sizeof(did), "%s (unknown)", dprefix6);
 
         char line[160];
         if (mode == NB_DIRECT) {
-          snprintf(line, sizeof(line), "  %s %-18.18s %6s",
-                   dtname, id, dage);
+          snprintf(line, sizeof(line), "  %s %-25.25s %6s",
+                   dtname, did, dage);
         } else {
           // hops=0 fix (discover-Antworten sind protokoll-bedingt direct)
-          snprintf(line, sizeof(line), "  %s %-18.18s %6s hops=0",
-                   dtname, id, dage);
+          snprintf(line, sizeof(line), "  %s %-25.25s %6s hops=0",
+                   dtname, did, dage);
         }
         add_line(line);
         discover_shown++;
