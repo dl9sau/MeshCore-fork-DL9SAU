@@ -1862,16 +1862,68 @@ CLI-Vorschlag (User skizzierte zwei Varianten):
   Entscheidung: spaeter. (b) wirkt thematisch sauberer (Sync = Advert-
   Eigenschaft), (a) ist konsistent mit dem bestehenden 'set time'.
 
-Caveats:
-  - Replay-Schutz: alte Adverts (re-injected) duerfen die RTC nicht
-    zurueckdrehen. Vermutlich: nur akzeptieren wenn timestamp > letzter
-    akzeptierter timestamp dieser Source.
-  - Propagation-Delay: bei 2-3 Hops mehrere Sekunden bis Minuten alt.
-    Akzeptabel laut User-Vorgabe, aber dokumentieren.
-  - GPS-Konflikt: wenn GPS-Fix gerade gueltig ist, hat GPS-Zeit prioritaet
-    ueber Advert. Reihenfolge: GPS > App-Override (CMD_SET_DEVICE_TIME)
-    > Advert-Sync. (Diskussion noetig.)
+Verfeinerung (User-Spec 2026-06-01, Folgesession):
+
+  Drift-Schwelle:
+    20 s. RTC wird nur korrigiert wenn |delta| >= 20 s.
+
+  Update-Frequenz:
+    Max 1x pro 24h. Verhindert dass jedes hereinkommende Advert eine
+    RTC-Aenderung triggert.
+
+  Failover-Timeout:
+    24h15min. Wenn vom gepinnten Source-Repeater laenger nichts
+    gehoert wurde, wechseln wir auf die naechste konfigurierte Source.
+    Hintergrund: manche Repeater konfigurieren Advert-Intervalle bis zu
+    1 Woche. Solche sind als Sync-Source ungeeignet, der User waehlt
+    haeufigere. Unsere Firmware sendet zero-hop-Adverts oft -- daran
+    koennen sich andere mit diesem Feature orientieren.
+
+  Strict-Mode (bis-zu-3 konfigurierte Pub-Key-Prefixes):
+    Wie ursprueglich beschrieben. NTP-Style-Pinning, Median-Auswahl,
+    Plausibility-Check.
+
+  Lazy-Mode (Opt-in Alternative):
+    Akzeptiere JEDES zero-hop (nicht flooded) signierte Advert als
+    Zeitquelle. Vorteil: bei falscher Zeit kann der User lokal beim
+    SysOp Bescheid sagen -- 300km entfernte Repeater zu kontaktieren
+    waere unpraktisch. Nachteil: erfordert dass mindestens ein
+    Repeater in Funk-Reichweite die Zeit korrekt hat. Replay/falsche-
+    Zeit-Detektion via Plausibility-Check (Jahr 2020 oder 2099
+    verwerfen) und Drift-Schwelle.
+    Zero-hop-Filter ist hier essentiell: floodbare Adverts koennten
+    von weit entfernten Quellen kommen, deren Uhr wir nicht beurteilen
+    koennen.
+
+  GPS-Konflikt (revidiert):
+    GPS hat Vorrang VOR Advert-Sync ABER nur wenn das bestehende
+    'first_sync'-Flag true ist (GPS hat schon einmal erfolgreich
+    synced). Wenn GPS noch keinen Fix hat, greift Advert-Sync als
+    Fallback. Sobald GPS einen Fix bekommt, geht Vorrang zurueck zu
+    GPS und Advert-Sync wird ignoriert (bis GPS wieder ausfaellt).
+
+  Replay-Schutz:
+    Plausibility-Check (Jahr 2020-2099). Zusaetzlich: pro Source nur
+    Updates akzeptieren wenn advert_timestamp > letzter akzeptierter
+    timestamp dieser Source.
+
+  Trace:
+    Wiederverwendung des bestehenden TRACE_RTC. Bei Time-Change durch
+    Advert-Sync zusaetzlich loggen welche Repeater-Quelle (3 Byte
+    Pub-Key-Prefix) und Delta in Sekunden.
+
+  Status-Anzeige in 'clock' / 'time':
+    Bisher: "RTC = 1730xxxx (UTC, local)".
+    Neu zusaetzlich: "  synced via a1b2c3, age 45s" wenn Advert-Sync
+    aktiv ist, bzw. "synced via GPS" bei GPS-Sync. Quelle + Age sind
+    Diagnose-Helfer.
+
+  Bootstrap (heute):
+    Firmware orientiert sich am neuesten Eintrag der heard-Liste.
+    Bleibt fuer Strict-Mode-Ueberbrueckungen bis 1. Sync-Source
+    gehoert wird.
 
 Quelle: User-Wunsch 2026-06-01, eingefroren als Wunschliste-Eintrag
 nach erneutem Hinweis ("Wir hatten mal besprochen ... finde keinen
-help-Befehl ... haben wir wohl nicht umgesetzt").
+help-Befehl ... haben wir wohl nicht umgesetzt"). Verfeinerung in
+Folgesession nach Detail-Diskussion.
