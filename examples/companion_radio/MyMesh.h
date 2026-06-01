@@ -475,6 +475,10 @@ private:
   bool          _discover_active;
   unsigned long _discover_expiry_ms;
   unsigned long _discover_next_allowed_ms; // rate-limit: 60s seit letztem REQ
+  // RTC-Timestamp wann der letzte discover-Batch endete (>=1 Antwort).
+  // Verwendet von 'neighbors' um discover-only-Eintraege (nicht in
+  // Kontaktliste) bis 48h nachzulisten.
+  uint32_t      _discover_last_at_rtc;
   void discoverStart(uint8_t filter, bool prefix_only);
   void discoverFinishAndPrint();
   void discoverHandleResp(mesh::Packet* packet);

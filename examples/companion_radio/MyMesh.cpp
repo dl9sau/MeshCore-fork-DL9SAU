@@ -2533,6 +2533,10 @@ void MyMesh::discoverFinishAndPrint() {
     pushCompanionMessage("discover: keine Antworten in 30s.");
     return;
   }
+  // Timestamp setzen sobald wir >=1 Antwort haben -- 'neighbors' nutzt
+  // diesen Wert um discover-only-Knoten (nicht in Kontaktliste) bis
+  // 48h nachzulisten.
+  _discover_last_at_rtc = getRTCClock()->getCurrentTime();
   // Tabelle via gemeinsamem Legend-Helper (gleiche Format wie chain-
   // Modus). Keine Region-CSV in diesem Pfad, daher 2. Arg = NULL.
   char header[80];
@@ -2704,6 +2708,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _discover_tag = 0;
   _discover_expiry_ms = 0;
   _discover_next_allowed_ms = 0;
+  _discover_last_at_rtc = 0;
   _discoverable_window_start_ms = 0;
   _discoverable_count_window = 0;
   memset(_discover_entries, 0, sizeof(_discover_entries));
@@ -8222,9 +8227,72 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       shown++;
     }
 
-    char summary[80];
-    snprintf(summary, sizeof(summary),
-             "total: %d within 48h, %d known", shown, num);
+    // Discover-Augmentation: wenn innerhalb 48h ein 'discover' lief und
+    // dabei Antworten gesammelt wurden, liste jene Knoten nach die NICHT
+    // in der Kontaktliste sind (kein Auto-Add fuer diesen Typ konfiguriert).
+    // Discover-Antworten sind protokoll-bedingt zero-hop -- daher passen
+    // sie zu allen drei Modi (direct, hops, km). Im km-Mode wird mangels
+    // GPS-Info keine Distanz angezeigt, aber Eintrag inkludiert (User-
+    // Vorgabe: direkt-gehoert ist immer interessant).
+    int discover_shown = 0;
+    if (_discover_last_at_rtc > 0
+        && now >= _discover_last_at_rtc
+        && (now - _discover_last_at_rtc) <= CR_HEARD_MAX_AGE_SECS
+        && _discover_count > 0) {
+      char dage[16];
+      uint32_t s = now - _discover_last_at_rtc;
+      if      (s < 60)     snprintf(dage, sizeof(dage), "%us", (unsigned)s);
+      else if (s < 3600)   snprintf(dage, sizeof(dage), "%um", (unsigned)(s / 60));
+      else if (s < 86400)  snprintf(dage, sizeof(dage), "%uh%02um",
+                                    (unsigned)(s / 3600), (unsigned)((s % 3600) / 60));
+      else                 snprintf(dage, sizeof(dage), "%ud%02uh",
+                                    (unsigned)(s / 86400), (unsigned)((s % 86400) / 3600));
+
+      for (uint8_t i = 0; i < _discover_count; i++) {
+        const DiscoverEntry& e = _discover_entries[i];
+        // Skip wenn Eintrag in Kontaktliste -- wurde dann oben schon
+        // (oder durch Filter bewusst nicht) gelistet.
+        ContactInfo* known = lookupContactByPubKey(
+            (uint8_t*)e.pub_key, e.full_pubkey ? PUB_KEY_SIZE : 8);
+        if (known) continue;
+
+        const char* dtname;
+        switch (e.adv_type) {
+          case ADV_TYPE_REPEATER: dtname = "rep "; break;
+          case ADV_TYPE_CHAT:     dtname = "cmp "; break;
+          case ADV_TYPE_ROOM:     dtname = "room"; break;
+          case ADV_TYPE_SENSOR:   dtname = "sns "; break;
+          default:                dtname = "?   "; break;
+        }
+        // Identifier: 4-Byte-Hex-Prefix + Markierung 'disc' damit klar
+        // ist dass die Info aus dem discover-Cache stammt, nicht Kontakt.
+        char id[24];
+        snprintf(id, sizeof(id), "%02x%02x%02x%02x.disc",
+                 e.pub_key[0], e.pub_key[1], e.pub_key[2], e.pub_key[3]);
+
+        char line[160];
+        if (mode == NB_DIRECT) {
+          snprintf(line, sizeof(line), "  %s %-18.18s %6s",
+                   dtname, id, dage);
+        } else {
+          // hops=0 fix (discover-Antworten sind protokoll-bedingt direct)
+          snprintf(line, sizeof(line), "  %s %-18.18s %6s hops=0",
+                   dtname, id, dage);
+        }
+        add_line(line);
+        discover_shown++;
+      }
+    }
+
+    char summary[100];
+    if (discover_shown > 0) {
+      snprintf(summary, sizeof(summary),
+               "total: %d contacts + %d discover-only, %d known",
+               shown, discover_shown, num);
+    } else {
+      snprintf(summary, sizeof(summary),
+               "total: %d within 48h, %d known", shown, num);
+    }
     add_line(summary);
     flush(true);
     return;
