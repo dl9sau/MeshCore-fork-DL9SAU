@@ -3002,13 +3002,17 @@ void MyMesh::begin(bool has_display) {
 
   // Boot-Greeting als ALLERERSTE Nachricht: soll die iOS-Companion-App
   // dazu bringen, bei Mention des eigenen Namens einen Ton abzuspielen,
-  // damit der User akustisch einen Reboot mitbekommt. Empirisch 2026-06-01:
-  // "Booted. Hello <name>" triggerte den Ton NICHT. Naechster Versuch mit
-  // expliziter @-Mention-Syntax am Anfang -- App-Konvention vieler Chat-
-  // Clients ist @<name> als Highlight-Trigger.
+  // damit der User akustisch einen Reboot mitbekommt. Empirie 2026-06-01:
+  //   v1 "Booted. Hello <name>"     -> kein Ton
+  //   v2 "@<name>: booted. enjoy!"  -> kein Ton
+  // User-Erkenntnis: die App-eigene 'Antworten'-Funktion erzeugt
+  // intern '@[<name>] ' (mit Klammern). Die Klammern werden angezeigt
+  // als grau-hinterlegte Highlight-Box. Vermutlich ist DAS das echte
+  // Mention-Format, das die Ton-Logik triggert.
+  //   v3 "@[<name>] booted.."       -> Test
   {
     char greet[80];
-    snprintf(greet, sizeof(greet), "@%.40s: booted. enjoy!", _prefs.node_name);
+    snprintf(greet, sizeof(greet), "@[%.40s] booted..", _prefs.node_name);
     pushCompanionMessage(greet);
   }
 
