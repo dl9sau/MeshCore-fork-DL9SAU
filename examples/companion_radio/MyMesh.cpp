@@ -2999,12 +2999,15 @@ void MyMesh::begin(bool has_display) {
   // max(seq_no) der restaurierten Eintraege.
   loadBucketsFromFlash();
 
-  // Boot-Greeting als ALLERERSTE Nachricht: erlaubt der iOS-Companion-App
-  // bei Referenzierung des eigenen Namens einen Ton abzuspielen, sodass
-  // der User mitbekommt dass der Tracker neu gestartet hat.
+  // Boot-Greeting als ALLERERSTE Nachricht: soll die iOS-Companion-App
+  // dazu bringen, bei Mention des eigenen Namens einen Ton abzuspielen,
+  // damit der User akustisch einen Reboot mitbekommt. Empirisch 2026-06-01:
+  // "Booted. Hello <name>" triggerte den Ton NICHT. Naechster Versuch mit
+  // expliziter @-Mention-Syntax am Anfang -- App-Konvention vieler Chat-
+  // Clients ist @<name> als Highlight-Trigger.
   {
-    char greet[64];
-    snprintf(greet, sizeof(greet), "Booted. Hello %.40s", _prefs.node_name);
+    char greet[80];
+    snprintf(greet, sizeof(greet), "@%.40s: booted. enjoy!", _prefs.node_name);
     pushCompanionMessage(greet);
   }
 
@@ -7027,7 +7030,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
           "Repeat: repeat flood_max (1..64, def 16)\n"
-          "  flood_max_infra (def 16, 0=transient)\n"
+          "  flood_max_infra (def 16, 0=flood_max)\n"
           "  flood_max_req_resp (def 0=erbt infra)");
         pushCompanionMessage(
           "  scope_regional_hops\n"
@@ -9200,8 +9203,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Cap fuer REPEATER/SENSOR/ROOM-Adverts.\n"
           "  Default 16. User-Chat-Adverts unbetroffen.");
         pushCompanionMessage(
-          "  0 = transienter Fallback (nur flood_max).\n"
-          "  Reboot setzt 0 zurueck auf 16.");
+          "  0 = wirkt wie flood_max (kein extra Cap).\n"
+          "  Reboot bumpt 0 zurueck auf 16.");
         return;
       }
       if (strcmp(key, "flood_max_req_resp") == 0 || strcmp(key, "flood.max.req.resp") == 0) {
