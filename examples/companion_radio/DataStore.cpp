@@ -280,7 +280,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.msg_store_flash, sizeof(_prefs.msg_store_flash));                  // 1502
     file.read((uint8_t *)_prefs.msg_store_limit, sizeof(_prefs.msg_store_limit));                   // 1503 (5 byte)
     file.read((uint8_t *)&_prefs.log_flags, sizeof(_prefs.log_flags));                              // 1508
-    file.read((uint8_t *)&_prefs.flood_max_adv_infra, sizeof(_prefs.flood_max_adv_infra));          // 1509
+    file.read((uint8_t *)&_prefs.flood_max_infra, sizeof(_prefs.flood_max_infra));          // 1509
 
     file.close();
   }
@@ -353,7 +353,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.msg_store_flash, sizeof(_prefs.msg_store_flash));                  // 1502
     file.write((uint8_t *)_prefs.msg_store_limit, sizeof(_prefs.msg_store_limit));                   // 1503
     file.write((uint8_t *)&_prefs.log_flags, sizeof(_prefs.log_flags));                              // 1508
-    file.write((uint8_t *)&_prefs.flood_max_adv_infra, sizeof(_prefs.flood_max_adv_infra));          // 1509
+    file.write((uint8_t *)&_prefs.flood_max_infra, sizeof(_prefs.flood_max_infra));          // 1509
 
     file.close();
   }

@@ -1206,7 +1206,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   }
   // Wunschliste 24 (2026-05-30): Infrastruktur-Advert-Cap. Adverts mit
   // adv_type != ADV_TYPE_CHAT (also REPEATER/SENSOR/ROOM) werden ab
-  // path_hash_count > flood_max_adv_infra nicht mehr weitergeleitet.
+  // path_hash_count > flood_max_infra nicht mehr weitergeleitet.
   // User-Adverts (Chat) muessen weit kommen damit Erstkontakt ohne
   // externen Schluesseltausch funktioniert; Infrastruktur-Adverts sind
   // ortsbezogen. Advert-Payload-Layout (Mesh.cpp:249+):
@@ -1218,10 +1218,10 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   // NICHT-rejection (z.B. CHAT-advert oder hops <= cap) der else-Zweig
   // nicht eintritt und die nachfolgende ptype-Scope-Pruefung greift.
   else if (ptype == PAYLOAD_TYPE_ADVERT
-           && _prefs.flood_max_adv_infra > 0
+           && _prefs.flood_max_infra > 0
            && packet->payload_len > (int)(PUB_KEY_SIZE + 4 + SIGNATURE_SIZE)
            && (packet->payload[PUB_KEY_SIZE + 4 + SIGNATURE_SIZE] & 0x0F) != ADV_TYPE_CHAT
-           && packet->getPathHashCount() > _prefs.flood_max_adv_infra) {
+           && packet->getPathHashCount() > _prefs.flood_max_infra) {
     reject_reason = "infra-advert-cap";
   }
   // ADVERTs and ACKs: forward only if the packet is scoped (transport-coded)
@@ -5746,7 +5746,7 @@ void MyMesh::backupSaveToSerial() {
   kv_float("direct_txdelay",       _prefs.direct_tx_delay_factor, 3);
   kv_uint ("scope_regional_hops",  _prefs.scope_regional_hop_limit);
   kv_uint ("flood_max",            _prefs.flood_max);
-  kv_uint ("flood_max_adv_infra",  _prefs.flood_max_adv_infra);
+  kv_uint ("flood_max_infra",  _prefs.flood_max_infra);
   kv_float("lat",                  sensors.node_lat, 6);
   kv_float("lon",                  sensors.node_lon, 6);
   Serial.println();
@@ -6300,7 +6300,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "direct_txdelay") == 0)        { _prefs.direct_tx_delay_factor= as_float();        _br_applied++; return; }
       if (strcmp(key, "scope_regional_hops") == 0)   { _prefs.scope_regional_hop_limit = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max") == 0)             { _prefs.flood_max             = (uint8_t)as_uint(); _br_applied++; return; }
-      if (strcmp(key, "flood_max_adv_infra") == 0)   { _prefs.flood_max_adv_infra   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "flood_max_infra") == 0)   { _prefs.flood_max_infra   = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start);   _br_applied++; return; }
       if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start);   _br_applied++; return; }
     }
@@ -6974,7 +6974,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
           "Repeat: repeat flood_max\n"
-          "  flood_max_adv_infra scope_regional_hops\n"
+          "  flood_max_infra scope_regional_hops\n"
           "  loop_detect (off|minimal|moderate|strict)");
         pushCompanionMessage(
           "Delays: rxdelay txdelay direct_txdelay\n"
@@ -9446,28 +9446,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (_prefs.scope_regional_hop_limit > _prefs.flood_max) {
         _prefs.scope_regional_hop_limit = _prefs.flood_max;
       }
-      // Auch flood_max_adv_infra auto-cappen falls > flood_max.
+      // Auch flood_max_infra auto-cappen falls > flood_max.
       bool infra_clipped = false;
-      if (_prefs.flood_max_adv_infra > _prefs.flood_max) {
-        _prefs.flood_max_adv_infra = _prefs.flood_max;
+      if (_prefs.flood_max_infra > _prefs.flood_max) {
+        _prefs.flood_max_infra = _prefs.flood_max;
         infra_clipped = true;
       }
       savePrefs();
       char r[140]; snprintf(r, sizeof(r),
         "OK - flood_max = %d\n"
         "  scope_regional_hops gecapped auf %u\n"
-        "  flood_max_adv_infra%s = %u",
+        "  flood_max_infra%s = %u",
         v, (unsigned)_prefs.scope_regional_hop_limit,
         infra_clipped ? " gecapped" : "",
-        (unsigned)_prefs.flood_max_adv_infra);
+        (unsigned)_prefs.flood_max_infra);
       pushCompanionMessage(r);
       return;
     }
 
     // Wunschliste 24: Hop-Cap fuer Nicht-Chat-Adverts (Repeater/Sensor/
     // Room). Range 0..flood_max. 0 = deaktiviert (es gilt flood_max).
-    if (strcmp(key, "flood_max_adv_infra") == 0
-        || strcmp(key, "flood.max.adv.infra") == 0) {
+    if (strcmp(key, "flood_max_infra") == 0
+        || strcmp(key, "flood.max.infra") == 0) {
       int v = atoi(value_lc);
       if (v < 0 || v > _prefs.flood_max) {
         char r[80]; snprintf(r, sizeof(r),
@@ -9476,10 +9476,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      _prefs.flood_max_adv_infra = (uint8_t)v;
+      _prefs.flood_max_infra = (uint8_t)v;
       savePrefs();
       char r[80]; snprintf(r, sizeof(r),
-        "OK - flood_max_adv_infra = %d%s",
+        "OK - flood_max_infra = %d%s",
         v, v == 0 ? " (deaktiviert, es gilt flood_max)" : "");
       pushCompanionMessage(r);
       return;
@@ -9616,7 +9616,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
       emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
-      emit_uint  ("flood_max_adv_infra", _prefs.flood_max_adv_infra,    0);
+      emit_uint  ("flood_max_infra", _prefs.flood_max_infra,    0);
       // loop_detect (Wunschliste 6b) -- enum, eigene Anzeige.
       {
         uint8_t v = _prefs.loop_detect;
@@ -9674,11 +9674,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "direct_txdelay") == 0)    snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
     else if (strcmp(key, "scope_regional_hops") == 0) snprintf(r, sizeof(r), "scope_regional_hops = %u", (unsigned)_prefs.scope_regional_hop_limit);
     else if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) snprintf(r, sizeof(r), "flood_max = %u", (unsigned)_prefs.flood_max);
-    else if (strcmp(key, "flood_max_adv_infra") == 0 || strcmp(key, "flood.max.adv.infra") == 0) {
-      if (_prefs.flood_max_adv_infra == 0)
-        snprintf(r, sizeof(r), "flood_max_adv_infra = 0 (deaktiviert, es gilt flood_max=%u)", (unsigned)_prefs.flood_max);
+    else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
+      if (_prefs.flood_max_infra == 0)
+        snprintf(r, sizeof(r), "flood_max_infra = 0 (deaktiviert, es gilt flood_max=%u)", (unsigned)_prefs.flood_max);
       else
-        snprintf(r, sizeof(r), "flood_max_adv_infra = %u", (unsigned)_prefs.flood_max_adv_infra);
+        snprintf(r, sizeof(r), "flood_max_infra = %u", (unsigned)_prefs.flood_max_infra);
     }
     else if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) snprintf(r, sizeof(r), "owner_info = %s", _prefs.owner_info[0] ? _prefs.owner_info : "(leer)");
     else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
