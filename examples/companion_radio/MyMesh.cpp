@@ -5819,6 +5819,40 @@ void MyMesh::backupSaveToSerial() {
   Serial.println("--- BACKUP NODE MAIN END ---");
   Serial.println();
   Serial.flush();
+
+  // -------- Block 3: Hashtag-Channels (Wunschliste 28 Phase D) --------
+  // Nur Channels deren Name mit '#' beginnt -- die PSK wird beim Restore
+  // deterministisch aus dem Namen rekonstruiert (SHA-256-Prefix-Algorithmus
+  // dokumentiert in docs/companion_protocol.md). Public-Channel hat eigene
+  // hartcodierte PSK -- nicht im Backup. $companion-Channel wird beim
+  // Boot von setupCompanionChannel() automatisch (re-)angelegt, ebenfalls
+  // nicht im Backup. Private-Channels: bewusst NICHT im Backup, weil deren
+  // PSK random ist und nicht rekonstruierbar -- User muss seinen Key
+  // separat sichern (z.B. via App-Share).
+  Serial.println();
+  Serial.println("--- BACKUP HASHTAG CHANNELS BEGIN ---");
+  Serial.println("{");
+  first = true;
+  emit_meta();
+  {
+    int idx = 0;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (!getChannel(i, ch)) continue;
+      if (ch.name[0] != '#') continue;
+      // Defensive: $companion-Channel sollte mit '#' nicht starten,
+      // aber sicher ist sicher (PSK-Match).
+      if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) continue;
+      char key[16];
+      snprintf(key, sizeof(key), "ch%d", idx++);
+      kv_str(key, ch.name);
+    }
+  }
+  Serial.println();
+  Serial.println("}");
+  Serial.println("--- BACKUP HASHTAG CHANNELS END ---");
+  Serial.println();
+  Serial.flush();
 }
 
 // =========================================================================
@@ -5956,6 +5990,15 @@ void MyMesh::backupRestoreLoop() {
             _br_in_string = false;
             _br_escape_next = false;
             Serial.print("\r\n# NODE MAIN block: reading JSON...\r\n");
+            Serial.flush();
+          } else if (strncmp(type_str, "HASHTAG CHANNELS BEGIN ---", 26) == 0) {
+            _br_block_type = 3;
+            _br_state = BR_READING_JSON;
+            _br_json_len = 0;
+            _br_brace_depth = 0;
+            _br_in_string = false;
+            _br_escape_next = false;
+            Serial.print("\r\n# HASHTAG CHANNELS block: reading JSON...\r\n");
             Serial.flush();
           }
           // andere Marker (z.B. END) ignorieren, bleiben in WAIT_MARKER
@@ -6376,6 +6419,69 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
     _br_skipped++;
     return;
   }
+
+  if (block_type == 3) {
+    // ===== HASHTAG CHANNELS =====
+    // Keys: "chN" mit N = 0..MAX_GROUP_CHANNELS-1, Value = "#name".
+    // PSK wird hier deterministisch aus dem Namen rekonstruiert:
+    // erste 16 Byte von SHA-256(name). Format-Konvention dokumentiert
+    // in docs/companion_protocol.md.
+    if (val_type == 's' && key[0] == 'c' && key[1] == 'h') {
+      char chname[32];
+      brExtractString(val_start, val_len, chname, sizeof(chname));
+      if (chname[0] != '#') {
+        // Nicht hashtag-Channel -- ueberspringen (Schutz vor versehentlich
+        // ge-pasten Private-Channel-Eintraegen die wir nicht rekonstruieren
+        // koennen).
+        _br_skipped++;
+        return;
+      }
+      uint8_t hash[32];
+      mesh::Utils::sha256(hash, sizeof(hash),
+                          (const uint8_t*)chname, strlen(chname));
+
+      ChannelDetails ch;
+      memset(&ch, 0, sizeof(ch));
+      StrHelper::strncpy(ch.name, chname, sizeof(ch.name));
+      memcpy(ch.channel.secret, hash, 16);
+
+      // Slot finden: bevorzugt vorhandenen Eintrag mit gleichem Namen
+      // ueberschreiben (idempotent), sonst ersten leeren Slot. Den
+      // Companion-Slot niemals anfassen (PSK-Match).
+      int slot = -1;
+      int empty_slot = -1;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        ChannelDetails existing;
+        if (!getChannel(i, existing)) continue;
+        if (memcmp(existing.channel.secret, s_companion_psk_magic, 16) == 0) continue;
+        if (existing.name[0] == 0) {
+          if (empty_slot < 0) empty_slot = i;
+          continue;
+        }
+        if (strcmp(existing.name, chname) == 0) {
+          slot = i;
+          break;
+        }
+      }
+      if (slot < 0) slot = empty_slot;
+      if (slot < 0) {
+        _br_errors++;
+        Serial.printf("# channel %s: no free slot, skipped.\r\n", chname);
+        return;
+      }
+      if (setChannel(slot, ch)) {
+        saveChannels();
+        _br_applied++;
+      } else {
+        _br_errors++;
+        Serial.printf("# channel %s: setChannel failed.\r\n", chname);
+      }
+      return;
+    }
+    _br_skipped++;
+    return;
+  }
+
   _br_skipped++;
 }
 
