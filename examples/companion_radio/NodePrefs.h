@@ -218,6 +218,27 @@ struct NodePrefs {  // persisted to file
   // bleibt; Repeater/Sensor/Room-Adverts sind ortsbezogen.
   uint8_t        flood_max_infra;
 
+  // Hop-Cap fuer REQ/RESP/ANON_REQ-Pakete (Telemetrie, Owner-Info, Login etc).
+  // REQ/RESP machen aus jeder Konversation Doppel-Flood (REQ floodet hin,
+  // PATH_RETURN mit RESP floodet zurueck) und dominieren empirisch den
+  // Mesh-Traffic (analyzer.meshcorenetz.de). Eng cappen bringt am meisten.
+  // Range 0 oder 1..flood_max_infra (falls gesetzt, sonst 1..flood_max).
+  //   > 0  -> Pakete mit path_hash_count > flood_max_req_resp werden nicht
+  //           mehr repeated.
+  //   == 0 -> kaskadiert: es greift flood_max_infra (falls > 0), sonst
+  //           flood_max.
+  // Default 0 (= kaskade): out-of-the-box keine Verhaltensaenderung. Help
+  // empfiehlt explizit 4..8 zu setzen -- 4 fuer eng (typische Stadt-
+  // Reichweite), 8 ist sinnvoll wenn man Adverts auf 16 Hops weit gehen
+  // laesst und Repeater darunter trotzdem flooded abfragen koennen will.
+  // Auto-Cap wenn flood_max_infra oder flood_max unter den gesetzten Wert
+  // sinken. CLI: set flood_max_req_resp <N>.
+  // Sub-Typ-Differenzierung (Telemetrie vs. Owner-Info) ist beim Forwarding
+  // protokoll-bedingt nicht moeglich: REQ-Sub-Typ ist im verschluesselten
+  // Payload, dest_hash ist nur 1 Byte (kollidiert), ADV_TYPE des Empfaengers
+  // nicht im Header.
+  uint8_t        flood_max_req_resp;
+
   // Geo-vs-Default Send-Hierarchie fuer eigene Adverts (Wunschliste 13).
   //   0 = uninitialisiert (begin() migriert)
   //   1 = off:    Default-Scope gewinnt immer. Geo wird nie verwendet.

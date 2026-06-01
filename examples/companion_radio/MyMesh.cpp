@@ -1224,6 +1224,24 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
            && packet->getPathHashCount() > _prefs.flood_max_infra) {
     reject_reason = "infra-advert-cap";
   }
+  // Wunschliste 29 (DL9SAU 2026-06-01): Hop-Cap fuer REQ/RESP/ANON_REQ.
+  // Reduziert den Doppel-Flood (REQ floodet hin, PATH_RETURN mit RESP
+  // floodet zurueck) fuer Telemetrie/Login/Owner-Info-Anfragen. Sub-Typ
+  // ist am Forwarder unsichtbar (REQ_TYPE_* im verschluesselten Payload),
+  // daher uniformer Cap auf alle drei Top-Level-Typen.
+  // Kaskade: explizit gesetzter Wert > 0 gewinnt. Bei 0: Fallback auf
+  // flood_max_infra (selbst kaskadiert weiter auf flood_max via Block oben).
+  // Wenn beide 0 sind: kein zusaetzlicher Cap, nur die globale flood_max-
+  // Pruefung am Anfang dieses Blocks greift.
+  else if ((ptype == PAYLOAD_TYPE_REQ
+            || ptype == PAYLOAD_TYPE_RESPONSE
+            || ptype == PAYLOAD_TYPE_ANON_REQ)
+           && (_prefs.flood_max_req_resp || _prefs.flood_max_infra)
+           && packet->getPathHashCount() >
+              (_prefs.flood_max_req_resp ? _prefs.flood_max_req_resp
+                                         : _prefs.flood_max_infra)) {
+    reject_reason = "req-resp-cap";
+  }
   // ADVERTs and ACKs: forward only if the packet is scoped (transport-coded)
   else if (ptype == PAYLOAD_TYPE_ADVERT || ptype == PAYLOAD_TYPE_ACK ||
       ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA ||
@@ -2911,6 +2929,17 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.scope_regional_hop_limit == 0
       || _prefs.scope_regional_hop_limit > _prefs.flood_max) {
     _prefs.scope_regional_hop_limit = (_prefs.flood_max < 3) ? _prefs.flood_max : 3;
+  }
+  // flood_max_req_resp: 0 = kaskade auf flood_max_infra (oder flood_max
+  // falls infra=0). Kein Auto-Bump auf einen Default -- frische Installation
+  // verhaelt sich identisch zur vorherigen Firmware. User-Konfiguration via
+  // 'set flood_max_req_resp 4' (Help-Empfehlung 4..8). Hier nur Sanity-Cap
+  // an den jeweiligen Obergrenzen falls Wert > flood_max_infra/flood_max.
+  if (_prefs.flood_max_req_resp > _prefs.flood_max) {
+    _prefs.flood_max_req_resp = _prefs.flood_max;
+  }
+  if (_prefs.flood_max_infra > 0 && _prefs.flood_max_req_resp > _prefs.flood_max_infra) {
+    _prefs.flood_max_req_resp = _prefs.flood_max_infra;
   }
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
@@ -5747,6 +5776,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint ("scope_regional_hops",  _prefs.scope_regional_hop_limit);
   kv_uint ("flood_max",            _prefs.flood_max);
   kv_uint ("flood_max_infra",  _prefs.flood_max_infra);
+  kv_uint ("flood_max_req_resp",   _prefs.flood_max_req_resp);
   kv_float("lat",                  sensors.node_lat, 6);
   kv_float("lon",                  sensors.node_lon, 6);
   Serial.println();
@@ -6301,6 +6331,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "scope_regional_hops") == 0)   { _prefs.scope_regional_hop_limit = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max") == 0)             { _prefs.flood_max             = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_infra") == 0)   { _prefs.flood_max_infra   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "flood_max_req_resp") == 0){ _prefs.flood_max_req_resp= (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start);   _br_applied++; return; }
       if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start);   _br_applied++; return; }
     }
@@ -6974,7 +7005,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
           "Repeat: repeat flood_max\n"
-          "  flood_max_infra scope_regional_hops\n"
+          "  flood_max_infra flood_max_req_resp\n"
+          "  scope_regional_hops\n"
           "  loop_detect (off|minimal|moderate|strict)");
         pushCompanionMessage(
           "Delays: rxdelay txdelay direct_txdelay\n"
@@ -9452,14 +9484,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         _prefs.flood_max_infra = _prefs.flood_max;
         infra_clipped = true;
       }
+      // Und flood_max_req_resp ebenfalls -- darf nie groesser sein als
+      // flood_max (bei infra==0 ist flood_max die effektive Obergrenze).
+      bool rr_clipped = false;
+      if (_prefs.flood_max_req_resp > _prefs.flood_max) {
+        _prefs.flood_max_req_resp = _prefs.flood_max;
+        rr_clipped = true;
+      }
       savePrefs();
-      char r[140]; snprintf(r, sizeof(r),
+      char r[180]; snprintf(r, sizeof(r),
         "OK - flood_max = %d\n"
         "  scope_regional_hops gecapped auf %u\n"
-        "  flood_max_infra%s = %u",
+        "  flood_max_infra%s = %u\n"
+        "  flood_max_req_resp%s = %u",
         v, (unsigned)_prefs.scope_regional_hop_limit,
         infra_clipped ? " gecapped" : "",
-        (unsigned)_prefs.flood_max_infra);
+        (unsigned)_prefs.flood_max_infra,
+        rr_clipped ? " gecapped" : "",
+        (unsigned)_prefs.flood_max_req_resp);
       pushCompanionMessage(r);
       return;
     }
@@ -9477,11 +9519,56 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       _prefs.flood_max_infra = (uint8_t)v;
+      // flood_max_req_resp ggf. mit-runter ziehen, wenn neuer infra-Wert
+      // > 0 und kleiner als der gesetzte req_resp-Wert ist.
+      bool rr_clipped = false;
+      if (_prefs.flood_max_infra > 0
+          && _prefs.flood_max_req_resp > _prefs.flood_max_infra) {
+        _prefs.flood_max_req_resp = _prefs.flood_max_infra;
+        rr_clipped = true;
+      }
       savePrefs();
-      char r[80]; snprintf(r, sizeof(r),
+      char r[120]; snprintf(r, sizeof(r),
         "OK - flood_max_infra = %d%s",
         v, v == 0 ? " (deaktiviert, es gilt flood_max)" : "");
       pushCompanionMessage(r);
+      if (rr_clipped) {
+        char r2[80]; snprintf(r2, sizeof(r2),
+          "  flood_max_req_resp gecapped auf %u",
+          (unsigned)_prefs.flood_max_req_resp);
+        pushCompanionMessage(r2);
+      }
+      return;
+    }
+
+    // Wunschliste 29 (DL9SAU 2026-06-01): Hop-Cap fuer REQ/RESP/ANON_REQ.
+    // Effektive Obergrenze ist min(flood_max_infra, flood_max). Wenn
+    // flood_max_infra == 0, ist flood_max die einzige Obergrenze.
+    // 0 = kaskade: es gilt flood_max_infra (falls > 0), sonst kein
+    // zusaetzlicher Cap (nur globales flood_max greift).
+    if (strcmp(key, "flood_max_req_resp") == 0
+        || strcmp(key, "flood.max.req.resp") == 0) {
+      int v = atoi(value_lc);
+      uint8_t upper = (_prefs.flood_max_infra > 0
+                      && _prefs.flood_max_infra < _prefs.flood_max)
+                       ? _prefs.flood_max_infra : _prefs.flood_max;
+      if (v < 0 || v > upper) {
+        char r[100]; snprintf(r, sizeof(r),
+          "Wert ausserhalb 0..%u (Cap durch %s)",
+          (unsigned)upper,
+          (_prefs.flood_max_infra > 0
+           && _prefs.flood_max_infra < _prefs.flood_max)
+            ? "flood_max_infra" : "flood_max");
+        pushCompanionMessage(r);
+        return;
+      }
+      _prefs.flood_max_req_resp = (uint8_t)v;
+      savePrefs();
+      char r[140]; snprintf(r, sizeof(r),
+        "OK - flood_max_req_resp = %d%s",
+        v, v == 0 ? " (kaskade auf flood_max_infra/flood_max)" : "");
+      pushCompanionMessage(r);
+      pushCompanionMessage("Empfehlung: 4..8 (eng=4 Stadt, 8=weiter).");
       return;
     }
 
@@ -9617,6 +9704,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
       emit_uint  ("flood_max_infra", _prefs.flood_max_infra,    0);
+      emit_uint  ("flood_max_req_resp", _prefs.flood_max_req_resp, 0);
       // loop_detect (Wunschliste 6b) -- enum, eigene Anzeige.
       {
         uint8_t v = _prefs.loop_detect;
@@ -9679,6 +9767,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(r, sizeof(r), "flood_max_infra = 0 (deaktiviert, es gilt flood_max=%u)", (unsigned)_prefs.flood_max);
       else
         snprintf(r, sizeof(r), "flood_max_infra = %u", (unsigned)_prefs.flood_max_infra);
+    }
+    else if (strcmp(key, "flood_max_req_resp") == 0 || strcmp(key, "flood.max.req.resp") == 0) {
+      if (_prefs.flood_max_req_resp == 0) {
+        uint8_t eff = _prefs.flood_max_infra > 0 ? _prefs.flood_max_infra : _prefs.flood_max;
+        snprintf(r, sizeof(r), "flood_max_req_resp = 0 (kaskade -> %u)", (unsigned)eff);
+      } else {
+        snprintf(r, sizeof(r), "flood_max_req_resp = %u", (unsigned)_prefs.flood_max_req_resp);
+      }
     }
     else if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) snprintf(r, sizeof(r), "owner_info = %s", _prefs.owner_info[0] ? _prefs.owner_info : "(leer)");
     else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
