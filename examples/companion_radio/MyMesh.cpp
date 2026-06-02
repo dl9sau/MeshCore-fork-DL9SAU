@@ -4150,8 +4150,35 @@ void MyMesh::handleCmdFrame(size_t len) {
     StrHelper::strncpy(channel.name, (char *)&cmd_frame[2], 32);
     memset(channel.channel.secret, 0, sizeof(channel.channel.secret));
     memcpy(channel.channel.secret, &cmd_frame[2 + 32], 16); // NOTE: only 128-bit supported
+    // Wunschliste 32: bei Channel-Loeschen (Name leer) oder bei
+    // Channel-Wechsel im selben Slot die per-Channel-Hops-Cap zuruecksetzen.
+    // Begruendung: User loescht einen Channel oft wenn etwas nicht
+    // funktioniert; nach Neueinrichtung erwartet er Default-Verhalten und
+    // keine alten "gedraendert" Reste. Companion-Slot wird hier nicht
+    // angefasst -- der wird ohnehin beim Boot via setupCompanionChannel()
+    // wieder forced auf 0.
+    if (channel_idx < MAX_GROUP_CHANNELS) {
+      ChannelDetails prev;
+      bool diff = true;
+      if (getChannel(channel_idx, prev)) {
+        // Identisch wenn Name+secret gleich -- dann KEIN Reset (User
+        // hat z.B. nur via 'add channel' den gleichen Channel nochmal
+        // gesetzt; existierende ch.hops-Wahl soll bleiben).
+        diff = strcmp(prev.name, channel.name) != 0
+               || memcmp(prev.channel.secret, channel.channel.secret, 16) != 0;
+      }
+      if (diff) {
+        // Companion-PSK NIE veraendern (forced wird im Boot gesetzt).
+        if (memcmp(prev.channel.secret, s_companion_psk_magic, 16) != 0
+            && memcmp(channel.channel.secret, s_companion_psk_magic, 16) != 0) {
+          _prefs.channel_hops_cap[channel_idx] = CH_HOPS_OFF;
+        }
+      }
+    }
     if (setChannel(channel_idx, channel)) {
       saveChannels();
+      // savePrefs() falls oben channel_hops_cap geaendert wurde.
+      savePrefs();
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
