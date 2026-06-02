@@ -318,6 +318,21 @@ protected:
   void maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestamp, uint8_t adv_type);
   void timeSyncFinalizeLazyCollection();   // wird aus loop() / onAdvertRecv aufgerufen
   bool isGpsAuthoritative() const;
+
+  // Wunschliste 34/35: Runtime-effektiver Repeater-Zustand.
+  // client_repeat ist der STORED user-wunsch. Effective ist abhaengig
+  // vom profile (defensive vs normal) und im defensive-Fall auch von
+  // freq+force. Bei freq-Wechsel auf non-strict ohne force: wish=on
+  // bleibt im Storage, runtime suppressed transparent zu 'repeater off'.
+  bool isRepeatingEffectivelyAllowed() const;
+  // Cached Bool fuer per-Packet-Check (vermeidet pro Paket
+  // isValidClientRepeatFreq + Branches). Wird aktualisiert via
+  // recomputeRepeatingAllowed() bei jeder Aenderung von freq/bw/
+  // client_repeat/force/profile.
+  bool _repeating_allowed;
+  // Recompute + ggf. Trace bei Transition. Call nach jedem stored-state-
+  // Wechsel der die effektive Erlaubnis beeinflussen koennte.
+  void recomputeRepeatingAllowed(const char* reason);
   void onContactPathUpdated(const ContactInfo &contact) override;
   ContactInfo* processAck(const uint8_t *data) override;
   void queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt, uint32_t sender_timestamp,

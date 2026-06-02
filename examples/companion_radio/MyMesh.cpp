@@ -878,6 +878,26 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
 // Wunschliste 31: Advert-basierte RTC-Sync
 // =========================================================================
 
+bool MyMesh::isRepeatingEffectivelyAllowed() const {
+  if (_prefs.client_repeat == 0) return false;
+  if (_prefs.repeater_profile != 0) return true;   // normal: keine freq-Pruefung
+  // defensive: freq muss in strict-Range sein ODER force gesetzt
+  uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
+  if (isValidClientRepeatFreq(f_khz)) return true;
+  if (_prefs.client_repeat_force) return true;
+  return false;
+}
+
+void MyMesh::recomputeRepeatingAllowed(const char* reason) {
+  bool prev = _repeating_allowed;
+  _repeating_allowed = isRepeatingEffectivelyAllowed();
+  if (prev != _repeating_allowed) {
+    pushDebugLog("[repeat] effective -> %s (%s)\n",
+                 _repeating_allowed ? "on" : "off",
+                 reason ? reason : "?");
+  }
+}
+
 bool MyMesh::isGpsAuthoritative() const {
   // GPS hat Vorrang VOR Advert-Sync wenn GPS aktiv ist UND schon
   // mindestens einmal einen Fix bekommen hat. Andernfalls greift
@@ -1408,7 +1428,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     }
   }
 
-  if (_prefs.client_repeat == 0) {
+  // Runtime-Gate: cached effektive Repeating-Erlaubnis. Wird via
+  // recomputeRepeatingAllowed() bei jeder relevanten Stored-State-
+  // Aenderung neu berechnet (CLI repeater on/off/profile, App-CMD_SET_
+  // RADIO_PARAMS, boot). Per-Paket-Check ist ein einzelner Bool-Load.
+  if (!_repeating_allowed) {
     // Kein Trace hier - bei deaktiviertem Repeater wuerde JEDES Paket einen
     // filter-trace generieren, das ist nur Laerm.
     return false;
@@ -3150,6 +3174,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(_channel_sender_seen, 0, sizeof(_channel_sender_seen));
   _channel_sender_seen_count = 0;
   _channel_sender_seen_next = 0;
+  _repeating_allowed = false;  // boot-conservative; recompute laeuft in begin() nach loadPrefs
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -3396,6 +3421,12 @@ void MyMesh::begin(bool has_display) {
   _prefs.bw = constrain(_prefs.bw, 7.8f, 500.0f);
   _prefs.sf = constrain(_prefs.sf, 5, 12);
   _prefs.cr = constrain(_prefs.cr, 5, 8);
+  // Wunschliste 35: cached effektive Repeating-Erlaubnis initial berechnen.
+  // Wird bei jeder Stored-State-Aenderung (CLI repeater on/off/profile,
+  // App-CMD_SET_RADIO_PARAMS) per recomputeRepeatingAllowed() refreshed.
+  // _repeating_allowed wird in shouldRepeat() pro Paket gecheckt --
+  // einzelner Bool-Load statt isValidClientRepeatFreq pro Paket.
+  recomputeRepeatingAllowed("boot");
   _prefs.tx_power_dbm = constrain(_prefs.tx_power_dbm, -9, MAX_LORA_TX_POWER);
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
@@ -4223,6 +4254,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       // 'repeater on' musste der User wieder 'force' angeben obwohl er
       // die Einstellung explizit gesetzt hatte.
       savePrefs();
+      recomputeRepeatingAllowed("App: radio params");
 
       applyRadioPolicy();
       MESH_DEBUG_PRINTLN("OK: CMD_SET_RADIO_PARAMS: f=%d, bw=%d, sf=%d, cr=%d", freq, bw, (uint32_t)sf,
@@ -7167,6 +7199,7 @@ void MyMesh::clearStats() {
   memset(_channel_sender_seen, 0, sizeof(_channel_sender_seen));
   _channel_sender_seen_count = 0;
   _channel_sender_seen_next = 0;
+  _repeating_allowed = false;  // boot-conservative; recompute laeuft in begin() nach loadPrefs
   _tx_repeat_airtime_ms = 0;
   memset(_rx_flood_by_ptype, 0, sizeof(_rx_flood_by_ptype));
   memset(_repeat_by_ptype,        0, sizeof(_repeat_by_ptype));
@@ -13484,13 +13517,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* ld = (_prefs.loop_detect == 0) ? "off"
                      : (_prefs.loop_detect == 1) ? "minimal"
                      : (_prefs.loop_detect == 2) ? "moderate" : "strict";
-      // Inline-Suffix in 'repeater=on'-Zeile: Bewegungs-Status.
-      // Nur fuer defensive (profile=0) relevant -- normal-Profile wird
-      // bei is_moving NICHT pausiert (siehe Wunschliste 34).
-      bool paused = (_prefs.client_repeat != 0
-                     && _prefs.repeater_profile == 0
-                     && _is_moving);
-      const char* move_suffix = paused ? ", paused (currently moving)" : "";
+      // Inline-Suffix in 'repeater=on'-Zeile: runtime-Status.
+      // Prioritaet (1 Slot, mutually exclusive):
+      //   blocked: wish=on aber effective=off (freq non-strict, no force)
+      //   paused:  wish=on, effective=on, aber is_moving (defensive only)
+      //   sonst:   kein Suffix
+      bool eff_allowed = _repeating_allowed;
+      bool wish_on = (_prefs.client_repeat != 0);
+      const char* runtime_suffix = "";
+      if (wish_on && !eff_allowed) {
+        runtime_suffix = ", blocked (freq non-strict, no force)";
+      } else if (wish_on && _prefs.repeater_profile == 0 && _is_moving) {
+        runtime_suffix = ", paused (currently moving)";
+      }
 
       // loop_detect-Inaktiv-Note: nur wenn loop_detect != off UND
       // profile=defensive (Loop-Detect greift nur in normal-Profile).
@@ -13504,7 +13543,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                "loop_detect=%s%s\n"
                "freq=%.4f MHz",
                _prefs.client_repeat ? "on" : "off",
-               move_suffix,
+               runtime_suffix,
                _prefs.repeater_profile == 1 ? "normal" : "defensive",
                ld, ld_note,
                _prefs.freq);
@@ -13571,6 +13610,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (pm < 0)   { pushCompanionMessage("Usage: repeater profile defensive|normal"); return; }
       _prefs.repeater_profile = (uint8_t)pm;
       savePrefs();
+      recomputeRepeatingAllowed("profile change");
       char r[160];
       snprintf(r, sizeof(r),
         "OK - repeater profile = %s.\n"
@@ -13594,6 +13634,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // wieder explizites 'force' verlangt wenn der User es schon
       // einmal gesetzt hat. 'prefs reset' loescht weiterhin alles.
       savePrefs();
+      recomputeRepeatingAllowed("repeater off");
       pushCompanionMessage("OK - repeater off.");
       return;
     }
@@ -13628,6 +13669,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.client_repeat = 1;
       _prefs.client_repeat_force = force ? 1 : 0;
       savePrefs();
+      recomputeRepeatingAllowed(force ? "repeater on force" : "repeater on");
       char line[80];
       snprintf(line, sizeof(line), "OK - repeater on%s.", force ? " (force)" : "");
       pushCompanionMessage(line);
