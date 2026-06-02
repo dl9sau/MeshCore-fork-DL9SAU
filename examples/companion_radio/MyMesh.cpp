@@ -3265,6 +3265,10 @@ void MyMesh::begin(bool has_display) {
   // interpretiert, was sicher nicht gewollt waere.
   memset(_prefs.channel_hops_cap, CH_HOPS_OFF, sizeof(_prefs.channel_hops_cap));
   _prefs.flood_max_unknown_chan = CH_HOPS_OFF;
+  // Wunschliste 12 update 2026-06-02: scope_regional_hops Default 3
+  // VOR loadPrefs. Falls Datei kuerzer / fresh-install: bleibt 3 stehen.
+  // Stored-Wert (inkl. user-explizit 0 = 'nicht repeaten') ueberschreibt.
+  _prefs.scope_regional_hop_limit = 3;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -3373,12 +3377,11 @@ void MyMesh::begin(bool has_display) {
   // owner_info: NULL-Terminator sicherstellen (defensive gegen
   // unterminierte Flash-Daten).
   _prefs.owner_info[sizeof(_prefs.owner_info) - 1] = 0;
-  // scope_regional_hop_limit: 0 = uninitialisiert -> Companion-Default 3.
-  // Range 1..flood_max (sonst widerspruechlich — flood_max ist die harte
-  // Obergrenze, regional muss drunter liegen).
-  if (_prefs.scope_regional_hop_limit == 0
-      || _prefs.scope_regional_hop_limit > _prefs.flood_max) {
-    _prefs.scope_regional_hop_limit = (_prefs.flood_max < 3) ? _prefs.flood_max : 3;
+  // scope_regional_hop_limit: 0 ist jetzt gueltiger User-Wert
+  // ('#region/#regional nicht repeaten'). Pre-Init vor loadPrefs() liefert
+  // den Default 3. Hier nur Sanity-Cap an flood_max.
+  if (_prefs.scope_regional_hop_limit > _prefs.flood_max) {
+    _prefs.scope_regional_hop_limit = _prefs.flood_max;
   }
   // flood_max_infra: 0 = uninitialisiert -> bump auf 16 (oder flood_max
   // falls kleiner). Analog zu flood_max=0->16. Hintergrund: wir wollen
@@ -8163,7 +8166,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
-      pushCompanionMessage("(kein Help-Eintrag fuer dieses Topic)");
+      pushCompanionMessage(
+        "(kein Help-Eintrag fuer dieses Topic)\n"
+        "Tipp: fuer set-keys liefert 'set <key>' (ohne Wert)\n"
+        "die Detail-Hilfe. 'help set' fuer Key-Liste.");
       return;
     }
     // 'Befehle: ...' war zu lang fuer MAX_TEXT_LEN (160 inkl. 'Sender: '-
@@ -10308,9 +10314,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (strcmp(key, "scope_regional_hops") == 0) {
         pushCompanionMessage(
-          "set scope_regional_hops <1..flood_max>:\n"
+          "set scope_regional_hops <0..flood_max>:\n"
           "  Hop-Cap fuer #region/#regional-scoped Pakete.\n"
           "  Default 3.");
+        pushCompanionMessage(
+          "  0 = #region/#regional NICHT repeaten\n"
+          "  (auch im 'repeat all'-Modus).");
         return;
       }
       if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
@@ -10663,19 +10672,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // Hop-Cap fuer #region / #regional. Range 1..flood_max. 0 wird in
-    // begin() als uninitialisiert auf 3 normalisiert.
+    // Hop-Cap fuer #region / #regional. Range 0..flood_max.
+    //   0 = #region/#regional NICHT repeaten (auch im allow-list-Mode)
+    //   1..flood_max = expliziter Cap
+    // Default-Bump auf 3 nur bei wirklich uninitialisiert (siehe Pre-Init
+    // in begin()) -- nicht im Setter, damit User explizit 0 setzen kann.
     if (strcmp(key, "scope_regional_hops") == 0) {
       int v = atoi(value_lc);
-      if (v < 1 || v > _prefs.flood_max) {
+      if (v < 0 || v > _prefs.flood_max) {
         char r[80]; snprintf(r, sizeof(r),
-          "Wert ausserhalb 1..%u (flood_max-Cap)", (unsigned)_prefs.flood_max);
+          "Wert ausserhalb 0..%u (flood_max-Cap)", (unsigned)_prefs.flood_max);
         pushCompanionMessage(r);
         return;
       }
       _prefs.scope_regional_hop_limit = (uint8_t)v;
       savePrefs();
-      char r[60]; snprintf(r, sizeof(r), "OK - scope_regional_hops = %d", v);
+      char r[80]; snprintf(r, sizeof(r),
+        "OK - scope_regional_hops = %d%s", v,
+        v == 0 ? " (nicht repeaten)" : "");
       pushCompanionMessage(r);
       return;
     }
@@ -12300,14 +12314,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Max 145 Zeichen pro BLE-Message (User-Constraint 2026-05-29).
       // Channelnamen koennen lang sein -> kombinierte Header-Message kann
       // ueberlaufen. Wenn ja, per-Line splitten.
+      // Header-Klarstellung (User-Feedback 2026-06-02): bisher 'scope
+      // advert (send hierarchy):' liess offen wofuer die scopes verwendet
+      // werden. Explizit: 'own initiated packets'.
       char head[200];
       int hlen = snprintf(head, sizeof(head),
-                          "scope advert (send hierarchy):\n  %s\n  %s\n  %s",
+                          "scope (own initiated packets):\n  %s\n  %s\n  %s",
                           def_line, bake_line, ovr_line);
       if (hlen < 145) {
         pushCompanionMessage(head);
       } else {
-        pushCompanionMessage("scope advert (send hierarchy):");
+        pushCompanionMessage("scope (own initiated packets):");
         char line[160];
         snprintf(line, sizeof(line), "  %s", def_line);  pushCompanionMessage(line);
         snprintf(line, sizeof(line), "  %s", bake_line); pushCompanionMessage(line);
