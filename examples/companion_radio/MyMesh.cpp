@@ -6442,6 +6442,22 @@ void MyMesh::backupSaveToSerial() {
       snprintf(key, sizeof(key), "ch%d", idx++);
       kv_str(key, ch.name);
     }
+    // Public-PSK Channels (Wunschliste 36): Public hat festen Key
+    // (s_public_psk) -- damit ist er genauso restaurierbar wie Hashtag-
+    // Channels. User kann Public umbenennen oder loeschen; Backup
+    // erfasst den aktuellen Slot-Stand. Format: "ch_pub_N": "<name>".
+    // Random-private Channels bleiben aussen vor (Key nicht rekonstruier-
+    // bar) -- wuerde bei Restore auf Target-Geraet verloren gehen.
+    int puidx = 0;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (!getChannel(i, ch)) continue;
+      if (ch.name[0] == 0) continue;
+      if (memcmp(ch.channel.secret, s_public_psk, 16) != 0) continue;
+      char key[24];
+      snprintf(key, sizeof(key), "ch_pub_%d", puidx++);
+      kv_str(key, ch.name);
+    }
     // Wunschliste 32: per-Channel hop-cap mit save. Format
     // "ch_hops_N": "Name=Cap". Inkl. Public (kein '#' aber gespeicherte
     // Cap-Aenderung soll erhalten bleiben). Companion-Slot wird beim
@@ -6610,7 +6626,32 @@ void MyMesh::backupRestoreLoop() {
             _br_brace_depth = 0;
             _br_in_string = false;
             _br_escape_next = false;
-            Serial.print("\r\n# HASHTAG CHANNELS block: reading JSON...\r\n");
+            // Pre-Clear (Wunschliste 36): bevor Block-Entries appliziert
+            // werden, alle restaurierbaren Slots leeren -- hashtag (PSK
+            // aus Name rekonstruierbar) und Public-PSK (fester Key).
+            // Damit reflektiert das Restore auch Source-Loeschungen statt
+            // nur additiv zu sein. NICHT angefasst: companion (PSK-magic,
+            // wird beim Boot eh wieder erzeugt) und random-private (PSK
+            // nicht im Backup, Loeschen wuerde User-Channel verlieren).
+            int br_cleared = 0;
+            for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+              ChannelDetails ch;
+              if (!getChannel(i, ch)) continue;
+              if (ch.name[0] == 0) continue;
+              if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) continue;
+              bool is_hashtag = (ch.name[0] == '#');
+              bool is_public  = (memcmp(ch.channel.secret, s_public_psk, 16) == 0);
+              if (!is_hashtag && !is_public) continue;  // random-private bleibt
+              ChannelDetails empty;
+              memset(&empty, 0, sizeof(empty));
+              if (setChannel(i, empty)) br_cleared++;
+            }
+            if (br_cleared > 0) saveChannels();
+            char dbg[80];
+            snprintf(dbg, sizeof(dbg),
+                     "\r\n# HASHTAG CHANNELS block: pre-clear (%d slots), reading JSON...\r\n",
+                     br_cleared);
+            Serial.print(dbg);
             Serial.flush();
           }
           // andere Marker (z.B. END) ignorieren, bleiben in WAIT_MARKER
@@ -7117,6 +7158,50 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       } else {
         _br_errors++;
         Serial.printf("# channel %s: setChannel failed.\r\n", chname);
+      }
+      return;
+    }
+    // Public-PSK Channels (Wunschliste 36): ch_pub_N => "<name>"
+    // Setzt Slot mit festem s_public_psk + uebernommenem Namen. Bevorzugt
+    // existierenden Public-Slot (PSK-Match), sonst ersten leeren Slot.
+    // Companion-Slot niemals anfassen.
+    if (val_type == 's' && strncmp(key, "ch_pub_", 7) == 0) {
+      char pname[32];
+      brExtractString(val_start, val_len, pname, sizeof(pname));
+      if (pname[0] == 0) { _br_skipped++; return; }
+
+      ChannelDetails nch;
+      memset(&nch, 0, sizeof(nch));
+      StrHelper::strncpy(nch.name, pname, sizeof(nch.name));
+      memcpy(nch.channel.secret, s_public_psk, 16);
+
+      int slot = -1;
+      int empty_slot = -1;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        ChannelDetails existing;
+        if (!getChannel(i, existing)) continue;
+        if (memcmp(existing.channel.secret, s_companion_psk_magic, 16) == 0) continue;
+        if (existing.name[0] == 0) {
+          if (empty_slot < 0) empty_slot = i;
+          continue;
+        }
+        if (memcmp(existing.channel.secret, s_public_psk, 16) == 0) {
+          slot = i;
+          break;
+        }
+      }
+      if (slot < 0) slot = empty_slot;
+      if (slot < 0) {
+        _br_errors++;
+        Serial.printf("# ch_pub %s: no free slot, skipped.\r\n", pname);
+        return;
+      }
+      if (setChannel(slot, nch)) {
+        saveChannels();
+        _br_applied++;
+      } else {
+        _br_errors++;
+        Serial.printf("# ch_pub %s: setChannel failed.\r\n", pname);
       }
       return;
     }
