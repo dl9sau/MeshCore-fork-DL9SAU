@@ -8039,29 +8039,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "repeater")) {
         pushCompanionMessage(
           "repeater [on [force] | off]:\n"
-          "  schaltet Repeating ein/aus. Verhalten gemaess\n"
-          "  gewaehltem profile (defensive | normal).");
-        pushCompanionMessage(
-          "  Ohne Arg -> Status (siehe unten).");
+          "  schaltet Repeating ein/aus. Verhalten\n"
+          "  gemaess profile (defensive | normal).\n"
+          "  Ohne Arg -> Status.");
         pushCompanionMessage(
           "profile=defensive (Default; = 'client_repeat'):\n"
           "  PATH nur fuer lokale Endpoints,\n"
-          "  reduzierte Power + CR5. Bei is_moving:\n"
-          "  Repeating wird automatisch pausiert.");
+          "  reduzierte Power + CR5.");
+        pushCompanionMessage(
+          "  Bei is_moving: Repeating wird\n"
+          "  automatisch pausiert.");
         pushCompanionMessage(
           "profile=normal:\n"
           "  vollwertiger Repeater, alle PATH-Pakete,\n"
-          "  volle Power + konfigurierte CR.\n"
+          "  volle Power + konfigurierte CR.");
+        pushCompanionMessage(
           "Wechsel via 'repeater profile <defensive|normal>'");
         pushCompanionMessage(
           "force (nur fuer defensive relevant):\n"
-          "  manche Frequenzen brauchen force fuer client-rep,\n"
-          "  z.B. EU 869.618 MHz (lange Repeats dort nicht\n"
-          "  regelkonform).");
+          "  auf manchen Frequenzen sind\n"
+          "  client-repeater nicht erwuenscht\n"
+          "  (z.B. EU 869.618 MHz).");
         pushCompanionMessage(
-          "  'repeater on force' aktiviert das Repeating dort\n"
-          "  trotzdem. Persistent ueber on/off (nicht gecleart).\n"
-          "  signalFitsInIsmBand bleibt immer aktiv.");
+          "  'repeater on force' aktiviert es\n"
+          "  trotzdem. Persistent ueber on/off.\n"
+          "  signalFitsInIsmBand bleibt aktiv.");
         return;
       }
       if (topic_prefix_match(topic, "status")) {
