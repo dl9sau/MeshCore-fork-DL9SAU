@@ -7,6 +7,13 @@
 // und kein Konflikt mit 0xFF (potentielles "uninitialisiert"-Pattern).
 #define FLOOD_MAX_INFRA_FOLLOW   254
 
+// Sentinel-Wert fuer channel_hops_cap / flood_max_unknown_chan:
+// "off" = kein per-channel-Cap, es greift flood_max. 0 ist KEIN
+// Sentinel sondern bedeutet explizit "nicht repeaten". Werte 1..flood_max
+// sind explizite Caps. Same numeric als FLOOD_MAX_INFRA_FOLLOW; semantisch
+// gleich (= "kein extra Cap"), zur Konsistenz.
+#define CH_HOPS_OFF              254
+
 #define TELEM_MODE_DENY            0
 #define TELEM_MODE_ALLOW_FLAGS     1     // use contact.flags
 #define TELEM_MODE_ALLOW_ALL       2
@@ -248,6 +255,28 @@ struct NodePrefs {  // persisted to file
   // Payload, dest_hash ist nur 1 Byte (kollidiert), ADV_TYPE des Empfaengers
   // nicht im Header.
   uint8_t        flood_max_req_resp;
+
+  // Wunschliste 32: per-Channel Repeat-Cap fuer Group-Messages
+  // (PAYLOAD_TYPE_GRP_TXT/GRP_DATA). Index parallel zu BaseChatMesh::channels[].
+  //   CH_HOPS_OFF (254) = kein Cap, es greift flood_max
+  //   0                  = "nicht repeaten" (explizit blockieren)
+  //   1..flood_max       = expliziter Cap (Repeat nur wenn
+  //                        path_hash_count < N)
+  // $companion-Slot wird in setupCompanionChannel() forced auf 0 gesetzt.
+  // Auto-Cap auf flood_max bei boot/set falls Wert > flood_max (und !=
+  // CH_HOPS_OFF).
+  uint8_t        channel_hops_cap[MAX_GROUP_CHANNELS];
+
+  // Wunschliste 32: Repeat-Cap fuer Group-Messages auf Channels die
+  // NICHT in unserer channels[]-Liste stehen (channel_hash[0] matched
+  // keinen Eintrag). Default-Verhalten fuer Unbekannte.
+  //   CH_HOPS_OFF (254) = kein Cap, es greift flood_max (Status quo)
+  //   0                  = nicht repeaten
+  //   1..flood_max       = expliziter Cap
+  // Pre-Init via begin() VOR loadPrefs(), damit fresh-install /
+  // Firmware-Upgrade-ohne-Save den 'off'-Default sehen statt 'nicht
+  // repeaten' (memset 0). Persistierte User-Werte ueberschreiben das.
+  uint8_t        flood_max_unknown_chan;
 
   // Geo-vs-Default Send-Hierarchie fuer eigene Adverts (Wunschliste 13).
   //   0 = uninitialisiert (begin() migriert)

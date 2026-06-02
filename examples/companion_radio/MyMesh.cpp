@@ -1258,6 +1258,38 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
                                          : _prefs.flood_max_infra)) {
     reject_reason = "req-resp-cap";
   }
+  // Wunschliste 32: per-Channel Repeat-Cap fuer Group-Messages.
+  // payload[0] = channel_hash[0] (1-byte-truncated). Wir scannen alle
+  // matchenden Slots in channels[] und nehmen den restriktivsten Cap
+  // (= niedrigster Wert). Damit kommt $companion (forced 0) zuverlaessig
+  // zum Tragen, auch wenn ein anderer Channel mit hash[0] kollidiert.
+  // Unbekannter channel_hash (kein Slot matched): flood_max_unknown_chan.
+  // Cap-Encoding:
+  //   CH_HOPS_OFF (254) -> kein Cap, skip
+  //   0                 -> immer droppen
+  //   1..N              -> droppen wenn path_hash_count > N
+  else if ((ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
+           && packet->payload_len >= 1) {
+    uint8_t ch_hash = packet->payload[0];
+    uint8_t eff_cap = CH_HOPS_OFF;
+    bool matched = false;
+    for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
+      ChannelDetails ch;
+      if (!getChannel(ci, ch)) continue;
+      if (ch.name[0] == 0) continue;  // leerer Slot
+      if (ch.channel.hash[0] != ch_hash) continue;
+      matched = true;
+      uint8_t cap = _prefs.channel_hops_cap[ci];
+      if (cap == CH_HOPS_OFF) continue;
+      // restriktivster Cap gewinnt (0 schlaegt alles, dann kleinster N)
+      if (eff_cap == CH_HOPS_OFF || cap < eff_cap) eff_cap = cap;
+    }
+    if (!matched) eff_cap = _prefs.flood_max_unknown_chan;
+    if (eff_cap != CH_HOPS_OFF
+        && (eff_cap == 0 || packet->getPathHashCount() > eff_cap)) {
+      reject_reason = matched ? "ch.hops-cap" : "unknown-chan-cap";
+    }
+  }
   // ADVERTs and ACKs: forward only if the packet is scoped (transport-coded)
   else if (ptype == PAYLOAD_TYPE_ADVERT || ptype == PAYLOAD_TYPE_ACK ||
       ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA ||
@@ -2846,6 +2878,17 @@ void MyMesh::begin(bool has_display) {
   }
 #endif
 
+  // Wunschliste 32: Pre-Init der per-Channel-Hops auf CH_HOPS_OFF (254).
+  // Trick: VOR loadPrefs() setzen. Falls die Prefs-Datei zu kurz ist
+  // (frische Installation, oder Upgrade von Firmware ohne dieses Feature),
+  // bleiben diese Default-Werte stehen. Falls die Datei sie enthaelt,
+  // ueberschreibt loadPrefs() mit den persistierten Werten -- inkl. einem
+  // User-explizit-gesetzten 0 ("don't repeat"). Ohne dieses Pre-Init
+  // wuerde der memset(0)-Default flaechendeckend als "don't repeat"
+  // interpretiert, was sicher nicht gewollt waere.
+  memset(_prefs.channel_hops_cap, CH_HOPS_OFF, sizeof(_prefs.channel_hops_cap));
+  _prefs.flood_max_unknown_chan = CH_HOPS_OFF;
+
   // load persisted prefs
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
 
@@ -2918,8 +2961,8 @@ void MyMesh::begin(bool has_display) {
   }
 
   // flood_max: 0 = uninitialisiert -> Default 16 (analog dem alten
-  // hartcodierten Wert). Range 1..64 analog CommonCLI flood.max.
-  if (_prefs.flood_max == 0 || _prefs.flood_max > 64) {
+  // hartcodierten Wert). Range 1..63 (Protokoll-Max: 6-Bit-hash_count).
+  if (_prefs.flood_max == 0 || _prefs.flood_max > 63) {
     _prefs.flood_max = 16;
   }
   // scope_advert_auto: 0=uninit, 1=off, 2=on (default), 3=prefer.
@@ -2978,6 +3021,7 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.flood_max_infra > 0 && _prefs.flood_max_req_resp > _prefs.flood_max_infra) {
     _prefs.flood_max_req_resp = _prefs.flood_max_infra;
   }
+
   _prefs.airtime_factor = constrain(_prefs.airtime_factor, 0, 9.0f);
   _prefs.freq = constrain(_prefs.freq, 150.0f, 2500.0f);
   _prefs.bw = constrain(_prefs.bw, 7.8f, 500.0f);
@@ -5845,6 +5889,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint ("flood_max",            _prefs.flood_max);
   kv_uint ("flood_max_infra",  _prefs.flood_max_infra);
   kv_uint ("flood_max_req_resp",   _prefs.flood_max_req_resp);
+  kv_uint ("flood_max_unknown_chan", _prefs.flood_max_unknown_chan);
   kv_float("lat",                  sensors.node_lat, 6);
   kv_float("lon",                  sensors.node_lon, 6);
   Serial.println();
@@ -5879,6 +5924,23 @@ void MyMesh::backupSaveToSerial() {
       char key[16];
       snprintf(key, sizeof(key), "ch%d", idx++);
       kv_str(key, ch.name);
+    }
+    // Wunschliste 32: per-Channel hop-cap mit save. Format
+    // "ch_hops_N": "Name=Cap". Inkl. Public (kein '#' aber gespeicherte
+    // Cap-Aenderung soll erhalten bleiben). Companion-Slot wird beim
+    // Boot eh forced -- nicht saven.
+    int hidx = 0;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (!getChannel(i, ch)) continue;
+      if (ch.name[0] == 0) continue;
+      if (_prefs.channel_hops_cap[i] == CH_HOPS_OFF) continue;
+      if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) continue;
+      char val[48];
+      snprintf(val, sizeof(val), "%s=%u", ch.name, (unsigned)_prefs.channel_hops_cap[i]);
+      char key[24];
+      snprintf(key, sizeof(key), "ch_hops_%d", hidx++);
+      kv_str(key, val);
     }
   }
   Serial.println();
@@ -6443,6 +6505,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "flood_max") == 0)             { _prefs.flood_max             = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_infra") == 0)   { _prefs.flood_max_infra   = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_req_resp") == 0){ _prefs.flood_max_req_resp= (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "flood_max_unknown_chan") == 0){ _prefs.flood_max_unknown_chan= (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start);   _br_applied++; return; }
       if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start);   _br_applied++; return; }
     }
@@ -6511,6 +6574,34 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       }
       return;
     }
+    // Wunschliste 32: ch_hops_N => "Name=Cap"
+    if (val_type == 's' && strncmp(key, "ch_hops_", 8) == 0) {
+      char raw[64];
+      brExtractString(val_start, val_len, raw, sizeof(raw));
+      char* eq = strchr(raw, '=');
+      if (!eq) { _br_skipped++; return; }
+      *eq = 0;
+      int cap = atoi(eq + 1);
+      if (cap < 0 || cap > 63) { _br_skipped++; return; }
+      // Slot via Name finden
+      int slot = -1;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        ChannelDetails ch;
+        if (!getChannel(i, ch)) continue;
+        if (ch.name[0] == 0) continue;
+        if (strcmp(ch.name, raw) == 0) { slot = i; break; }
+      }
+      if (slot < 0) { _br_skipped++; return; }
+      // Companion-Slot nicht ueberschreiben (forced 0)
+      ChannelDetails ch; getChannel(slot, ch);
+      if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) {
+        _br_skipped++;
+        return;
+      }
+      _prefs.channel_hops_cap[slot] = (uint8_t)cap;
+      _br_applied++;
+      return;
+    }
     _br_skipped++;
     return;
   }
@@ -6571,6 +6662,10 @@ void MyMesh::setupCompanionChannel() {
   setChannel(target, nch);
   _companion_channel_idx = (uint8_t)target;
   saveChannels(); // persistieren, damit der Index ueber Reboots stabil bleibt
+  // Wunschliste 32: $companion-Channel darf NIE repeated werden -- forced 0.
+  // Selbst wenn der User irgendwie versucht haette, einen Wert zu setzen,
+  // wird das hier bei jedem Boot ueberschrieben (Sicherheitsmassnahme).
+  _prefs.channel_hops_cap[target] = 0;
 }
 
 // Setzt alle RAM-Statistik-Counter zurueck (analog simple_repeater
@@ -6940,6 +7035,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
     "messages", "logging", "unscoped-channelmessages", "clear",
     "contact", "backup", "save", "discover",
+    "ch.hops",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -7163,6 +7259,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Build-in Geo-Tabelle (RO)");
         return;
       }
+      if (topic_prefix_match(topic, "ch.hops")) {
+        pushCompanionMessage(
+          "ch.hops: per-Channel Repeat-Cap fuer\n"
+          "  PAYLOAD_TYPE_GRP_TXT/GRP_DATA-Pakete.");
+        pushCompanionMessage(
+          "  set ch.hops <name> <N|off>\n"
+          "    N=0 = nicht repeaten\n"
+          "    N=1..63 = Cap, off = kein Cap");
+        pushCompanionMessage(
+          "  get ch.hops <name>\n"
+          "  ch.hops status -- aktive Caps\n"
+          "  ch.hops clear  -- alle Caps loeschen");
+        pushCompanionMessage(
+          "Spezial-Name 'unknown' -> Cap fuer\n"
+          "  Channels die nicht in unserer Liste sind.\n"
+          "$companion: forced 0, nicht aenderbar.");
+        return;
+      }
       if (topic_prefix_match(topic, "neighbors")) {
         pushCompanionMessage(
           "neighbors [hops <N> | km <D>]:\n"
@@ -7186,12 +7300,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Radio: freq sf bw cr tx_power\n"
           "Position: lat lon gps gps_interval advert_loc_policy");
         pushCompanionMessage(
-          "Repeat: repeat flood_max (1..64, def 16)\n"
+          "Repeat: repeat flood_max (1..63, def 16)\n"
           "  flood_max_infra (def 16, 'follow'=fmax)\n"
           "  flood_max_req_resp (def 0=erbt infra)");
         pushCompanionMessage(
           "  scope_regional_hops\n"
           "  loop_detect (off|minimal|moderate|strict)\n"
+          "  ch.hops -> 'help ch.hops'\n"
           "  ('set <key>' ohne Wert -> Detailhilfe)");
         pushCompanionMessage(
           "Delays: rxdelay txdelay direct_txdelay\n"
@@ -8453,6 +8568,109 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
+  // ---------- ch.hops --------------------------------------------------
+  // Per-Channel Repeat-Cap (Wunschliste 32). dt267-inspirierte Syntax:
+  //   set ch.hops <name> <N|off>  -- N=0 heisst 'nicht repeaten'
+  //   get ch.hops <name>
+  //   ch.hops status              -- alle aktiven Caps
+  //   ch.hops clear               -- alle Caps loeschen (ausser companion)
+  //   ch.hops help / ?
+  if (starts_with_word(cmd, "ch.hops")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+
+    if (!arg || *arg == 0 || strcmp(arg, "help") == 0 || arg[0] == '?') {
+      pushCompanionMessage(
+        "ch.hops: per-Channel Repeat-Cap.\n"
+        "  ch.hops status       -- aktive Caps zeigen\n"
+        "  ch.hops clear        -- alle Caps loeschen");
+      pushCompanionMessage(
+        "  set ch.hops <name> <N|off>\n"
+        "    N=0 = nicht repeaten; N>0 = Cap;\n"
+        "    off = kein per-Channel-Cap (flood_max).");
+      pushCompanionMessage(
+        "  get ch.hops <name>\n"
+        "$companion ist forced auf 0 (nicht repeaten,\n"
+        "Sicherheitsmassnahme, nicht aenderbar).");
+      return;
+    }
+
+    if (strcmp(arg, "status") == 0) {
+      int n_shown = 0;
+      char buf[200]; size_t buf_used = 0;
+      auto flush_b = [&](bool force) {
+        if (buf_used == 0) return;
+        if (!force && buf_used < 130) return;
+        buf[buf_used] = 0; pushCompanionMessage(buf); buf_used = 0;
+      };
+      auto add_b = [&](const char* line) {
+        size_t len = strlen(line);
+        if (buf_used + len + 2 >= sizeof(buf)) flush_b(true);
+        if (buf_used > 0) buf[buf_used++] = '\n';
+        for (size_t k = 0; k < len && buf_used < sizeof(buf)-1; k++) buf[buf_used++] = line[k];
+        flush_b(false);
+      };
+      add_b("ch.hops status:");
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        ChannelDetails ch;
+        if (!getChannel(i, ch)) continue;
+        if (ch.name[0] == 0) continue;
+        uint8_t cap = _prefs.channel_hops_cap[i];
+        if (cap == CH_HOPS_OFF) continue;  // nicht zeigen
+        char line[80];
+        if (cap == 0) snprintf(line, sizeof(line), "  %-20.20s = 0 (nicht repeaten)", ch.name);
+        else          snprintf(line, sizeof(line), "  %-20.20s = %u", ch.name, (unsigned)cap);
+        add_b(line);
+        n_shown++;
+      }
+      // Unknown-Chan-Cap auch zeigen wenn aktiv
+      if (_prefs.flood_max_unknown_chan != CH_HOPS_OFF) {
+        char line[80];
+        if (_prefs.flood_max_unknown_chan == 0)
+          snprintf(line, sizeof(line), "  <unknown channels>   = 0 (nicht repeaten)");
+        else
+          snprintf(line, sizeof(line), "  <unknown channels>   = %u",
+                   (unsigned)_prefs.flood_max_unknown_chan);
+        add_b(line);
+        n_shown++;
+      }
+      if (n_shown == 0) add_b("  (keine, alle channels = off)");
+      flush_b(true);
+      return;
+    }
+
+    if (strcmp(arg, "clear") == 0) {
+      int n_cleared = 0;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        if (_prefs.channel_hops_cap[i] == CH_HOPS_OFF) continue;
+        ChannelDetails ch;
+        // $companion-Slot NICHT loeschen -- bleibt forced auf 0.
+        if (getChannel(i, ch)
+            && memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) {
+          continue;
+        }
+        _prefs.channel_hops_cap[i] = CH_HOPS_OFF;
+        n_cleared++;
+      }
+      if (_prefs.flood_max_unknown_chan != CH_HOPS_OFF) {
+        _prefs.flood_max_unknown_chan = CH_HOPS_OFF;
+        n_cleared++;
+      }
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r),
+        "OK - %d ch.hops Cap(s) geloescht.\n($companion bleibt forced auf 0.)",
+        n_cleared);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // Unbekanntes Subkommando
+    char r[120];
+    snprintf(r, sizeof(r), "Unbekannt: ch.hops %s\n'ch.hops help' fuer Liste.", arg);
+    pushCompanionMessage(r);
+    return;
+  }
+
   // ---------- prefs [show | all | reset] -------------------------------
   // Zeigt / resettet die DL9SAU-spezifischen Prefs (die ueber Companion-CLI
   // konfigurierbar sind). App-Settings (node_name, freq, default_scope etc.)
@@ -9524,7 +9742,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // 0-vs-deaktiviert-Falle. Jede Message bleibt < 145 Byte.
       if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) {
         pushCompanionMessage(
-          "set flood_max <1..64>: globale Hop-Obergrenze.\n"
+          "set flood_max <1..63>: globale Hop-Obergrenze.\n"
           "  Default 16. Bei Senken werden infra und\n"
           "  req_resp automatisch mit-gecapped.");
         return;
@@ -9614,6 +9832,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  0=DENY (nie senden),\n"
           "  1=ALLOW_FLAGS (contact.flags entscheidet),\n"
           "  2=ALLOW_ALL (immer senden).");
+        return;
+      }
+      if (strcmp(key, "ch.hops") == 0) {
+        pushCompanionMessage(
+          "set ch.hops <name> <N|off>:\n"
+          "  per-Channel Repeat-Cap (Group-Messages).");
+        pushCompanionMessage(
+          "  N=0 = nicht repeaten\n"
+          "  N=1..63 = Cap (Drop wenn path_hash > N)\n"
+          "  off = kein per-Channel-Cap (flood_max gilt)");
+        pushCompanionMessage(
+          "  Name 'unknown' fuer Channels nicht in Liste\n"
+          "  -> flood_max_unknown_chan.\n"
+          "  Siehe auch: 'ch.hops status' / 'ch.hops clear'");
         return;
       }
       char r[100]; snprintf(r, sizeof(r), "Usage: set %s <value>", key);
@@ -9922,12 +10154,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // Globale Repeat-Hop-Obergrenze. Range 1..64 analog CommonCLI flood.max.
+    // Globale Repeat-Hop-Obergrenze. Range 1..63 (6-Bit-hash_count).
     // 'flood.max' (CommonCLI-Stil) als Alias erlaubt.
     if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) {
       int v = atoi(value_lc);
-      if (v < 1 || v > 64) {
-        pushCompanionMessage("Wert ausserhalb 1..64");
+      if (v < 1 || v > 63) {
+        pushCompanionMessage("Wert ausserhalb 1..63");
         return;
       }
       _prefs.flood_max = (uint8_t)v;
@@ -10049,6 +10281,109 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         v, v == 0 ? " (kaskade auf flood_max_infra/flood_max)" : "");
       pushCompanionMessage(r);
       pushCompanionMessage("Empfehlung: 4..8 (eng=4 Stadt, 8=weiter).");
+      return;
+    }
+
+    // Wunschliste 32: set ch.hops <name> <N|off>
+    // Multi-Token: nach key ('ch.hops') folgen Channel-Name (kann
+    // Spaces enthalten!) und am Ende der Wert. Wir parsen vom Ende:
+    // letztes Whitespace-separates Token = Wert, alles davor = Name.
+    if (strcmp(key, "ch.hops") == 0) {
+      // value_lc zeigt auf den Rest nach 'set ch.hops ' (inkl. Spaces).
+      // Letztes Token finden.
+      size_t vlen = strlen(value_lc);
+      if (vlen == 0) {
+        pushCompanionMessage(
+          "Usage: set ch.hops <name> <N|off>\n"
+          "  Beispiel: set ch.hops Public 3");
+        return;
+      }
+      // Trailing-WS strippen
+      while (vlen > 0 && (value_lc[vlen-1] == ' ' || value_lc[vlen-1] == '\t'
+                          || value_lc[vlen-1] == '\r' || value_lc[vlen-1] == '\n')) vlen--;
+      // Letztes Token finden (von hinten Whitespace suchen)
+      size_t tok_end = vlen;
+      size_t tok_start = tok_end;
+      while (tok_start > 0 && value_lc[tok_start-1] != ' ' && value_lc[tok_start-1] != '\t') tok_start--;
+      if (tok_start == 0) {
+        pushCompanionMessage("Usage: set ch.hops <name> <N|off>");
+        return;
+      }
+      // Name: alles vor tok_start (Trailing-WS strippen)
+      size_t name_end = tok_start;
+      while (name_end > 0 && (value_lc[name_end-1] == ' ' || value_lc[name_end-1] == '\t')) name_end--;
+      if (name_end == 0) {
+        pushCompanionMessage("Usage: set ch.hops <name> <N|off>");
+        return;
+      }
+      char chname[32];
+      size_t nlen = name_end < sizeof(chname) - 1 ? name_end : sizeof(chname) - 1;
+      memcpy(chname, value_lc, nlen);
+      chname[nlen] = 0;
+      // Value-Token interpretieren
+      char vtok[12];
+      size_t vlen2 = tok_end - tok_start < sizeof(vtok) - 1 ? tok_end - tok_start : sizeof(vtok) - 1;
+      memcpy(vtok, value_lc + tok_start, vlen2);
+      vtok[vlen2] = 0;
+      uint8_t new_cap;
+      if (strcmp(vtok, "off") == 0) {
+        new_cap = CH_HOPS_OFF;
+      } else {
+        int v = atoi(vtok);
+        if (v < 0 || v > 63) {
+          pushCompanionMessage("Wert ausserhalb 0..63 (oder 'off').");
+          return;
+        }
+        new_cap = (uint8_t)v;
+      }
+      // Channel-Slot via Name finden (case-insensitive Whole-Match)
+      int slot = -1;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        ChannelDetails ch;
+        if (!getChannel(i, ch)) continue;
+        if (ch.name[0] == 0) continue;
+        if (strcasecmp(ch.name, chname) == 0) { slot = i; break; }
+      }
+      if (slot < 0) {
+        // Spezialfall: 'unknown' / 'unknown channels' setzt
+        // flood_max_unknown_chan
+        if (strcasecmp(chname, "unknown") == 0
+            || strcasecmp(chname, "unknown channels") == 0) {
+          _prefs.flood_max_unknown_chan = new_cap;
+          savePrefs();
+          char r[120];
+          if (new_cap == CH_HOPS_OFF)
+            snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = off");
+          else if (new_cap == 0)
+            snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = 0 (nicht repeaten)");
+          else
+            snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = %u", (unsigned)new_cap);
+          pushCompanionMessage(r);
+          return;
+        }
+        char r[100]; snprintf(r, sizeof(r), "Channel '%s' nicht gefunden.", chname);
+        pushCompanionMessage(r);
+        return;
+      }
+      // $companion-Schutz: forced 0, nicht aenderbar
+      ChannelDetails ch;
+      getChannel(slot, ch);
+      if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) {
+        pushCompanionMessage(
+          "$companion ist forced auf 0 (nicht repeaten).\n"
+          "Sicherheitsmassnahme, nicht aenderbar.");
+        return;
+      }
+      _prefs.channel_hops_cap[slot] = new_cap;
+      savePrefs();
+      char r[120];
+      if (new_cap == CH_HOPS_OFF)
+        snprintf(r, sizeof(r), "OK - ch.hops %s = off (kein Cap)", ch.name);
+      else if (new_cap == 0)
+        snprintf(r, sizeof(r), "OK - ch.hops %s = 0 (nicht repeaten)", ch.name);
+      else
+        snprintf(r, sizeof(r), "OK - ch.hops %s = %u", ch.name, (unsigned)new_cap);
+      pushCompanionMessage(r);
       return;
     }
 
@@ -10272,6 +10607,47 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
       const char* nm = (_prefs.loop_detect == 0) ? "off" : (_prefs.loop_detect == 1) ? "minimal" : (_prefs.loop_detect == 2) ? "moderate" : "strict";
       snprintf(r, sizeof(r), "loop_detect = %s", nm);
+    }
+    else if (strcmp(key, "ch.hops") == 0) {
+      // Multi-Token: 'get ch.hops <name>'. p zeigt auf "ch.hops..."
+      const char* np = p + strlen("ch.hops");
+      while (*np == ' ' || *np == '\t') np++;
+      // Trailing-WS strippen
+      size_t nl = strlen(np);
+      while (nl > 0 && (np[nl-1] == ' ' || np[nl-1] == '\t'
+                        || np[nl-1] == '\r' || np[nl-1] == '\n')) nl--;
+      if (nl == 0) {
+        snprintf(r, sizeof(r), "Usage: get ch.hops <name>");
+      } else {
+        char chname[32];
+        size_t cl = nl < sizeof(chname) - 1 ? nl : sizeof(chname) - 1;
+        memcpy(chname, np, cl); chname[cl] = 0;
+        // Spezial: 'unknown' fuer flood_max_unknown_chan
+        if (strcasecmp(chname, "unknown") == 0
+            || strcasecmp(chname, "unknown channels") == 0) {
+          uint8_t cap = _prefs.flood_max_unknown_chan;
+          if (cap == CH_HOPS_OFF) snprintf(r, sizeof(r), "ch.hops unknown = off");
+          else if (cap == 0)      snprintf(r, sizeof(r), "ch.hops unknown = 0 (nicht repeaten)");
+          else                    snprintf(r, sizeof(r), "ch.hops unknown = %u", (unsigned)cap);
+        } else {
+          int slot = -1;
+          for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            ChannelDetails ch;
+            if (!getChannel(i, ch)) continue;
+            if (ch.name[0] == 0) continue;
+            if (strcasecmp(ch.name, chname) == 0) { slot = i; break; }
+          }
+          if (slot < 0) {
+            snprintf(r, sizeof(r), "Channel '%s' nicht gefunden.", chname);
+          } else {
+            uint8_t cap = _prefs.channel_hops_cap[slot];
+            ChannelDetails ch; getChannel(slot, ch);
+            if (cap == CH_HOPS_OFF) snprintf(r, sizeof(r), "ch.hops %s = off", ch.name);
+            else if (cap == 0)      snprintf(r, sizeof(r), "ch.hops %s = 0 (nicht repeaten)", ch.name);
+            else                    snprintf(r, sizeof(r), "ch.hops %s = %u", ch.name, (unsigned)cap);
+          }
+        }
+      }
     }
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
