@@ -12461,14 +12461,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* ld = (_prefs.loop_detect == 0) ? "off"
                      : (_prefs.loop_detect == 1) ? "minimal"
                      : (_prefs.loop_detect == 2) ? "moderate" : "strict";
+      // Wunschliste 34: bei defensive+is_moving Repeating temporaer aus.
+      // Hinweis in der repeater-Status-Ausgabe damit User weiss warum
+      // gerade nicht repeated wird obwohl repeater=on.
+      bool suspended = (_prefs.client_repeat != 0
+                        && _prefs.repeater_profile == 0
+                        && _is_moving);
       snprintf(line, sizeof(line),
-               "repeater=%s%s\n"
+               "repeater=%s%s%s\n"
                "profile=%s\n"
                "loop_detect=%s%s\n"
                "freq=%.4f MHz\n"
                "strict_ok=%s",
                _prefs.client_repeat ? "on" : "off",
                _prefs.client_repeat_force ? " (force)" : "",
+               suspended ? "\n  temporary suspended: is_moving" : "",
                _prefs.repeater_profile == 1 ? "normal" : "defensive",
                ld,
                (_prefs.repeater_profile != 1 && _prefs.loop_detect != 0)
