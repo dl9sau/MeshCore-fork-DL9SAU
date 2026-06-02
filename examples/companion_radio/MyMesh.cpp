@@ -1231,11 +1231,52 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     memcpy(&out_frame[i], extra, extra_len);
     i += extra_len;
   }
-  int tlen = strlen(text); // TODO: UTF-8 ??
+
+  // Wunschliste 35: Once-per-Tuple Annotation auch fuer DMs. Im DM-Pfad
+  // gibt es keinen 'Sender: text'-Praefix -- der Sender ist im Paket-
+  // Header (pub_key). Wir haengen die Annotation deshalb als Footer-Zeile
+  // an den Text an: 'text\n— (#scope[, direct])'. Nur einmal pro
+  // (Sender-Pub-Key-6B, Scope, Direct)-Tuple. Folge-DMs vom selben
+  // Sender bleiben unannotiert. Nur fuer PLAIN/SIGNED_PLAIN, nicht CLI.
+  const char* effective_text = text;
+  char augmented[MAX_TEXT_LEN + 64];
+  if (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN) {
+    uint32_t name_h = fnv1a32((const char*)from.id.pub_key, 6);
+    uint32_t scope_h;
+    const char* scope_label = NULL;
+    char scope_buf[36];
+    if (pkt->hasTransportCodes()) {
+      const char* scope_name = lookupRegionByTransportCode(pkt);
+      if (scope_name) {
+        scope_h = fnv1a32_cstr(scope_name);
+        if (scope_h == 0xFFFFFFFEUL || scope_h == 0xFFFFFFFFUL) scope_h ^= 0x12345678UL;
+        snprintf(scope_buf, sizeof(scope_buf), "#%s", scope_name);
+      } else {
+        scope_h = 0xFFFFFFFEUL;
+        snprintf(scope_buf, sizeof(scope_buf), "#?");
+      }
+      scope_label = scope_buf;
+    } else {
+      scope_h = 0xFFFFFFFFUL;
+      scope_label = "#*";
+    }
+    uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
+    bool already_seen = channelSenderSeenLookupOrAdd(name_h, scope_h, direct_flag);
+    if (!already_seen) {
+      const char* dir_suffix = direct_flag ? ", direct" : "";
+      int n = snprintf(augmented, sizeof(augmented), "%s\n— (%s%s)",
+                       text, scope_label, dir_suffix);
+      if (n > 0 && n < (int)sizeof(augmented)) {
+        effective_text = augmented;
+      }
+    }
+  }
+
+  int tlen = strlen(effective_text); // TODO: UTF-8 ??
   if (i + tlen > MAX_FRAME_SIZE) {
     tlen = MAX_FRAME_SIZE - i;
   }
-  memcpy(&out_frame[i], text, tlen);
+  memcpy(&out_frame[i], effective_text, tlen);
   i += tlen;
   addToOfflineQueue(out_frame, i);
 
