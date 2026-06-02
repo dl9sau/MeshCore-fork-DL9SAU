@@ -2728,8 +2728,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _rx_us_self_initiated_count = 0;
   _rx_us_repeated_count       = 0;
   memset(_rx_flood_by_ptype,  0, sizeof(_rx_flood_by_ptype));
-  memset(_repeat_by_ptype,    0, sizeof(_repeat_by_ptype));
-  memset(_tx_total_by_ptype,  0, sizeof(_tx_total_by_ptype));
+  memset(_repeat_by_ptype,        0, sizeof(_repeat_by_ptype));
+  memset(_tx_total_by_ptype,      0, sizeof(_tx_total_by_ptype));
+  memset(_tx_self_flood_by_ptype, 0, sizeof(_tx_self_flood_by_ptype));
   memset(_heard_quality,      0, sizeof(_heard_quality));
   _tx_repeat_airtime_ms = 0;
   _last_advert_snr_q4 = 0;
@@ -3154,6 +3155,13 @@ void MyMesh::applyPacketTxOverrides(const mesh::Packet* packet) {
   if (h != 0 && matchSelfHash(h) != 2) {
     _self_initiated_hashes[_self_initiated_head] = h;
     _self_initiated_head = (uint8_t)((_self_initiated_head + 1) % 32);
+    // Selbst-initiierten FLOOD-Anteil pro ptype zaehlen (Direct ergibt
+    // sich als Differenz). Erlaubt 'stats-packets' das nightly-flood-
+    // Beacon-Advert separat sichtbar zu machen.
+    if (pt < 16 && packet->isRouteFlood()
+        && _tx_self_flood_by_ptype[pt] < 0xFFFF) {
+      _tx_self_flood_by_ptype[pt]++;
+    }
   }
   uint8_t flags = packet->tx_flags;
   if (flags == 0) return;
@@ -6557,8 +6565,9 @@ void MyMesh::clearStats() {
   _duty_blocked_count = 0;
   _tx_repeat_airtime_ms = 0;
   memset(_rx_flood_by_ptype, 0, sizeof(_rx_flood_by_ptype));
-  memset(_repeat_by_ptype,   0, sizeof(_repeat_by_ptype));
-  memset(_tx_total_by_ptype, 0, sizeof(_tx_total_by_ptype));
+  memset(_repeat_by_ptype,        0, sizeof(_repeat_by_ptype));
+  memset(_tx_total_by_ptype,      0, sizeof(_tx_total_by_ptype));
+  memset(_tx_self_flood_by_ptype, 0, sizeof(_tx_self_flood_by_ptype));
   memset(_heard_direct,      0, sizeof(_heard_direct));
   memset(_heard_quality,     0, sizeof(_heard_quality));
   memset(_rx_advert_total,   0, sizeof(_rx_advert_total));
@@ -10440,6 +10449,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  own_of(PAYLOAD_TYPE_TRACE),
                  (unsigned long)own_total);
     append_rate_hint(block + p, sizeof(block) - p, own_total, uptime_s);
+    pushCompanionMessage(block);
+
+    // Selbst-initiierter FLOOD-Anteil pro ptype. Direct = own_of - flood.
+    // Eigene Message damit es das 145-Byte-Limit nicht reisst.
+    uint32_t own_flood_total = 0;
+    for (int pp = 0; pp < 16; pp++) own_flood_total += _tx_self_flood_by_ptype[pp];
+    snprintf(block, sizeof(block),
+             "tx own flood (direct = own - flood):\n"
+             "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
+             "  flood total=%lu",
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_PATH],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ACK],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_REQ],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_RESPONSE],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TRACE],
+             (unsigned long)own_flood_total);
     pushCompanionMessage(block);
     return;
   }

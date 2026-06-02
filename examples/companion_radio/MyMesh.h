@@ -935,6 +935,10 @@ private:
   uint16_t      _rx_flood_by_ptype[16][2];
   uint16_t      _repeat_by_ptype[16];    // Pakete die WIR tatsaechlich durchgereicht haben
   uint16_t      _tx_total_by_ptype[16];  // ALLE TX (eigen + repeated); eigen = total - repeat
+  // Self-initiated FLOOD-Tx pro ptype. Subset von '_tx_total_by_ptype - _repeat_by_ptype'.
+  // Direct = self_total - self_flood. Erlaubt Stats-Anzeige "tx own flood vs direct"
+  // pro ptype (z.B. um zu sehen ob der nightly-flood-Beacon-Advert raus ging).
+  uint16_t      _tx_self_flood_by_ptype[16];
   uint32_t      _tx_repeat_airtime_ms;   // geschaetzte Airtime nur unserer Repeats
   // Duty-Cycle Sliding-Window (siehe CR_DUTY_* Konstanten).
   uint32_t      _duty_air_ms_per_minute[CR_DUTY_WINDOW_SLOTS];
