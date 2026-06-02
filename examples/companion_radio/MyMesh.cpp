@@ -1167,6 +1167,22 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     return false;
   }
 
+  // Wunschliste 34 (DL9SAU 2026-06-02): im defensive-Mode UND in Bewegung
+  // (>370m in letzten 10min, _is_moving = true) Repeating aussetzen.
+  // Begruendung: mobil bekommen wir eh schlecht stabile Signale (variable
+  // Antennen-Polarisation, Doppler, schlechter Antennenstandort), unsere
+  // Repeats stoeren das Netz mehr als sie helfen. Sobald wir stehen
+  // (is_moving wird false durch das normale Motion-Window), kehrt
+  // automatisch das defensive-Repeat-Verhalten zurueck.
+  // Gilt NICHT fuer profile=normal (1) -- da hat der User ja bewusst
+  // 'echter Repeater' aktiviert, vermutlich an festem Standort.
+  // Kein per-Paket-Trace (gleiche Begruendung wie oben). Stats-Counter
+  // erlaubt Sichtbarkeit im stats-Output.
+  if (_prefs.repeater_profile == 0 /* defensive */ && _is_moving) {
+    _repeat_skipped_motion++;
+    return false;
+  }
+
   // Duty-Cycle Soft-Limit: Repeats unterdruecken bei Annaeherung an die
   // 10%/h-Grenze. Eigene Pakete (Auto-Adverts, User-Chat) laufen weiter
   // bis Hard erreicht ist. Stats-Counter + Trace.
@@ -2739,6 +2755,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _duty_slot_start_ms = 0;
   _duty_last_total_ms = 0;
   _duty_blocked_count = 0;
+  _repeat_skipped_motion = 0;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -5303,8 +5320,16 @@ void MyMesh::updateMotionTracking() {
     if (was_moving != _is_moving) {
       char ll[32];
       formatLatLonDM(ll, sizeof(ll), cur_lat, cur_lon);
-      traceCompanion(TRACE_MOTION, "[motion] %s (Anker-Distanz %d m) pos=%s",
-                     _is_moving ? "moving" : "static", (int)d_m, ll);
+      // Wunschliste 34: bei defensive-Mode-Repeater-Gate auf
+      // Bewegungs-Status hinweisen damit der User mitbekommt warum
+      // gerade nicht repeated wird (oder wieder repeated wird).
+      const char* rep_hint = "";
+      if (_prefs.client_repeat != 0 && _prefs.repeater_profile == 0) {
+        rep_hint = _is_moving ? " -- repeating temporaer aus"
+                              : " -- repeating wieder an";
+      }
+      traceCompanion(TRACE_MOTION, "[motion] %s (Anker-Distanz %d m) pos=%s%s",
+                     _is_moving ? "moving" : "static", (int)d_m, ll, rep_hint);
     }
     // Movement just started — accelerate the next advert so a fresh
     // position goes out promptly, instead of waiting out the static
@@ -6563,6 +6588,7 @@ void MyMesh::clearStats() {
   _tx_digi_count = 0;
   _bt_connect_count = 0;
   _duty_blocked_count = 0;
+  _repeat_skipped_motion = 0;
   _tx_repeat_airtime_ms = 0;
   memset(_rx_flood_by_ptype, 0, sizeof(_rx_flood_by_ptype));
   memset(_repeat_by_ptype,        0, sizeof(_repeat_by_ptype));
@@ -10821,6 +10847,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                (unsigned)_prefs.duty_soft_pct, soft_s,
                (unsigned)_prefs.duty_hard_pct, hard_s,
                (unsigned long)_duty_blocked_count);
+      pushCompanionMessage(block);
+    }
+
+    // ---- repeat-skipped wegen Bewegung (Wunschliste 34) ----
+    // Nur anzeigen wenn relevant: client_repeat an UND profile==defensive
+    // UND Counter > 0. Sonst Zeile sparen.
+    if (_prefs.client_repeat != 0
+        && _prefs.repeater_profile == 0
+        && _repeat_skipped_motion > 0) {
+      snprintf(block, sizeof(block),
+               "motion: %lu repeats gedroppt (defensive + moving)",
+               (unsigned long)_repeat_skipped_motion);
       pushCompanionMessage(block);
     }
     return;

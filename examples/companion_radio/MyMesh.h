@@ -946,6 +946,7 @@ private:
   unsigned long _duty_slot_start_ms;     // millis() bei Slot-Start
   unsigned long _duty_last_total_ms;     // letzter Snapshot getTotalAirTime()
   uint32_t      _duty_blocked_count;     // gedroppte Pakete (Soft+Hard zusammen)
+  uint32_t      _repeat_skipped_motion;  // Repeats gedroppt weil defensive-Mode + is_moving
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual
