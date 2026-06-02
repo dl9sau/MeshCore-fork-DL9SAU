@@ -12487,20 +12487,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool suspended = (_prefs.client_repeat != 0
                         && _prefs.repeater_profile == 0
                         && _is_moving);
+      // Hauptblock ohne suspended-Zeile. Worst-Case-Laenge:
+      //   "repeater=on (force needed, strict=no)\n" = 38
+      //   "profile=defensive\n" = 18
+      //   "loop_detect=strict (inaktiv -- profile=defensive)\n" = 50
+      //   "freq=869.6180 MHz" = 17
+      //   total ~123 Byte -- sicher unter 145-Byte-Companion-Limit.
       snprintf(line, sizeof(line),
-               "repeater=%s%s%s\n"
+               "repeater=%s%s\n"
                "profile=%s\n"
                "loop_detect=%s%s\n"
                "freq=%.4f MHz",
                _prefs.client_repeat ? "on" : "off",
                rep_suffix,
-               suspended ? "\n  temporary suspended: is_moving" : "",
                _prefs.repeater_profile == 1 ? "normal" : "defensive",
                ld,
                (_prefs.repeater_profile != 1 && _prefs.loop_detect != 0)
                    ? " (inaktiv -- profile=defensive)" : "",
                _prefs.freq);
       pushCompanionMessage(line);
+      // Suspended-Hinweis als eigene Message, sonst koennten alle drei
+      // Sonderfaelle zusammen (force+strict, suspended, loop_detect-inaktiv)
+      // den 145-Byte-Limit reissen.
+      if (suspended) {
+        pushCompanionMessage("  temporary suspended: is_moving");
+      }
       return;
     }
 
