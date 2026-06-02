@@ -13044,9 +13044,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "Flags: R=aktiv jetzt, A=auto-mode, P=pin, D=disabled,\n"
         "X=deleted, b=hat bbox; (b-in)=Build-in, (ext)=Extras");
       pushCompanionMessage(
-        "  ! = Eigenes geo auto-Advert nimmt diesen Scope nie.");
-      pushCompanionMessage(
-        "      Repeat-Verhalten bleibt unberuehrt.");
+        "  ! = Eigenes geo auto-Advert nimmt diesen Scope nie.\n"
+        "      Keine Auswirkung auf Repeater-Verhalten.");
       pushCompanionMessage(
         "      'scope advert default/bake/override <name>' kann diesen\n"
         "      Scope trotzdem explizit waehlen.");
