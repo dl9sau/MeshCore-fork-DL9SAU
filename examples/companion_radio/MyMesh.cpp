@@ -7169,7 +7169,7 @@ void MyMesh::setupCompanionChannel() {
         setChannel(i, ch);
         saveChannels();
       }
-      return;
+      goto done;
     }
   }
 
@@ -7184,31 +7184,36 @@ void MyMesh::setupCompanionChannel() {
       setChannel(i, ch);   // recomputes hash automatisch
       saveChannels();
       _companion_channel_idx = (uint8_t)i;
-      return;
+      goto done;
     }
   }
 
   // (3) Nicht gefunden -- ersten freien Slot suchen und neu anlegen.
-  int target = -1;
-  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-    if (getChannel(i, ch) && ch.name[0] == 0) { target = i; break; }
+  {
+    int target = -1;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      if (getChannel(i, ch) && ch.name[0] == 0) { target = i; break; }
+    }
+    if (target < 0) {
+      _companion_channel_idx = 0xFF; // kein Slot frei
+      goto done;   // andere ch.hops trotzdem rebuilden
+    }
+    ChannelDetails nch;
+    memset(&nch, 0, sizeof(nch));
+    StrHelper::strncpy(nch.name, COMPANION_CHANNEL_NAME, sizeof(nch.name));
+    memcpy(nch.channel.secret, s_companion_psk_magic, 16);
+    // secret[16..32] bleibt 0 -> setChannel berechnet 128-bit-Hash
+    setChannel(target, nch);
+    _companion_channel_idx = (uint8_t)target;
+    saveChannels(); // persistieren, damit der Index ueber Reboots stabil bleibt
   }
-  if (target < 0) {
-    _companion_channel_idx = 0xFF; // kein Slot frei
-    return;
-  }
-  ChannelDetails nch;
-  memset(&nch, 0, sizeof(nch));
-  StrHelper::strncpy(nch.name, COMPANION_CHANNEL_NAME, sizeof(nch.name));
-  memcpy(nch.channel.secret, s_companion_psk_magic, 16);
-  // secret[16..32] bleibt 0 -> setChannel berechnet 128-bit-Hash
-  setChannel(target, nch);
-  _companion_channel_idx = (uint8_t)target;
-  saveChannels(); // persistieren, damit der Index ueber Reboots stabil bleibt
+done:
   // Wunschliste 32 v2: $companion-Channel darf NIE repeated werden.
   // rebuildChannelHopsCache() macht einen force-Upsert vom companion-
-  // Eintrag (cap=0), bevor es den Cache neu aufbaut. Hier nur das
-  // Caching anschubsen.
+  // Eintrag (cap=0), bevor es den Cache neu aufbaut. MUSS in jedem
+  // Pfad laufen (User-Bug 2026-06-02: war frueher nur im 3.-Pfad,
+  // 'companion via PSK gefunden' Early-Return uebersprang den Cache-
+  // Rebuild komplett -> 'get ch.hops companion' zeigte 'off').
   rebuildChannelHopsCache();
 }
 
