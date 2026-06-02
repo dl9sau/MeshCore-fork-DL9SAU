@@ -12462,17 +12462,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                      : (_prefs.loop_detect == 1) ? "minimal"
                      : (_prefs.loop_detect == 2) ? "moderate" : "strict";
       // Suffix-Logik fuer repeater=on:
-      //   (force)             -- client_repeat_force gesetzt
-      //   (strict=no)         -- freq ausserhalb strict-Range, KEIN force
-      //                          (Anomalie: User koennte es nicht wissen)
-      //   (force, strict=no)  -- beides
-      //   (nichts)            -- clean state (strict_ok=yes, kein force)
-      // strict_ok=yes ist der Default-Fall und braucht keine eigene Zeile.
-      char rep_suffix[32] = "";
+      //   (force needed, strict=no) -- force gesetzt UND aktuell noetig
+      //                                (Freq ausserhalb strict-Range,
+      //                                z.B. EU 869.618 MHz Hauptfrequenz)
+      //   (force)                   -- force gesetzt, aktuell NICHT noetig
+      //                                (Freq ist strict-compliant -- z.B.
+      //                                wurde Freq nach 'repeater on force'
+      //                                auf compliant umgestellt)
+      //   (strict=no)               -- ohne force, Freq non-strict
+      //                                (Anomalie: kann passieren wenn Freq
+      //                                nach Repeater-Start gewechselt
+      //                                wurde, evtl. ist 'repeater off/on
+      //                                force' notwendig)
+      //   (nichts)                  -- clean state
+      char rep_suffix[40] = "";
       if (_prefs.client_repeat) {
         bool has_force = _prefs.client_repeat_force != 0;
         bool flag_strict = !strict_ok;
-        if (has_force && flag_strict)      snprintf(rep_suffix, sizeof(rep_suffix), " (force, strict=no)");
+        if (has_force && flag_strict)      snprintf(rep_suffix, sizeof(rep_suffix), " (force needed, strict=no)");
         else if (has_force)                snprintf(rep_suffix, sizeof(rep_suffix), " (force)");
         else if (flag_strict)              snprintf(rep_suffix, sizeof(rep_suffix), " (strict=no)");
       }
