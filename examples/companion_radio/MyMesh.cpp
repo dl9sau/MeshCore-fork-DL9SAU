@@ -12461,9 +12461,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* ld = (_prefs.loop_detect == 0) ? "off"
                      : (_prefs.loop_detect == 1) ? "minimal"
                      : (_prefs.loop_detect == 2) ? "moderate" : "strict";
+      // Suffix-Logik fuer repeater=on:
+      //   (force)             -- client_repeat_force gesetzt
+      //   (strict=no)         -- freq ausserhalb strict-Range, KEIN force
+      //                          (Anomalie: User koennte es nicht wissen)
+      //   (force, strict=no)  -- beides
+      //   (nichts)            -- clean state (strict_ok=yes, kein force)
+      // strict_ok=yes ist der Default-Fall und braucht keine eigene Zeile.
+      char rep_suffix[32] = "";
+      if (_prefs.client_repeat) {
+        bool has_force = _prefs.client_repeat_force != 0;
+        bool flag_strict = !strict_ok;
+        if (has_force && flag_strict)      snprintf(rep_suffix, sizeof(rep_suffix), " (force, strict=no)");
+        else if (has_force)                snprintf(rep_suffix, sizeof(rep_suffix), " (force)");
+        else if (flag_strict)              snprintf(rep_suffix, sizeof(rep_suffix), " (strict=no)");
+      }
       // Wunschliste 34: bei defensive+is_moving Repeating temporaer aus.
-      // Hinweis in der repeater-Status-Ausgabe damit User weiss warum
-      // gerade nicht repeated wird obwohl repeater=on.
       bool suspended = (_prefs.client_repeat != 0
                         && _prefs.repeater_profile == 0
                         && _is_moving);
@@ -12471,16 +12484,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                "repeater=%s%s%s\n"
                "profile=%s\n"
                "loop_detect=%s%s\n"
-               "freq=%.4f MHz\n"
-               "strict_ok=%s",
+               "freq=%.4f MHz",
                _prefs.client_repeat ? "on" : "off",
-               _prefs.client_repeat_force ? " (force)" : "",
+               rep_suffix,
                suspended ? "\n  temporary suspended: is_moving" : "",
                _prefs.repeater_profile == 1 ? "normal" : "defensive",
                ld,
                (_prefs.repeater_profile != 1 && _prefs.loop_detect != 0)
                    ? " (inaktiv -- profile=defensive)" : "",
-               _prefs.freq, strict_ok ? "yes" : "no");
+               _prefs.freq);
       pushCompanionMessage(line);
       return;
     }
