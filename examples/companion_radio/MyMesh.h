@@ -969,7 +969,6 @@ private:
   unsigned long _duty_slot_start_ms;     // millis() bei Slot-Start
   unsigned long _duty_last_total_ms;     // letzter Snapshot getTotalAirTime()
   uint32_t      _duty_blocked_count;     // gedroppte Pakete (Soft+Hard zusammen)
-  uint32_t      _repeat_skipped_motion;  // Repeats gedroppt weil defensive-Mode + is_moving
 
   // ---- Wunschliste 31: Advert-basierte RTC-Sync (RAM-State) ----
   uint32_t      _time_sync_last_at_rtc;  // RTC-Wert beim letzten angewendeten Sync (24h-Cap)

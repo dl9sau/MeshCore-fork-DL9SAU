@@ -880,8 +880,10 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
 
 bool MyMesh::isRepeatingEffectivelyAllowed() const {
   if (_prefs.client_repeat == 0) return false;
-  if (_prefs.repeater_profile != 0) return true;   // normal: keine freq-Pruefung
-  // defensive: freq muss in strict-Range sein ODER force gesetzt
+  if (_prefs.repeater_profile != 0) return true;   // normal: ignoriert moving + freq
+  // defensive:
+  if (_is_moving) return false;                    // is_moving suppressed defensive-rep
+  // freq muss in strict-Range sein ODER force gesetzt
   uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
   if (isValidClientRepeatFreq(f_khz)) return true;
   if (_prefs.client_repeat_force) return true;
@@ -1438,21 +1440,10 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     return false;
   }
 
-  // Wunschliste 34 (DL9SAU 2026-06-02): im defensive-Mode UND in Bewegung
-  // (>370m in letzten 10min, _is_moving = true) Repeating aussetzen.
-  // Begruendung: mobil bekommen wir eh schlecht stabile Signale (variable
-  // Antennen-Polarisation, Doppler, schlechter Antennenstandort), unsere
-  // Repeats stoeren das Netz mehr als sie helfen. Sobald wir stehen
-  // (is_moving wird false durch das normale Motion-Window), kehrt
-  // automatisch das defensive-Repeat-Verhalten zurueck.
-  // Gilt NICHT fuer profile=normal (1) -- da hat der User ja bewusst
-  // 'echter Repeater' aktiviert, vermutlich an festem Standort.
-  // Kein per-Paket-Trace (gleiche Begruendung wie oben). Stats-Counter
-  // erlaubt Sichtbarkeit im stats-Output.
-  if (_prefs.repeater_profile == 0 /* defensive */ && _is_moving) {
-    _repeat_skipped_motion++;
-    return false;
-  }
+  // (Wunschliste 34 is_moving-Gate ist jetzt in isRepeatingEffectivelyAllowed()
+  // / cached _repeating_allowed Flag integriert -- kein per-Paket-Branch
+  // mehr noetig. Transition via recomputeRepeatingAllowed() aus
+  // updateMotionTracking().)
 
   // Duty-Cycle Soft-Limit: Repeats unterdruecken bei Annaeherung an die
   // 10%/h-Grenze. Eigene Pakete (Auto-Adverts, User-Chat) laufen weiter
@@ -3160,7 +3151,6 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _duty_slot_start_ms = 0;
   _duty_last_total_ms = 0;
   _duty_blocked_count = 0;
-  _repeat_skipped_motion = 0;
   // Wunschliste 31: time-sync RAM-state
   _time_sync_last_at_rtc = 0;
   memset(_time_sync_strict_last_ts, 0, sizeof(_time_sync_strict_last_ts));
@@ -5829,6 +5819,10 @@ void MyMesh::updateMotionTracking() {
       }
       traceCompanion(TRACE_MOTION, "[motion] %s (Anker-Distanz %d m) pos=%s%s",
                      _is_moving ? "moving" : "static", (int)d_m, ll, rep_hint);
+      // Cache aktualisieren (Wunschliste 34 Refactor): _is_moving ist
+      // jetzt Teil von isRepeatingEffectivelyAllowed() -- recompute
+      // damit per-Paket-Gate sofort greift.
+      recomputeRepeatingAllowed(_is_moving ? "started moving" : "stopped moving");
     }
     // Movement just started — accelerate the next advert so a fresh
     // position goes out promptly, instead of waiting out the static
@@ -7185,7 +7179,6 @@ void MyMesh::clearStats() {
   _tx_digi_count = 0;
   _bt_connect_count = 0;
   _duty_blocked_count = 0;
-  _repeat_skipped_motion = 0;
   // Wunschliste 31: time-sync RAM-state
   _time_sync_last_at_rtc = 0;
   memset(_time_sync_strict_last_ts, 0, sizeof(_time_sync_strict_last_ts));
@@ -8062,12 +8055,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Wechsel via 'repeater profile <defensive|normal>'");
         pushCompanionMessage(
           "force (nur fuer defensive relevant):\n"
-          "  Ohne force prueft 'repeater on' die Freq gegen\n"
-          "  eine strict-Range (EU 869.618 MHz NICHT enthalten,\n"
-          "  dort sind lange Repeats nicht regelkonform).");
+          "  manche Frequenzen brauchen force fuer client-rep,\n"
+          "  z.B. EU 869.618 MHz (lange Repeats dort nicht\n"
+          "  regelkonform).");
         pushCompanionMessage(
-          "  'repeater on force' umgeht den Check.\n"
-          "  Persistent ueber on/off (nicht gecleart).\n"
+          "  'repeater on force' aktiviert das Repeating dort\n"
+          "  trotzdem. Persistent ueber on/off (nicht gecleart).\n"
           "  signalFitsInIsmBand bleibt immer aktiv.");
         return;
       }
@@ -11909,17 +11902,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(block);
     }
 
-    // ---- repeat-skipped wegen Bewegung (Wunschliste 34) ----
-    // Nur anzeigen wenn relevant: client_repeat an UND profile==defensive
-    // UND Counter > 0. Sonst Zeile sparen.
-    if (_prefs.client_repeat != 0
-        && _prefs.repeater_profile == 0
-        && _repeat_skipped_motion > 0) {
-      snprintf(block, sizeof(block),
-               "motion: %lu repeats gedroppt (defensive + moving)",
-               (unsigned long)_repeat_skipped_motion);
-      pushCompanionMessage(block);
-    }
+    // (motion-Counter entfernt: is_moving wird jetzt im cached
+    // _repeating_allowed-Flag abgebildet, kein per-Paket-Counter.
+    // Transitions werden via pushDebugLog '[repeat] effective ->
+    // on/off (started/stopped moving)' getraced.)
     return;
   }
 
@@ -13518,17 +13504,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                      : (_prefs.loop_detect == 1) ? "minimal"
                      : (_prefs.loop_detect == 2) ? "moderate" : "strict";
       // Inline-Suffix in 'repeater=on'-Zeile: runtime-Status.
-      // Prioritaet (1 Slot, mutually exclusive):
-      //   blocked: wish=on aber effective=off (freq non-strict, no force)
-      //   paused:  wish=on, effective=on, aber is_moving (defensive only)
+      // Prioritaet (1 Slot, mutually exclusive). Reasons in positiver
+      // Formulierung (User-Feedback 2026-06-02: doppelt-verneintes
+      // 'non-strict' verwirrt -- besser 'freq braucht force').
+      //   paused:  wish=on, effective=off, weil is_moving (defensive)
+      //   blocked: wish=on, effective=off, weil freq force braucht
+      //            aber force=off
       //   sonst:   kein Suffix
-      bool eff_allowed = _repeating_allowed;
       bool wish_on = (_prefs.client_repeat != 0);
       const char* runtime_suffix = "";
-      if (wish_on && !eff_allowed) {
-        runtime_suffix = ", blocked (freq non-strict, no force)";
-      } else if (wish_on && _prefs.repeater_profile == 0 && _is_moving) {
-        runtime_suffix = ", paused (currently moving)";
+      if (wish_on && !_repeating_allowed) {
+        if (_prefs.repeater_profile == 0 && _is_moving) {
+          runtime_suffix = ", paused (is_moving)";
+        } else {
+          runtime_suffix = ", blocked (freq braucht force, force=off)";
+        }
       }
 
       // loop_detect-Inaktiv-Note: nur wenn loop_detect != off UND
@@ -13554,22 +13544,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // relevant (normal-Profile prueft die Freq nicht gegen client-rep-
       // Range -- echter Repeater ist Admin-Verantwortung).
       // Tabelle der Faelle (nur profile=defensive):
-      //   force=on,  needed   -> "band-check force: on (needed)"
-      //   force=on,  no-need  -> "band-check force: on"
-      //   force=off, needed   -> "band-check force: off
-      //                            (would block 'repeater on' -- use force)"
+      //   force=on,  needed   -> "force: on (freq braucht es)"
+      //   force=on,  no-need  -> "force: on"
+      //   force=off, freq braucht force -> Hinweis-Block
       //   force=off, no-need  -> (nichts -- alles sauber)
       if (_prefs.repeater_profile == 0) {
         bool has_force = _prefs.client_repeat_force != 0;
-        bool freq_non_strict = !strict_ok;
+        bool freq_needs_force = !strict_ok;
         const char* bc = NULL;
-        if (has_force && freq_non_strict) {
-          bc = "band-check force: on (needed)";
+        if (has_force && freq_needs_force) {
+          bc = "force: on (freq braucht es)";
         } else if (has_force) {
-          bc = "band-check force: on";
-        } else if (freq_non_strict) {
-          bc = "band-check force: off\n"
-               "  (would block 'repeater on' -- use 'repeater on force')";
+          bc = "force: on";
+        } else if (freq_needs_force) {
+          bc = "force: off -- freq braucht force fuer client-rep\n"
+               "  ('repeater on force' aktiviert das Repeating)";
         }
         if (bc) pushCompanionMessage(bc);
       }
@@ -13657,11 +13646,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(line);
         return;
       }
-      // Sicherheitsgate 2: strict-Range (nur ohne force)
+      // Sicherheitsgate 2: freq erlaubt client-rep ohne force? (sonst force noetig)
       if (!force && !isValidClientRepeatFreq(f_khz)) {
         char line[160];
         snprintf(line, sizeof(line),
-                 "Abgelehnt: %.4f MHz nicht im strict-Range. "
+                 "Abgelehnt: %.4f MHz braucht force fuer client-rep.\n"
                  "Mit 'repeater on force' trotzdem aktivieren.", _prefs.freq);
         pushCompanionMessage(line);
         return;
