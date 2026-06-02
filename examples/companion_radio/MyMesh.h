@@ -310,6 +310,14 @@ protected:
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
   // SNR der Advert für die Quality-Klassifikation in onDiscoveredContact merken.
   void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override;
+
+  // Wunschliste 31: Advert-basierte RTC-Sync. Wird aus onAdvertRecv
+  // aufgerufen wenn das Paket Zero-Hop ist und einen plausiblen
+  // adv_type hat. Implementiert lazy/strict-Modi, Boot-Collection,
+  // Plausibility, 24h-Cap, Single-Source-Heuristik mit Boot-Bypass.
+  void maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestamp, uint8_t adv_type);
+  void timeSyncFinalizeLazyCollection();   // wird aus loop() / onAdvertRecv aufgerufen
+  bool isGpsAuthoritative() const;
   void onContactPathUpdated(const ContactInfo &contact) override;
   ContactInfo* processAck(const uint8_t *data) override;
   void queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt, uint32_t sender_timestamp,
@@ -947,6 +955,24 @@ private:
   unsigned long _duty_last_total_ms;     // letzter Snapshot getTotalAirTime()
   uint32_t      _duty_blocked_count;     // gedroppte Pakete (Soft+Hard zusammen)
   uint32_t      _repeat_skipped_motion;  // Repeats gedroppt weil defensive-Mode + is_moving
+
+  // ---- Wunschliste 31: Advert-basierte RTC-Sync (RAM-State) ----
+  uint32_t      _time_sync_last_at_rtc;  // RTC-Wert beim letzten angewendeten Sync (24h-Cap)
+  uint32_t      _time_sync_strict_last_ts[3]; // Replay: pro Strict-Source letzter akzept. timestamp
+  uint8_t       _time_sync_last_pubkey[3];   // 3-Byte Prefix der zuletzt genutzten Quelle (Display)
+  bool          _time_sync_done_since_boot;  // erster Sync nach Boot vollzogen (Boot-Drift-Bypass)
+
+  // Lazy-Mode Boot-Collection-Phase: bis zu 5 Kandidaten ueber 3 Min
+  // sammeln, dann Cluster-Auswertung. RAM-only, einmal pro Boot.
+  struct TimeSyncCandidate {
+    uint32_t timestamp;
+    uint8_t  pub_key3[3];
+    uint8_t  adv_type;
+  };
+  TimeSyncCandidate _time_sync_lazy_cands[5];
+  uint8_t       _time_sync_lazy_count;
+  unsigned long _time_sync_lazy_started_ms; // 0 = noch nicht gestartet
+  bool          _time_sync_lazy_done;       // Collection abgeschlossen
 
   // RAM-only counters for STATS display (reset on reboot)
   uint32_t      _tx_advert_count;            // own adverts: periodic + nightly + manual

@@ -278,6 +278,18 @@ struct NodePrefs {  // persisted to file
   // repeaten' (memset 0). Persistierte User-Werte ueberschreiben das.
   uint8_t        flood_max_unknown_chan;
 
+  // Wunschliste 31: RTC-Sync aus signiertem Advert.
+  //   0 = off (kein Advert-Sync)
+  //   1 = lazy (jeden zero-hop signierten Advert akzeptieren)
+  //   2 = strict (nur konfigurierte Sources unten)
+  // Default per Pre-Init in begin() = 1 (lazy). Wer das deaktivieren
+  // will, setzt 'set time sync off' explizit.
+  uint8_t        time_sync_mode;
+
+  // Bis zu 3 Trust-Source-Pub-Key-Prefixes (je 3 Byte). 0-Prefix = Slot
+  // ungenutzt. Greift nur bei mode==2 (strict).
+  uint8_t        time_sync_sources[3][3];
+
   // Geo-vs-Default Send-Hierarchie fuer eigene Adverts (Wunschliste 13).
   //   0 = uninitialisiert (begin() migriert)
   //   1 = off:    Default-Scope gewinnt immer. Geo wird nie verwendet.

@@ -867,8 +867,195 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
     AdvertDataParser parser(app_data, app_data_len);
     if (parser.isValid()) {
       putRuntimeNeighbour(id, timestamp, _last_advert_snr_q4, parser.getType());
+      // Wunschliste 31: Advert-basierte RTC-Sync. NUR zero-hop
+      // (filterstaerke: Adversary muss in Funkreichweite sein).
+      maybeAdvertTimeSync(id, timestamp, parser.getType());
     }
   }
+}
+
+// =========================================================================
+// Wunschliste 31: Advert-basierte RTC-Sync
+// =========================================================================
+
+bool MyMesh::isGpsAuthoritative() const {
+  // GPS hat Vorrang VOR Advert-Sync wenn GPS aktiv ist UND schon
+  // mindestens einmal einen Fix bekommen hat. Andernfalls greift
+  // Advert-Sync als Fallback.
+#if ENV_INCLUDE_GPS == 1
+  if (_prefs.gps_enabled && _gps_had_fix_ever) return true;
+#endif
+  return false;
+}
+
+void MyMesh::maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestamp, uint8_t adv_type) {
+  if (_prefs.time_sync_mode == 0) return;                  // off
+  if (isGpsAuthoritative()) return;                         // GPS-Vorrang
+  // Source-Type-Filter: nur Infra/User-Adverts (NICHT SENSOR).
+  // Roomserver = stark vertrauenswuerdig (Admin), Repeater = Admin
+  // ueblich aber theor. user-spoofbar (Trust via signiertem advert
+  // + zero-hop), CHAT = User. SENSOR liefert keine authoritativ
+  // korrekte Uhrzeit.
+  if (adv_type != ADV_TYPE_REPEATER
+      && adv_type != ADV_TYPE_ROOM
+      && adv_type != ADV_TYPE_CHAT) return;
+  // Plausibility-Check: Jahr 2020..2099. Werte ausserhalb sind
+  // wahrscheinlich Replay alter Adverts oder verirrte/falsche Quellen.
+  if (adv_timestamp < 1577836800UL /* 2020-01-01 */
+      || adv_timestamp > 4070908800UL /* 2099-01-01 */) return;
+
+  uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  // 24h-Cap (nur wenn schon einmal synced):
+  if (_time_sync_done_since_boot
+      && _time_sync_last_at_rtc > 0
+      && now_rtc >= _time_sync_last_at_rtc
+      && (now_rtc - _time_sync_last_at_rtc) < 86400UL) return;
+
+  // ----- Strict mode: nur konfigurierte Sources -----
+  if (_prefs.time_sync_mode == 2) {
+    int src_idx = -1;
+    int configured = 0;
+    for (int i = 0; i < 3; i++) {
+      bool nonzero = (_prefs.time_sync_sources[i][0] != 0
+                     || _prefs.time_sync_sources[i][1] != 0
+                     || _prefs.time_sync_sources[i][2] != 0);
+      if (nonzero) configured++;
+      if (nonzero && memcmp(id.pub_key, _prefs.time_sync_sources[i], 3) == 0) {
+        src_idx = i;
+      }
+    }
+    if (src_idx < 0) return;
+    // Replay-Schutz pro Source
+    if (adv_timestamp <= _time_sync_strict_last_ts[src_idx]) return;
+    int32_t delta = (int32_t)(adv_timestamp - now_rtc);
+    // Drift-Schwelle 20s
+    if (delta > -20 && delta < 20) return;
+    // Single-Source-Heuristik: bei nur 1 configured AND nach Boot-First-Sync
+    // sehr grossen Drift ignorieren (koennte falsche Source sein). Erste
+    // Sync nach Boot umgeht das (RTC kann real wild off sein).
+    if (configured == 1 && _time_sync_done_since_boot
+        && (delta > 3600 || delta < -3600)) {
+      pushDebugLog("[rtc] adv-sync IGNORED: delta=%lds too big (1 source)\n",
+                   (long)delta);
+      return;
+    }
+    // Anwenden
+    getRTCClock()->setCurrentTime(adv_timestamp);
+    _time_sync_last_at_rtc = adv_timestamp;
+    _time_sync_strict_last_ts[src_idx] = adv_timestamp;
+    _time_sync_done_since_boot = true;
+    memcpy(_time_sync_last_pubkey, id.pub_key, 3);
+    pushDebugLog("[rtc] adv-sync from %02x%02x%02x delta=%lds (strict)\n",
+                 id.pub_key[0], id.pub_key[1], id.pub_key[2], (long)delta);
+    return;
+  }
+
+  // ----- Lazy mode -----
+  if (_prefs.time_sync_mode == 1) {
+    if (!_time_sync_lazy_done) {
+      // Collection-Phase
+      if (_time_sync_lazy_started_ms == 0) _time_sync_lazy_started_ms = millis();
+      if (_time_sync_lazy_count < 5) {
+        TimeSyncCandidate& c = _time_sync_lazy_cands[_time_sync_lazy_count++];
+        c.timestamp = adv_timestamp;
+        c.pub_key3[0] = id.pub_key[0];
+        c.pub_key3[1] = id.pub_key[1];
+        c.pub_key3[2] = id.pub_key[2];
+        c.adv_type = adv_type;
+      }
+      // Trigger Finalize wenn 5 Kandidaten oder 3 min vergangen.
+      // 3-min-Check via loop()-tick separat, hier nur die 5er-Schwelle.
+      if (_time_sync_lazy_count >= 5) {
+        timeSyncFinalizeLazyCollection();
+      }
+      return;
+    }
+    // Steady-state Lazy: einfache Drift-Pruefung mit single-source-
+    // Heuristik. Replay-Schutz hier nicht per Source (lazy hat keine
+    // gespeicherte Source-Liste), aber das advert_timestamp muss >
+    // _time_sync_last_at_rtc sein.
+    if (adv_timestamp <= _time_sync_last_at_rtc) return;
+    int32_t delta = (int32_t)(adv_timestamp - now_rtc);
+    if (delta > -20 && delta < 20) return;
+    // Im Steady-state lazy: bei sehr grossen Drifts vorsichtig sein
+    // (koennte falsche Source sein). > 1h ignorieren.
+    if (delta > 3600 || delta < -3600) {
+      pushDebugLog("[rtc] adv-sync IGNORED: delta=%lds too big (lazy)\n",
+                   (long)delta);
+      return;
+    }
+    getRTCClock()->setCurrentTime(adv_timestamp);
+    _time_sync_last_at_rtc = adv_timestamp;
+    memcpy(_time_sync_last_pubkey, id.pub_key, 3);
+    pushDebugLog("[rtc] adv-sync from %02x%02x%02x delta=%lds (lazy)\n",
+                 id.pub_key[0], id.pub_key[1], id.pub_key[2], (long)delta);
+  }
+}
+
+void MyMesh::timeSyncFinalizeLazyCollection() {
+  if (_time_sync_lazy_done) return;
+  if (_time_sync_lazy_count == 0) {
+    // Keine Kandidaten gesehen -- collection beenden, beim naechsten
+    // Advert greift dann steady-state lazy.
+    _time_sync_lazy_done = true;
+    _time_sync_lazy_started_ms = 0;
+    return;
+  }
+  // Cluster-Analyse: fuer jeden Kandidaten zaehlen wie viele andere
+  // innerhalb 60s liegen. Hoechste Cluster-Staerke gewinnt. Bei Gleichstand
+  // adv_type Prio ROOM (3) > CHAT (1) > REPEATER (2).
+  // (Hinweis: Konstanten ADV_TYPE_REPEATER=2, _CHAT=1, _ROOM=3 -- Prio-
+  // Mapping unten explizit.)
+  auto type_prio = [](uint8_t t) -> int {
+    if (t == ADV_TYPE_ROOM) return 3;
+    if (t == ADV_TYPE_CHAT) return 2;
+    if (t == ADV_TYPE_REPEATER) return 1;
+    return 0;
+  };
+  int best = -1;
+  int best_strength = -1;
+  int best_prio = -1;
+  for (int i = 0; i < _time_sync_lazy_count; i++) {
+    int strength = 0;
+    for (int j = 0; j < _time_sync_lazy_count; j++) {
+      if (i == j) continue;
+      int32_t d = (int32_t)(_time_sync_lazy_cands[j].timestamp
+                          - _time_sync_lazy_cands[i].timestamp);
+      if (d < 0) d = -d;
+      if (d <= 60) strength++;
+    }
+    int prio = type_prio(_time_sync_lazy_cands[i].adv_type);
+    if (strength > best_strength
+        || (strength == best_strength && prio > best_prio)) {
+      best = i;
+      best_strength = strength;
+      best_prio = prio;
+    }
+  }
+  if (best < 0) {
+    _time_sync_lazy_done = true;
+    _time_sync_lazy_started_ms = 0;
+    return;
+  }
+  const TimeSyncCandidate& chosen = _time_sync_lazy_cands[best];
+  uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  int32_t delta = (int32_t)(chosen.timestamp - now_rtc);
+  if (delta > -20 && delta < 20) {
+    // RTC ist bereits nahe genug an Cluster-Median -- nichts tun.
+    _time_sync_lazy_done = true;
+    pushDebugLog("[rtc] lazy-collect: %d cand, no correction (delta=%ld)\n",
+                 (int)_time_sync_lazy_count, (long)delta);
+    return;
+  }
+  getRTCClock()->setCurrentTime(chosen.timestamp);
+  _time_sync_last_at_rtc = chosen.timestamp;
+  _time_sync_done_since_boot = true;
+  memcpy(_time_sync_last_pubkey, chosen.pub_key3, 3);
+  _time_sync_lazy_done = true;
+  pushDebugLog("[rtc] lazy-collect: %d cand, picked %02x%02x%02x type=%d delta=%lds\n",
+               (int)_time_sync_lazy_count,
+               chosen.pub_key3[0], chosen.pub_key3[1], chosen.pub_key3[2],
+               (int)chosen.adv_type, (long)delta);
 }
 
 void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_timestamp,
@@ -2788,6 +2975,15 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _duty_last_total_ms = 0;
   _duty_blocked_count = 0;
   _repeat_skipped_motion = 0;
+  // Wunschliste 31: time-sync RAM-state
+  _time_sync_last_at_rtc = 0;
+  memset(_time_sync_strict_last_ts, 0, sizeof(_time_sync_strict_last_ts));
+  memset(_time_sync_last_pubkey, 0, sizeof(_time_sync_last_pubkey));
+  _time_sync_done_since_boot = false;
+  memset(_time_sync_lazy_cands, 0, sizeof(_time_sync_lazy_cands));
+  _time_sync_lazy_count = 0;
+  _time_sync_lazy_started_ms = 0;
+  _time_sync_lazy_done = false;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -2888,6 +3084,13 @@ void MyMesh::begin(bool has_display) {
   // interpretiert, was sicher nicht gewollt waere.
   memset(_prefs.channel_hops_cap, CH_HOPS_OFF, sizeof(_prefs.channel_hops_cap));
   _prefs.flood_max_unknown_chan = CH_HOPS_OFF;
+
+  // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
+  // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
+  // existent) -- so wird fresh-install zu 'lazy' (Komfort), aber 'set time
+  // sync off' bleibt erhalten.
+  _prefs.time_sync_mode = 1; // lazy default
+  memset(_prefs.time_sync_sources, 0, sizeof(_prefs.time_sync_sources));
 
   // load persisted prefs
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
@@ -4684,6 +4887,16 @@ void MyMesh::loop() {
   // Wunschliste 27: discover-Listen-Window check
   discoverLoop();
 
+  // Wunschliste 31: 3-min Timeout fuer Lazy-Collection. Wenn nach
+  // 3 min noch nicht finalisiert (< 5 Kandidaten gesammelt),
+  // jetzt evaluieren mit dem was wir haben.
+  if (_prefs.time_sync_mode == 1
+      && !_time_sync_lazy_done
+      && _time_sync_lazy_started_ms != 0
+      && (millis() - _time_sync_lazy_started_ms) > 180000UL) {
+    timeSyncFinalizeLazyCollection();
+  }
+
   // Wunschliste 28 Phase B: backup restore Serial-Read State-Machine.
   // Liest rohe USB-CDC bytes (Serial.*). Laeuft PARALLEL zum BLE-Frame-
   // Pfad (_serial->checkRecvFrame in checkSerialInterface), weil im
@@ -5917,6 +6130,21 @@ void MyMesh::backupSaveToSerial() {
   kv_uint ("flood_max_infra",  _prefs.flood_max_infra);
   kv_uint ("flood_max_req_resp",   _prefs.flood_max_req_resp);
   kv_uint ("flood_max_unknown_chan", _prefs.flood_max_unknown_chan);
+  // Wunschliste 31: time-sync prefs
+  kv_uint ("time_sync_mode",       _prefs.time_sync_mode);
+  // Sources als 6-hex-Strings (3 Slots, leere als 000000)
+  {
+    char buf[8];
+    for (int i = 0; i < 3; i++) {
+      snprintf(buf, sizeof(buf), "%02x%02x%02x",
+               _prefs.time_sync_sources[i][0],
+               _prefs.time_sync_sources[i][1],
+               _prefs.time_sync_sources[i][2]);
+      char key_[24];
+      snprintf(key_, sizeof(key_), "time_sync_src%d", i);
+      kv_str(key_, buf);
+    }
+  }
   kv_float("lat",                  sensors.node_lat, 6);
   kv_float("lon",                  sensors.node_lon, 6);
   Serial.println();
@@ -6533,11 +6761,40 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "flood_max_infra") == 0)   { _prefs.flood_max_infra   = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_req_resp") == 0){ _prefs.flood_max_req_resp= (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_unknown_chan") == 0){ _prefs.flood_max_unknown_chan= (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "time_sync_mode") == 0)         { _prefs.time_sync_mode         = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start);   _br_applied++; return; }
       if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start);   _br_applied++; return; }
     }
     if (val_type == 's') {
       if (strcmp(key, "name") == 0) { brExtractString(val_start, val_len, _prefs.node_name, sizeof(_prefs.node_name)); _br_applied++; return; }
+      // Wunschliste 31: time_sync_src0/1/2 als 6-hex-string
+      if (strncmp(key, "time_sync_src", 13) == 0 && key[13] >= '0' && key[13] <= '2' && key[14] == 0) {
+        int slot = key[13] - '0';
+        char hexbuf[8];
+        brExtractString(val_start, val_len, hexbuf, sizeof(hexbuf));
+        // Parse 6 hex chars
+        uint8_t bytes[3] = {0,0,0};
+        bool ok = (strlen(hexbuf) == 6);
+        for (int j = 0; j < 3 && ok; j++) {
+          int hi = -1, lo = -1;
+          char ch1 = hexbuf[j*2], ch2 = hexbuf[j*2+1];
+          if (ch1 >= '0' && ch1 <= '9') hi = ch1 - '0';
+          else if (ch1 >= 'a' && ch1 <= 'f') hi = ch1 - 'a' + 10;
+          else if (ch1 >= 'A' && ch1 <= 'F') hi = ch1 - 'A' + 10;
+          if (ch2 >= '0' && ch2 <= '9') lo = ch2 - '0';
+          else if (ch2 >= 'a' && ch2 <= 'f') lo = ch2 - 'a' + 10;
+          else if (ch2 >= 'A' && ch2 <= 'F') lo = ch2 - 'A' + 10;
+          if (hi < 0 || lo < 0) ok = false;
+          else bytes[j] = (uint8_t)((hi << 4) | lo);
+        }
+        if (ok) {
+          memcpy(_prefs.time_sync_sources[slot], bytes, 3);
+          _br_applied++;
+        } else {
+          _br_skipped++;
+        }
+        return;
+      }
     }
     _br_skipped++;
     return;
@@ -6711,6 +6968,15 @@ void MyMesh::clearStats() {
   _bt_connect_count = 0;
   _duty_blocked_count = 0;
   _repeat_skipped_motion = 0;
+  // Wunschliste 31: time-sync RAM-state
+  _time_sync_last_at_rtc = 0;
+  memset(_time_sync_strict_last_ts, 0, sizeof(_time_sync_strict_last_ts));
+  memset(_time_sync_last_pubkey, 0, sizeof(_time_sync_last_pubkey));
+  _time_sync_done_since_boot = false;
+  memset(_time_sync_lazy_cands, 0, sizeof(_time_sync_lazy_cands));
+  _time_sync_lazy_count = 0;
+  _time_sync_lazy_started_ms = 0;
+  _time_sync_lazy_done = false;
   _tx_repeat_airtime_ms = 0;
   memset(_rx_flood_by_ptype, 0, sizeof(_rx_flood_by_ptype));
   memset(_repeat_by_ptype,        0, sizeof(_repeat_by_ptype));
@@ -7372,12 +7638,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           || topic_prefix_match(topic, "time")) {
         pushCompanionMessage(
           "clock / date / time (ohne Arg):\n"
-          "  zeigt RTC (Unix-sec, UTC, lokal)."
-        );
+          "  RTC + Sync-Quelle anzeigen.");
         pushCompanionMessage(
-          "time <epoch>: setzt RTC.\n"
-          "  Sanity-Check 1500000000..4000000000."
-        );
+          "time <epoch>: RTC manuell setzen.\n"
+          "  (epoch = unix sec, post-2017..pre-2096)");
+        pushCompanionMessage(
+          "set time sync <off|lazy|aabbcc [bb [cc]]>:\n"
+          "  Advert-basierte RTC-Sync, Default lazy.\n"
+          "  Details: 'set time' ohne Wert.");
         return;
       }
       if (topic_prefix_match(topic, "clear")) {
@@ -9049,6 +9317,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              "clock:\n  unix = %lu\n  utc  = %s\n  loc  = %s",
              (unsigned long)now, utc_str, loc_str);
     pushCompanionMessage(block);
+    // Wunschliste 31: Sync-Quelle anzeigen wenn aktiv. Eigene Message,
+    // damit der clock-Block oben 145-Byte-sicher bleibt.
+    if (_time_sync_done_since_boot && _time_sync_last_at_rtc > 0) {
+      uint32_t age = (now >= _time_sync_last_at_rtc)
+                     ? (now - _time_sync_last_at_rtc) : 0;
+      char src[40];
+      if (isGpsAuthoritative()) {
+        snprintf(src, sizeof(src), "GPS");
+      } else {
+        snprintf(src, sizeof(src), "advert %02x%02x%02x",
+                 _time_sync_last_pubkey[0],
+                 _time_sync_last_pubkey[1],
+                 _time_sync_last_pubkey[2]);
+      }
+      char line[100];
+      snprintf(line, sizeof(line), "  synced via %s, age %lus", src, (unsigned long)age);
+      pushCompanionMessage(line);
+    } else if (_prefs.time_sync_mode != 0 && !isGpsAuthoritative()) {
+      pushCompanionMessage("  (advert-sync aktiv, noch keine Quelle gehoert)");
+    }
     return;
   }
 
@@ -9861,6 +10149,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  2=ALLOW_ALL (immer senden).");
         return;
       }
+      if (strcmp(key, "time") == 0) {
+        pushCompanionMessage(
+          "set time sync <off|lazy|aabbcc [bb [cc]]>:\n"
+          "  Advert-basierte RTC-Sync (signiert).");
+        pushCompanionMessage(
+          "  off  = aus\n"
+          "  lazy = jeder zero-hop Advert von\n"
+          "         REPEATER/ROOM/CHAT (default)");
+        pushCompanionMessage(
+          "  aabbcc = 6 hex = 3-Byte Pub-Key-Prefix\n"
+          "  bis 3 strict-Sources moeglich.\n"
+          "  GPS hat Vorrang wenn aktiv+je-synced.");
+        return;
+      }
       if (strcmp(key, "ch.hops") == 0) {
         pushCompanionMessage(
           "set ch.hops <name> <N|off>:\n"
@@ -10311,6 +10613,107 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Wunschliste 31: set time sync <off|lazy|aabbcc [bb [cc]]>
+    // Konfiguriert den Advert-basierten RTC-Sync. 3-Byte-Pub-Key-Prefixe
+    // (= 6 Hex-Zeichen) fuer bis zu 3 Trust-Sources im strict-Modus.
+    if (strcmp(key, "time") == 0) {
+      // value_lc beginnt mit "sync ..."
+      const char* vp = value_lc;
+      if (strncmp(vp, "sync", 4) != 0
+          || (vp[4] != ' ' && vp[4] != '\t' && vp[4] != 0)) {
+        pushCompanionMessage(
+          "Usage: set time sync <off|lazy|aabbcc [bb [cc]]>\n"
+          "  aabbcc = 6 Hex-Zeichen (3-Byte Pub-Key-Prefix)");
+        return;
+      }
+      const char* rest = vp + 4;
+      while (*rest == ' ' || *rest == '\t') rest++;
+      if (*rest == 0) {
+        // 'set time sync' allein -- aktuelle Config zeigen
+        if (_prefs.time_sync_mode == 0) {
+          pushCompanionMessage("time sync = off");
+        } else if (_prefs.time_sync_mode == 1) {
+          pushCompanionMessage("time sync = lazy (any zero-hop signed advert)");
+        } else {
+          char r[140]; int n = snprintf(r, sizeof(r), "time sync = strict, sources:");
+          for (int i = 0; i < 3; i++) {
+            bool nz = (_prefs.time_sync_sources[i][0]
+                     || _prefs.time_sync_sources[i][1]
+                     || _prefs.time_sync_sources[i][2]);
+            if (nz && n < (int)sizeof(r))
+              n += snprintf(r + n, sizeof(r) - n, " %02x%02x%02x",
+                            _prefs.time_sync_sources[i][0],
+                            _prefs.time_sync_sources[i][1],
+                            _prefs.time_sync_sources[i][2]);
+          }
+          pushCompanionMessage(r);
+        }
+        return;
+      }
+      if (strcmp(rest, "off") == 0) {
+        _prefs.time_sync_mode = 0;
+        savePrefs();
+        pushCompanionMessage("OK - time sync = off");
+        return;
+      }
+      if (strcmp(rest, "lazy") == 0) {
+        _prefs.time_sync_mode = 1;
+        memset(_prefs.time_sync_sources, 0, sizeof(_prefs.time_sync_sources));
+        savePrefs();
+        pushCompanionMessage("OK - time sync = lazy (Default).\n"
+                             "  Akzeptiert zero-hop Adverts von\n"
+                             "  REPEATER, ROOM, CHAT (nicht SENSOR).");
+        return;
+      }
+      // Strict mode: 1-3 Hex-Prefixe parsen
+      uint8_t newsrc[3][3];
+      memset(newsrc, 0, sizeof(newsrc));
+      int found = 0;
+      const char* p2 = rest;
+      while (*p2 && found < 3) {
+        while (*p2 == ' ' || *p2 == '\t') p2++;
+        if (!*p2) break;
+        // Parse 6 hex chars
+        uint8_t bytes[3];
+        bool ok = true;
+        for (int j = 0; j < 3 && ok; j++) {
+          int hi = -1, lo = -1;
+          char ch1 = p2[j*2], ch2 = p2[j*2 + 1];
+          if (ch1 >= '0' && ch1 <= '9')      hi = ch1 - '0';
+          else if (ch1 >= 'a' && ch1 <= 'f') hi = ch1 - 'a' + 10;
+          else if (ch1 >= 'A' && ch1 <= 'F') hi = ch1 - 'A' + 10;
+          if (ch2 >= '0' && ch2 <= '9')      lo = ch2 - '0';
+          else if (ch2 >= 'a' && ch2 <= 'f') lo = ch2 - 'a' + 10;
+          else if (ch2 >= 'A' && ch2 <= 'F') lo = ch2 - 'A' + 10;
+          if (hi < 0 || lo < 0) ok = false;
+          else bytes[j] = (uint8_t)((hi << 4) | lo);
+        }
+        if (!ok) {
+          pushCompanionMessage("Source-Prefix muss 6 Hex-Zeichen sein\n(z.B. a1b2c3).");
+          return;
+        }
+        memcpy(newsrc[found], bytes, 3);
+        found++;
+        p2 += 6;
+        // Trennzeichen
+        while (*p2 == ' ' || *p2 == '\t') p2++;
+      }
+      if (found == 0) {
+        pushCompanionMessage("Keine gueltigen Sources geparst.");
+        return;
+      }
+      _prefs.time_sync_mode = 2;
+      memcpy(_prefs.time_sync_sources, newsrc, sizeof(newsrc));
+      savePrefs();
+      char r[140]; int n = snprintf(r, sizeof(r), "OK - time sync = strict, sources:");
+      for (int i = 0; i < found; i++) {
+        n += snprintf(r + n, sizeof(r) - n, " %02x%02x%02x",
+                      newsrc[i][0], newsrc[i][1], newsrc[i][2]);
+      }
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Wunschliste 32: set ch.hops <name> <N|off>
     // Multi-Token: nach key ('ch.hops') folgen Channel-Name (kann
     // Spaces enthalten!) und am Ende der Wert. Wir parsen vom Ende:
@@ -10634,6 +11037,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
       const char* nm = (_prefs.loop_detect == 0) ? "off" : (_prefs.loop_detect == 1) ? "minimal" : (_prefs.loop_detect == 2) ? "moderate" : "strict";
       snprintf(r, sizeof(r), "loop_detect = %s", nm);
+    }
+    else if (strcmp(key, "time") == 0) {
+      // get time [sync]
+      const char* np = p + strlen("time");
+      while (*np == ' ' || *np == '\t') np++;
+      if (strncmp(np, "sync", 4) == 0
+          && (np[4] == 0 || np[4] == ' ' || np[4] == '\t')) {
+        if (_prefs.time_sync_mode == 0)      snprintf(r, sizeof(r), "time sync = off");
+        else if (_prefs.time_sync_mode == 1) snprintf(r, sizeof(r), "time sync = lazy");
+        else {
+          int n = snprintf(r, sizeof(r), "time sync = strict, sources:");
+          for (int i = 0; i < 3; i++) {
+            bool nz = (_prefs.time_sync_sources[i][0]
+                     || _prefs.time_sync_sources[i][1]
+                     || _prefs.time_sync_sources[i][2]);
+            if (nz && n < (int)sizeof(r))
+              n += snprintf(r + n, sizeof(r) - n, " %02x%02x%02x",
+                            _prefs.time_sync_sources[i][0],
+                            _prefs.time_sync_sources[i][1],
+                            _prefs.time_sync_sources[i][2]);
+          }
+        }
+      } else {
+        snprintf(r, sizeof(r), "Usage: get time sync");
+      }
     }
     else if (strcmp(key, "ch.hops") == 0) {
       // Multi-Token: 'get ch.hops <name>'. p zeigt auf "ch.hops..."
