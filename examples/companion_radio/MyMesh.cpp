@@ -12347,6 +12347,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else
         snprintf(line2, sizeof(line2), "  active = %s", active_val);
       pushCompanionMessage(line2);
+      // User-Feedback 2026-06-02: das war NUR die Send-Sicht. User
+      // hat 45 min nach der allowlist-Einstellung gesucht weil das
+      // hier suggerierte 'das ist alles'. Footer mit Verweis auf
+      // die anderen Sub-Befehle:
+      pushCompanionMessage(
+        "weitere Sub-Befehle:\n"
+        "  scope repeater  -- Repeating-Policy (mode, allowlist)\n"
+        "  scope list      -- bekannte scopes (Registry)\n"
+        "  scope <name>    -- per-Eintrag-Optionen\n"
+        "  scope ? / help scope -- volle Uebersicht");
       return;
     }
 
