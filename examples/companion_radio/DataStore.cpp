@@ -282,14 +282,14 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.log_flags, sizeof(_prefs.log_flags));                              // 1508
     file.read((uint8_t *)&_prefs.flood_max_infra, sizeof(_prefs.flood_max_infra));          // 1509
     file.read((uint8_t *)&_prefs.flood_max_req_resp, sizeof(_prefs.flood_max_req_resp));    // 1510
-    // Wunschliste 32: per-Channel-Hops + Unknown-Chan-Cap. Offset 1511.
-    // Vor file.read() haben wir _prefs.channel_hops_cap[] und
-    // flood_max_unknown_chan in MyMesh::begin() auf CH_HOPS_OFF gesetzt.
-    // Bei zu kurzer Datei (frische Installation / Firmware-Upgrade) bleibt
-    // dieser Default-Wert stehen; ein vorheriger Save ueberschreibt mit
-    // dem persistierten Wert.
-    file.read((uint8_t *)_prefs.channel_hops_cap, sizeof(_prefs.channel_hops_cap));         // 1511 (MAX_GROUP_CHANNELS byte)
-    file.read((uint8_t *)&_prefs.flood_max_unknown_chan, sizeof(_prefs.flood_max_unknown_chan)); // 1511+MAX_GROUP_CHANNELS
+    // Wunschliste 32 v2: per-Channel-Hops jetzt als Name-Hash-Liste
+    // (statt frueher Slot-Index-Array). Format-Change -> existing
+    // user-ch.hops gehen beim Firmware-Upgrade verloren (User-Hinweis
+    // in der Commit-Message; betrifft Dev-Branch).
+    // Offsets verschieben sich -- alle nachfolgenden Felder ebenfalls.
+    file.read((uint8_t *)&_prefs.flood_max_unknown_chan, sizeof(_prefs.flood_max_unknown_chan)); // 1511
+    file.read((uint8_t *)&_prefs.channel_hops_count, sizeof(_prefs.channel_hops_count));         // 1512
+    file.read((uint8_t *)_prefs.channel_hops_list, sizeof(_prefs.channel_hops_list));            // 1513 (MAX_GROUP_CHANNELS*5)
     // Wunschliste 31: time-sync mode + sources (10 byte)
     file.read((uint8_t *)&_prefs.time_sync_mode, sizeof(_prefs.time_sync_mode));            // 1512+MAX_GROUP_CHANNELS
     file.read((uint8_t *)_prefs.time_sync_sources, sizeof(_prefs.time_sync_sources));       // +1
@@ -367,9 +367,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.log_flags, sizeof(_prefs.log_flags));                              // 1508
     file.write((uint8_t *)&_prefs.flood_max_infra, sizeof(_prefs.flood_max_infra));          // 1509
     file.write((uint8_t *)&_prefs.flood_max_req_resp, sizeof(_prefs.flood_max_req_resp));    // 1510
-    // Wunschliste 32
-    file.write((uint8_t *)_prefs.channel_hops_cap, sizeof(_prefs.channel_hops_cap));         // 1511 (MAX_GROUP_CHANNELS byte)
-    file.write((uint8_t *)&_prefs.flood_max_unknown_chan, sizeof(_prefs.flood_max_unknown_chan)); // 1511+MAX_GROUP_CHANNELS
+    // Wunschliste 32 v2
+    file.write((uint8_t *)&_prefs.flood_max_unknown_chan, sizeof(_prefs.flood_max_unknown_chan)); // 1511
+    file.write((uint8_t *)&_prefs.channel_hops_count, sizeof(_prefs.channel_hops_count));         // 1512
+    file.write((uint8_t *)_prefs.channel_hops_list, sizeof(_prefs.channel_hops_list));            // 1513 (MAX_GROUP_CHANNELS*5)
     // Wunschliste 31
     file.write((uint8_t *)&_prefs.time_sync_mode, sizeof(_prefs.time_sync_mode));            // 1512+MAX_GROUP_CHANNELS
     file.write((uint8_t *)_prefs.time_sync_sources, sizeof(_prefs.time_sync_sources));       // +1

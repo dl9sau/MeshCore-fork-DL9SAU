@@ -1541,7 +1541,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       if (ch.name[0] == 0) continue;  // leerer Slot
       if (ch.channel.hash[0] != ch_hash) continue;
       matched = true;
-      uint8_t cap = _prefs.channel_hops_cap[ci];
+      uint8_t cap = _channel_hops_cap_cache[ci];
       if (cap == CH_HOPS_OFF) continue;
       // restriktivster Cap gewinnt (0 schlaegt alles, dann kleinster N)
       if (eff_cap == CH_HOPS_OFF || cap < eff_cap) eff_cap = cap;
@@ -1786,6 +1786,68 @@ static void stripReplyMentionDecoration(char* buf) {
       p = openpat + 1;  // direkt nach dem neu liegenden ']'
     } else {
       p = close + 1;
+    }
+  }
+}
+
+// =========================================================================
+// Wunschliste 32 v2: channel_hops_list (name-hash basiert)
+// =========================================================================
+
+int MyMesh::findChannelHopsEntry(uint32_t name_fnv1a) const {
+  for (uint8_t i = 0; i < _prefs.channel_hops_count; i++) {
+    if (_prefs.channel_hops_list[i].name_fnv1a == name_fnv1a) return i;
+  }
+  return -1;
+}
+
+// Upsert: aktualisiere existierenden Eintrag oder fuege neuen an.
+// Returns true bei Erfolg, false wenn Liste voll (nur bei neuem Eintrag).
+static bool channelHopsUpsert(NodePrefs& prefs, uint32_t name_fnv1a, uint8_t cap) {
+  for (uint8_t i = 0; i < prefs.channel_hops_count; i++) {
+    if (prefs.channel_hops_list[i].name_fnv1a == name_fnv1a) {
+      prefs.channel_hops_list[i].cap = cap;
+      return true;
+    }
+  }
+  if (prefs.channel_hops_count >= MAX_GROUP_CHANNELS) return false;
+  prefs.channel_hops_list[prefs.channel_hops_count].name_fnv1a = name_fnv1a;
+  prefs.channel_hops_list[prefs.channel_hops_count].cap = cap;
+  prefs.channel_hops_count++;
+  return true;
+}
+
+// Remove: loesche Eintrag aus Liste, kompaktiere. No-op falls nicht da.
+static void channelHopsRemove(NodePrefs& prefs, uint32_t name_fnv1a) {
+  for (uint8_t i = 0; i < prefs.channel_hops_count; i++) {
+    if (prefs.channel_hops_list[i].name_fnv1a == name_fnv1a) {
+      for (uint8_t j = i; j < prefs.channel_hops_count - 1; j++) {
+        prefs.channel_hops_list[j] = prefs.channel_hops_list[j + 1];
+      }
+      prefs.channel_hops_count--;
+      memset(&prefs.channel_hops_list[prefs.channel_hops_count], 0,
+             sizeof(NodePrefs::ChannelHopsEntry));
+      return;
+    }
+  }
+}
+
+void MyMesh::rebuildChannelHopsCache() {
+  // Companion-Eintrag (cap=0) sicherstellen -- ueberschreibt jeden User-
+  // Versuch, ihn anders zu setzen. Pre-Boot Garantie: companion wird nie
+  // repeated, auch wenn er irgendwie ins Funkfeld entfleucht.
+  // COMPANION_CHANNEL_NAME ist weiter unten definiert; hardcode "companion".
+  channelHopsUpsert(_prefs, fnv1a32_cstr("companion"), 0);
+
+  memset(_channel_hops_cap_cache, CH_HOPS_OFF, sizeof(_channel_hops_cap_cache));
+  for (int slot = 0; slot < MAX_GROUP_CHANNELS; slot++) {
+    ChannelDetails ch;
+    if (!getChannel(slot, ch)) continue;
+    if (ch.name[0] == 0) continue;
+    uint32_t h = fnv1a32_cstr(ch.name);
+    int idx = findChannelHopsEntry(h);
+    if (idx >= 0) {
+      _channel_hops_cap_cache[slot] = _prefs.channel_hops_list[idx].cap;
     }
   }
 }
@@ -3263,7 +3325,14 @@ void MyMesh::begin(bool has_display) {
   // User-explizit-gesetzten 0 ("don't repeat"). Ohne dieses Pre-Init
   // wuerde der memset(0)-Default flaechendeckend als "don't repeat"
   // interpretiert, was sicher nicht gewollt waere.
-  memset(_prefs.channel_hops_cap, CH_HOPS_OFF, sizeof(_prefs.channel_hops_cap));
+  // Wunschliste 32 v2: RAM-Cache fuer per-Channel-Hops. Default OFF.
+  // Wird in rebuildChannelHopsCache() aus _prefs.channel_hops_list (name-
+  // hash) befuellt, sobald Channels geladen sind.
+  memset(_channel_hops_cap_cache, CH_HOPS_OFF, sizeof(_channel_hops_cap_cache));
+  // Persistente Liste: leer als Default. Pre-Init vor loadPrefs damit
+  // fresh-install / Firmware-Upgrade keine geisterhaften Eintraege bekommt.
+  _prefs.channel_hops_count = 0;
+  memset(_prefs.channel_hops_list, 0, sizeof(_prefs.channel_hops_list));
   _prefs.flood_max_unknown_chan = CH_HOPS_OFF;
   // Wunschliste 12 update 2026-06-02: scope_regional_hops Default 3
   // VOR loadPrefs. Falls Datei kuerzer / fresh-install: bleibt 3 stehen.
@@ -4561,35 +4630,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     StrHelper::strncpy(channel.name, (char *)&cmd_frame[2], 32);
     memset(channel.channel.secret, 0, sizeof(channel.channel.secret));
     memcpy(channel.channel.secret, &cmd_frame[2 + 32], 16); // NOTE: only 128-bit supported
-    // Wunschliste 32: bei Channel-Loeschen (Name leer) oder bei
-    // Channel-Wechsel im selben Slot die per-Channel-Hops-Cap zuruecksetzen.
-    // Begruendung: User loescht einen Channel oft wenn etwas nicht
-    // funktioniert; nach Neueinrichtung erwartet er Default-Verhalten und
-    // keine alten "gedraendert" Reste. Companion-Slot wird hier nicht
-    // angefasst -- der wird ohnehin beim Boot via setupCompanionChannel()
-    // wieder forced auf 0.
-    if (channel_idx < MAX_GROUP_CHANNELS) {
-      ChannelDetails prev;
-      bool diff = true;
-      if (getChannel(channel_idx, prev)) {
-        // Identisch wenn Name+secret gleich -- dann KEIN Reset (User
-        // hat z.B. nur via 'add channel' den gleichen Channel nochmal
-        // gesetzt; existierende ch.hops-Wahl soll bleiben).
-        diff = strcmp(prev.name, channel.name) != 0
-               || memcmp(prev.channel.secret, channel.channel.secret, 16) != 0;
-      }
-      if (diff) {
-        // Companion-PSK NIE veraendern (forced wird im Boot gesetzt).
-        if (memcmp(prev.channel.secret, s_companion_psk_magic, 16) != 0
-            && memcmp(channel.channel.secret, s_companion_psk_magic, 16) != 0) {
-          _prefs.channel_hops_cap[channel_idx] = CH_HOPS_OFF;
-        }
-      }
-    }
+    // Wunschliste 32 v2: bei Channel-Wechsel im Slot rebuildChannelHops-
+    // Cache(). Der ch.hops-Eintrag ist Name-Hash-basiert; bei Channel-
+    // Aenderung greift automatisch der neue Mapping ueber rebuild. Alter
+    // diff-Reset-Hook entfaellt -- war fehleranfaellig bei App-Resync.
     if (setChannel(channel_idx, channel)) {
       saveChannels();
-      // savePrefs() falls oben channel_hops_cap geaendert wurde.
-      savePrefs();
+      rebuildChannelHopsCache();
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
@@ -6404,10 +6451,10 @@ void MyMesh::backupSaveToSerial() {
       ChannelDetails ch;
       if (!getChannel(i, ch)) continue;
       if (ch.name[0] == 0) continue;
-      if (_prefs.channel_hops_cap[i] == CH_HOPS_OFF) continue;
+      if (_channel_hops_cap_cache[i] == CH_HOPS_OFF) continue;
       if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) continue;
       char val[48];
-      snprintf(val, sizeof(val), "%s=%u", ch.name, (unsigned)_prefs.channel_hops_cap[i]);
+      snprintf(val, sizeof(val), "%s=%u", ch.name, (unsigned)_channel_hops_cap_cache[i]);
       char key[24];
       snprintf(key, sizeof(key), "ch_hops_%d", hidx++);
       kv_str(key, val);
@@ -7073,7 +7120,12 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       }
       return;
     }
-    // Wunschliste 32: ch_hops_N => "Name=Cap"
+    // Wunschliste 32 v2: ch_hops_N => "Name=Cap"
+    // Speichern via name-hash in channel_hops_list. Cache wird einmal am
+    // Ende rebuilt -- aber hier per-Entry direkt nach upsert -- ist OK,
+    // rebuild ist guenstig. Companion-Name wird zwar geupsertet wenn er
+    // im Backup steht, aber sein cap wird beim naechsten rebuild eh auf
+    // 0 zurueck geforced.
     if (val_type == 's' && strncmp(key, "ch_hops_", 8) == 0) {
       char raw[64];
       brExtractString(val_start, val_len, raw, sizeof(raw));
@@ -7082,23 +7134,15 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       *eq = 0;
       int cap = atoi(eq + 1);
       if (cap < 0 || cap > 63) { _br_skipped++; return; }
-      // Slot via Name finden
-      int slot = -1;
-      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-        ChannelDetails ch;
-        if (!getChannel(i, ch)) continue;
-        if (ch.name[0] == 0) continue;
-        if (strcmp(ch.name, raw) == 0) { slot = i; break; }
-      }
-      if (slot < 0) { _br_skipped++; return; }
-      // Companion-Slot nicht ueberschreiben (forced 0)
-      ChannelDetails ch; getChannel(slot, ch);
-      if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) {
-        _br_skipped++;
+      uint32_t h = fnv1a32_cstr(raw);
+      if (!channelHopsUpsert(_prefs, h, (uint8_t)cap)) {
+        _br_errors++;
+        Serial.printf("# ch.hops %s: list full, skipped.\r\n", raw);
         return;
       }
-      _prefs.channel_hops_cap[slot] = (uint8_t)cap;
       _br_applied++;
+      // Cache am Ende rebuilten waere ideal -- hier defensiv pro Entry.
+      rebuildChannelHopsCache();
       return;
     }
     _br_skipped++;
@@ -7161,10 +7205,11 @@ void MyMesh::setupCompanionChannel() {
   setChannel(target, nch);
   _companion_channel_idx = (uint8_t)target;
   saveChannels(); // persistieren, damit der Index ueber Reboots stabil bleibt
-  // Wunschliste 32: $companion-Channel darf NIE repeated werden -- forced 0.
-  // Selbst wenn der User irgendwie versucht haette, einen Wert zu setzen,
-  // wird das hier bei jedem Boot ueberschrieben (Sicherheitsmassnahme).
-  _prefs.channel_hops_cap[target] = 0;
+  // Wunschliste 32 v2: $companion-Channel darf NIE repeated werden.
+  // rebuildChannelHopsCache() macht einen force-Upsert vom companion-
+  // Eintrag (cap=0), bevor es den Cache neu aufbaut. Hier nur das
+  // Caching anschubsen.
+  rebuildChannelHopsCache();
 }
 
 // Setzt alle RAM-Statistik-Counter zurueck (analog simple_repeater
@@ -9139,7 +9184,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         ChannelDetails ch;
         if (!getChannel(i, ch)) continue;
         if (ch.name[0] == 0) continue;
-        uint8_t cap = _prefs.channel_hops_cap[i];
+        uint8_t cap = _channel_hops_cap_cache[i];
         if (cap == CH_HOPS_OFF) continue;  // nicht zeigen
         char line[80];
         if (cap == 0) snprintf(line, sizeof(line), "  %-20.20s = 0 (nicht repeaten)", ch.name);
@@ -9164,24 +9209,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     if (strcmp(arg, "clear") == 0) {
-      int n_cleared = 0;
-      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-        if (_prefs.channel_hops_cap[i] == CH_HOPS_OFF) continue;
-        ChannelDetails ch;
-        // $companion-Slot NICHT loeschen -- bleibt forced auf 0.
-        if (getChannel(i, ch)
-            && memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) {
-          continue;
-        }
-        _prefs.channel_hops_cap[i] = CH_HOPS_OFF;
-        n_cleared++;
-      }
+      // Liste leeren (alle Eintraege weg, ausser companion -- der wird
+      // vom rebuildChannelHopsCache() automatisch re-upsertet mit cap=0).
+      uint8_t before = _prefs.channel_hops_count;
+      _prefs.channel_hops_count = 0;
+      memset(_prefs.channel_hops_list, 0, sizeof(_prefs.channel_hops_list));
+      int n_cleared = before;  // grobe Schaetzung (companion war drin -> wird re-upsertet)
       if (_prefs.flood_max_unknown_chan != CH_HOPS_OFF) {
         _prefs.flood_max_unknown_chan = CH_HOPS_OFF;
         n_cleared++;
       }
+      rebuildChannelHopsCache();
       savePrefs();
-      char r[80]; snprintf(r, sizeof(r),
+      char r[100]; snprintf(r, sizeof(r),
         "OK - %d ch.hops Cap(s) geloescht.\n($companion bleibt forced auf 0.)",
         n_cleared);
       pushCompanionMessage(r);
@@ -11041,7 +11081,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Sicherheitsmassnahme, nicht aenderbar.");
         return;
       }
-      _prefs.channel_hops_cap[slot] = new_cap;
+      // Speichern via name-hash. Upsert oder remove je nach Wert.
+      uint32_t h = fnv1a32_cstr(ch.name);
+      if (new_cap == CH_HOPS_OFF) {
+        channelHopsRemove(_prefs, h);
+      } else {
+        if (!channelHopsUpsert(_prefs, h, new_cap)) {
+          pushCompanionMessage("Liste voll (max MAX_GROUP_CHANNELS Eintraege).");
+          return;
+        }
+      }
+      rebuildChannelHopsCache();
       savePrefs();
       char r[120];
       if (new_cap == CH_HOPS_OFF)
@@ -11332,7 +11382,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           if (slot < 0) {
             snprintf(r, sizeof(r), "Channel '%s' nicht gefunden.", chname);
           } else {
-            uint8_t cap = _prefs.channel_hops_cap[slot];
+            uint8_t cap = _channel_hops_cap_cache[slot];
             ChannelDetails ch; getChannel(slot, ch);
             if (cap == CH_HOPS_OFF) snprintf(r, sizeof(r), "ch.hops %s = off", ch.name);
             else if (cap == 0)      snprintf(r, sizeof(r), "ch.hops %s = 0 (nicht repeaten)", ch.name);

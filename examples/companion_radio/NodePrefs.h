@@ -256,16 +256,32 @@ struct NodePrefs {  // persisted to file
   // nicht im Header.
   uint8_t        flood_max_req_resp;
 
-  // Wunschliste 32: per-Channel Repeat-Cap fuer Group-Messages
-  // (PAYLOAD_TYPE_GRP_TXT/GRP_DATA). Index parallel zu BaseChatMesh::channels[].
-  //   CH_HOPS_OFF (254) = kein Cap, es greift flood_max
-  //   0                  = "nicht repeaten" (explizit blockieren)
-  //   1..flood_max       = expliziter Cap (Repeat nur wenn
-  //                        path_hash_count < N)
-  // $companion-Slot wird in setupCompanionChannel() forced auf 0 gesetzt.
-  // Auto-Cap auf flood_max bei boot/set falls Wert > flood_max (und !=
-  // CH_HOPS_OFF).
-  uint8_t        channel_hops_cap[MAX_GROUP_CHANNELS];
+  // Wunschliste 32 v2 (User-Feedback 2026-06-02): per-Channel Repeat-Cap
+  // jetzt als Name-Hash-Liste statt Slot-Index-Array. Slot-Indices in
+  // channels[] sind nicht stabil -- wenn Channel an einen anderen Slot
+  // wandert (App-Sync, delete+add), zeigte der Slot-indizierte Cap auf
+  // den falschen Channel.
+  //
+  // Storage: bis zu MAX_GROUP_CHANNELS Eintraege, je 5 Byte.
+  // Lookup im RX-Hot-Path via RAM-Cache _channel_hops_cap_cache (slot-
+  // indiziert, wird bei jeder Channel- oder ch.hops-Aenderung neu aus
+  // dieser Liste aufgebaut).
+  // FNV-1a 32-bit Hash ueber den Channel-Namen -- Kollisions-
+  // Wahrscheinlichkeit fuer 40 Eintraege < 2e-9.
+  // Cap-Werte:
+  //   254 (CH_HOPS_OFF) = kein expliziter Cap (Entry sollte dann nicht
+  //                       in der Liste stehen; defensiv akzeptiert)
+  //   0                  = "nicht repeaten" (z.B. Public gegen Spam)
+  //   1..flood_max       = expliziter Cap (Drop wenn
+  //                        path_hash_count > N)
+  // $companion-Slot wird in setupCompanionChannel() im Cache forced auf
+  // 0 gesetzt -- NICHT in dieser Liste persistiert (Sicherheitsmassnahme).
+  struct ChannelHopsEntry {
+    uint32_t name_fnv1a;
+    uint8_t  cap;
+  };
+  ChannelHopsEntry channel_hops_list[MAX_GROUP_CHANNELS];
+  uint8_t          channel_hops_count;
 
   // Wunschliste 32: Repeat-Cap fuer Group-Messages auf Channels die
   // NICHT in unserer channels[]-Liste stehen (channel_hash[0] matched

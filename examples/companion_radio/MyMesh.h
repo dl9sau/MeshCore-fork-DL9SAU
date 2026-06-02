@@ -319,6 +319,17 @@ protected:
   void timeSyncFinalizeLazyCollection();   // wird aus loop() / onAdvertRecv aufgerufen
   bool isGpsAuthoritative() const;
 
+  // Wunschliste 32 v2: RAM-Cache der channel_hops Werte pro Slot.
+  // Wird aus _prefs.channel_hops_list (name-hash-basiert, slot-stable)
+  // aufgebaut. Per-Paket-Lookup in shouldRepeat() ist O(channels-matching-
+  // ch_hash). Rebuild auf: boot (nach channels laden), CMD_SET_CHANNEL,
+  // set ch.hops / ch.hops clear, setupCompanionChannel.
+  uint8_t _channel_hops_cap_cache[MAX_GROUP_CHANNELS];
+  void rebuildChannelHopsCache();
+  // Hilfsfunktion: Eintrag in channel_hops_list per Name-Hash finden.
+  // Returns index in der Liste (0..count-1) oder -1.
+  int findChannelHopsEntry(uint32_t name_fnv1a) const;
+
   // Wunschliste 34/35: Runtime-effektiver Repeater-Zustand.
   // client_repeat ist der STORED user-wunsch. Effective ist abhaengig
   // vom profile (defensive vs normal) und im defensive-Fall auch von
