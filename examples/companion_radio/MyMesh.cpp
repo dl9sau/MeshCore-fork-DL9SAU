@@ -1670,6 +1670,87 @@ void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uin
   queueMessage(from, TXT_TYPE_SIGNED_PLAIN, pkt, sender_timestamp, sender_prefix, 4, text);
 }
 
+// =========================================================================
+// Wunschliste 35: Channel-Message Sender-Annotation + Reply-Mention-Strip
+// =========================================================================
+
+// FNV-1a 32-bit. Klein, deterministisch, byte-genau (UTF-8-safe ohne
+// Parse). Kollisions-Wahrscheinlichkeit bei 16 Eintraegen vernachlaessigbar.
+// Reply-Mention-Strip: entfernt ' (#...)' direkt vor ']' innerhalb von
+// '@[...]'-Mentions. In-place Mutation. User-Klammern ohne '#' bleiben
+// unangetastet. Robust gegen multiple Mentions, leere Mentions, mid-text.
+//
+// Beispiele:
+//   '@[X (#scope, direct)] hi'            -> '@[X] hi'
+//   '@[X (foo) (#scope)] hi'              -> '@[X (foo)] hi'
+//   '@[X] hi'                             -> '@[X] hi'  (no-op)
+//   '@[X (#scope)]'                       -> '@[X]'    (empty body)
+static void stripReplyMentionDecoration(char* buf) {
+  if (buf == NULL) return;
+  char* p = buf;
+  while ((p = strstr(p, "@[")) != NULL) {
+    char* close = strchr(p + 2, ']');
+    if (!close) break;
+    if (close - (p + 2) < 4 || close[-1] != ')') {
+      // Kein ')' direkt vor ']' -> kein Strip-Kandidat
+      p = close + 1;
+      continue;
+    }
+    // Backward-Scan im Bracket-Inhalt: letztes ' (#' suchen.
+    char* openpat = NULL;  // zeigt aufs ' ' vor '(#'
+    char* lim = p + 2;     // 1. Char nach '@['
+    for (char* q = close - 4; q >= lim; q--) {
+      if (q[0] == ' ' && q[1] == '(' && q[2] == '#') {
+        openpat = q;
+        break;
+      }
+    }
+    if (openpat) {
+      // memmove den Rest (close..end+null) nach openpat.
+      memmove(openpat, close, strlen(close) + 1);
+      p = openpat + 1;  // direkt nach dem neu liegenden ']'
+    } else {
+      p = close + 1;
+    }
+  }
+}
+
+uint32_t MyMesh::fnv1a32(const char* data, size_t len) {
+  uint32_t h = 0x811c9dc5UL;
+  for (size_t i = 0; i < len; i++) {
+    h ^= (uint8_t)data[i];
+    h *= 0x01000193UL;
+  }
+  return h;
+}
+uint32_t MyMesh::fnv1a32_cstr(const char* s) {
+  if (s == NULL) return 0;
+  return fnv1a32(s, strlen(s));
+}
+
+bool MyMesh::channelSenderSeenLookupOrAdd(uint32_t name_fnv1a,
+                                          uint32_t scope_fnv1a,
+                                          uint8_t direct_flag) {
+  for (uint8_t i = 0; i < _channel_sender_seen_count; i++) {
+    const ChannelSenderSeen& e = _channel_sender_seen[i];
+    if (e.name_fnv1a == name_fnv1a
+        && e.scope_fnv1a == scope_fnv1a
+        && e.direct_flag == direct_flag) return true;
+  }
+  // Nicht in Liste -> als neu eintragen (LRU-Wrap nach MAX).
+  uint8_t slot;
+  if (_channel_sender_seen_count < CHANNEL_SENDER_SEEN_MAX) {
+    slot = _channel_sender_seen_count++;
+  } else {
+    slot = _channel_sender_seen_next;
+    _channel_sender_seen_next = (uint8_t)((_channel_sender_seen_next + 1) % CHANNEL_SENDER_SEEN_MAX);
+  }
+  _channel_sender_seen[slot].name_fnv1a = name_fnv1a;
+  _channel_sender_seen[slot].scope_fnv1a = scope_fnv1a;
+  _channel_sender_seen[slot].direct_flag = direct_flag;
+  return false;
+}
+
 void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
                                   const char *text) {
   // Schutz 2026-06-01: $companion ist STRICT LOCAL -- von aussen darf
@@ -1682,37 +1763,58 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     MESH_DEBUG_PRINTLN("onChannelMessageRecv: dropping external $companion text");
     return;
   }
-  // Build an augmented text that exposes the packet's scope (region) name
-  // to the app, using a text-convention "Sender (#scope): msg". No
-  // wire-protocol change required.
-  //   scoped + known region   -> (#name)
-  //   scoped + unknown region -> (#?)  (raw transport_code is payload-
-  //                             dependent and not a stable identifier)
-  //   unscoped                -> (#*)  (borrowed from repeater allowf-*
-  //                             notation: wildcard / no scope)
+  // Wunschliste 35: Sender-Annotation '(#scope[, direct])' an Sender-Namen
+  // anhaengen -- aber NUR EINMAL pro (Name, Scope, Direct)-Tuple. Sonst
+  // bricht der App-Reply-Button die @-Mention-Sound-Logik weil der
+  // augmentierte Name '@[Name (#scope, direct)]' nicht mehr exact dem
+  // tatsaechlichen Sender-Namen entspricht. Trade-off: User sieht den
+  // Scope nur bei der ersten Nachricht eines Tuples; gut genug zum
+  // Identifizieren.
+  // direct_flag: pkt->path_len == 0 (direkt gehoert, kein Repeater
+  // im Pfad). Gilt fuer DIRECT-routed und FLOOD-routed (beide haben
+  // path_len 0 bei direktem Empfang).
   const char* effective_text = text;
-  char augmented[MAX_TEXT_LEN + 32];
+  char augmented[MAX_TEXT_LEN + 64];
   const char* sep = strstr(text, ": ");
   if (sep) {
+    // Sender-Name extrahieren (prefix vor ': ').
+    size_t name_len = (size_t)(sep - text);
+    uint32_t name_h = fnv1a32(text, name_len);
+    // Scope-Hash mit Sentinels:
+    //   0xFFFFFFFE = '#?' (scoped aber Region unbekannt)
+    //   0xFFFFFFFF = '#*' (unscoped)
+    uint32_t scope_h;
     const char* scope_label = NULL;
-    char buf[36];
+    char scope_buf[36];
     if (pkt->hasTransportCodes()) {
       const char* scope_name = lookupRegionByTransportCode(pkt);
       if (scope_name) {
-        snprintf(buf, sizeof(buf), "#%s", scope_name);
+        scope_h = fnv1a32_cstr(scope_name);
+        // Kollision mit Sentinel-Werten extrem unwahrscheinlich aber sicher:
+        if (scope_h == 0xFFFFFFFEUL || scope_h == 0xFFFFFFFFUL) scope_h ^= 0x12345678UL;
+        snprintf(scope_buf, sizeof(scope_buf), "#%s", scope_name);
       } else {
-        snprintf(buf, sizeof(buf), "#?");
+        scope_h = 0xFFFFFFFEUL;
+        snprintf(scope_buf, sizeof(scope_buf), "#?");
       }
-      scope_label = buf;
+      scope_label = scope_buf;
     } else {
+      scope_h = 0xFFFFFFFFUL;
       scope_label = "#*";
     }
-    size_t prefix_len = (size_t)(sep - text);
-    int n = snprintf(augmented, sizeof(augmented), "%.*s (%s)%s",
-                     (int)prefix_len, text, scope_label, sep);
-    if (n > 0 && n < (int)sizeof(augmented)) {
-      effective_text = augmented;
+    uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
+    bool already_seen = channelSenderSeenLookupOrAdd(name_h, scope_h, direct_flag);
+    if (!already_seen) {
+      // One-time Annotation. Format: 'Name (#scope[, direct]): text'
+      const char* dir_suffix = direct_flag ? ", direct" : "";
+      int n = snprintf(augmented, sizeof(augmented), "%.*s (%s%s)%s",
+                       (int)name_len, text, scope_label, dir_suffix, sep);
+      if (n > 0 && n < (int)sizeof(augmented)) {
+        effective_text = augmented;
+      }
     }
+    // else: schon gesehen -> kein Suffix, plain 'Sender: text'. So
+    // bleibt der App-Reply-Button sauber.
   }
 
   int i = 0;
@@ -2984,6 +3086,10 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _time_sync_lazy_count = 0;
   _time_sync_lazy_started_ms = 0;
   _time_sync_lazy_done = false;
+  // Wunschliste 35: channel-sender-seen Liste leer
+  memset(_channel_sender_seen, 0, sizeof(_channel_sender_seen));
+  _channel_sender_seen_count = 0;
+  _channel_sender_seen_next = 0;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -3626,6 +3732,12 @@ void MyMesh::handleCmdFrame(size_t len) {
       int tlen = len - i;
       uint32_t est_timeout;
       text[tlen] = 0; // ensure null
+      // Wunschliste 35: Reply-Mention-Strip. Falls App eine Reply mit
+      // augmentiertem Sender '@[Name (#scope...)]' sendet, das ' (#...)'
+      // entfernen damit Empfaenger-App-Sound auf @-Mention korrekt
+      // matcht. Im DM-Kontext nur defensive (Copy-Paste-Schutz).
+      stripReplyMentionDecoration(text);
+      tlen = (int)strlen(text);
       int result;
       uint32_t expected_ack;
       if (txt_type == TXT_TYPE_CLI_DATA) {
@@ -3710,7 +3822,18 @@ void MyMesh::handleCmdFrame(size_t len) {
       // the actual message body in the group payload.
       char short_sender[sizeof(_prefs.node_name)];
       copyShortSenderName(short_sender, sizeof(short_sender));
-      if (success && sendGroupMessage(msg_timestamp, channel.channel, short_sender, text, len - i)) {
+      // Wunschliste 35: Reply-Mention-Strip auf Channel-Send-Text.
+      // text zeigt in cmd_frame -- in eigenen Puffer kopieren um
+      // in-place zu mutieren ohne den Original-cmd_frame zu veraendern.
+      char mtext[MAX_TEXT_LEN];
+      int mlen_raw = len - i;
+      if (mlen_raw < 0) mlen_raw = 0;
+      if (mlen_raw >= (int)sizeof(mtext)) mlen_raw = sizeof(mtext) - 1;
+      memcpy(mtext, text, mlen_raw);
+      mtext[mlen_raw] = 0;
+      stripReplyMentionDecoration(mtext);
+      int mlen = (int)strlen(mtext);
+      if (success && sendGroupMessage(msg_timestamp, channel.channel, short_sender, mtext, mlen)) {
         // Autolearn des TX-Scope-Override aus Channel-Sends wurde entfernt:
         // wir mischten channel.secret (= Channel-Decryption-Key) und scope-
         // keys (= SHA-256("#name")) im selben Slot — zwei unterschiedliche
@@ -6977,6 +7100,10 @@ void MyMesh::clearStats() {
   _time_sync_lazy_count = 0;
   _time_sync_lazy_started_ms = 0;
   _time_sync_lazy_done = false;
+  // Wunschliste 35: channel-sender-seen Liste leer
+  memset(_channel_sender_seen, 0, sizeof(_channel_sender_seen));
+  _channel_sender_seen_count = 0;
+  _channel_sender_seen_next = 0;
   _tx_repeat_airtime_ms = 0;
   memset(_rx_flood_by_ptype, 0, sizeof(_rx_flood_by_ptype));
   memset(_repeat_by_ptype,        0, sizeof(_repeat_by_ptype));

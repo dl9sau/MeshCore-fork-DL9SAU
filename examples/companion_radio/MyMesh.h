@@ -962,6 +962,36 @@ private:
   uint8_t       _time_sync_last_pubkey[3];   // 3-Byte Prefix der zuletzt genutzten Quelle (Display)
   bool          _time_sync_done_since_boot;  // erster Sync nach Boot vollzogen (Boot-Drift-Bypass)
 
+  // ---- Wunschliste 35: Channel-Message Sender-Annotation (Once-per-Tuple) ----
+  // Bei Channel-Messages anhaengen einer Annotation '(#scope[, direct])' an
+  // den Sender-Anzeigenamen. Aber nur EINMAL pro (Name, Scope, Direct)-Tuple
+  // -- danach plain 'Name: text'. Vermeidet dass der App-Reply-Button mit
+  // dem augmentierten Namen '@[Name (#scope, direct)]' den App-Sound-Trigger
+  // verfehlt (App matched exact-name).
+  // Storage: 16 Eintraege global, FNV-1a 32-bit Hash ueber Name + Scope.
+  // Sentinels fuer scope_fnv1a:
+  //   0xFFFFFFFE = '#?' (scoped, aber unbekannte region)
+  //   0xFFFFFFFF = '#*' (unscoped)
+  //   andere     = FNV-1a vom Scope-Namen
+  struct ChannelSenderSeen {
+    uint32_t name_fnv1a;
+    uint32_t scope_fnv1a;
+    uint8_t  direct_flag;  // 0 = via repeats, 1 = direkt gehoert (path_len==0)
+  };
+  static const int CHANNEL_SENDER_SEEN_MAX = 16;
+  ChannelSenderSeen _channel_sender_seen[CHANNEL_SENDER_SEEN_MAX];
+  uint8_t           _channel_sender_seen_count;  // Anzahl belegter Slots (<= MAX)
+  uint8_t           _channel_sender_seen_next;   // naechster Slot fuer LRU-Wrap
+
+  // FNV-1a 32-bit Hash-Helper.
+  static uint32_t fnv1a32(const char* data, size_t len);
+  static uint32_t fnv1a32_cstr(const char* s);
+  // Liefert true wenn das Tuple in der seen-Liste war (also schon annotiert).
+  // Andernfalls: ein neuer Eintrag wird angelegt und false zurueckgegeben
+  // (caller fuegt die Annotation diesmal hinzu).
+  bool channelSenderSeenLookupOrAdd(uint32_t name_fnv1a, uint32_t scope_fnv1a,
+                                    uint8_t direct_flag);
+
   // Lazy-Mode Boot-Collection-Phase: bis zu 5 Kandidaten ueber 3 Min
   // sammeln, dann Cluster-Auswertung. RAM-only, einmal pro Boot.
   struct TimeSyncCandidate {
