@@ -1927,3 +1927,78 @@ Quelle: User-Wunsch 2026-06-01, eingefroren als Wunschliste-Eintrag
 nach erneutem Hinweis ("Wir hatten mal besprochen ... finde keinen
 help-Befehl ... haben wir wohl nicht umgesetzt"). Verfeinerung in
 Folgesession nach Detail-Diskussion.
+
+
+--------------------------------------------------------------------------------
+32. Per-Channel-Hop-Limit (Anti-Spam, dt267-Inspiration)
+--------------------------------------------------------------------------------
+
+Hintergrund:
+  Beobachtung des dt267-Projekts (MeshCore-Low-Power-Firmware-For-
+  Heltec-V3-V4): per-Channel konfigurierbares Hop-Limit. Use-Case:
+  Spam-Begrenzung im Public-Channel. Public ist offen, jeder kann
+  reinposten -- wenn jemand "kreativ" wird und Mesh-weit flutet, kann
+  ein engerer Hop-Cap fuer diesen einen Channel das Mesh entlasten,
+  ohne andere Channels zu beeintraechtigen.
+
+Ist-Zustand bei uns:
+  Globales flood_max + flood_max_infra + flood_max_req_resp greifen
+  fuer ALLES gleichermassen. Channel-spezifische Caps gibt es nicht.
+
+Soll-Verhalten:
+  Pro ChannelDetails-Slot ein Hop-Cap. 0 = kein zusaetzlicher Cap
+  (es greift flood_max), >0 = harter Cap fuer Group-Messages auf
+  diesem Channel. Im Repeater-shouldRepeat()-Pfad pruefen ob
+  Paket-Typ Group ist und packet->getPathHashCount() > ch.hops_cap.
+
+CLI-Vorschlag:
+  set ch.hops <channel-name> <N>     -- z.B. 'set ch.hops Public 3'
+  get ch.hops <channel-name>
+  set ch.hops <channel-name> 0       -- Cap entfernen
+
+Storage:
+  Erweiterung der ChannelDetails-Struct oder separater parallelem
+  Array. Erstere Variante ist sauberer aber bricht das Storage-
+  Format (channels-Datei). Separates Array haelt das Format stabil.
+
+Default-Empfehlung:
+  Public-Channel auf 3-4 Hops (oft sinnvoll, dt267 setzt aehnlich).
+  Hashtag-Channels Default 0 (kein Cap), User kann erhoehen wenn
+  Spam-Problem auftritt.
+  $companion-Channel ist lokal, Cap irrelevant.
+
+Quelle: User-Beobachtung 2026-06-02 ueber dt267-Fork-Feature.
+
+
+--------------------------------------------------------------------------------
+33. BLE-Sleep wenn kein App-Companion verbunden (dt267-Inspiration)
+--------------------------------------------------------------------------------
+
+Hintergrund:
+  dt267 schaltet BLE-Stack ab/in-Sleep wenn ueber laengere Zeit kein
+  App-Companion connected ist. Spart erheblich Strom -- der BLE-Stack
+  ist auf ESP32-S3 ein nicht-trivialer Idle-Verbraucher. Powerbank-
+  Use-Case: Tracker laeuft Tage am Stueck ohne USB-Host und ohne
+  App-Verbindung, BLE im Idle frisst unnoetig Energie.
+
+Ist-Zustand bei uns:
+  BLE laeuft permanent, advertised dauerhaft. Verbrauchs-Reserve
+  liegt im 5-15mA-Bereich (ESP32-S3 BLE-Idle).
+
+Soll-Verhalten:
+  - Timeout nach disconnect (z.B. 10 min): BLE in Sleep / disable.
+  - Wakeup-Mechanismen:
+    * GPIO-Button-Press (existierender Hardware-Knopf)?
+    * Periodisches kurzes Wake-Window (z.B. 1 min alle 30 min)?
+    * Time-of-Day-Schedule?
+  - Re-Advertise wenn Wake, kurze Fenster genug fuer App-Reconnect.
+
+Caveats:
+  - Wenn BLE schlaeft kommt der User nicht mehr per App ran. Recovery
+    nur via USB-Serial moeglich -- muss klar dokumentiert werden.
+  - User-Erwartung "App-Verbindung sollte immer funktionieren" vs
+    Stromsparen. Eventuell als Opt-In.
+  - dt267-Quelle pruefen wie sie das exakt machen.
+
+Quelle: dt267-Beobachtung 2026-06-02. Eigene Recherche im dt267-
+Source noetig sobald implementiert werden soll.
