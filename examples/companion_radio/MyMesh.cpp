@@ -4217,11 +4217,11 @@ void MyMesh::handleCmdFrame(size_t len) {
       _prefs.freq = (float)freq / 1000.0;
       _prefs.bw = (float)bw / 1000.0;
       _prefs.client_repeat = repeat;
-      // Force-Flag wird gecleared sobald der Repeater per App deaktiviert
-      // wird. Damit muss er erneut per Companion "repeater on force"
-      // aktiviert werden — verhindert dass jemand per App ein/aus toggelt
-      // und dabei den force-Modus stillschweigend reaktiviert.
-      if (!repeat) _prefs.client_repeat_force = 0;
+      // User-Wunsch 2026-06-02: client_repeat_force persistent halten
+      // auch wenn der Repeater per App ausgeschaltet wird. Vorher wurde
+      // force bei !repeat gecleart, was unerwartet war: nach erneutem
+      // 'repeater on' musste der User wieder 'force' angeben obwohl er
+      // die Einstellung explizit gesetzt hatte.
       savePrefs();
 
       applyRadioPolicy();
@@ -8012,25 +8012,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "repeater")) {
         pushCompanionMessage(
-          "repeater [on [force] | off]: schaltet client_repeat ein/aus. "
-          "'on' prueft die Freq gegen einen strict-Range (z.B. 869.618 MHz "
-          "NICHT enthalten)."
-        );
+          "repeater [on [force] | off]:\n"
+          "  schaltet Repeating ein/aus. Verhalten gemaess\n"
+          "  gewaehltem profile (defensive | normal).");
         pushCompanionMessage(
-          "'force' ueberspringt diesen Check; signalFitsInIsmBand "
-          "bleibt aktiv. Force-Flag wird persistiert und beim App-'aus' "
-          "gecleared. Ohne Arg -> Status."
-        );
+          "  Ohne Arg -> Status (siehe unten).");
         pushCompanionMessage(
-          "repeater profile [defensive | normal]: Filter-Tiefe.");
+          "profile=defensive (Default; = 'client_repeat'):\n"
+          "  PATH nur fuer lokale Endpoints,\n"
+          "  reduzierte Power + CR5. Bei is_moving:\n"
+          "  Repeating wird automatisch pausiert.");
         pushCompanionMessage(
-          "  defensive (Default):\n"
-          "    PATH nur fuer lokale Endpoints,\n"
-          "    Repeats mit reduzierter Power + CR5.");
+          "profile=normal:\n"
+          "  vollwertiger Repeater, alle PATH-Pakete,\n"
+          "  volle Power + konfigurierte CR.\n"
+          "Wechsel via 'repeater profile <defensive|normal>'");
         pushCompanionMessage(
-          "  normal:\n"
-          "    ALLE PATH-Pakete repeaten, volle Power +\n"
-          "    konfigurierte CR (= echter Repeater).");
+          "force (nur fuer defensive relevant):\n"
+          "  Ohne force prueft 'repeater on' die Freq gegen\n"
+          "  eine strict-Range (EU 869.618 MHz NICHT enthalten,\n"
+          "  dort sind lange Repeats nicht regelkonform).");
+        pushCompanionMessage(
+          "  'repeater on force' umgeht den Check.\n"
+          "  Persistent ueber on/off (nicht gecleart).\n"
+          "  signalFitsInIsmBand bleibt immer aktiv.");
         return;
       }
       if (topic_prefix_match(topic, "status")) {
@@ -13476,62 +13481,58 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (!arg || *arg == 0) {
       uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
       bool strict_ok = isValidClientRepeatFreq(f_khz);
-      char line[160];
-      // C1: Multi-Line statt einer langen Zeile (User-Wunsch).
-      // Wunschliste 6b: loop_detect mit anzeigen wenn != off.
       const char* ld = (_prefs.loop_detect == 0) ? "off"
                      : (_prefs.loop_detect == 1) ? "minimal"
                      : (_prefs.loop_detect == 2) ? "moderate" : "strict";
-      // Suffix-Logik fuer repeater=on:
-      //   (force needed, strict=no) -- force gesetzt UND aktuell noetig
-      //                                (Freq ausserhalb strict-Range,
-      //                                z.B. EU 869.618 MHz Hauptfrequenz)
-      //   (force)                   -- force gesetzt, aktuell NICHT noetig
-      //                                (Freq ist strict-compliant -- z.B.
-      //                                wurde Freq nach 'repeater on force'
-      //                                auf compliant umgestellt)
-      //   (strict=no)               -- ohne force, Freq non-strict
-      //                                (Anomalie: kann passieren wenn Freq
-      //                                nach Repeater-Start gewechselt
-      //                                wurde, evtl. ist 'repeater off/on
-      //                                force' notwendig)
-      //   (nichts)                  -- clean state
-      char rep_suffix[40] = "";
-      if (_prefs.client_repeat) {
-        bool has_force = _prefs.client_repeat_force != 0;
-        bool flag_strict = !strict_ok;
-        if (has_force && flag_strict)      snprintf(rep_suffix, sizeof(rep_suffix), " (force needed, strict=no)");
-        else if (has_force)                snprintf(rep_suffix, sizeof(rep_suffix), " (force)");
-        else if (flag_strict)              snprintf(rep_suffix, sizeof(rep_suffix), " (strict=no)");
-      }
-      // Wunschliste 34: bei defensive+is_moving Repeating temporaer aus.
-      bool suspended = (_prefs.client_repeat != 0
-                        && _prefs.repeater_profile == 0
-                        && _is_moving);
-      // Hauptblock ohne suspended-Zeile. Worst-Case-Laenge:
-      //   "repeater=on (force needed, strict=no)\n" = 38
-      //   "profile=defensive\n" = 18
-      //   "loop_detect=strict (inaktiv -- profile=defensive)\n" = 50
-      //   "freq=869.6180 MHz" = 17
-      //   total ~123 Byte -- sicher unter 145-Byte-Companion-Limit.
+      // Inline-Suffix in 'repeater=on'-Zeile: Bewegungs-Status.
+      // Nur fuer defensive (profile=0) relevant -- normal-Profile wird
+      // bei is_moving NICHT pausiert (siehe Wunschliste 34).
+      bool paused = (_prefs.client_repeat != 0
+                     && _prefs.repeater_profile == 0
+                     && _is_moving);
+      const char* move_suffix = paused ? ", paused (currently moving)" : "";
+
+      // loop_detect-Inaktiv-Note: nur wenn loop_detect != off UND
+      // profile=defensive (Loop-Detect greift nur in normal-Profile).
+      const char* ld_note = (_prefs.repeater_profile != 1 && _prefs.loop_detect != 0)
+                            ? " (inaktiv: profile=defensive)" : "";
+
+      char line[160];
       snprintf(line, sizeof(line),
                "repeater=%s%s\n"
                "profile=%s\n"
                "loop_detect=%s%s\n"
                "freq=%.4f MHz",
                _prefs.client_repeat ? "on" : "off",
-               rep_suffix,
+               move_suffix,
                _prefs.repeater_profile == 1 ? "normal" : "defensive",
-               ld,
-               (_prefs.repeater_profile != 1 && _prefs.loop_detect != 0)
-                   ? " (inaktiv -- profile=defensive)" : "",
+               ld, ld_note,
                _prefs.freq);
       pushCompanionMessage(line);
-      // Suspended-Hinweis als eigene Message, sonst koennten alle drei
-      // Sonderfaelle zusammen (force+strict, suspended, loop_detect-inaktiv)
-      // den 145-Byte-Limit reissen.
-      if (suspended) {
-        pushCompanionMessage("  temporary suspended: is_moving");
+
+      // Band-check-force Status als separate Message -- nur wenn Anomalie
+      // oder explizit force gesetzt. force ist nur fuer profile=defensive
+      // relevant (normal-Profile prueft die Freq nicht gegen client-rep-
+      // Range -- echter Repeater ist Admin-Verantwortung).
+      // Tabelle der Faelle (nur profile=defensive):
+      //   force=on,  needed   -> "band-check force: on (needed)"
+      //   force=on,  no-need  -> "band-check force: on"
+      //   force=off, needed   -> "band-check force: off
+      //                            (would block 'repeater on' -- use force)"
+      //   force=off, no-need  -> (nichts -- alles sauber)
+      if (_prefs.repeater_profile == 0) {
+        bool has_force = _prefs.client_repeat_force != 0;
+        bool freq_non_strict = !strict_ok;
+        const char* bc = NULL;
+        if (has_force && freq_non_strict) {
+          bc = "band-check force: on (needed)";
+        } else if (has_force) {
+          bc = "band-check force: on";
+        } else if (freq_non_strict) {
+          bc = "band-check force: off\n"
+               "  (would block 'repeater on' -- use 'repeater on force')";
+        }
+        if (bc) pushCompanionMessage(bc);
       }
       return;
     }
@@ -13588,7 +13589,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (rm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
     if (rm == 0) {
       _prefs.client_repeat = 0;
-      _prefs.client_repeat_force = 0;  // Force-Modus mit "off" beenden
+      // force-Flag bewusst NICHT cleared (User-Wunsch 2026-06-02):
+      // persistent ueber on/off, damit erneutes 'repeater on' nicht
+      // wieder explizites 'force' verlangt wenn der User es schon
+      // einmal gesetzt hat. 'prefs reset' loescht weiterhin alles.
       savePrefs();
       pushCompanionMessage("OK - repeater off.");
       return;
