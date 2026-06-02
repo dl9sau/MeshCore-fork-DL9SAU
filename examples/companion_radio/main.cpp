@@ -127,10 +127,16 @@ void setup() {
   // (Boot ohne USB-Host -> Tracker bleibt an "Loading..." haengen, bis
   // jemand cu / Serial-Console oeffnet). Empirisch nachgewiesen 2026-05-31.
   //
-  // Mit einem kleinen aber non-zero Wert (5 ms) wird der Underflow vermieden
+  // Mit einem kleinen aber non-zero Wert wird der Underflow vermieden
   // und Blockzeiten sind unter der BLE-Supervision-Schwelle.
+  // 1 ms statt frueher 5 ms (User-Report 2026-06-02): bei Powerbank-Use
+  // und vielen kurz aufeinander folgenden Serial.write-Aufrufen (z.B.
+  // 'backup save' mit hunderten Lines) summieren sich 5 ms × N zu BLE-
+  // Supervision-Reiss-Time. 1 ms × N ist 5x sicherer; zusaetzlich gibt
+  // es jetzt 'if (Serial)'-Guards an den heissen Stellen (backupSave,
+  // pushDebugLog).
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
-  Serial.setTxTimeoutMs(5);
+  Serial.setTxTimeoutMs(1);
 #endif
 
 #if defined(ESP32) && !defined(WIFI_SSID)

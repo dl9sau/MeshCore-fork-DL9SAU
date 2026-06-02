@@ -6111,10 +6111,24 @@ void MyMesh::formatLatLonDM(char* out, size_t out_size, double lat, double lon) 
 // Format: pretty-printed multi-line, eine "key": value Zeile pro Feld
 // (Komma davor wenn nicht erste Zeile -> Tracking via 'first' Flag).
 void MyMesh::backupSaveToSerial() {
+  // Guard: USB-Serial muss verbunden sein. Sonst stauen sich hunderte
+  // Serial.print()-Aufrufe im HWCDC-TX-Buffer, jeder kann (bei DTR-true
+  // ohne aktiv lesendem Host) bis zu tx_timeout_ms blockieren --
+  // cumulative kann das BLE-Supervision-Timeout reissen und die App-
+  // Verbindung abreisst (User-Report 2026-06-02, Powerbank-Use-Case).
+  // Mit 'if (!Serial)' (HWCDC::operator bool() == isCDC_Connected())
+  // halten wir die Backup-Action zurueck wenn kein Host bereit ist.
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  if (!Serial) {
+    pushCompanionMessage(
+      "backup save: USB-Serial nicht verbunden.\n"
+      "Terminal anschliessen (z.B. cu / minicom) und\n"
+      "danach Befehl erneut absetzen.");
+    return;
+  }
+#endif
   bool first;
-  // Hilfs-Lambdas. Schreiben direkt auf Serial -- USB-CDC mit
-  // setTxTimeoutMs(0) ist non-blocking, mit angeschlossenem Host (was
-  // fuer Backup zwingend ist) drained das OS schnell genug.
+  // Hilfs-Lambdas. Schreiben direkt auf Serial.
   auto kv_uint = [&](const char* name, uint32_t v) {
     if (!first) Serial.println(",");
     first = false;
@@ -13871,18 +13885,35 @@ void MyMesh::pushDebugLog(const char* fmt, ...) {
   // Geblubber sonst die App-Frame-Stream zerstoeren -- da der User in
   // dem Fall auch nicht ueber die App das Logging abschalten koennte,
   // ist 'per Default aus' universell sicher.
+  // Zusaetzlich: USB-CDC-Connect-Check. Auf Powerbank (kein Host) wuerden
+  // die write()-Aufrufe sonst evtl. blockieren und das BLE-Supervision-
+  // Timeout reissen (User-Report 2026-06-02). Bei 'if (!Serial)' wird der
+  // ganze Log-Ausgabe-Pfad ohne Risiko geskipped.
   // CRLF-Uebersetzung wie zuvor (LF -> CRLF, multiline-aware).
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  if ((_prefs.log_flags & 0x01) && Serial) {
+#else
   if (_prefs.log_flags & 0x01) {
-    for (int i = 0; i < n; i++) {
+#endif
+    // CRLF-Expansion in lokalen Buffer, dann EIN einzelner Serial.write
+    // statt zeichenweise. Hintergrund (User-Erkenntnis 2026-06-02):
+    // jedes einzelne Serial.write kann bei DTR-true-ohne-aktivem-Host
+    // bis tx_timeout_ms blockieren. 200 Aufrufe = 200x Blockzeit, was
+    // BLE-Supervision-Timeout reisst. EIN Write ueber den gesamten
+    // Buffer hat nur EINE Blockphase.
+    char out[200 * 2 + 4];  // max Expansion: jedes Byte -> CRLF
+    int oi = 0;
+    for (int i = 0; i < n && oi < (int)sizeof(out) - 2; i++) {
       if (buf[i] == '\n' && (i == 0 || buf[i - 1] != '\r')) {
-        Serial.write('\r');
+        out[oi++] = '\r';
       }
-      Serial.write(buf[i]);
+      out[oi++] = buf[i];
     }
-    if (buf[n - 1] != '\n') {
-      Serial.write('\r');
-      Serial.write('\n');
+    if (n > 0 && buf[n - 1] != '\n' && oi < (int)sizeof(out) - 2) {
+      out[oi++] = '\r';
+      out[oi++] = '\n';
     }
+    if (oi > 0) Serial.write((const uint8_t*)out, (size_t)oi);
   }
 
   // Push to app debug log if connected. Frame: [PUSH_CODE][text bytes, no null].
