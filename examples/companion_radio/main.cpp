@@ -139,6 +139,20 @@ void setup() {
   Serial.setTxTimeoutMs(1);
 #endif
 
+#ifdef ESP32
+  // DL9SAU 2026-06-02: ESP_LOG-Flut der Arduino-ESP32-Libraries
+  // (insb. BLE-Stack) komplett stillstellen. Beobachtet: bei BLE-
+  // disconnect spammed BLECharacteristic::notify() 'rc=-1 Unknown
+  // ESP_ERR' im Sekundentakt -- jeder log_e()-Aufruf erzeugt
+  // Serial-Output, was bei nicht-drained CDC zu Block-Akkumulation
+  // fuehrt. Wir haben unseren eigenen pushDebugLog (gated von
+  // log_flags), brauchen die generischen ESP-LIB-Errors nicht im
+  // Companion-Channel-Build.
+  // Falls jemand fuer ESP-IDF-Debugging die Logs wieder will,
+  // diesen Aufruf temporaer auskommentieren.
+  esp_log_level_set("*", ESP_LOG_NONE);
+#endif
+
 #if defined(ESP32) && !defined(WIFI_SSID)
   // Power down the WiFi side of the radio when only BLE/USB is used.
   // Saves ~10-20 mA on ESP32-S3 idle current.
