@@ -1212,34 +1212,13 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
 
 void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
                           uint32_t sender_timestamp, const uint8_t *extra, int extra_len, const char *text) {
-  int i = 0;
-  if (app_target_ver >= 3) {
-    out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV_V3;
-    out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
-    out_frame[i++] = 0; // reserved1
-    out_frame[i++] = 0; // reserved2
-  } else {
-    out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV;
-  }
-  memcpy(&out_frame[i], from.id.pub_key, 6);
-  i += 6; // just 6-byte prefix
-  uint8_t path_len = out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
-  out_frame[i++] = txt_type;
-  memcpy(&out_frame[i], &sender_timestamp, 4);
-  i += 4;
-  if (extra_len > 0) {
-    memcpy(&out_frame[i], extra, extra_len);
-    i += extra_len;
-  }
-
-  // Wunschliste 35: Once-per-Tuple Annotation auch fuer DMs. Im DM-Pfad
-  // gibt es keinen 'Sender: text'-Praefix -- der Sender ist im Paket-
-  // Header (pub_key). Wir haengen die Annotation deshalb als Footer-Zeile
-  // an den Text an: 'text\n— (#scope[, direct])'. Nur einmal pro
-  // (Sender-Pub-Key-6B, Scope, Direct)-Tuple. Folge-DMs vom selben
-  // Sender bleiben unannotiert. Nur fuer PLAIN/SIGNED_PLAIN, nicht CLI.
-  const char* effective_text = text;
-  char augmented[MAX_TEXT_LEN + 64];
+  // Wunschliste 35 (DM): once-per-tuple Scope-/Direct-Annotation als
+  // SEPARATE Vorab-Message '[#scope, direct]'. Separate Frame statt
+  // Footer im Original-Text: (1) keine Laengen-Limit-Konflikte bei
+  // langen DMs, (2) [...] signalisiert visuell 'das ist Metadata, nicht
+  // vom Sender'. Vorab-Timestamp = sender_timestamp - 1 damit die
+  // Annotation chronologisch oberhalb der eigentlichen Nachricht
+  // einsortiert wird.
   if (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN) {
     uint32_t name_h = fnv1a32((const char*)from.id.pub_key, 6);
     uint32_t scope_h;
@@ -1263,20 +1242,60 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
     bool already_seen = channelSenderSeenLookupOrAdd(name_h, scope_h, direct_flag);
     if (!already_seen) {
-      const char* dir_suffix = direct_flag ? ", direct" : "";
-      int n = snprintf(augmented, sizeof(augmented), "%s\n— (%s%s)",
-                       text, scope_label, dir_suffix);
-      if (n > 0 && n < (int)sizeof(augmented)) {
-        effective_text = augmented;
+      // Separate Vorab-Frame mit Metadata-Text.
+      char meta_text[48];
+      snprintf(meta_text, sizeof(meta_text), "[%s%s]",
+               scope_label, direct_flag ? ", direct" : "");
+      uint32_t meta_ts = sender_timestamp > 0 ? (sender_timestamp - 1) : sender_timestamp;
+      int mi = 0;
+      if (app_target_ver >= 3) {
+        out_frame[mi++] = RESP_CODE_CONTACT_MSG_RECV_V3;
+        out_frame[mi++] = (int8_t)(pkt->getSNR() * 4);
+        out_frame[mi++] = 0;  // reserved1
+        out_frame[mi++] = 0;  // reserved2
+      } else {
+        out_frame[mi++] = RESP_CODE_CONTACT_MSG_RECV;
       }
+      memcpy(&out_frame[mi], from.id.pub_key, 6);
+      mi += 6;
+      out_frame[mi++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
+      out_frame[mi++] = TXT_TYPE_PLAIN;
+      memcpy(&out_frame[mi], &meta_ts, 4);
+      mi += 4;
+      // extra-Section: leer fuer Metadata (kein ACK-Hash o.ae.)
+      int mtlen = (int)strlen(meta_text);
+      if (mi + mtlen > MAX_FRAME_SIZE) mtlen = MAX_FRAME_SIZE - mi;
+      memcpy(&out_frame[mi], meta_text, mtlen);
+      mi += mtlen;
+      addToOfflineQueue(out_frame, mi);
     }
   }
 
-  int tlen = strlen(effective_text); // TODO: UTF-8 ??
+  int i = 0;
+  if (app_target_ver >= 3) {
+    out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV_V3;
+    out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
+    out_frame[i++] = 0; // reserved1
+    out_frame[i++] = 0; // reserved2
+  } else {
+    out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV;
+  }
+  memcpy(&out_frame[i], from.id.pub_key, 6);
+  i += 6; // just 6-byte prefix
+  uint8_t path_len = out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
+  out_frame[i++] = txt_type;
+  memcpy(&out_frame[i], &sender_timestamp, 4);
+  i += 4;
+  if (extra_len > 0) {
+    memcpy(&out_frame[i], extra, extra_len);
+    i += extra_len;
+  }
+
+  int tlen = strlen(text); // TODO: UTF-8 ??
   if (i + tlen > MAX_FRAME_SIZE) {
     tlen = MAX_FRAME_SIZE - i;
   }
-  memcpy(&out_frame[i], effective_text, tlen);
+  memcpy(&out_frame[i], text, tlen);
   i += tlen;
   addToOfflineQueue(out_frame, i);
 
@@ -6191,17 +6210,13 @@ void MyMesh::backupSaveToSerial() {
     Serial.print("]");
   };
 
-  // Identity ueber Public-API auslesen: LocalIdentity::writeTo schreibt
-  // PRV (64) + PUB (32) = 96 Byte hintereinander.
-  uint8_t id_buf[PRV_KEY_SIZE + PUB_KEY_SIZE];
-  size_t  id_len = self_id.writeTo(id_buf, sizeof(id_buf));
-  (void)id_len;  // immer 96 bei aktueller Impl
-
-  // Helper: nested _meta-Block schreiben. Enthaelt fw_version,
-  // pubkey (64 hex = full PUB_KEY_SIZE), prv_key (128 hex = full
-  // PRV_KEY_SIZE Ed25519 expanded form).
-  // ACHTUNG: prv_key ist GEHEIM -- wer ihn besitzt kann diese Node
-  // imitieren. Backup-Datei entsprechend behandeln.
+  // Helper: nested _meta-Block schreiben. Enthaelt fw_version + pubkey
+  // (= Identitaets-Anker zum Verifizieren). KEIN prv_key mehr im
+  // Backup -- User-Wunsch 2026-06-02: damit der private Schluessel
+  // nicht versehentlich in Logs/Backup-Dateien/Cloud-Sync abhanden
+  // kommt. Wer eine Identitaet auf ein neues Geraet migrieren will,
+  // nutzt explizit den prv.key-Pfad (set prv.key NEW, manuelle
+  // Schluessel-Eingabe etc.).
   auto emit_meta = [&]() {
     if (!first) Serial.println(",");
     first = false;
@@ -6213,19 +6228,12 @@ void MyMesh::backupSaveToSerial() {
     for (int i = 0; i < PUB_KEY_SIZE; i++) {
       char b[3]; snprintf(b, sizeof(b), "%02x", self_id.pub_key[i]); Serial.print(b);
     }
-    Serial.println("\",");
-    Serial.print("    \"prv_key\": \"");
-    // id_buf-Layout: [0..PRV_KEY_SIZE) = prv_key, [PRV..PRV+PUB) = pub_key
-    for (size_t i = 0; i < PRV_KEY_SIZE; i++) {
-      char b[3]; snprintf(b, sizeof(b), "%02x", id_buf[i]); Serial.print(b);
-    }
     Serial.println("\"");
     Serial.print("  }");
   };
 
   // -------- Block 1: DL9SAU prefs --------
   Serial.println();
-  Serial.println("# !!! Enthaelt private Schluessel im _meta-Block. Geheim halten. !!!");
   Serial.println("--- BACKUP DL9SAU PREFS BEGIN ---");
   Serial.println("{");
   first = true;
