@@ -8024,8 +8024,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "get <key>\n  einzelner Wert");
         pushCompanionMessage(
-          "Keys: identisch zu 'set' (siehe 'help set'). Plus:\n"
-          "  flood.max (alias flood_max), scope_regional_hops");
+          "Keys wie 'set' (siehe 'help set').\n"
+          "Alle underscore-Keys auch mit Punkt:\n"
+          "  z.B. flood.max statt flood_max.");
+        pushCompanionMessage(
+          "Per-Channel ch.hops:\n"
+          "  get ch.hops <name>   einzelner Channel\n"
+          "  ch.hops status       komplette Liste\n"
+          "  ('help ch.hops' fuer Details)");
         return;
       }
       if (topic_prefix_match(topic, "clock") || topic_prefix_match(topic, "date")
