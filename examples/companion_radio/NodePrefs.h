@@ -278,9 +278,21 @@ struct NodePrefs {  // persisted to file
   //                        path_hash_count > N)
   // $companion-Slot wird in setupCompanionChannel() im Cache forced auf
   // 0 gesetzt -- NICHT in dieser Liste persistiert (Sicherheitsmassnahme).
+  // CH_HOPS_FLAG_EXTERNAL: Entry referenziert einen NICHT-abonnierten
+  // Hashtag-Channel. Hashtag-PSK ist deterministisch aus dem Namen
+  // ableitbar (sha256), wir koennen also channel_hash[0] vorab
+  // berechnen und beim RX-Filter ohne Slot direkt matchen. Use-Case:
+  // '#bots' interessiert uns nicht im Chat, soll aber auch nicht
+  // weitergeleitet werden -- 'set ch.hops #bots 0' ohne Subscribe.
+  // Fuer Private-Channels nicht moeglich (PSK random, nicht
+  // rekonstruierbar).
+#define CH_HOPS_FLAG_EXTERNAL  0x01
   struct ChannelHopsEntry {
     uint32_t name_fnv1a;
     uint8_t  cap;
+    uint8_t  channel_hash;   // gueltig wenn flags & EXTERNAL
+    uint8_t  flags;          // CH_HOPS_FLAG_*
+    uint8_t  _reserved;      // padding -> 8 Byte aligned
   };
   ChannelHopsEntry channel_hops_list[MAX_GROUP_CHANNELS];
   uint8_t          channel_hops_count;
