@@ -8362,7 +8362,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     );
     pushCompanionMessage(
       "  stats, stats-core, stats-radio, stats-packets,\n"
-      "  trace, chatname, prefs, set, get, clock, time,"
+      "  trace, chatname, prefs, set, get, ch.hops, clock, time,"
     );
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
