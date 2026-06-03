@@ -265,7 +265,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 286 (8*32=256 Byte)
     file.read((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 542
     file.read((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 543 (52*16=832 Byte)
-    file.read((uint8_t *)&_prefs.scope_regional_hop_limit, sizeof(_prefs.scope_regional_hop_limit));                  // 1375
+    file.read((uint8_t *)&_prefs.flood_max_scope_region, sizeof(_prefs.flood_max_scope_region));                  // 1375
     file.read((uint8_t *)&_prefs.flood_max, sizeof(_prefs.flood_max));                              // 1376
     file.read((uint8_t *)&_prefs.scope_advert_auto, sizeof(_prefs.scope_advert_auto));              // 1377
     file.read((uint8_t *)&_prefs.repeater_profile, sizeof(_prefs.repeater_profile));                // 1378
@@ -354,7 +354,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)_prefs.scope_buildin_status, sizeof(_prefs.scope_buildin_status));         // 286 (8*32=256 Byte)
     file.write((uint8_t *)&_prefs.scope_extras_count, sizeof(_prefs.scope_extras_count));            // 542
     file.write((uint8_t *)_prefs.scope_extras, sizeof(_prefs.scope_extras));                          // 543 (52*16=832 Byte)
-    file.write((uint8_t *)&_prefs.scope_regional_hop_limit, sizeof(_prefs.scope_regional_hop_limit));                  // 1375
+    file.write((uint8_t *)&_prefs.flood_max_scope_region, sizeof(_prefs.flood_max_scope_region));                  // 1375
     file.write((uint8_t *)&_prefs.flood_max, sizeof(_prefs.flood_max));                              // 1376
     file.write((uint8_t *)&_prefs.scope_advert_auto, sizeof(_prefs.scope_advert_auto));              // 1377
     file.write((uint8_t *)&_prefs.repeater_profile, sizeof(_prefs.repeater_profile));                // 1378

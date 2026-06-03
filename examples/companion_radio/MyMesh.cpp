@@ -1589,7 +1589,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       //              dabei wird der Scope zu 'local-discard' umgeschrieben
       //              damit kein zweiter Repeater drueber geht. Pakete mit
       //              hops>0 werden verworfen.
-      // region/regional: konfigurierbares Hop-Limit (scope_regional_hop_limit).
+      // region/regional: konfigurierbares Hop-Limit (flood_max_scope_region).
       //
       // local-discard SENTINEL — WICHTIG: hier IMMER hart blocken,
       // unabhaengig vom repeat_scope_mode. Im 'repeat all'-Modus ist
@@ -1634,7 +1634,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
         // (idx_local_discard nicht gefunden: einfach normal weiterleiten —
         // sollte nicht passieren da local-discard im Build-in-Table steht.)
       } else if (is_region) {
-        if (hops >= _prefs.scope_regional_hop_limit) {
+        if (hops >= _prefs.flood_max_scope_region) {
           decision = false;
           reject_reason = "region-hop-limit";
         }
@@ -3348,10 +3348,10 @@ void MyMesh::begin(bool has_display) {
   _prefs.channel_hops_count = 0;
   memset(_prefs.channel_hops_list, 0, sizeof(_prefs.channel_hops_list));
   _prefs.flood_max_unknown_chan = CH_HOPS_OFF;
-  // Wunschliste 12 update 2026-06-02: scope_regional_hops Default 3
+  // Wunschliste 12 update 2026-06-02: flood_max_scope_region Default 3
   // VOR loadPrefs. Falls Datei kuerzer / fresh-install: bleibt 3 stehen.
   // Stored-Wert (inkl. user-explizit 0 = 'nicht repeaten') ueberschreibt.
-  _prefs.scope_regional_hop_limit = 3;
+  _prefs.flood_max_scope_region = 3;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -3468,11 +3468,11 @@ void MyMesh::begin(bool has_display) {
   // owner_info: NULL-Terminator sicherstellen (defensive gegen
   // unterminierte Flash-Daten).
   _prefs.owner_info[sizeof(_prefs.owner_info) - 1] = 0;
-  // scope_regional_hop_limit: 0 ist jetzt gueltiger User-Wert
+  // flood_max_scope_region: 0 ist jetzt gueltiger User-Wert
   // ('#region/#regional nicht repeaten'). Pre-Init vor loadPrefs() liefert
   // den Default 3. Hier nur Sanity-Cap an flood_max.
-  if (_prefs.scope_regional_hop_limit > _prefs.flood_max) {
-    _prefs.scope_regional_hop_limit = _prefs.flood_max;
+  if (_prefs.flood_max_scope_region > _prefs.flood_max) {
+    _prefs.flood_max_scope_region = _prefs.flood_max;
   }
   // flood_max_infra: 0 = uninitialisiert -> bump auf 16 (oder flood_max
   // falls kleiner). Analog zu flood_max=0->16. Hintergrund: wir wollen
@@ -6426,7 +6426,7 @@ void MyMesh::backupSaveToSerial() {
   kv_float("rxdelay",              _prefs.rx_delay_base, 3);
   kv_float("txdelay",              _prefs.tx_delay_factor, 3);
   kv_float("direct_txdelay",       _prefs.direct_tx_delay_factor, 3);
-  kv_uint ("scope_regional_hops",  _prefs.scope_regional_hop_limit);
+  kv_uint ("flood_max_scope_region",  _prefs.flood_max_scope_region);
   kv_uint ("flood_max",            _prefs.flood_max);
   kv_uint ("flood_max_infra",  _prefs.flood_max_infra);
   kv_uint ("flood_max_req_resp",   _prefs.flood_max_req_resp);
@@ -7098,7 +7098,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "rxdelay") == 0)               { _prefs.rx_delay_base         = as_float();        _br_applied++; return; }
       if (strcmp(key, "txdelay") == 0)               { _prefs.tx_delay_factor       = as_float();        _br_applied++; return; }
       if (strcmp(key, "direct_txdelay") == 0)        { _prefs.direct_tx_delay_factor= as_float();        _br_applied++; return; }
-      if (strcmp(key, "scope_regional_hops") == 0)   { _prefs.scope_regional_hop_limit = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "flood_max_scope_region") == 0)   { _prefs.flood_max_scope_region = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max") == 0)             { _prefs.flood_max             = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_infra") == 0)   { _prefs.flood_max_infra   = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_req_resp") == 0){ _prefs.flood_max_req_resp= (uint8_t)as_uint(); _br_applied++; return; }
@@ -7990,7 +7990,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  flood_max_infra (def 16, 'follow'=fmax)\n"
           "  flood_max_req_resp (def 0=erbt infra)");
         pushCompanionMessage(
-          "  scope_regional_hops\n"
+          "  flood_max_scope_region\n"
           "  loop_detect (off|minimal|moderate|strict)\n"
           "  ch.hops -> 'help ch.hops'\n"
           "  ('set <key>' ohne Wert -> Detailhilfe)");
@@ -10515,9 +10515,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Empfehlung 4..8 (4=Stadt, 8=weiter).");
         return;
       }
-      if (strcmp(key, "scope_regional_hops") == 0) {
+      if (strcmp(key, "flood_max_scope_region") == 0) {
         pushCompanionMessage(
-          "set scope_regional_hops <0..flood_max>:\n"
+          "set flood_max_scope_region <0..flood_max>:\n"
           "  Hop-Cap fuer #region/#regional-scoped Pakete.\n"
           "  Default 3.");
         pushCompanionMessage(
@@ -10917,7 +10917,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     //   1..flood_max = expliziter Cap
     // Default-Bump auf 3 nur bei wirklich uninitialisiert (siehe Pre-Init
     // in begin()) -- nicht im Setter, damit User explizit 0 setzen kann.
-    if (strcmp(key, "scope_regional_hops") == 0) {
+    if (strcmp(key, "flood_max_scope_region") == 0) {
       int v = atoi(value_lc);
       if (v < 0 || v > _prefs.flood_max) {
         char r[80]; snprintf(r, sizeof(r),
@@ -10925,10 +10925,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      _prefs.scope_regional_hop_limit = (uint8_t)v;
+      _prefs.flood_max_scope_region = (uint8_t)v;
       savePrefs();
       char r[80]; snprintf(r, sizeof(r),
-        "OK - scope_regional_hops = %d%s", v,
+        "OK - flood_max_scope_region = %d%s", v,
         v == 0 ? " (nicht repeaten)" : "");
       pushCompanionMessage(r);
       return;
@@ -10969,10 +10969,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       _prefs.flood_max = (uint8_t)v;
-      // Wenn scope_regional_hop_limit jetzt drueber liegt: nach unten ziehen
+      // Wenn flood_max_scope_region jetzt drueber liegt: nach unten ziehen
       // damit die Beziehung gilt (regional <= flood_max).
-      if (_prefs.scope_regional_hop_limit > _prefs.flood_max) {
-        _prefs.scope_regional_hop_limit = _prefs.flood_max;
+      if (_prefs.flood_max_scope_region > _prefs.flood_max) {
+        _prefs.flood_max_scope_region = _prefs.flood_max;
       }
       // Auch flood_max_infra auto-cappen falls > flood_max. Aber das
       // FOLLOW-Sentinel (254) bleibt unangetastet -- dessen Semantik
@@ -10994,10 +10994,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       savePrefs();
       char r[180]; snprintf(r, sizeof(r),
         "OK - flood_max = %d\n"
-        "  scope_regional_hops gecapped auf %u\n"
+        "  flood_max_scope_region gecapped auf %u\n"
         "  flood_max_infra%s = %u\n"
         "  flood_max_req_resp%s = %u",
-        v, (unsigned)_prefs.scope_regional_hop_limit,
+        v, (unsigned)_prefs.flood_max_scope_region,
         infra_clipped ? " gecapped" : "",
         (unsigned)_prefs.flood_max_infra,
         rr_clipped ? " gecapped" : "",
@@ -11464,7 +11464,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           gline(tmp);
         }
       }
-      emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
+      emit_uint  ("flood_max_scope_region", _prefs.flood_max_scope_region, 3);
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
       // flood_max_infra: Sentinel 254 = follow flood_max. Eigene Anzeige
       // statt nackter Zahl.
@@ -11546,7 +11546,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else
         snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
     }
-    else if (strcmp(key, "scope_regional_hops") == 0) snprintf(r, sizeof(r), "scope_regional_hops = %u", (unsigned)_prefs.scope_regional_hop_limit);
+    else if (strcmp(key, "flood_max_scope_region") == 0) snprintf(r, sizeof(r), "flood_max_scope_region = %u", (unsigned)_prefs.flood_max_scope_region);
     else if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) snprintf(r, sizeof(r), "flood_max = %u", (unsigned)_prefs.flood_max);
     else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
       if (_prefs.flood_max_infra == 0)

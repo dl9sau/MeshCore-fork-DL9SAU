@@ -102,7 +102,7 @@ static const GeoRegion regions[] = {
   // - local / lokal:      single-hop; bei Repeat wird Scope zu local-discard
   //                       umgeschrieben, damit kein zweiter Repeater drueber
   //                       geht. Pakete mit hops > 0 werden verworfen.
-  // - region / regional:  konfigurierbarer Hop-Cap (_prefs.scope_regional_hop_limit).
+  // - region / regional:  konfigurierbarer Hop-Cap (_prefs.flood_max_scope_region).
   //                       Scope bleibt unveraendert beim Repeat — andere
   //                       Repeater respektieren das Limit selbst.
   // - local-discard:      sentinel; default OFF, wird nie repeated. Markiert
