@@ -7636,7 +7636,7 @@ static const TraceCat trace_cats[] = {
   { "filter",  TRACE_FILTER,  "NICHT-repeatete Pakete + Grund (kann viele Zeilen erzeugen)" },
   { "night",    TRACE_NIGHT,    "Nightly-Flood Schedule + Scope-Auswahl" },
   { "duty",     TRACE_DUTY,     "Duty-Cycle Drops (Soft/Hard) ueber 10% TX/h" },
-  { "msgstore", TRACE_MSGSTORE, "Offline-Queue Bucket-Save zu Flash ($companion ausgenommen)" },
+  { "msgstore", TRACE_MSGSTORE, "Persistenz-Schreibvorgaenge der Offline-Message-Queue (jede gespeicherte Msg, ein Trace pro Bucket-Save -- Flash-Wear-Diagnose)" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
@@ -11669,7 +11669,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint32_t own_total = 0;
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
     p = snprintf(block, sizeof(block),
-                 "tx self-initiated:\n"
+                 "tx self-initiated (flood + zero-hop):\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
                  "  total=%lu",
                  own_of(PAYLOAD_TYPE_ADVERT),
@@ -11959,7 +11959,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint32_t own_total = 0;
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
     p = snprintf(block, sizeof(block),
-                 "tx self-initiated:\n"
+                 "tx self-initiated (flood + zero-hop):\n"
                  "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
                  "  total=%lu",
                  own_of(PAYLOAD_TYPE_ADVERT),
@@ -11973,6 +11973,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  own_of(PAYLOAD_TYPE_TRACE),
                  (unsigned long)own_total);
     append_rate_hint(block + p, sizeof(block) - p, own_total, uptime_s);
+    pushCompanionMessage(block);
+
+    // ---- Msg 5b: tx own flood-Subset (Direct = own_of - flood) ------------
+    // Eigene Message wegen 145-Byte-BLE-Limit. Nightly-Beacon-Adverts sind
+    // hier sichtbar (gehen als Flood raus); manuelle Direct-DMs zaehlen
+    // gegen self-initiated aber nicht hier.
+    uint32_t own_flood_total = 0;
+    for (int pp = 0; pp < 16; pp++) own_flood_total += _tx_self_flood_by_ptype[pp];
+    snprintf(block, sizeof(block),
+             "tx own flood (direct = own - flood):\n"
+             "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
+             "  flood total=%lu",
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_PATH],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ACK],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_REQ],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_RESPONSE],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ],
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TRACE],
+             (unsigned long)own_flood_total);
     pushCompanionMessage(block);
 
     // ---- Msg 6+7: tx repeated + tx total — nur wenn Repeater aktiv ----
