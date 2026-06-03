@@ -290,6 +290,9 @@ protected:
   int calcRxDelay(float score, uint32_t air_time) const override;
   uint32_t getRetransmitDelay(const mesh::Packet *packet) override;
   uint32_t getDirectRetransmitDelay(const mesh::Packet *packet) override;
+  // Effektiver Faktor (Auto-Sentinel aufgeloest). Fuer Status-Anzeigen.
+  float effectiveTxDelayFactor() const;
+  float effectiveDirectTxDelayFactor() const;
   bool shouldReduceFloodRetransmit(const mesh::Packet* packet, uint8_t original_path_count) const override;
   uint8_t getExtraAckTransmitCount() const override;
   bool filterRecvFloodPacket(mesh::Packet* packet) override;

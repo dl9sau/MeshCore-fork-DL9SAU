@@ -660,15 +660,29 @@ int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
   return (int)((pow(_prefs.rx_delay_base, 0.85f - score) - 1.0) * air_time);
 }
 
+// Auto-Mode (Sentinel -1.0) Logik. Diese Funktion liefert den EFFEKTIVEN
+// Faktor unabhaengig davon ob der User "auto" oder einen expliziten Wert
+// gesetzt hat -- damit Status-Anzeigen ("get txdelay") konsistent sind mit
+// dem was die Send-Funktionen tatsaechlich verwenden.
+float MyMesh::effectiveTxDelayFactor() const {
+  if (_prefs.tx_delay_factor >= 0.0f) return _prefs.tx_delay_factor;
+  // Auto: Forwarding-Pfad. Normal-Repeater raffinierter, defensive
+  // wie Upstream-Default 0.5.
+  return (_prefs.repeater_profile == 1) ? 1.5f : 0.5f;
+}
+float MyMesh::effectiveDirectTxDelayFactor() const {
+  if (_prefs.direct_tx_delay_factor >= 0.0f) return _prefs.direct_tx_delay_factor;
+  // Auto: Upstream-Repeater-Default fuer direct/zero-hop-Forwarding.
+  return 0.2f;
+}
+
 uint32_t MyMesh::getRetransmitDelay(const mesh::Packet *packet) {
-  // Faktor analog zum simple_repeater (_prefs.tx_delay_factor). 0.5f bleibt
-  // der bisherige hartcodierte Default — wird in begin() als Fallback gesetzt.
-  float f = _prefs.tx_delay_factor;
+  float f = effectiveTxDelayFactor();
   uint32_t t = (uint32_t)(_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * f);
   return getRNG()->nextInt(0, 5*t + 1);
 }
 uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
-  float f = _prefs.direct_tx_delay_factor;
+  float f = effectiveDirectTxDelayFactor();
   uint32_t t = (uint32_t)(_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * f);
   return getRNG()->nextInt(0, 5*t + 1);
 }
@@ -3376,14 +3390,22 @@ void MyMesh::begin(bool has_display) {
 
   // sanitise bad pref values
   _prefs.rx_delay_base = constrain(_prefs.rx_delay_base, 0, 20.0f);
-  // tx_delay_factor / direct_tx_delay_factor: 0 wird als uninitialisiert
-  // gewertet (bisher hartcodiert in MyMesh::getRetransmitDelay) und
-  // einmalig auf den Companion-Default gesetzt. Obergrenze wie simple_repeater.
-  if (_prefs.tx_delay_factor <= 0.0f || _prefs.tx_delay_factor > 2.0f) {
-    _prefs.tx_delay_factor = 0.5f;
+  // tx_delay_factor / direct_tx_delay_factor: Sentinel-Logik
+  //   0    = uninitialisiert (neues Geraet)        -> -1 (auto)
+  //   -1   = expliziter "auto"                      -> bleibt
+  //   0..2 = expliziter numerischer Wert            -> bleibt
+  //   sonst (out-of-range, NaN)                     -> -1 (auto)
+  if (_prefs.tx_delay_factor == 0.0f
+      || _prefs.tx_delay_factor > 2.0f
+      || _prefs.tx_delay_factor < -1.0f
+      || isnan(_prefs.tx_delay_factor)) {
+    _prefs.tx_delay_factor = -1.0f;  // auto
   }
-  if (_prefs.direct_tx_delay_factor <= 0.0f || _prefs.direct_tx_delay_factor > 2.0f) {
-    _prefs.direct_tx_delay_factor = 0.2f;
+  if (_prefs.direct_tx_delay_factor == 0.0f
+      || _prefs.direct_tx_delay_factor > 2.0f
+      || _prefs.direct_tx_delay_factor < -1.0f
+      || isnan(_prefs.direct_tx_delay_factor)) {
+    _prefs.direct_tx_delay_factor = -1.0f;  // auto
   }
   if (_prefs.repeat_scope_mode > REPEAT_SCOPE_MODE_ALLOWLIST) {
     _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
@@ -7974,6 +7996,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  ('set <key>' ohne Wert -> Detailhilfe)");
         pushCompanionMessage(
           "Delays: rxdelay txdelay direct_txdelay\n"
+          "  (tx/dir: 'auto' Default, oder 0..2)\n"
           "Telemetry: telemetry_mode_base loc env\n"
           "  airtime_factor rx_boosted_gain");
         pushCompanionMessage(
@@ -10503,6 +10526,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Default off. Numerisch 0..3 auch erlaubt.");
         return;
       }
+      if (strcmp(key, "txdelay") == 0) {
+        pushCompanionMessage(
+          "set txdelay <auto | 0..2>:\n"
+          "  Retransmit-Delay-Faktor x Airtime beim\n"
+          "  Forwarden (Repeaten) von Flood-Paketen.");
+        pushCompanionMessage(
+          "  auto (Default): 1.5 wenn profile=full,\n"
+          "  0.5 wenn defensive. Hoeher = mehr Spread,\n"
+          "  hilft bei hochwertigem Standort/Reichweite.");
+        return;
+      }
+      if (strcmp(key, "direct_txdelay") == 0) {
+        pushCompanionMessage(
+          "set direct_txdelay <auto | 0..2>:\n"
+          "  Retransmit-Delay-Faktor x Airtime beim\n"
+          "  Forwarden von DIRECT-routed Paketen.");
+        pushCompanionMessage(
+          "  auto (Default): 0.2 (Upstream-Default).\n"
+          "  Niedrig weil direkt-geroutet = bekannter\n"
+          "  Pfad, Latenz hat Vorrang vor Spread.");
+        return;
+      }
       if (strcmp(key, "advert_loc_policy") == 0 || strcmp(key, "advert.loc.policy") == 0) {
         pushCompanionMessage(
           "set advert_loc_policy <0|1|2>:\n"
@@ -10815,32 +10860,47 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     // Repeater-style Delay-Knöpfe (analog simple_repeater CommonCLI).
     // txdelay/rxdelay sind Faktoren multipliziert mit Pkt-Airtime; siehe
-    // getRetransmitDelay() / calcRxDelay().
+    // getRetransmitDelay() / calcRxDelay(). 'auto' ist Sentinel (-1) der
+    // den effektiven Wert aus repeater_profile + Kontext ableitet.
     if (strcmp(key, "txdelay") == 0 || strcmp(key, "rxdelay") == 0
         || strcmp(key, "direct_txdelay") == 0) {
-      float v = (float)atof(value_lc);
-      if (v < 0.0f || v > 20.0f) {
-        pushCompanionMessage("Wert ausserhalb 0..20.0");
+      bool is_auto = (strcasecmp(value_lc, "auto") == 0);
+      float v = is_auto ? -1.0f : (float)atof(value_lc);
+      if (!is_auto && (v < 0.0f || v > 20.0f)) {
+        pushCompanionMessage("Wert ausserhalb 0..20.0 (oder 'auto')");
         return;
       }
       if (strcmp(key, "rxdelay") == 0) {
+        // rxdelay kennt kein auto -- numerisch lassen wie bisher.
+        if (is_auto) { pushCompanionMessage("rxdelay: 'auto' nicht definiert."); return; }
         _prefs.rx_delay_base = v;
         savePrefs();
         char r[60]; snprintf(r, sizeof(r), "OK - rxdelay = %.3f", v);
         pushCompanionMessage(r);
       } else if (strcmp(key, "txdelay") == 0) {
-        if (v > 2.0f) { pushCompanionMessage("txdelay max 2.0"); return; }
-        if (v == 0.0f) v = 0.5f;   // 0 wird als uninit gewertet, siehe begin()
+        if (!is_auto && v > 2.0f) { pushCompanionMessage("txdelay max 2.0"); return; }
+        if (!is_auto && v == 0.0f) v = -1.0f;  // 0 -> auto (uninit-Sentinel)
         _prefs.tx_delay_factor = v;
         savePrefs();
-        char r[60]; snprintf(r, sizeof(r), "OK - txdelay = %.3f", v);
+        char r[80];
+        if (v < 0.0f)
+          snprintf(r, sizeof(r), "OK - txdelay = auto (effektiv %.2f, profile=%s)",
+                   effectiveTxDelayFactor(),
+                   _prefs.repeater_profile == 1 ? "full" : "defensive");
+        else
+          snprintf(r, sizeof(r), "OK - txdelay = %.3f", v);
         pushCompanionMessage(r);
       } else {  // direct_txdelay
-        if (v > 2.0f) { pushCompanionMessage("direct_txdelay max 2.0"); return; }
-        if (v == 0.0f) v = 0.2f;
+        if (!is_auto && v > 2.0f) { pushCompanionMessage("direct_txdelay max 2.0"); return; }
+        if (!is_auto && v == 0.0f) v = -1.0f;  // 0 -> auto
         _prefs.direct_tx_delay_factor = v;
         savePrefs();
-        char r[60]; snprintf(r, sizeof(r), "OK - direct_txdelay = %.3f", v);
+        char r[80];
+        if (v < 0.0f)
+          snprintf(r, sizeof(r), "OK - direct_txdelay = auto (effektiv %.2f)",
+                   effectiveDirectTxDelayFactor());
+        else
+          snprintf(r, sizeof(r), "OK - direct_txdelay = %.3f", v);
         pushCompanionMessage(r);
       }
       return;
@@ -11365,8 +11425,39 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_uint  ("telemetry_mode_env",  _prefs.telemetry_mode_env,    0);
       emit_uint  ("buzzer_quiet",        _prefs.buzzer_quiet,          0);
       emit_float ("rxdelay",             _prefs.rx_delay_base,         0.0f,                   "",     3);
-      emit_float ("txdelay",             _prefs.tx_delay_factor,       0.5f,                   "",     3);
-      emit_float ("direct_txdelay",      _prefs.direct_tx_delay_factor,0.2f,                   "",     3);
+      // txdelay / direct_txdelay: Sentinel -1 = auto. Sonderdarstellung
+      // statt nackter "-1.000". Default ist auto.
+      {
+        bool eq = (_prefs.tx_delay_factor < 0.0f);
+        if (!(list_changed && eq)) {
+          if (!eq) changed++;
+          if (_prefs.tx_delay_factor < 0.0f)
+            snprintf(tmp, sizeof(tmp),
+                     "  txdelay = auto (effektiv %.2f, profile=%s) [default]",
+                     effectiveTxDelayFactor(),
+                     _prefs.repeater_profile == 1 ? "full" : "defensive");
+          else
+            snprintf(tmp, sizeof(tmp),
+                     "  txdelay = %.3f (default: auto)",
+                     (double)_prefs.tx_delay_factor);
+          gline(tmp);
+        }
+      }
+      {
+        bool eq = (_prefs.direct_tx_delay_factor < 0.0f);
+        if (!(list_changed && eq)) {
+          if (!eq) changed++;
+          if (_prefs.direct_tx_delay_factor < 0.0f)
+            snprintf(tmp, sizeof(tmp),
+                     "  direct_txdelay = auto (effektiv %.2f) [default]",
+                     effectiveDirectTxDelayFactor());
+          else
+            snprintf(tmp, sizeof(tmp),
+                     "  direct_txdelay = %.3f (default: auto)",
+                     (double)_prefs.direct_tx_delay_factor);
+          gline(tmp);
+        }
+      }
       emit_uint  ("scope_regional_hops", _prefs.scope_regional_hop_limit, 3);
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
       // flood_max_infra: Sentinel 254 = follow flood_max. Eigene Anzeige
@@ -11434,8 +11525,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "telemetry_mode_env") == 0) snprintf(r, sizeof(r), "telemetry_mode_env = %u", (unsigned)_prefs.telemetry_mode_env);
     else if (strcmp(key, "buzzer_quiet") == 0)      snprintf(r, sizeof(r), "buzzer_quiet = %u", (unsigned)_prefs.buzzer_quiet);
     else if (strcmp(key, "rxdelay") == 0)           snprintf(r, sizeof(r), "rxdelay = %.3f", _prefs.rx_delay_base);
-    else if (strcmp(key, "txdelay") == 0)           snprintf(r, sizeof(r), "txdelay = %.3f", _prefs.tx_delay_factor);
-    else if (strcmp(key, "direct_txdelay") == 0)    snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
+    else if (strcmp(key, "txdelay") == 0) {
+      if (_prefs.tx_delay_factor < 0.0f)
+        snprintf(r, sizeof(r), "txdelay = auto (effektiv %.2f, profile=%s)",
+                 effectiveTxDelayFactor(),
+                 _prefs.repeater_profile == 1 ? "full" : "defensive");
+      else
+        snprintf(r, sizeof(r), "txdelay = %.3f", _prefs.tx_delay_factor);
+    }
+    else if (strcmp(key, "direct_txdelay") == 0) {
+      if (_prefs.direct_tx_delay_factor < 0.0f)
+        snprintf(r, sizeof(r), "direct_txdelay = auto (effektiv %.2f)",
+                 effectiveDirectTxDelayFactor());
+      else
+        snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
+    }
     else if (strcmp(key, "scope_regional_hops") == 0) snprintf(r, sizeof(r), "scope_regional_hops = %u", (unsigned)_prefs.scope_regional_hop_limit);
     else if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) snprintf(r, sizeof(r), "flood_max = %u", (unsigned)_prefs.flood_max);
     else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {

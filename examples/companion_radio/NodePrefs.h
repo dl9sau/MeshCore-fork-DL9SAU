@@ -191,8 +191,10 @@ struct NodePrefs {  // persisted to file
   uint8_t gps_lead_min;
   // Retransmit-Delay-Faktoren (analog simple_repeater / CommonCLI txdelay/
   // direct_txdelay). Faktor multipliziert mit Pkt-Airtime, +/- 5x RNG-Spread.
-  // 0 wird in MyMesh::begin() als uninitialisiert gewertet und einmalig auf
-  // den Companion-Default (0.5 / 0.2 — die alten hartcodierten Werte) gesetzt.
+  // 0  = uninit -> begin() setzt auf -1 (auto, Default fuer neue Geraete).
+  // -1 = AUTO (Sentinel): bei txdelay 1.5 wenn repeater_profile==full,
+  //      0.5 wenn defensive; bei direct_txdelay fix 0.2.
+  // 0..2 = expliziter User-Wert.
   float tx_delay_factor;
   float direct_tx_delay_factor;
   uint8_t        repeat_scope_mode;          // REPEAT_SCOPE_MODE_*
