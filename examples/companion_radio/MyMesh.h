@@ -293,6 +293,9 @@ protected:
   // Effektiver Faktor (Auto-Sentinel aufgeloest). Fuer Status-Anzeigen.
   float effectiveTxDelayFactor() const;
   float effectiveDirectTxDelayFactor() const;
+  // Effektive Hop-Caps mit follow-Sentinel-Aufloesung (Wunschliste 39).
+  uint8_t effectiveFloodMaxInfra() const;
+  uint8_t effectiveFloodMaxReqResp() const;
   bool shouldReduceFloodRetransmit(const mesh::Packet* packet, uint8_t original_path_count) const override;
   uint8_t getExtraAckTransmitCount() const override;
   bool filterRecvFloodPacket(mesh::Packet* packet) override;

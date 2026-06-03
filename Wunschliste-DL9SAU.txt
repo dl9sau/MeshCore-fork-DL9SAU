@@ -2183,9 +2183,47 @@ Bewusst NICHT umgesetzt:
     Empfaenger sieht den gefakten Pfad -- Designschwaeche von
     MeshCore ohne sauberes Heilmittel.
 
-Implementiert: Commit fa62a3d2 + folgender Alignment-Commit
+Implementiert: Commit fa62a3d2 + folgender Alignment-Commits
 (2026-06-04). Help-Texte unter 145-Byte BLE-Limit gehalten.
 Quelle: User-Diskussion 2026-06-04.
+
+
+Hierarchie aller flood_max_* Hop-Caps (Stand 2026-06-04):
+
+  flood_max  (= 63 Default, harte Obergrenze)
+    |-- flood_max_infra              cap fuer non-CHAT Adverts
+    |     |                          (REPEATER/ROOM/SENSOR)
+    |     '-- flood_max_req_resp     cap fuer REQ/RESP/ANON_REQ
+    |-- flood_max_unknown_chan       cap fuer unbekannte
+    |                                  channel-hashes
+    '-- flood_max_scope_region       cap fuer #region / #regional
+          '-- flood_max_unscoped_companions
+                                     cap fuer unscoped FLOOD
+                                     CHAT-Adverts + TXT_MSG
+
+Konvention der Sentinel-Werte:
+
+  Variable                          | Keywords
+  ----------------------------------|---------
+  flood_max                         | nur 1..63 (selbst Parent)
+  flood_max_infra                   | 1..N | follow
+  flood_max_req_resp                | 1..N | follow
+  flood_max_scope_region            | 1..N | off
+  flood_max_unknown_chan            | 1..N | follow | off
+  flood_max_unscoped_companions     | 1..N | follow | off
+
+  follow:  CH_HOPS_OFF (254) = folgt parent-Variable
+  off:     0 = explizit nicht repeaten
+
+Design-Logik fuer "off" / "follow":
+  - flood_max selbst: kein Sinn (Repeater ohne Repeat = sinnfrei).
+  - flood_max_infra / req_resp: KEIN "off" (Repeater waere nicht
+    mehr auffindbar oder admin-bar). Nur "follow" + Cap.
+  - flood_max_scope_region: KEIN "follow" (selbst Parent fuer
+    flood_max_unscoped_companions, semantisch eigenes Konzept).
+    "off" sinnvoll wenn User Region-Konzept nicht moechte.
+  - flood_max_unknown_chan / unscoped_companions: BEIDE Sentinels
+    sinnvoll (Spam-Schutz vs follow-Parent).
 
 
 
