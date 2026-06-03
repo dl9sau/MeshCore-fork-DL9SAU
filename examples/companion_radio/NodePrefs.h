@@ -289,10 +289,15 @@ struct NodePrefs {  // persisted to file
 #define CH_HOPS_FLAG_EXTERNAL  0x01
   struct ChannelHopsEntry {
     uint32_t name_fnv1a;
+    char     name[20];       // Channel-Name (mit '#' fuer hashtag),
+                             // null-terminiert. Bei Slot-Eintraegen
+                             // synced beim rebuild; bei External-
+                             // Eintraegen vom User gesetzt. Display
+                             // + Backup nutzen direkt diesen Wert.
     uint8_t  cap;
     uint8_t  channel_hash;   // gueltig wenn flags & EXTERNAL
     uint8_t  flags;          // CH_HOPS_FLAG_*
-    uint8_t  _reserved;      // padding -> 8 Byte aligned
+    uint8_t  _reserved;      // padding -> 28 Byte (4-aligned)
   };
   ChannelHopsEntry channel_hops_list[MAX_GROUP_CHANNELS];
   uint8_t          channel_hops_count;

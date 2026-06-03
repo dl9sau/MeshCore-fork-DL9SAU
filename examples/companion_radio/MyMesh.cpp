@@ -1834,12 +1834,18 @@ int MyMesh::findChannelHopsEntry(uint32_t name_fnv1a) const {
 // ueberschrieben damit ein Slot-Eintrag der zu External wechselt
 // (oder umgekehrt) sauber konvertiert wird.
 static bool channelHopsUpsert(NodePrefs& prefs, uint32_t name_fnv1a, uint8_t cap,
-                              uint8_t flags = 0, uint8_t channel_hash = 0) {
+                              uint8_t flags = 0, uint8_t channel_hash = 0,
+                              const char* name = "") {
   for (uint8_t i = 0; i < prefs.channel_hops_count; i++) {
     if (prefs.channel_hops_list[i].name_fnv1a == name_fnv1a) {
       prefs.channel_hops_list[i].cap = cap;
       prefs.channel_hops_list[i].flags = flags;
       prefs.channel_hops_list[i].channel_hash = channel_hash;
+      if (name && name[0]) {
+        strncpy(prefs.channel_hops_list[i].name, name,
+                sizeof(prefs.channel_hops_list[i].name) - 1);
+        prefs.channel_hops_list[i].name[sizeof(prefs.channel_hops_list[i].name) - 1] = 0;
+      }
       return true;
     }
   }
@@ -1850,6 +1856,11 @@ static bool channelHopsUpsert(NodePrefs& prefs, uint32_t name_fnv1a, uint8_t cap
   prefs.channel_hops_list[k].cap          = cap;
   prefs.channel_hops_list[k].flags        = flags;
   prefs.channel_hops_list[k].channel_hash = channel_hash;
+  if (name && name[0]) {
+    strncpy(prefs.channel_hops_list[k].name, name,
+            sizeof(prefs.channel_hops_list[k].name) - 1);
+    prefs.channel_hops_list[k].name[sizeof(prefs.channel_hops_list[k].name) - 1] = 0;
+  }
   prefs.channel_hops_count++;
   return true;
 }
@@ -1874,7 +1885,7 @@ void MyMesh::rebuildChannelHopsCache() {
   // Versuch, ihn anders zu setzen. Pre-Boot Garantie: companion wird nie
   // repeated, auch wenn er irgendwie ins Funkfeld entfleucht.
   // COMPANION_CHANNEL_NAME ist weiter unten definiert; hardcode "companion".
-  channelHopsUpsert(_prefs, fnv1a32_cstr("companion"), 0);
+  channelHopsUpsert(_prefs, fnv1a32_cstr("companion"), 0, 0, 0, "companion");
 
   memset(_channel_hops_cap_cache, CH_HOPS_OFF, sizeof(_channel_hops_cap_cache));
   for (int slot = 0; slot < MAX_GROUP_CHANNELS; slot++) {
@@ -1885,6 +1896,11 @@ void MyMesh::rebuildChannelHopsCache() {
     int idx = findChannelHopsEntry(h);
     if (idx >= 0) {
       _channel_hops_cap_cache[slot] = _prefs.channel_hops_list[idx].cap;
+      // Slot-Eintrag: aktuellen ch.name in die Liste syncen (Channel
+      // koennte umbenannt worden sein -- relevant fuer Display+Backup).
+      strncpy(_prefs.channel_hops_list[idx].name, ch.name,
+              sizeof(_prefs.channel_hops_list[idx].name) - 1);
+      _prefs.channel_hops_list[idx].name[sizeof(_prefs.channel_hops_list[idx].name) - 1] = 0;
     }
   }
 }
@@ -6537,21 +6553,19 @@ void MyMesh::backupSaveToSerial() {
       snprintf(key, sizeof(key), "ch_hops_%d", hidx++);
       kv_str(key, val);
     }
-    // External-Eintraege (nicht-abonnierte Hashtag-Channels). Caveat:
-    // wir speichern aktuell den Namen NICHT in der Entry-Struct, nur
-    // den fnv1a-Hash + channel_hash. Backup kann den Namen daher nicht
-    // emittieren -- User muss External-Caps nach Restore neu setzen.
-    // Persistiert sind sie aber ueber Reboot (NodePrefs-Storage).
-    // TODO: Name-Side-Storage falls Backup-Roundtrip noetig wird.
-    bool any_ext = false;
+    // External-Eintraege (nicht-abonnierte Hashtag-Channels) -- Name
+    // ist jetzt in der Entry gespeichert, also voll restaurierbar.
+    // Format: "ch_hops_ext_N": "Name=Cap".
+    int eidx = 0;
     for (uint8_t e = 0; e < _prefs.channel_hops_count; e++) {
-      if (_prefs.channel_hops_list[e].flags & CH_HOPS_FLAG_EXTERNAL) {
-        any_ext = true; break;
-      }
-    }
-    if (any_ext) {
-      kv_str("ch_hops_ext_note",
-             "external ch.hops entries skipped (name not persisted); set manually after restore");
+      const auto& en = _prefs.channel_hops_list[e];
+      if (!(en.flags & CH_HOPS_FLAG_EXTERNAL)) continue;
+      if (en.name[0] == 0) continue;  // defensive
+      char val[40];
+      snprintf(val, sizeof(val), "%s=%u", en.name, (unsigned)en.cap);
+      char key[24];
+      snprintf(key, sizeof(key), "ch_hops_ext_%d", eidx++);
+      kv_str(key, val);
     }
   }
   Serial.println();
@@ -7289,6 +7303,37 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
     // rebuild ist guenstig. Companion-Name wird zwar geupsertet wenn er
     // im Backup steht, aber sein cap wird beim naechsten rebuild eh auf
     // 0 zurueck geforced.
+    // Wunschliste 36: External-Eintraege "ch_hops_ext_N": "Name=Cap"
+    // VOR dem allgemeinen ch_hops_ Check pruefen (prefix-match: ext_
+    // ist Subset von ch_hops_*).
+    if (val_type == 's' && strncmp(key, "ch_hops_ext_", 12) == 0) {
+      char raw[64];
+      brExtractString(val_start, val_len, raw, sizeof(raw));
+      char* eq = strchr(raw, '=');
+      if (!eq) { _br_skipped++; return; }
+      *eq = 0;
+      int cap = atoi(eq + 1);
+      if (cap < 0 || cap > 63) { _br_skipped++; return; }
+      // Nur hashtag-Channels (mit '#' prefix) sind extern restaurierbar.
+      if (raw[0] != '#') {
+        _br_skipped++;
+        Serial.printf("# ch.hops ext %s: not a hashtag channel, skipped.\r\n", raw);
+        return;
+      }
+      uint8_t hash16[32];
+      mesh::Utils::sha256(hash16, sizeof(hash16),
+                          (const uint8_t*)raw, strlen(raw));
+      uint32_t h = fnv1a32_cstr(raw);
+      if (!channelHopsUpsert(_prefs, h, (uint8_t)cap,
+                             CH_HOPS_FLAG_EXTERNAL, hash16[0], raw)) {
+        _br_errors++;
+        Serial.printf("# ch.hops ext %s: list full, skipped.\r\n", raw);
+        return;
+      }
+      _br_applied++;
+      rebuildChannelHopsCache();
+      return;
+    }
     if (val_type == 's' && strncmp(key, "ch_hops_", 8) == 0) {
       char raw[64];
       brExtractString(val_start, val_len, raw, sizeof(raw));
@@ -7298,7 +7343,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       int cap = atoi(eq + 1);
       if (cap < 0 || cap > 63) { _br_skipped++; return; }
       uint32_t h = fnv1a32_cstr(raw);
-      if (!channelHopsUpsert(_prefs, h, (uint8_t)cap)) {
+      if (!channelHopsUpsert(_prefs, h, (uint8_t)cap, 0, 0, raw)) {
         _br_errors++;
         Serial.printf("# ch.hops %s: list full, skipped.\r\n", raw);
         return;
@@ -7997,8 +8042,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  ch.hops status -- aktive Caps\n"
           "  ch.hops clear  -- alle Caps loeschen");
         pushCompanionMessage(
-          "Spezial-Name 'unknown' -> Cap fuer\n"
-          "  Channels die nicht in unserer Liste sind.\n"
+          "External (Hashtag-Channels ohne Subscribe):\n"
+          "  set ch.hops #bots 0 (nicht abonniert, blocken)\n"
+          "  PSK aus Name ableitbar (sha256), kein Slot noetig.\n"
+          "  Anzeige: '#bots (ext)' in 'ch.hops status'.");
+        pushCompanionMessage(
+          "Private-Channels (Random-PSK): nur blockbar wenn\n"
+          "  bereits konfiguriert (mit identischer PSK des\n"
+          "  Absenders). Sonst pauschal via 'unknown'.");
+        pushCompanionMessage(
+          "Spezial-Name 'unknown' -> Cap fuer Channel-Hashes\n"
+          "  die auf keinen Slot/External matchen. CH_HOPS_OFF\n"
+          "  (default) = follow flood_max.\n"
           "$companion: forced 0, nicht aenderbar.");
         return;
       }
@@ -9395,29 +9450,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         n_shown++;
       }
       // External-Eintraege (nicht-abonnierte Hashtag-Channels). Name
-      // ist nicht in einem Slot, daher iterieren wir die Liste direkt.
-      // Markiert mit (ext)-Suffix.
+      // wird in der Entry gespeichert -- direkt anzeigen mit (ext)-Suffix.
       for (uint8_t e = 0; e < _prefs.channel_hops_count; e++) {
         const auto& en = _prefs.channel_hops_list[e];
         if (!(en.flags & CH_HOPS_FLAG_EXTERNAL)) continue;
-        // Name aus FNV-Hash nicht rekonstruierbar -- speichern wir
-        // den Namen mit. Aktuell nicht im Storage, daher Anzeige
-        // als '#hash:XX' Platzhalter. TODO: Namen-Storage erweitern.
+        char display[24];
+        snprintf(display, sizeof(display), "%s (ext)", en.name);
         char line[80];
         if (en.cap == 0)
-          snprintf(line, sizeof(line),
-                   "  #hash:%02X (ext)         = 0 (nicht repeaten)", en.channel_hash);
+          snprintf(line, sizeof(line), "  %-20.20s = 0 (nicht repeaten)", display);
         else
-          snprintf(line, sizeof(line),
-                   "  #hash:%02X (ext)         = %u", en.channel_hash, (unsigned)en.cap);
+          snprintf(line, sizeof(line), "  %-20.20s = %u", display, (unsigned)en.cap);
         add_b(line);
         n_shown++;
       }
-      // Unknown-Chan-Cap auch zeigen wenn aktiv
-      if (_prefs.flood_max_unknown_chan != CH_HOPS_OFF) {
+      // Unknown-Chan-Cap IMMER zeigen -- macht das "follow"-Verhalten
+      // sichtbar (analog flood_max_infra-Anzeige in 'get all').
+      {
         char line[80];
-        if (_prefs.flood_max_unknown_chan == 0)
-          snprintf(line, sizeof(line), "  <unknown channels>   = 0 (nicht repeaten)");
+        if (_prefs.flood_max_unknown_chan == CH_HOPS_OFF)
+          snprintf(line, sizeof(line),
+                   "  <unknown channels>   = follow (-> %u)",
+                   (unsigned)_prefs.flood_max);
+        else if (_prefs.flood_max_unknown_chan == 0)
+          snprintf(line, sizeof(line),
+                   "  <unknown channels>   = 0 (nicht repeaten)");
         else
           snprintf(line, sizeof(line), "  <unknown channels>   = %u",
                    (unsigned)_prefs.flood_max_unknown_chan);
@@ -10687,8 +10744,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  N=1..63 = Cap (Drop wenn path_hash > N)\n"
           "  off = kein per-Channel-Cap (flood_max gilt)");
         pushCompanionMessage(
-          "  Name 'unknown' fuer Channels nicht in Liste\n"
-          "  -> flood_max_unknown_chan.\n"
+          "Hashtag-Channels koennen auch OHNE Subscribe\n"
+          "  geblockt werden (PSK aus Name ableitbar):\n"
+          "  set ch.hops #bots 0 -- Eintrag wird (ext).");
+        pushCompanionMessage(
+          "  Name 'unknown' -> flood_max_unknown_chan\n"
+          "  (Channel-Hash auf keinen Slot/External match)\n"
+          "  Default = follow flood_max.");
+        pushCompanionMessage(
           "  Siehe auch: 'ch.hops status' / 'ch.hops clear'");
         return;
       }
@@ -11347,7 +11410,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                               (const uint8_t*)chname, strlen(chname));
           uint32_t h = fnv1a32_cstr(chname);
           if (!channelHopsUpsert(_prefs, h, new_cap,
-                                 CH_HOPS_FLAG_EXTERNAL, hash16[0])) {
+                                 CH_HOPS_FLAG_EXTERNAL, hash16[0],
+                                 chname)) {
             pushCompanionMessage("Liste voll (max MAX_GROUP_CHANNELS Eintraege).");
             return;
           }
@@ -11365,7 +11429,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         char r[140]; snprintf(r, sizeof(r),
           "Channel '%s' nicht gefunden.\n"
-          "Private-Channels brauchen Subscribe (PSK).", chname);
+          "Private Kanaele muessen bereits konfiguriert sein\n"
+          "(PSK muss identisch sein mit dem des Absenders!).", chname);
         pushCompanionMessage(r);
         return;
       }
