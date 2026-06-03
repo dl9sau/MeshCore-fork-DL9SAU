@@ -1617,6 +1617,14 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       int idx_region        = dl9sau_find_region_index("region");
       int idx_regional      = dl9sau_find_region_index("regional");
       int idx_local_discard = dl9sau_find_region_index("local-discard");
+      // Wunschliste 38: User-adressierbare No-Repeat-Sentinels. Wer ein
+      // Paket mit einem dieser Scopes sendet signalisiert allen Repeatern
+      // "nicht weiterleiten". Hard-Block analog local-discard, ohne
+      // Rewrite (sind End-States, kein Hop weiter).
+      int idx_direct        = dl9sau_find_region_index("direct");
+      int idx_direkt        = dl9sau_find_region_index("direkt");
+      int idx_norepeat      = dl9sau_find_region_index("norepeat");
+      int idx_no_repeat     = dl9sau_find_region_index("no-repeat");
       auto codeMatches = [&](int idx) -> bool {
         return idx >= 0 && idx < _buildin_keys_count
                && _buildin_keys[idx].calcTransportCode(packet) == target;
@@ -1624,11 +1632,19 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       bool is_local         = codeMatches(idx_local) || codeMatches(idx_lokal);
       bool is_region        = codeMatches(idx_region) || codeMatches(idx_regional);
       bool is_local_discard = codeMatches(idx_local_discard);
+      bool is_user_norepeat = codeMatches(idx_direct)
+                            || codeMatches(idx_direkt)
+                            || codeMatches(idx_norepeat)
+                            || codeMatches(idx_no_repeat);
 
       if (is_local_discard) {
         // SENTINEL: NIE weiterleiten. Gilt auch im 'repeat all'-Modus.
         decision = false;
         reject_reason = "local-discard";
+      } else if (is_user_norepeat) {
+        // User hat explizit signalisiert nicht weiterleiten zu wollen.
+        decision = false;
+        reject_reason = "user-norepeat";
       } else if (is_local) {
         if (hops > 0) {
           decision = false;
@@ -12965,16 +12981,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // geo ist alias fuer auto (beide -> aidx 8/10 -> "auto" shortcut)
       if (aidx == 10) aidx = 8;
 
-      // Sentinel-Schutz: #local-discard ist ein Sentinel-Scope und darf
-      // NICHT modifiziert werden. Nur 'info' ist erlaubt -- alles andere
-      // (enable/disable/delete/undelete/pin/auto/off/rep/adv) wuerde die
-      // Sentinel-Semantik kaputt machen (s. Wunschliste 14 +
-      // allowPacketForward local-discard-Hard-Block).
-      if (ref.storage == SCOPE_BUILDIN && strcmp(name, "local-discard") == 0
+      // Sentinel-Schutz: Sentinel-Scopes sind hartcodiert und duerfen
+      // NICHT modifiziert werden (enable/disable/delete/pin/auto/off/
+      // rep/adv wuerden die Sentinel-Semantik kaputt machen). Nur 'info'
+      // erlaubt. Wunschliste 14 + 38, allowPacketForward Hard-Block.
+      auto is_sentinel_name = [](const char* n) -> bool {
+        return strcmp(n, "local-discard") == 0
+            || strcmp(n, "direct")        == 0
+            || strcmp(n, "direkt")        == 0
+            || strcmp(n, "norepeat")      == 0
+            || strcmp(n, "no-repeat")     == 0;
+      };
+      if (ref.storage == SCOPE_BUILDIN && is_sentinel_name(name)
           && aidx != 6 /* info */) {
-        pushCompanionMessage(
-          "#local-discard ist Sentinel — nicht modifizierbar.\n"
-          "  Erlaubt: nur 'scope local-discard info'.");
+        char r[140]; snprintf(r, sizeof(r),
+          "#%s ist Sentinel - nicht modifizierbar.\n"
+          "  Erlaubt: nur 'scope %s info'.", name, name);
+        pushCompanionMessage(r);
         return;
       }
 
@@ -13692,10 +13715,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       ScopeRef ref = findScopeByName(name);
-      // Sentinel-Schutz: local-discard nicht entfernbar (Wunschliste 14).
-      if (ref.storage == SCOPE_BUILDIN && strcmp(name, "local-discard") == 0) {
-        pushCompanionMessage(
-          "#local-discard ist Sentinel — nicht entfernbar.");
+      // Sentinel-Schutz: Sentinels nicht entfernbar (Wunschliste 14 + 38).
+      auto is_sentinel_name = [](const char* n) -> bool {
+        return strcmp(n, "local-discard") == 0
+            || strcmp(n, "direct")        == 0
+            || strcmp(n, "direkt")        == 0
+            || strcmp(n, "norepeat")      == 0
+            || strcmp(n, "no-repeat")     == 0;
+      };
+      if (ref.storage == SCOPE_BUILDIN && is_sentinel_name(name)) {
+        char r[80]; snprintf(r, sizeof(r),
+          "#%s ist Sentinel - nicht entfernbar.", name);
+        pushCompanionMessage(r);
         return;
       }
       if (ref.storage == SCOPE_BUILDIN) {

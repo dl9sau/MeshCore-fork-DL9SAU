@@ -107,11 +107,21 @@ static const GeoRegion regions[] = {
   //                       Repeater respektieren das Limit selbst.
   // - local-discard:      sentinel; default OFF, wird nie repeated. Markiert
   //                       das Ende der single-hop-local-Reichweite.
+  // - direct / direkt / norepeat / no-repeat (Wunschliste 38, 2026-06-03):
+  //                       User-adressierbare No-Repeat-Sentinels. Wer eine
+  //                       Nachricht mit einem dieser Scopes sendet, signali-
+  //                       siert ALLEN Repeatern "nicht weiterleiten". Hart
+  //                       geblockt in allowPacketForward auch im 'repeat
+  //                       all'-Modus.
   NOGEO_PIN("local"),
   NOGEO_PIN("lokal"),
   NOGEO_PIN("region"),
   NOGEO_PIN("regional"),
   NOGEO_OFF("local-discard"),
+  NOGEO_OFF("direct"),
+  NOGEO_OFF("direkt"),
+  NOGEO_OFF("norepeat"),
+  NOGEO_OFF("no-repeat"),
 };
 #undef GEO
 #undef GEO_ALIAS
