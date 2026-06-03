@@ -2002,3 +2002,61 @@ Caveats:
 
 Quelle: dt267-Beobachtung 2026-06-02. Eigene Recherche im dt267-
 Source noetig sobald implementiert werden soll.
+
+
+--------------------------------------------------------------------------------
+37. AGC-Reset (LoRa-Empfaenger-Refresh) -- ggf. adaptiv
+--------------------------------------------------------------------------------
+
+Hintergrund:
+  SX126x-Familie (auch SX1262 auf Heltec Tracker) hat AGC die nach
+  starkem Signal heruntergeregelt bleiben kann -- Empfaenger bleibt
+  taub. Repeater-Admin-Berichte: Floor klemmt dauerhaft auf sehr
+  niedrigem SNR (-127 oder so), Pakete gehen verloren.
+
+Infrastruktur ist upstream vollstaendig vorhanden:
+  - src/Dispatcher.cpp ruft periodisch _radio->resetAGC() wenn
+    getAGCResetInterval() > 0
+  - src/helpers/radiolib/SX126xReset.h: full receiver reset
+    (sleep -> CALIBRATE_ALL -> re-calibrate image -> re-apply
+    boosted gain). 5-50ms Blindzeit.
+  - simple_repeater overrideeted getAGCResetInterval() mit Pref-Wert
+    in secs/4 (CommonCLI 'agc.reset.interval').
+
+Ist-Zustand companion_radio:
+  Kein Override -> Default 0 -> AGC-Reset disabled.
+
+Option A -- statischer Reset (low-effort, ~30 Zeilen):
+  NodePrefs-Feld agc_reset_interval (uint16_t secs oder secs/4 fuer
+  upstream-Kompat), getAGCResetInterval()-Override, CLI set/get.
+  Default 0 (off). User kann z.B. 60s setzen.
+
+Option B -- adaptive Intelligenz (mehr Aufwand, interessanter):
+  Beobachtung: wenn rx-SNR-Floor ueber X Minuten ungewoehnlich
+  niedrig haengt (z.B. -127 dB), automatisch resetAGC() triggern.
+  Heuristik:
+    - Tracking eines gleitenden Floor-Wertes (rx_quality / RSSI-
+      Stille-Floor)
+    - Threshold + Hysterese (z.B. <-120 dBm fuer >10 Min ohne
+      sinnvollen Empfang -> reset)
+    - Rate-Limit auf max. 1 Reset pro N Minuten (sonst Flapping)
+  Vorteil: kein blind-Periodisch-Reset im Normalbetrieb,
+  reagiert nur wenn AGC wirklich klemmt.
+
+Beide Optionen koennen kombiniert werden: A als Fallback (sehr
+seltener Schluck-Auf-Reset, z.B. 1x/Stunde), B als Trigger-Logik.
+
+Use-Cases:
+  - Stationaerer Repeater mit nahen starken Stationen: hoher Nutzen
+  - Mobiler Companion: mittlerer Nutzen (AGC re-adaptiert beim
+    Bewegen, aber nicht garantiert)
+  - Reiner Client zuhause: niedriger Nutzen
+
+Kosten:
+  Reset = 5-50ms Blindzeit. Bei 60s Periode ~0.08% Off-Time.
+  Akzeptabel.
+
+Quelle: User-Frage 2026-06-03 ("haben wir das? brauchen wir das?"
+ueber Repeater-Admin-Berichte). User bevorzugt adaptive Variante
+(Option B / Kombi).
+
