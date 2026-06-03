@@ -2226,4 +2226,76 @@ Design-Logik fuer "off" / "follow":
     sinnvoll (Spam-Schutz vs follow-Parent).
 
 
+--------------------------------------------------------------------------------
+40. BLE-Powerbank-Stabilitaet weiter ungeloest -- OFFEN
+--------------------------------------------------------------------------------
+
+Status 2026-06-04:
+
+Symptom:
+  Heltec Wireless Tracker an Powerbank, BLE-Verbindung zur Companion-
+  App (iOS oder Android). Nach ca. 30 Minuten mobilem Betrieb:
+  BLE-Verbindungsabbruch. Nach erneutem manuellem App-Connect haengt
+  es wieder fuer geraume Zeit oder bleibt instabil.
+
+Vergleich:
+  - Vanilla MeshCore-Companion-Firmware auf gleicher Hardware mit
+    gleicher Powerbank UND App: ueber viele Wochen NICHT betroffen.
+    Damit ist das Problem in UNSEREM Fork eingeschleppt.
+  - Heltec Wireless Tracker (433 MHz Version) mit DL9SAU's LoRa-APRS
+    Firmware (kein BLE, mit serial-debug): jahrelang stabil an Power-
+    bank. Hardware OK, HWCDC OK, Power-Versorgung OK.
+
+Bereits eingebaut (alle Versuche bisher):
+
+  1. Serial.setTxTimeoutMs(1) -- HWCDC uint32-underflow Workaround
+     (timeout=0 lockt fuer ~49.7 Tage; war urspruengliches Problem)
+  2. esp_log_level_set("*", ESP_LOG_NONE) -- silence ESP-LIB-Log-
+     Flood (BLECharacteristic::notify rc=-1 spammed in Sekundentakt)
+  3. WiFi explizit disabled (esp_wifi_deinit) -- BLE-WiFi-Coex aus
+  4. pushDebugLog batched writes + 'if (Serial)' guards -- vermeidet
+     char-by-char serial blocking
+  5. _serial->isConnected() checks an vielen Send-Stellen --
+     verhindert Schreiben in disconnected channel
+  6. KEINE aktive Reconnect-Logik unsererseits -- BLE-Stack
+     handhabt advertise + reconnect selbst
+
+Trotz aller Layer: Symptom besteht (~30min, mobil, Powerbank).
+
+Diagnose-Strategie (TODO):
+
+  A) Wir-Diff vs upstream durchforsten -- was haben wir veraendert
+     was BLE/Memory/Timing tangieren koennte? Letzte Wochen
+     commit-by-commit.
+
+  B) Heap-Usage ueber Zeit loggen (ESP.getFreeHeap, Min-Free)
+     -- Speicherleak nach 30min?
+
+  C) BLE-Disconnect-Reason callback einbauen (NimBLE-API) --
+     gibt Aufschluss ueber WIE der Disconnect kam: Timeout,
+     Brown-out, App-side-Close, MAC-Layer-Fehler.
+
+  D) Brown-Out-Detector Status pro Loop loggen -- Power-Dip?
+     Heltec WT zieht bei LoRa-TX Spitzen, manche Powerbanks haben
+     Brownout-Schutz oder auto-shutdown unter Lastspitzen.
+
+  E) BLE Connection-Parameters mit upstream + dt267 vergleichen
+     -- Min/Max-Interval, Timeout, Latency. iOS-konform?
+
+  F) Andere Powerbank testen (User-Vorhaben 2026-06-04). Die
+     aktuelle wird seit kurzem genutzt -- moeglich dass sie
+     mehr Brown-Out-Dips hat als die alte.
+
+User-Vergleichs-Erkenntnis: vanilla MeshCore-Companion ist
+NICHT betroffen. Damit ist (A) Wir-Diff der Hauptverdacht.
+
+Ressourcen:
+  - [[ble-powerbank-diagnostics]] (memory) -- 3 Guard-Layer
+    geschichte
+  - [[hwcdc-timeout-zero-underflow]] (memory) -- HWCDC-Fix-Story
+  - Commit-History feat/nearly-real-repeater seit Branch-Start
+
+Quelle: User-Bericht 2026-06-04 nach mehreren Anlauf-Versuchen.
+
+
 
