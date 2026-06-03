@@ -1496,6 +1496,16 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   else if (loop_drop) {
     reject_reason = "loop-detected";
   }
+  // ROUTE_TYPE_DIRECT/_TRANSPORT_DIRECT: path-forwarding, NICHT repeating.
+  // Wir sind benannter Hop -- Mesh.cpp:81-114 hat self_id.isHashMatch
+  // bereits geprueft. Path-Routing ist die Routing-Entscheidung, kein
+  // zusaetzlicher Scope/Cap-Filter. Globale Limits (flood_max via
+  // getPathHashCount, duty soft, _repeating_allowed) sind oben bereits
+  // geprueft. Behebt vorigen Bug wo unscoped DMs entlang etablierter
+  // Pfade gedroppt wurden (Wunschliste 39, 2026-06-04).
+  else if (packet->isRouteDirect()) {
+    decision = true;
+  }
   // Wunschliste 24 (2026-05-30): Infrastruktur-Advert-Cap. Adverts mit
   // adv_type != ADV_TYPE_CHAT (also REPEATER/SENSOR/ROOM) werden ab
   // path_hash_count > flood_max_infra nicht mehr weitergeleitet.
@@ -1586,7 +1596,31 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       ptype == PAYLOAD_TYPE_REQ || ptype == PAYLOAD_TYPE_RESPONSE ||
       ptype == PAYLOAD_TYPE_TXT_MSG || ptype == PAYLOAD_TYPE_ANON_REQ) {
     decision = packet->hasTransportCodes();
-    if (!decision) reject_reason = "unscoped";
+    if (!decision) {
+      // Wunschliste 39 (2026-06-04): Selektives Aufweichen des
+      // unscoped-Blocks fuer Companion-User-Traffic (Erstkontakt).
+      //   - ADVERT + ADV_TYPE_CHAT  (User publiziert pub_key/Position)
+      //   - TXT_MSG flood            (DM ohne Pfad + ohne Scope-Default)
+      // Cap = flood_max_unscoped_companions (Sentinel CH_HOPS_OFF =
+      // follow flood_max_scope_region). REQ/RESP/ANON_REQ bleiben
+      // gedroppt (40% Traffic, kein Erstkontakt-Use-Case).
+      uint8_t cap = _prefs.flood_max_unscoped_companions;
+      if (cap == CH_HOPS_OFF) cap = _prefs.flood_max_scope_region;
+      bool is_chat_advert =
+          (ptype == PAYLOAD_TYPE_ADVERT
+           && packet->payload_len > (int)(PUB_KEY_SIZE + 4 + SIGNATURE_SIZE)
+           && (packet->payload[PUB_KEY_SIZE + 4 + SIGNATURE_SIZE] & 0x0F) == ADV_TYPE_CHAT);
+      bool is_user_txt = (ptype == PAYLOAD_TYPE_TXT_MSG);
+      if ((is_chat_advert || is_user_txt) && cap > 0
+          && packet->getPathHashCount() <= cap) {
+        decision = true;
+      } else {
+        reject_reason = (cap == 0) ? "unscoped-companions-off"
+                                    : (is_chat_advert || is_user_txt)
+                                       ? "unscoped-companions-cap"
+                                       : "unscoped";
+      }
+    }
     else if (!scopeAllowedForRepeat(packet)) {
       decision = false;
       reject_reason = "scope-not-allowed";
@@ -3407,6 +3441,10 @@ void MyMesh::begin(bool has_display) {
   // VOR loadPrefs. Falls Datei kuerzer / fresh-install: bleibt 3 stehen.
   // Stored-Wert (inkl. user-explizit 0 = 'nicht repeaten') ueberschreibt.
   _prefs.flood_max_scope_region = 3;
+  // Wunschliste 39 (2026-06-04): unscoped Companion cap. Sentinel
+  // CH_HOPS_OFF = follow flood_max_scope_region (Default damit
+  // Erstkontakt via unscoped CHAT-Adverts klappt).
+  _prefs.flood_max_unscoped_companions = CH_HOPS_OFF;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -6486,6 +6524,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint ("flood_max_infra",  _prefs.flood_max_infra);
   kv_uint ("flood_max_req_resp",   _prefs.flood_max_req_resp);
   kv_uint ("flood_max_unknown_chan", _prefs.flood_max_unknown_chan);
+  kv_uint ("flood_max_unscoped_companions", _prefs.flood_max_unscoped_companions);
   // Wunschliste 31: time-sync prefs
   kv_uint ("time_sync_mode",       _prefs.time_sync_mode);
   // Sources als 6-hex-Strings (3 Slots, leere als 000000)
@@ -7172,6 +7211,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "flood_max_infra") == 0)   { _prefs.flood_max_infra   = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_req_resp") == 0){ _prefs.flood_max_req_resp= (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_unknown_chan") == 0){ _prefs.flood_max_unknown_chan= (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "flood_max_unscoped_companions") == 0){ _prefs.flood_max_unscoped_companions = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "time_sync_mode") == 0)         { _prefs.time_sync_mode         = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start);   _br_applied++; return; }
       if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start);   _br_applied++; return; }
@@ -10663,6 +10703,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Default off. Numerisch 0..3 auch erlaubt.");
         return;
       }
+      if (strcmp(key, "flood_max_unscoped_companions") == 0
+          || strcmp(key, "flood.max.unscoped.companions") == 0) {
+        pushCompanionMessage(
+          "set flood_max_unscoped_companions <follow|off|1..63>:\n"
+          "  Hop-Cap fuer UNSCOPED Companion-Flood:\n"
+          "    - CHAT-Adverts (User-Erstkontakt)\n"
+          "    - flooded DMs ohne Default-Scope");
+        pushCompanionMessage(
+          "  follow (Default) = folgt flood_max_scope_region.\n"
+          "  off              = nicht repeaten.\n"
+          "  1..63            = expliziter Cap.\n"
+          "REQ/RESP/ANON_REQ unscoped bleiben geblockt.");
+        return;
+      }
       if (strcmp(key, "txdelay") == 0) {
         pushCompanionMessage(
           "set txdelay <auto | 0..2>:\n"
@@ -11227,6 +11281,45 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Wunschliste 39 (2026-06-04): set flood_max_unscoped_companions
+    // <follow|off|1..63>. Cap fuer ROUTE_TYPE_FLOOD ohne Scope, nur fuer
+    // ADV_TYPE_CHAT-Adverts + TXT_MSG (User-Erstkontakt). REQ/RESP/ANON_REQ
+    // unscoped bleiben geblockt.
+    if (strcmp(key, "flood_max_unscoped_companions") == 0
+        || strcmp(key, "flood.max.unscoped.companions") == 0) {
+      uint8_t newval;
+      if (strcmp(value_lc, "follow") == 0) {
+        newval = CH_HOPS_OFF;
+      } else if (strcmp(value_lc, "off") == 0) {
+        newval = 0;
+      } else {
+        int v = atoi(value_lc);
+        if (v < 1 || v > _prefs.flood_max) {
+          char r[120]; snprintf(r, sizeof(r),
+            "Wert: 'follow' / 'off' / 1..%u (flood_max).",
+            (unsigned)_prefs.flood_max);
+          pushCompanionMessage(r);
+          return;
+        }
+        newval = (uint8_t)v;
+      }
+      _prefs.flood_max_unscoped_companions = newval;
+      savePrefs();
+      char r[140];
+      if (newval == CH_HOPS_OFF)
+        snprintf(r, sizeof(r),
+          "OK - flood_max_unscoped_companions = follow (-> %u)",
+          (unsigned)_prefs.flood_max_scope_region);
+      else if (newval == 0)
+        snprintf(r, sizeof(r),
+          "OK - flood_max_unscoped_companions = off (nicht repeaten)");
+      else
+        snprintf(r, sizeof(r),
+          "OK - flood_max_unscoped_companions = %u", (unsigned)newval);
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Wunschliste 31: set time sync <off|lazy|aabbcc [bb [cc]]>
     // Konfiguriert den Advert-basierten RTC-Sync. 3-Byte-Pub-Key-Prefixe
     // (= 6 Hex-Zeichen) fuer bis zu 3 Trust-Sources im strict-Modus.
@@ -11656,6 +11749,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         emit_uint  ("flood_max_infra", _prefs.flood_max_infra,    0);
       }
       emit_uint  ("flood_max_req_resp", _prefs.flood_max_req_resp, 0);
+      // flood_max_unscoped_companions (Wunschliste 39):
+      // Sentinel CH_HOPS_OFF = follow flood_max_scope_region. Default.
+      {
+        bool eq = (_prefs.flood_max_unscoped_companions == CH_HOPS_OFF);
+        if (!list_changed || !eq) {
+          if (!eq) changed++;
+          if (_prefs.flood_max_unscoped_companions == CH_HOPS_OFF)
+            snprintf(tmp, sizeof(tmp),
+              "  flood_max_unscoped_companions = follow (-> %u) [default]",
+              (unsigned)_prefs.flood_max_scope_region);
+          else if (_prefs.flood_max_unscoped_companions == 0)
+            snprintf(tmp, sizeof(tmp),
+              "  flood_max_unscoped_companions = off (default: follow)");
+          else
+            snprintf(tmp, sizeof(tmp),
+              "  flood_max_unscoped_companions = %u (default: follow)",
+              (unsigned)_prefs.flood_max_unscoped_companions);
+          gline(tmp);
+        }
+      }
       // loop_detect (Wunschliste 6b) -- enum, eigene Anzeige.
       {
         uint8_t v = _prefs.loop_detect;
@@ -11741,6 +11854,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       } else {
         snprintf(r, sizeof(r), "flood_max_req_resp = %u", (unsigned)_prefs.flood_max_req_resp);
       }
+    }
+    else if (strcmp(key, "flood_max_unscoped_companions") == 0
+             || strcmp(key, "flood.max.unscoped.companions") == 0) {
+      if (_prefs.flood_max_unscoped_companions == CH_HOPS_OFF)
+        snprintf(r, sizeof(r), "flood_max_unscoped_companions = follow (-> %u)",
+                 (unsigned)_prefs.flood_max_scope_region);
+      else if (_prefs.flood_max_unscoped_companions == 0)
+        snprintf(r, sizeof(r), "flood_max_unscoped_companions = off (nicht repeaten)");
+      else
+        snprintf(r, sizeof(r), "flood_max_unscoped_companions = %u",
+                 (unsigned)_prefs.flood_max_unscoped_companions);
     }
     else if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) snprintf(r, sizeof(r), "owner_info = %s", _prefs.owner_info[0] ? _prefs.owner_info : "(leer)");
     else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {

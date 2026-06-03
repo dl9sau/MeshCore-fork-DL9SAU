@@ -293,6 +293,11 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // Wunschliste 31: time-sync mode + sources (10 byte)
     file.read((uint8_t *)&_prefs.time_sync_mode, sizeof(_prefs.time_sync_mode));            // 1512+MAX_GROUP_CHANNELS
     file.read((uint8_t *)_prefs.time_sync_sources, sizeof(_prefs.time_sync_sources));       // +1
+    // Wunschliste 39: unscoped-companions cap. Bei alten Files liefert
+    // file.read 0 Bytes -> Pre-Init in begin() bleibt stehen (default
+    // CH_HOPS_OFF = follow flood_max_scope_region).
+    file.read((uint8_t *)&_prefs.flood_max_unscoped_companions,
+              sizeof(_prefs.flood_max_unscoped_companions));
 
     file.close();
   }
@@ -374,6 +379,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Wunschliste 31
     file.write((uint8_t *)&_prefs.time_sync_mode, sizeof(_prefs.time_sync_mode));            // 1512+MAX_GROUP_CHANNELS
     file.write((uint8_t *)_prefs.time_sync_sources, sizeof(_prefs.time_sync_sources));       // +1
+    // Wunschliste 39
+    file.write((uint8_t *)&_prefs.flood_max_unscoped_companions,
+               sizeof(_prefs.flood_max_unscoped_companions));
 
     file.close();
   }

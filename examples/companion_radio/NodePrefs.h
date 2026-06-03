@@ -415,4 +415,16 @@ struct NodePrefs {  // persisted to file
   // App-Debug-Frame (PUSH_CODE_DEBUG_LOG) bleibt unbeeinflusst.
   // CLI: logging usb|channel on|off ; 'logging' zeigt Status.
   uint8_t        log_flags;
+
+  // Wunschliste 39 (2026-06-04): Hop-Cap fuer UNSCOPED Companion-Pakete
+  // (ROUTE_TYPE_FLOOD ohne transport_codes):
+  //   - ADVERT mit adv_type = ADV_TYPE_CHAT  (Companion-User)
+  //   - TXT_MSG flood (DM ohne etablierten Path und ohne Default-Scope)
+  // Erlaubt limited propagation damit User-Erstkontakt ueber Repeater
+  // hinweg klappt -- ohne unbeschraenkten unscoped-Traffic.
+  //   254 (CH_HOPS_OFF)  = follow flood_max_scope_region (Default)
+  //   0                   = nicht repeaten (explizit off)
+  //   1..flood_max        = expliziter Cap
+  // CLI: set flood_max_unscoped_companions <follow|off|1..63>
+  uint8_t        flood_max_unscoped_companions;
 };
