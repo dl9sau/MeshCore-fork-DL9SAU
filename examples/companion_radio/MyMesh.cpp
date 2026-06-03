@@ -11690,7 +11690,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint32_t own_flood_total = 0;
     for (int pp = 0; pp < 16; pp++) own_flood_total += _tx_self_flood_by_ptype[pp];
     snprintf(block, sizeof(block),
-             "tx own flood (direct = own - flood):\n"
+             "tx own flood:\n"
              "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
              "  flood total=%lu",
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
@@ -11982,7 +11982,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint32_t own_flood_total = 0;
     for (int pp = 0; pp < 16; pp++) own_flood_total += _tx_self_flood_by_ptype[pp];
     snprintf(block, sizeof(block),
-             "tx own flood (direct = own - flood):\n"
+             "tx own flood:\n"
              "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
              "  flood total=%lu",
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
