@@ -2060,3 +2060,50 @@ Quelle: User-Frage 2026-06-03 ("haben wir das? brauchen wir das?"
 ueber Repeater-Admin-Berichte). User bevorzugt adaptive Variante
 (Option B / Kombi).
 
+
+--------------------------------------------------------------------------------
+38. User-adressierbare No-Repeat-Sentinel-Scopes -- ERLEDIGT (2026-06-03)
+--------------------------------------------------------------------------------
+
+Hintergrund:
+  Wir haben bereits #local-discard als internen Sentinel: lokal-Pakete
+  werden beim Erst-Repeat auf local-discard umgeschrieben, sodass kein
+  zweiter Repeater drueber geht. Dieser Mechanismus war bisher
+  systemintern -- der User konnte nicht selbst eine Nachricht mit
+  "bitte nicht weiterleiten" markieren.
+
+  Gerade im 'repeat all'-Modus, wo wir Pakete aller Scopes weiterleiten
+  (nicht nur die in der Allowlist), ist eine User-adressierbare
+  Opt-Out-Markierung sinnvoll.
+
+Umsetzung:
+  Vier neue Build-in-Sentinels in dl9sau_geo_recommendations.cpp,
+  alle NOGEO_OFF (default REPEAT_OFF + ADVERT_OFF):
+
+    #direct       (englisch)
+    #direkt       (deutsche Schreibweise)
+    #norepeat
+    #no-repeat
+
+  Hard-Block in allowPacketForward analog #local-discard, mit
+  reject_reason = "user-norepeat". Greift auch im 'repeat all'-Modus.
+  Im Gegensatz zu local-discard KEIN Re-Write -- sind reine End-States,
+  vom User direkt adressiert.
+
+Sentinel-Schutz (gemeinsamer is_sentinel_name() Helper):
+  - 'scope add direct'        -> "Build-in. 'scope direct pin'..."
+  - 'scope direct pin|off|..' -> "Sentinel - nicht modifizierbar.
+                                  Erlaubt: nur 'scope direct info'."
+  - 'scope remove direct'     -> "#direct ist Sentinel - nicht entfernbar."
+
+Anwendungsfaelle:
+  - User schickt einen Test-Ping ueber das LAN-RF-Mesh, will aber nicht
+    dass Repeater den weitertragen
+  - Direct-DM zu nahem Kontakt: keine Reichweite-Verstaerkung gewuenscht
+  - Datenschutz-/Etikette-Marker: "diese Nachricht ist nur fuer
+    direkten Empfang"
+
+Implementiert: Commit 2d9b2e7b (2026-06-03).
+Quelle: User-Wunsch 2026-06-03.
+
+
