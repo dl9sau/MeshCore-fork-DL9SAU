@@ -2107,3 +2107,85 @@ Implementiert: Commit 2d9b2e7b (2026-06-03).
 Quelle: User-Wunsch 2026-06-03.
 
 
+--------------------------------------------------------------------------------
+39. Unscoped Companion-Traffic selektiv erlauben + DIRECT-bypass -- ERLEDIGT (2026-06-04)
+--------------------------------------------------------------------------------
+
+Hintergrund (Diskussion 2026-06-04):
+
+Bisheriger Stand:
+  allowPacketForward() rejecte ALLE unscoped FLOOD-Pakete der Typen
+  ADVERT/ACK/MULTIPART/CONTROL/RAW_CUSTOM/TRACE/REQ/RESPONSE/TXT_MSG/
+  ANON_REQ mit reject_reason "unscoped".
+
+  Urspruengliche Designentscheidung: Companion-Firmware ist opt-in
+  Scoped-Repeater, unscoped traffic = unbeschraenkt, daher gedroppt.
+
+Problem 1 -- User-Erstkontakt:
+  Companions die ohne 'scope advert default' booten + ausserhalb
+  bekannter Geo-Bboxes senden unscoped CHAT-Adverts. Andere User
+  koennen sie dann nicht ueber unseren Repeater "sehen" -- der
+  fuer P2P-DM notwendige Schluesseltausch ueber Advert ist
+  unterbrochen.
+
+Problem 2 -- DIRECT-Bug:
+  ROUTE_TYPE_DIRECT/_TRANSPORT_DIRECT path-forwarding ist KEIN
+  Repeating. Mesh.cpp:81-114 prueft self_id.isHashMatch UND ruft
+  dann allowPacketForward(). Unsere ptype-Scope-Kaskade droppte
+  unscoped DMs auch wenn wir benannter Hop waren -- damit etablierte
+  Path-Routes durch uns gebrochen.
+
+Problem 3 -- Erweiterte Reichweite scoped DM:
+  Manche Repeater limitieren grosse Scopes wie "de" / "de-ni".
+  Damit reduziert sich die Reichweite scoped DMs. Ein non-scope-
+  fallback fuer User-DMs ist daher als Funktionalitaets-Reserve
+  sinnvoll.
+
+Aenderungen:
+
+(1) DIRECT-bypass in allowPacketForward (nach flood_max + loop_drop):
+      if (packet->isRouteDirect()) decision = true;
+    Path-Routes bleiben intakt fuer unscoped DMs, ACKs auf
+    etablierten Pfaden, Multipart. Globale Limits gelten weiter.
+
+(2) Selektive Lockerung fuer FLOOD unscoped:
+    - ADVERT mit ADV_TYPE_CHAT (Companion-User publizieren pub_key)
+    - TXT_MSG (flooded DM ohne Default-Scope / vor Path-Discovery)
+
+    Cap via neue Pref flood_max_unscoped_companions:
+      CH_HOPS_OFF (254) = follow flood_max_scope_region (Default 3)
+      0                  = explizit off
+      1..flood_max       = expliziter Cap
+
+(3) REQ/RESPONSE/ANON_REQ unscoped BLEIBEN geblockt:
+    40% Traffic-Anteil (jeweils ~20%) zu hoch, kein Erstkontakt-
+    Use-Case. User die Repeater/RoomServer/Sensoren abfragen
+    sollen Scopes verwenden.
+
+(4) ACK unscoped: in 99% ROUTE_TYPE_DIRECT (Antwort auf bekannten
+    Pfad) -> Aenderung (1) deckt das ab. Seltene flooded scoped
+    ACKs gehen weiter durch scope-filter.
+
+(5) Konvention-Alignment ch.hops + flood_max_unknown_chan:
+      follow = CH_HOPS_OFF (= folgt parent-Var)
+      off    = 0           (= explizit nicht repeaten)
+      1..63  = expliziter Cap
+    Bricht alte 'off' Semantik fuer per-channel ch.hops (war:
+    remove entry / follow); user nutzt jetzt 'follow' dafuer.
+    Akzeptiert weil Dev-Branch + alleine testend.
+
+Bewusst NICHT umgesetzt:
+  - Unscoped channel-Nachrichten mit max-hop Begrenzung. User-
+    Pakete ab path=0 koennen nach repeat bis zu 63 hops weit
+    propagieren (Protokoll-Limitation: nur Repeater koennen
+    Pfadlaenge limitieren, nicht Sender). Auffuellen des Pfads
+    mit eigenen Hops technisch moeglich aber kostet Airtime und
+    Empfaenger sieht den gefakten Pfad -- Designschwaeche von
+    MeshCore ohne sauberes Heilmittel.
+
+Implementiert: Commit fa62a3d2 + folgender Alignment-Commit
+(2026-06-04). Help-Texte unter 145-Byte BLE-Limit gehalten.
+Quelle: User-Diskussion 2026-06-04.
+
+
+

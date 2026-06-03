@@ -8090,9 +8090,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "ch.hops: per-Channel Repeat-Cap fuer\n"
           "  PAYLOAD_TYPE_GRP_TXT/GRP_DATA-Pakete.");
         pushCompanionMessage(
-          "  set ch.hops <name> <N|off>\n"
-          "    N=0 = nicht repeaten\n"
-          "    N=1..63 = Cap, off = kein Cap");
+          "  set ch.hops <name> <follow|off|N>\n"
+          "    follow = kein Cap (folgt flood_max)\n"
+          "    off    = nicht repeaten\n"
+          "    1..63  = expliziter Cap");
         pushCompanionMessage(
           "  get ch.hops <name>\n"
           "  ch.hops status -- aktive Caps\n"
@@ -9452,7 +9453,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
   // ---------- ch.hops --------------------------------------------------
   // Per-Channel Repeat-Cap (Wunschliste 32). dt267-inspirierte Syntax:
-  //   set ch.hops <name> <N|off>  -- N=0 heisst 'nicht repeaten'
+  //   set ch.hops <name> <follow|off|N>  -- N=0 heisst 'nicht repeaten'
   //   get ch.hops <name>
   //   ch.hops status              -- alle aktiven Caps
   //   ch.hops clear               -- alle Caps loeschen (ausser companion)
@@ -9467,9 +9468,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "  ch.hops status       -- aktive Caps zeigen\n"
         "  ch.hops clear        -- alle Caps loeschen");
       pushCompanionMessage(
-        "  set ch.hops <name> <N|off>\n"
-        "    N=0 = nicht repeaten; N>0 = Cap;\n"
-        "    off = kein per-Channel-Cap (flood_max).");
+        "  set ch.hops <name> <follow|off|N>\n"
+        "    follow = kein Cap (flood_max)\n"
+        "    off    = nicht repeaten\n"
+        "    1..63  = expliziter Cap");
       pushCompanionMessage(
         "  get ch.hops <name>\n"
         "$companion ist forced auf 0 (nicht repeaten,\n"
@@ -9500,7 +9502,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         uint8_t cap = _channel_hops_cap_cache[i];
         if (cap == CH_HOPS_OFF) continue;  // nicht zeigen
         char line[80];
-        if (cap == 0) snprintf(line, sizeof(line), "  %-20.20s = 0 (nicht repeaten)", ch.name);
+        if (cap == 0) snprintf(line, sizeof(line), "  %-20.20s = off (nicht repeaten)", ch.name);
         else          snprintf(line, sizeof(line), "  %-20.20s = %u", ch.name, (unsigned)cap);
         add_b(line);
         n_shown++;
@@ -9514,7 +9516,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(display, sizeof(display), "%s (ext)", en.name);
         char line[80];
         if (en.cap == 0)
-          snprintf(line, sizeof(line), "  %-20.20s = 0 (nicht repeaten)", display);
+          snprintf(line, sizeof(line), "  %-20.20s = off (nicht repeaten)", display);
         else
           snprintf(line, sizeof(line), "  %-20.20s = %u", display, (unsigned)en.cap);
         add_b(line);
@@ -10706,14 +10708,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (strcmp(key, "flood_max_unscoped_companions") == 0
           || strcmp(key, "flood.max.unscoped.companions") == 0) {
         pushCompanionMessage(
-          "set flood_max_unscoped_companions <follow|off|1..63>:\n"
-          "  Hop-Cap fuer UNSCOPED Companion-Flood:\n"
-          "    - CHAT-Adverts (User-Erstkontakt)\n"
-          "    - flooded DMs ohne Default-Scope");
+          "set flood_max_unscoped_companions:\n"
+          "  Cap fuer unscoped Companion-Flood\n"
+          "  (CHAT-Adverts + flooded DMs).");
         pushCompanionMessage(
-          "  follow (Default) = folgt flood_max_scope_region.\n"
-          "  off              = nicht repeaten.\n"
-          "  1..63            = expliziter Cap.\n"
+          "<follow|off|1..63>:\n"
+          "  follow = folgt flood_max_scope_region\n"
+          "  off    = nicht repeaten\n"
+          "  1..63  = expliziter Cap");
+        pushCompanionMessage(
           "REQ/RESP/ANON_REQ unscoped bleiben geblockt.");
         return;
       }
@@ -10807,12 +10810,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (strcmp(key, "ch.hops") == 0) {
         pushCompanionMessage(
-          "set ch.hops <name> <N|off>:\n"
+          "set ch.hops <name> <follow|off|N>:\n"
           "  per-Channel Repeat-Cap (Group-Messages).");
         pushCompanionMessage(
-          "  N=0 = nicht repeaten\n"
-          "  N=1..63 = Cap (Drop wenn path_hash > N)\n"
-          "  off = kein per-Channel-Cap (flood_max gilt)");
+          "  follow = kein Cap (flood_max gilt)\n"
+          "  off    = nicht repeaten\n"
+          "  1..63  = Cap (Drop wenn path_hash > N)");
         pushCompanionMessage(
           "Hashtag-Channels koennen auch OHNE Subscribe\n"
           "  geblockt werden (PSK aus Name ableitbar):\n"
@@ -11421,7 +11424,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // Wunschliste 32: set ch.hops <name> <N|off>
+    // Wunschliste 32: set ch.hops <name> <follow|off|N>
     // Multi-Token: nach key ('ch.hops') folgen Channel-Name (kann
     // Spaces enthalten!) und am Ende der Wert. Wir parsen vom Ende:
     // letztes Whitespace-separates Token = Wert, alles davor = Name.
@@ -11431,7 +11434,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       size_t vlen = strlen(value_lc);
       if (vlen == 0) {
         pushCompanionMessage(
-          "Usage: set ch.hops <name> <N|off>\n"
+          "Usage: set ch.hops <name> <follow|off|N>\n"
           "  Beispiel: set ch.hops Public 3");
         return;
       }
@@ -11443,14 +11446,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       size_t tok_start = tok_end;
       while (tok_start > 0 && value_lc[tok_start-1] != ' ' && value_lc[tok_start-1] != '\t') tok_start--;
       if (tok_start == 0) {
-        pushCompanionMessage("Usage: set ch.hops <name> <N|off>");
+        pushCompanionMessage("Usage: set ch.hops <name> <follow|off|N>");
         return;
       }
       // Name: alles vor tok_start (Trailing-WS strippen)
       size_t name_end = tok_start;
       while (name_end > 0 && (value_lc[name_end-1] == ' ' || value_lc[name_end-1] == '\t')) name_end--;
       if (name_end == 0) {
-        pushCompanionMessage("Usage: set ch.hops <name> <N|off>");
+        pushCompanionMessage("Usage: set ch.hops <name> <follow|off|N>");
         return;
       }
       char chname[32];
@@ -11463,12 +11466,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memcpy(vtok, value_lc + tok_start, vlen2);
       vtok[vlen2] = 0;
       uint8_t new_cap;
-      if (strcmp(vtok, "off") == 0) {
+      // Wunschliste 39 alignment (2026-06-04): einheitliche Konvention
+      //   follow = CH_HOPS_OFF (kein per-channel-Cap / follow parent)
+      //   off    = 0           (explizit nicht repeaten)
+      //   1..63  = expliziter Cap
+      // Bricht alte 'off' Semantik (war: kein Cap). Migration siehe
+      // Commit-Notes.
+      if (strcmp(vtok, "follow") == 0) {
         new_cap = CH_HOPS_OFF;
+      } else if (strcmp(vtok, "off") == 0) {
+        new_cap = 0;
       } else {
         int v = atoi(vtok);
         if (v < 0 || v > 63) {
-          pushCompanionMessage("Wert ausserhalb 0..63 (oder 'off').");
+          pushCompanionMessage("Wert: 'follow' / 'off' / 0..63.");
           return;
         }
         new_cap = (uint8_t)v;
@@ -11490,9 +11501,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           savePrefs();
           char r[120];
           if (new_cap == CH_HOPS_OFF)
-            snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = off");
+            snprintf(r, sizeof(r),
+              "OK - flood_max_unknown_chan = follow (-> %u)",
+              (unsigned)_prefs.flood_max);
           else if (new_cap == 0)
-            snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = 0 (nicht repeaten)");
+            snprintf(r, sizeof(r),
+              "OK - flood_max_unknown_chan = off (nicht repeaten)");
           else
             snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = %u", (unsigned)new_cap);
           pushCompanionMessage(r);
@@ -11566,9 +11580,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       savePrefs();
       char r[120];
       if (new_cap == CH_HOPS_OFF)
-        snprintf(r, sizeof(r), "OK - ch.hops %s = off (kein Cap)", ch.name);
+        snprintf(r, sizeof(r), "OK - ch.hops %s = follow (kein Cap)", ch.name);
       else if (new_cap == 0)
-        snprintf(r, sizeof(r), "OK - ch.hops %s = 0 (nicht repeaten)", ch.name);
+        snprintf(r, sizeof(r), "OK - ch.hops %s = off (nicht repeaten)", ch.name);
       else
         snprintf(r, sizeof(r), "OK - ch.hops %s = %u", ch.name, (unsigned)new_cap);
       pushCompanionMessage(r);
@@ -11914,9 +11928,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (strcasecmp(chname, "unknown") == 0
             || strcasecmp(chname, "unknown channels") == 0) {
           uint8_t cap = _prefs.flood_max_unknown_chan;
-          if (cap == CH_HOPS_OFF) snprintf(r, sizeof(r), "ch.hops unknown = off");
-          else if (cap == 0)      snprintf(r, sizeof(r), "ch.hops unknown = 0 (nicht repeaten)");
-          else                    snprintf(r, sizeof(r), "ch.hops unknown = %u", (unsigned)cap);
+          if (cap == CH_HOPS_OFF)
+            snprintf(r, sizeof(r), "ch.hops unknown = follow (-> %u)",
+                     (unsigned)_prefs.flood_max);
+          else if (cap == 0)
+            snprintf(r, sizeof(r), "ch.hops unknown = off (nicht repeaten)");
+          else
+            snprintf(r, sizeof(r), "ch.hops unknown = %u", (unsigned)cap);
         } else {
           int slot = -1;
           for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
@@ -11930,9 +11948,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           } else {
             uint8_t cap = _channel_hops_cap_cache[slot];
             ChannelDetails ch; getChannel(slot, ch);
-            if (cap == CH_HOPS_OFF) snprintf(r, sizeof(r), "ch.hops %s = off", ch.name);
-            else if (cap == 0)      snprintf(r, sizeof(r), "ch.hops %s = 0 (nicht repeaten)", ch.name);
-            else                    snprintf(r, sizeof(r), "ch.hops %s = %u", ch.name, (unsigned)cap);
+            if (cap == CH_HOPS_OFF)
+              snprintf(r, sizeof(r), "ch.hops %s = follow (kein Cap)", ch.name);
+            else if (cap == 0)
+              snprintf(r, sizeof(r), "ch.hops %s = off (nicht repeaten)", ch.name);
+            else
+              snprintf(r, sizeof(r), "ch.hops %s = %u", ch.name, (unsigned)cap);
           }
         }
       }
