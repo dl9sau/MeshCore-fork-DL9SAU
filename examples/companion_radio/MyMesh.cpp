@@ -7665,7 +7665,7 @@ static int append_rate_hint(char* out, size_t n, uint32_t total, uint64_t uptime
 
 static const TraceCat trace_cats[] = {
   { "gps",     TRACE_GPS,     "GPS power on/off, first fix, fix loss" },
-  { "adverts", TRACE_ADVERTS, "eigene Adverts (periodic/nightly/manual)" },
+  { "adverts", TRACE_ADVERTS, "eigene Adverts ALLER Typen: periodic zero-hop (mit Reschedule), nightly flood (Send), manual (App-Cmd / UI-Button). Repeats fremder Adverts NICHT (das ist 'repeat')." },
   { "repeat",  TRACE_REPEAT,  "durchgereichte Packets" },
   { "scope",   TRACE_SCOPE,   "scope override/default/bake Wechsel" },
   { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
@@ -14065,10 +14065,37 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ') arg++; }
 
     auto print_status = [&]() {
+      // Konsistent mit 'status'-Befehl: Uhrzeit statt nur on/off,
+      // 'on(?)' bei RTC-unset oder nightly-noch-nicht-geplant.
+      char zh_str[16], nl_str[16];
+      uint32_t now_rtc = getRTCClock()->getCurrentTime();
+      bool rtc_ok = (now_rtc > 1500000000UL);
+      int32_t tz = rtc_ok ? localTzOffsetSecs(now_rtc) : 0;
+      if (!(_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)) {
+        strcpy(zh_str, "off");
+      } else if (!rtc_ok) {
+        strcpy(zh_str, "on(?)");
+      } else {
+        long delta_ms = (long)(next_periodic_advert_at - millis());
+        long delta_s = (delta_ms < 0) ? 0 : delta_ms / 1000;
+        uint32_t loc = now_rtc + (uint32_t)delta_s + (uint32_t)tz;
+        snprintf(zh_str, sizeof(zh_str), "%02u:%02u",
+                 (unsigned)((loc % 86400UL) / 3600UL),
+                 (unsigned)((loc % 3600UL) / 60UL));
+      }
+      if (!(_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY)) {
+        strcpy(nl_str, "off");
+      } else if (!rtc_ok || next_night_flood_unix == 0) {
+        strcpy(nl_str, "on(?)");
+      } else {
+        uint32_t loc = next_night_flood_unix + (uint32_t)tz;
+        snprintf(nl_str, sizeof(nl_str), "%02u:%02u",
+                 (unsigned)((loc % 86400UL) / 3600UL),
+                 (unsigned)((loc % 3600UL) / 60UL));
+      }
       char line[120];
       snprintf(line, sizeof(line), "autoadv: zerohop=%s  nightly=%s",
-               (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) ? "on" : "off",
-               (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) ? "on" : "off");
+               zh_str, nl_str);
       pushCompanionMessage(line);
     };
     auto trigger_zerohop_now = [&]() {
