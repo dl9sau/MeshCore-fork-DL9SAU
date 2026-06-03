@@ -5200,6 +5200,17 @@ void MyMesh::loop() {
     unsigned long base = computeNextAdvertIntervalMs();
     unsigned long jitter = (unsigned long)getRNG()->nextInt(0, 120000);
     next_periodic_advert_at = futureMillis(base + jitter);
+    // Next-fire-Visibility (User-Wunsch 2026-06-03). Lokale Uhrzeit + Delta.
+    uint32_t now_rtc = getRTCClock()->getCurrentTime();
+    if (now_rtc > 1500000000UL) {
+      uint32_t abs_unix = now_rtc + (base + jitter) / 1000UL;
+      uint32_t loc = abs_unix + (uint32_t)localTzOffsetSecs(now_rtc);
+      unsigned hh = (unsigned)((loc % 86400UL) / 3600UL);
+      unsigned mm = (unsigned)((loc % 3600UL) / 60UL);
+      traceCompanion(TRACE_ADVERTS,
+                     "[adv] next zero-hop at %02u:%02u (in %lus)",
+                     hh, mm, (base + jitter) / 1000UL);
+    }
   }
 
   // Nightly scoped flood advert: random instant in 23:00-05:00 local
@@ -5725,9 +5736,15 @@ void MyMesh::scheduleNextNightFlood() {
   // Rueckkonvertierung lokal->UTC mit gleichem Offset wie oben. Edge-Case
   // DST-Wechsel-Sonntag: minimal 1h off, akzeptabler Trade-off.
   next_night_flood_unix = pick_local - (uint32_t)tz_off;
-  uint32_t now_rtc = getRTCClock()->getCurrentTime();
-  long until_s = (long)next_night_flood_unix - (long)now_rtc;
-  traceCompanion(TRACE_NIGHT, "[night] scheduled in %ld min", until_s / 60);
+  uint32_t now_rtc2 = getRTCClock()->getCurrentTime();
+  long until_s = (long)next_night_flood_unix - (long)now_rtc2;
+  // Absolute Uhrzeit mit ausgeben (User-Wunsch 2026-06-03).
+  uint32_t loc = next_night_flood_unix + (uint32_t)localTzOffsetSecs(now_rtc2);
+  unsigned hh = (unsigned)((loc % 86400UL) / 3600UL);
+  unsigned mm = (unsigned)((loc % 3600UL) / 60UL);
+  traceCompanion(TRACE_NIGHT,
+                 "[night] scheduled %02u:%02u (in %ld min)",
+                 hh, mm, until_s / 60);
 }
 
 // Adaptive zero-hop advert pacing:
@@ -8363,8 +8380,35 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                (int)_gps_had_fix_ever, (int)_is_moving, ll);
     }
     pushCompanionMessage(line);
-    const char* zh = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) ? "on" : "off";
-    const char* nl = (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) ? "on" : "off";
+    // Next-scheduled-Sichtbarkeit (User-Wunsch 2026-06-03): "zerohop=12:03"
+    // statt nur "on". "off" bleibt wenn deaktiviert. "on(?)" bei RTC-unset
+    // oder noch nicht geplant.
+    char zh_str[16], nl_str[16];
+    uint32_t now_rtc = getRTCClock()->getCurrentTime();
+    bool rtc_ok = (now_rtc > 1500000000UL);
+    int32_t tz = rtc_ok ? localTzOffsetSecs(now_rtc) : 0;
+    if (!(_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)) {
+      strcpy(zh_str, "off");
+    } else if (!rtc_ok) {
+      strcpy(zh_str, "on(?)");
+    } else {
+      long delta_ms = (long)(next_periodic_advert_at - millis());
+      long delta_s = (delta_ms < 0) ? 0 : delta_ms / 1000;
+      uint32_t loc = now_rtc + (uint32_t)delta_s + (uint32_t)tz;
+      snprintf(zh_str, sizeof(zh_str), "%02u:%02u",
+               (unsigned)((loc % 86400UL) / 3600UL),
+               (unsigned)((loc % 3600UL) / 60UL));
+    }
+    if (!(_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY)) {
+      strcpy(nl_str, "off");
+    } else if (!rtc_ok || next_night_flood_unix == 0) {
+      strcpy(nl_str, "on(?)");
+    } else {
+      uint32_t loc = next_night_flood_unix + (uint32_t)tz;
+      snprintf(nl_str, sizeof(nl_str), "%02u:%02u",
+               (unsigned)((loc % 86400UL) / 3600UL),
+               (unsigned)((loc % 3600UL) / 60UL));
+    }
     if (_prefs.client_repeat) {
       // Wunschliste 26 D (User 2026-05-31): Mode + Force-Flag in einer
       // Klammer. profile==1 -> 'full' (= 'normal' im Code), sonst
@@ -8374,11 +8418,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* frc  = _prefs.client_repeat_force ? ",force" : "";
       snprintf(line, sizeof(line),
                "autoadv: zerohop=%s nightly=%s  repeater=on (%s%s)",
-               zh, nl, prof, frc);
+               zh_str, nl_str, prof, frc);
     } else {
       snprintf(line, sizeof(line),
                "autoadv: zerohop=%s nightly=%s  repeater=off",
-               zh, nl);
+               zh_str, nl_str);
     }
     pushCompanionMessage(line);
     return;
@@ -12514,11 +12558,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // hier suggerierte 'das ist alles'. Footer mit Verweis auf
       // die anderen Sub-Befehle:
       pushCompanionMessage(
-        "weitere Sub-Befehle:\n"
-        "  scope repeater  -- Repeating-Policy (mode, allowlist)\n"
-        "  scope list      -- bekannte scopes (Registry)\n"
-        "  scope <name>    -- per-Eintrag-Optionen\n"
-        "  scope ? / help scope -- volle Uebersicht");
+        "weitere:\n"
+        "  scope repeater  -- Policy/allowlist\n"
+        "  scope list      -- Registry\n"
+        "  scope <name>    -- Eintrag-Opts\n"
+        "  help scope      -- volle Sicht");
       return;
     }
 
@@ -12896,6 +12940,57 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  "  active = %s",
                  auto_str, active);
         pushCompanionMessage(tail);
+
+        // Next-Fire-Sichtbarkeit (User-Wunsch 2026-06-03): wann ist der
+        // naechste zero-hop und der naechste nightly geplant? RTC-basiert,
+        // lokale Zeit. Bei is_moving aendert sich zero-hop dynamisch -- das
+        // ignorieren wir hier, der Wert ist eine Momentaufnahme.
+        {
+          uint32_t now_rtc = getRTCClock()->getCurrentTime();
+          int32_t  tz      = (now_rtc > 1500000000UL)
+                              ? localTzOffsetSecs(now_rtc) : 0;
+          char zh_buf[48] = "off";
+          char nl_buf[48] = "off";
+          auto fmt_hhmm_rel = [&](uint32_t abs_unix, long delta_s,
+                                  char* out, size_t out_size) {
+            uint32_t loc = abs_unix + (uint32_t)tz;
+            unsigned hh = (unsigned)((loc % 86400UL) / 3600UL);
+            unsigned mm = (unsigned)((loc % 3600UL) / 60UL);
+            if (delta_s < 0) delta_s = 0;
+            unsigned long ds = (unsigned long)delta_s;
+            unsigned long dh = ds / 3600UL, dm = (ds % 3600UL) / 60UL;
+            if (dh > 0)
+              snprintf(out, out_size, "%02u:%02u (in %luh%02lum)",
+                       hh, mm, dh, dm);
+            else
+              snprintf(out, out_size, "%02u:%02u (in %lum)", hh, mm, dm);
+          };
+          if (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) {
+            long delta_ms = (long)(next_periodic_advert_at - millis());
+            long delta_s  = delta_ms / 1000;
+            uint32_t abs_unix = (now_rtc > 1500000000UL)
+              ? (now_rtc + (uint32_t)(delta_s > 0 ? delta_s : 0)) : 0;
+            if (abs_unix == 0) snprintf(zh_buf, sizeof(zh_buf), "RTC unset");
+            else fmt_hhmm_rel(abs_unix, delta_s, zh_buf, sizeof(zh_buf));
+          }
+          if (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) {
+            if (next_night_flood_unix == 0) {
+              snprintf(nl_buf, sizeof(nl_buf), "not scheduled");
+            } else {
+              long delta_s = (long)next_night_flood_unix - (long)now_rtc;
+              fmt_hhmm_rel(next_night_flood_unix, delta_s,
+                           nl_buf, sizeof(nl_buf));
+            }
+          }
+          char nxt[160];
+          snprintf(nxt, sizeof(nxt),
+                   "next adverts:\n"
+                   "  zero-hop: %s\n"
+                   "  flooded:  %s",
+                   zh_buf, nl_buf);
+          pushCompanionMessage(nxt);
+        }
+
         pushCompanionMessage("Hilfe: 'scope advert ?' fuer Sub-Befehle.");
         return;
       }
@@ -13550,11 +13645,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           }
           gflush();
           pushCompanionMessage(
-            "Legende: (A)=aktiv (auto Bbox),\n"
-            "(A-)=inaktiv (auto Bbox),\n"
+            "Legende: (A)/(A-)=auto in/out Bbox\n"
             "(P)=pin (immer aktiv), (D)=disabled\n"
-            "Umschalten: scope <name> pin | auto | off\n"
-            "Hilfe: 'scope repeater ?' fuer Sub-Befehle.");
+            "Umschalten: scope <name> pin|auto|off\n"
+            "Hilfe: 'scope rep ?'");
         }
         return;
       }
