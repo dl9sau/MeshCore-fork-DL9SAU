@@ -186,10 +186,13 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic, esp_ble_gat
     BLE_DEBUG_PRINTLN("ERROR: onWrite(), frame too big, len=%d", len);
   } else if (recv_queue_len >= FRAME_QUEUE_SIZE) {
     BLE_DEBUG_PRINTLN("ERROR: onWrite(), recv_queue is full!");
+    _recv_overflow_count++;  // DL9SAU 2026-06-05: Diag-Counter
   } else {
     recv_queue[recv_queue_len].len = len;
     memcpy(recv_queue[recv_queue_len].buf, rxValue, len);
     recv_queue_len++;
+    if (recv_queue_len > _recv_queue_high_water)
+      _recv_queue_high_water = recv_queue_len;
   }
 }
 
@@ -234,12 +237,15 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   if (deviceConnected && len > 0) {
     if (send_queue_len >= FRAME_QUEUE_SIZE) {
       BLE_DEBUG_PRINTLN("writeFrame(), send_queue is full!");
+      _send_overflow_count++;  // DL9SAU 2026-06-05: Diag-Counter
       return 0;
     }
 
     send_queue[send_queue_len].len = len;  // add to send queue
     memcpy(send_queue[send_queue_len].buf, src, len);
     send_queue_len++;
+    if (send_queue_len > _send_queue_high_water)
+      _send_queue_high_water = send_queue_len;
 
     return len;
   }

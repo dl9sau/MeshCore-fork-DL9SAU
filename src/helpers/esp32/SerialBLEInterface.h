@@ -20,6 +20,11 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   // DL9SAU 2026-06-04: Disconnect-Diagnose (Wunschliste 40).
   uint32_t _disconnect_count;
   uint8_t  _last_disconnect_reason;
+  // DL9SAU 2026-06-05: Queue-Overflow-Diagnose.
+  uint32_t _recv_overflow_count;
+  uint32_t _send_overflow_count;
+  uint8_t  _recv_queue_high_water;
+  uint8_t  _send_queue_high_water;
 
   struct Frame {
     uint8_t len;
@@ -65,10 +70,18 @@ public:
     send_queue_len = recv_queue_len = 0;
     _disconnect_count = 0;
     _last_disconnect_reason = 0xFF;
+    _recv_overflow_count = 0;
+    _send_overflow_count = 0;
+    _recv_queue_high_water = 0;
+    _send_queue_high_water = 0;
   }
 
   uint32_t getDisconnectCount() const override { return _disconnect_count; }
   uint8_t  getLastDisconnectReason() const override { return _last_disconnect_reason; }
+  uint32_t getRecvOverflowCount() const override { return _recv_overflow_count; }
+  uint32_t getSendOverflowCount() const override { return _send_overflow_count; }
+  uint8_t  getRecvQueueHighWater() const override { return _recv_queue_high_water; }
+  uint8_t  getSendQueueHighWater() const override { return _send_queue_high_water; }
 
   /**
    * init the BLE interface.

@@ -25,4 +25,12 @@ public:
   // 0x13=remote-terminated, 0x16=local-host-terminated).
   virtual uint32_t getDisconnectCount() const { return 0; }
   virtual uint8_t  getLastDisconnectReason() const { return 0xFF; }
+  // DL9SAU 2026-06-05: Queue-Overflow-Counter (Wunschliste 40).
+  // Counts ueberschritten der FRAME_QUEUE_SIZE waehrend App-Sync.
+  // Symptom: App-Timeout ohne BLE-Disconnect -- Frame ging silent
+  // verloren weil queue voll war.
+  virtual uint32_t getRecvOverflowCount() const { return 0; }
+  virtual uint32_t getSendOverflowCount() const { return 0; }
+  virtual uint8_t  getRecvQueueHighWater() const { return 0; }
+  virtual uint8_t  getSendQueueHighWater() const { return 0; }
 };

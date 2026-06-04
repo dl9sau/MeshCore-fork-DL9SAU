@@ -8750,6 +8750,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       "BLE: disconnects=%u\n  last=0x%02X (%s)",
       (unsigned)dc, (unsigned)reason, reason_name);
     pushCompanionMessage(line);
+    if (_serial) {
+      uint32_t rovf = _serial->getRecvOverflowCount();
+      uint32_t sovf = _serial->getSendOverflowCount();
+      uint8_t  rhw  = _serial->getRecvQueueHighWater();
+      uint8_t  shw  = _serial->getSendQueueHighWater();
+      snprintf(line, sizeof(line),
+        "Queues: recv_ovf=%u send_ovf=%u\n"
+        "  high_water recv=%u send=%u (max 4)",
+        (unsigned)rovf, (unsigned)sovf, (unsigned)rhw, (unsigned)shw);
+      pushCompanionMessage(line);
+    }
 #ifdef ESP32
     snprintf(line, sizeof(line),
       "Heap: free=%u min_seen=%u min_lib=%u",
