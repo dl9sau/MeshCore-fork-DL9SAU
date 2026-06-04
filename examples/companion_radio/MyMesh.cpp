@@ -3247,6 +3247,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _bt_connect_count = 0;
   _last_serial_connected = false;
   _last_observed_rtc = 0;
+  _next_heap_log_at = 0;  // erste Pruefung greift in loop, hochsetzen dort
+  _last_logged_disconnect_count = 0;
+  _session_min_heap = UINT32_MAX;
   _buildin_keys_count = 0;
   memset(_buildin_in_bbox, 0, sizeof(_buildin_in_bbox));
   memset(_extras_in_bbox,  0, sizeof(_extras_in_bbox));
@@ -5379,6 +5382,39 @@ void MyMesh::loop() {
 
 #ifdef DISPLAY_CLASS
   if (_ui) _ui->setHasConnection(_serial->isConnected());
+#endif
+
+  // Wunschliste 40 (2026-06-04): Periodic Heap- + BLE-Disconnect-Tracking.
+  // Trace in den Companion-Channel via pushCompanionMessage -> Offline-
+  // Queue. ABSICHTLICH NICHT via pushDebugLog: jenes droppt wenn weder
+  // USB-Host connected NOCH BLE connected -- genau unser Fehler-Szenario
+  // (Powerbank ohne USB + BLE just disconnected). Companion-Channel
+  // bleibt in der Offline-Queue, App sieht beim Reconnect die komplette
+  // Diagnose-Spur.
+  // Bei Aenderung von disconnect_count: SOFORT loggen (Event-Burst);
+  // sonst alle 5 Minuten.
+#ifdef ESP32
+  if (_companion_channel_idx != 0xFF) {
+    uint32_t cur_heap = ESP.getFreeHeap();
+    if (cur_heap < _session_min_heap) _session_min_heap = cur_heap;
+    uint32_t dc = _serial ? _serial->getDisconnectCount() : 0;
+    bool dc_changed = (dc != _last_logged_disconnect_count);
+    if (dc_changed
+        || _next_heap_log_at == 0
+        || (long)(millis() - _next_heap_log_at) >= 0) {
+      uint8_t reason = _serial ? _serial->getLastDisconnectReason() : 0xFF;
+      char diag[145];
+      snprintf(diag, sizeof(diag),
+        "[ble-diag] heap=%u min=%u dc=%u reason=0x%02X%s",
+        (unsigned)cur_heap,
+        (unsigned)_session_min_heap,
+        (unsigned)dc, (unsigned)reason,
+        dc_changed ? " NEW" : "");
+      pushCompanionMessage(diag);
+      _last_logged_disconnect_count = dc;
+      _next_heap_log_at = millis() + 5UL * 60UL * 1000UL;  // 5min
+    }
+  }
 #endif
 
   // Deferred reboot — siehe handleCompanionCommand("reboot"). Erst hier am
@@ -8573,7 +8609,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
       "  contact, backup, save, discover, tempradio,\n"
-      "  clear, reboot."
+      "  bleinfo, clear, reboot."
     );
     return;
   }
@@ -8660,6 +8696,39 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                zh_str, nl_str);
     }
     pushCompanionMessage(line);
+    return;
+  }
+
+  // ---------- bleinfo (Wunschliste 40, 2026-06-04) ----------------------
+  // BLE-Disconnect-Counter, letzter Reason-Code, Heap-Stats. Snapshot
+  // jederzeit abfragbar; pushDebugLog macht periodische Aufzeichnung.
+  if (starts_with_word(cmd, "bleinfo") || starts_with_word(cmd, "bledbg")) {
+    char line[160];
+    uint32_t dc = _serial ? _serial->getDisconnectCount() : 0;
+    uint8_t  reason = _serial ? _serial->getLastDisconnectReason() : 0xFF;
+    const char* reason_name = "?";
+    switch (reason) {
+      case 0x08: reason_name = "supervision-timeout"; break;
+      case 0x13: reason_name = "remote-user-terminated"; break;
+      case 0x14: reason_name = "remote-low-resources"; break;
+      case 0x15: reason_name = "remote-power-off"; break;
+      case 0x16: reason_name = "local-host-terminated"; break;
+      case 0x22: reason_name = "lmp-response-timeout"; break;
+      case 0x3E: reason_name = "connection-failed"; break;
+      case 0xFF: reason_name = "none"; break;
+    }
+    snprintf(line, sizeof(line),
+      "BLE: disconnects=%u\n  last=0x%02X (%s)",
+      (unsigned)dc, (unsigned)reason, reason_name);
+    pushCompanionMessage(line);
+#ifdef ESP32
+    snprintf(line, sizeof(line),
+      "Heap: free=%u min_seen=%u min_lib=%u",
+      (unsigned)ESP.getFreeHeap(),
+      (unsigned)_session_min_heap,
+      (unsigned)ESP.getMinFreeHeap());
+    pushCompanionMessage(line);
+#endif
     return;
   }
 

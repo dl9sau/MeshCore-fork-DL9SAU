@@ -165,6 +165,17 @@ void SerialBLEInterface::onDisconnect(BLEServer* pServer) {
   }
 }
 
+// DL9SAU 2026-06-04 (Wunschliste 40): 2-Param-Variante mit Reason-Code.
+// Wird zusaetzlich zur 1-Param-Variante aufgerufen, daher hier NUR die
+// Diagnose-Felder befuellen -- restart-advertising-Logik laeuft schon
+// in der 1-Param-Variante.
+void SerialBLEInterface::onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
+  if (param != NULL) {
+    _last_disconnect_reason = param->disconnect.reason;
+  }
+  _disconnect_count++;
+}
+
 // -------- BLECharacteristicCallbacks methods
 
 void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) {

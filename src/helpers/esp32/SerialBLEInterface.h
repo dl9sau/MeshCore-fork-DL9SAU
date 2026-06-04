@@ -17,6 +17,9 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   uint32_t _pin_code;
   unsigned long _last_write;
   unsigned long adv_restart_time;
+  // DL9SAU 2026-06-04: Disconnect-Diagnose (Wunschliste 40).
+  uint32_t _disconnect_count;
+  uint8_t  _last_disconnect_reason;
 
   struct Frame {
     uint8_t len;
@@ -44,6 +47,7 @@ protected:
   void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override;
   void onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) override;
   void onDisconnect(BLEServer* pServer) override;
+  void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override;
 
   // BLECharacteristicCallbacks methods
   void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override;
@@ -59,7 +63,12 @@ public:
     _last_write = 0;
     last_conn_id = 0;
     send_queue_len = recv_queue_len = 0;
+    _disconnect_count = 0;
+    _last_disconnect_reason = 0xFF;
   }
+
+  uint32_t getDisconnectCount() const override { return _disconnect_count; }
+  uint8_t  getLastDisconnectReason() const override { return _last_disconnect_reason; }
 
   /**
    * init the BLE interface.

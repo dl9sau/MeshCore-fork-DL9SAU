@@ -1041,6 +1041,12 @@ private:
   uint32_t      _bt_connect_count;           // app/BT connect events (rising edges)
   bool          _last_serial_connected;      // edge-detector state
   uint32_t      _last_observed_rtc;          // for detecting external RTC corrections
+  // Wunschliste 40 (2026-06-04): BLE-Powerbank-Diagnose.
+  unsigned long _next_heap_log_at;            // millis() fuer naechsten heap-log
+  uint32_t      _last_logged_disconnect_count; // delta-detect fuer disconnect-trace
+  // Min-heap-Seen waehrend gesamter Session -- billiger als ESP.getMinFreeHeap()
+  // bei manchen Library-Versionen. Optional cross-check.
+  uint32_t      _session_min_heap;
 
   // Key-Cache fuer Build-in-Region-Eintraege (Wunschliste 11 Schritt 4).
   // Wird in begin() einmalig befuellt: TransportKey pro Build-in-Name aus
