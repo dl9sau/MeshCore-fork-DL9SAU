@@ -8708,13 +8708,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint8_t  reason = _serial ? _serial->getLastDisconnectReason() : 0xFF;
     const char* reason_name = "?";
     switch (reason) {
+      case 0x05: reason_name = "auth-failure"; break;
       case 0x08: reason_name = "supervision-timeout"; break;
       case 0x13: reason_name = "remote-user-terminated"; break;
       case 0x14: reason_name = "remote-low-resources"; break;
       case 0x15: reason_name = "remote-power-off"; break;
       case 0x16: reason_name = "local-host-terminated"; break;
       case 0x22: reason_name = "lmp-response-timeout"; break;
+      case 0x23: reason_name = "ll-procedure-collision"; break;
+      case 0x28: reason_name = "instant-passed"; break;  // conn-param-update missed
+      case 0x29: reason_name = "pairing-no-key"; break;
+      case 0x3B: reason_name = "diff-tx-coordination"; break;
+      case 0x3D: reason_name = "ll-mic-failure"; break;
       case 0x3E: reason_name = "connection-failed"; break;
+      case 0x3F: reason_name = "mac-conn-failed"; break;
+      case 0x42: reason_name = "unknown-conn-id"; break;
       case 0xFF: reason_name = "none"; break;
     }
     snprintf(line, sizeof(line),
