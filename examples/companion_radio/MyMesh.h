@@ -1047,6 +1047,10 @@ private:
   // Min-heap-Seen waehrend gesamter Session -- billiger als ESP.getMinFreeHeap()
   // bei manchen Library-Versionen. Optional cross-check.
   uint32_t      _session_min_heap;
+  // Rate-Limit fuer ble-diag-log. Verhindert Rueckkopplung bei Disconnect-
+  // Storm (Diag-Frames im Sync-Burst -> mehr Update-Aktivitaet -> mehr
+  // disconnects). Mindestens 30sec zwischen Log-Eintraegen.
+  unsigned long _last_ble_diag_log_at;
 
   // Key-Cache fuer Build-in-Region-Eintraege (Wunschliste 11 Schritt 4).
   // Wird in begin() einmalig befuellt: TransportKey pro Build-in-Name aus

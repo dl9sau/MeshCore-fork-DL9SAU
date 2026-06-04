@@ -3250,6 +3250,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _next_heap_log_at = 0;  // erste Pruefung greift in loop, hochsetzen dort
   _last_logged_disconnect_count = 0;
   _session_min_heap = UINT32_MAX;
+  _last_ble_diag_log_at = 0;
   _buildin_keys_count = 0;
   memset(_buildin_in_bbox, 0, sizeof(_buildin_in_bbox));
   memset(_extras_in_bbox,  0, sizeof(_extras_in_bbox));
@@ -5391,28 +5392,48 @@ void MyMesh::loop() {
   // (Powerbank ohne USB + BLE just disconnected). Companion-Channel
   // bleibt in der Offline-Queue, App sieht beim Reconnect die komplette
   // Diagnose-Spur.
-  // Bei Aenderung von disconnect_count: SOFORT loggen (Event-Burst);
-  // sonst alle 5 Minuten.
+  //
+  // RATE-LIMIT (Update 2026-06-05): mindestens 30sec zwischen Eintraegen
+  // -- verhindert Rueckkopplung bei Disconnect-Storm. User-Bericht:
+  // 102 disconnects in kurzer Folge => ohne Cooldown 102 Diag-Frames
+  // zusaetzlich im Sync-Burst, was wiederum die Connection-Update-
+  // Aktivitaet verschaerft. Mit Cooldown: max ~10 Logs in 5min, gibt
+  // genug Datenpunkte ohne selbst zu amplifizieren.
 #ifdef ESP32
   if (_companion_channel_idx != 0xFF) {
     uint32_t cur_heap = ESP.getFreeHeap();
     if (cur_heap < _session_min_heap) _session_min_heap = cur_heap;
     uint32_t dc = _serial ? _serial->getDisconnectCount() : 0;
     bool dc_changed = (dc != _last_logged_disconnect_count);
-    if (dc_changed
-        || _next_heap_log_at == 0
-        || (long)(millis() - _next_heap_log_at) >= 0) {
+    unsigned long now_ms = millis();
+    bool cooldown_ok = (_last_ble_diag_log_at == 0
+                        || (long)(now_ms - _last_ble_diag_log_at) >= 30000);
+    bool time_due = (_next_heap_log_at == 0
+                     || (long)(now_ms - _next_heap_log_at) >= 0);
+    if (cooldown_ok && (dc_changed || time_due)) {
       uint8_t reason = _serial ? _serial->getLastDisconnectReason() : 0xFF;
+      uint32_t delta = dc - _last_logged_disconnect_count;
       char diag[145];
-      snprintf(diag, sizeof(diag),
-        "[ble-diag] heap=%u min=%u dc=%u reason=0x%02X%s",
-        (unsigned)cur_heap,
-        (unsigned)_session_min_heap,
-        (unsigned)dc, (unsigned)reason,
-        dc_changed ? " NEW" : "");
+      if (dc_changed && delta > 1) {
+        snprintf(diag, sizeof(diag),
+          "[ble-diag] heap=%u min=%u dc=%u (+%u burst) reason=0x%02X",
+          (unsigned)cur_heap, (unsigned)_session_min_heap,
+          (unsigned)dc, (unsigned)delta, (unsigned)reason);
+      } else if (dc_changed) {
+        snprintf(diag, sizeof(diag),
+          "[ble-diag] heap=%u min=%u dc=%u reason=0x%02X NEW",
+          (unsigned)cur_heap, (unsigned)_session_min_heap,
+          (unsigned)dc, (unsigned)reason);
+      } else {
+        snprintf(diag, sizeof(diag),
+          "[ble-diag] heap=%u min=%u dc=%u reason=0x%02X",
+          (unsigned)cur_heap, (unsigned)_session_min_heap,
+          (unsigned)dc, (unsigned)reason);
+      }
       pushCompanionMessage(diag);
       _last_logged_disconnect_count = dc;
-      _next_heap_log_at = millis() + 5UL * 60UL * 1000UL;  // 5min
+      _last_ble_diag_log_at = now_ms;
+      _next_heap_log_at = now_ms + 5UL * 60UL * 1000UL;  // 5min
     }
   }
 #endif
