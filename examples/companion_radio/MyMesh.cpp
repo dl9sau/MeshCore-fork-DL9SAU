@@ -8757,7 +8757,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       uint8_t  shw  = _serial->getSendQueueHighWater();
       snprintf(line, sizeof(line),
         "Queues: recv_ovf=%u send_ovf=%u\n"
-        "  high_water recv=%u send=%u (max 4)",
+        "  high_water recv=%u send=%u (max 16)",
         (unsigned)rovf, (unsigned)sovf, (unsigned)rhw, (unsigned)shw);
       pushCompanionMessage(line);
     }

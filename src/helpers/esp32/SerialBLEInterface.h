@@ -31,7 +31,13 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
     uint8_t buf[MAX_FRAME_SIZE];
   };
 
-  #define FRAME_QUEUE_SIZE  4
+  // DL9SAU 2026-06-05 (Wunschliste 40): 4 -> 16. User-Daten zeigten
+  // send_ovf=188 bei mehrfachem 'stats'. stats produziert viele
+  // pushCompanionMessage in Folge, jede triggert eine
+  // PUSH_CODE_MSG_WAITING-Tickle via writeFrame. Mit 60ms BLE-Throttle
+  // und 4-Slot-Queue kein Burst-Buffer. RAM-Kosten: (16-4)*173 = ~2KB,
+  // verteilt auf recv+send. Vertretbar -- ESP32-S3 hat reichlich RAM.
+  #define FRAME_QUEUE_SIZE  16
   int recv_queue_len;
   Frame recv_queue[FRAME_QUEUE_SIZE];
   int send_queue_len;
