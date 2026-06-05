@@ -217,7 +217,8 @@ struct AdvertPath {
 #define TRACE_NIGHT     0x0200
 #define TRACE_DUTY      0x0400
 #define TRACE_MSGSTORE  0x0800   // Offline-Queue Bucket-Save zu Flash
-#define TRACE_ALL_MASK  0x0FFF
+#define TRACE_BT        0x1000   // BLE-Diagnose (heap + disconnect-counter)
+#define TRACE_ALL_MASK  0x1FFF
 
 // Duty-Cycle-Schutz: regulatorische 10% TX-Airtime pro rollendem 1h-Fenster
 // (EU SRD 869 narrow). Sliding-Window mit 60 Slots à 1 Minute (millis-basiert,

@@ -5400,9 +5400,16 @@ void MyMesh::loop() {
   // Aktivitaet verschaerft. Mit Cooldown: max ~10 Logs in 5min, gibt
   // genug Datenpunkte ohne selbst zu amplifizieren.
 #ifdef ESP32
-  if (_companion_channel_idx != 0xFF) {
+  // Update 2026-06-05: min-heap-Tracking laeuft IMMER (sehr billig),
+  // damit 'bleinfo' jederzeit den aktuellen min anzeigen kann.
+  // Periodisches PUSH in den Companion-Channel nur wenn 'trace bt'
+  // aktiv -- vorher permanent alle 5min, nervte im taeglichen Betrieb.
+  {
     uint32_t cur_heap = ESP.getFreeHeap();
     if (cur_heap < _session_min_heap) _session_min_heap = cur_heap;
+  }
+  if (_companion_channel_idx != 0xFF && (_trace_flags & TRACE_BT)) {
+    uint32_t cur_heap = ESP.getFreeHeap();
     uint32_t dc = _serial ? _serial->getDisconnectCount() : 0;
     bool dc_changed = (dc != _last_logged_disconnect_count);
     unsigned long now_ms = millis();
@@ -7917,7 +7924,7 @@ static int append_rate_hint(char* out, size_t n, uint32_t total, uint64_t uptime
 
 static const TraceCat trace_cats[] = {
   { "gps",     TRACE_GPS,     "GPS power on/off, first fix, fix loss" },
-  { "adverts", TRACE_ADVERTS, "eigene Adverts ALLER Typen: periodic zero-hop (mit Reschedule), nightly flood (Send), manual (App-Cmd / UI-Button). Repeats fremder Adverts NICHT (das ist 'repeat')." },
+  { "adverts", TRACE_ADVERTS, "eigene Adverts (periodic zero-hop, nightly flood, manual). Fremde Adverts via 'repeat'." },
   { "repeat",  TRACE_REPEAT,  "durchgereichte Packets" },
   { "scope",   TRACE_SCOPE,   "scope override/default/bake Wechsel" },
   { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
@@ -7927,7 +7934,8 @@ static const TraceCat trace_cats[] = {
   { "filter",  TRACE_FILTER,  "NICHT-repeatete Pakete + Grund (kann viele Zeilen erzeugen)" },
   { "night",    TRACE_NIGHT,    "Nightly-Flood Schedule + Scope-Auswahl" },
   { "duty",     TRACE_DUTY,     "Duty-Cycle Drops (Soft/Hard) ueber 10% TX/h" },
-  { "msgstore", TRACE_MSGSTORE, "Persistenz-Schreibvorgaenge der Offline-Message-Queue (jede gespeicherte Msg, ein Trace pro Bucket-Save -- Flash-Wear-Diagnose)" },
+  { "msgstore", TRACE_MSGSTORE, "Offline-Queue Flash-Persistenz-Writes (Flash-Wear-Diagnose)" },
+  { "bt",       TRACE_BT,       "BLE-Diagnose alle 5min: heap + disconnect-counter (default off)" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
@@ -8819,8 +8827,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "    + repeater_profile.");
       pushCompanionMessage(
         "  advert role fixed chat|repeater|sensor|room\n"
-        "    Type fest pinnen -- beeinflusst createSelfAdvert UND\n"
-        "    Discovery-Query-Antworten (siehe Wunschliste 7).");
+        "    Type fest pinnen -- beeinflusst createSelfAdvert\n"
+        "    + Discovery-Query (Wunschliste 7).");
       return;
     }
 
@@ -13216,8 +13224,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "weitere:\n"
         "  scope repeater  -- Policy/allowlist\n"
         "  scope list      -- Registry\n"
-        "  scope <name>    -- Eintrag-Opts\n"
-        "  help scope      -- volle Sicht");
+        "  scope <name>    = Details");
+      pushCompanionMessage(
+        "  help scope      -- vollstaendige Uebersicht");
       return;
     }
 
