@@ -5412,6 +5412,11 @@ void MyMesh::loop() {
   // Aktivitaet verschaerft. Mit Cooldown: max ~10 Logs in 5min, gibt
   // genug Datenpunkte ohne selbst zu amplifizieren.
 #ifdef ESP32
+  // ENTFERNBAR (Wunschliste 40): BLE-Diagnose-Block. Falls Stabilitaet
+  // dauerhaft gut bleibt, dieser ganze ifdef ESP32-Block + die zugehoerigen
+  // member-vars (_next_heap_log_at, _last_logged_disconnect_count,
+  // _session_min_heap, _last_ble_diag_log_at) koennen ersatzlos entfernt
+  // werden. TRACE_BT in MyMesh.h auch raus.
   // Update 2026-06-05: min-heap-Tracking laeuft IMMER (sehr billig),
   // damit 'bleinfo' jederzeit den aktuellen min anzeigen kann.
   // Periodisches PUSH in den Companion-Channel nur wenn 'trace bt'
@@ -8650,8 +8655,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
       "  contact, backup, save, discover, tempradio,\n"
-      "  bleinfo, clear, reboot."
+      "  clear, reboot."
     );
+    // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
+    // (Wunschliste 40). Sehen Kommentare bei den Handlern.
     return;
   }
 
@@ -8741,11 +8748,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   }
 
   // ---------- debugscope (Wunschliste 40, 2026-06-05) -------------------
+  // ENTFERNBAR sobald nicht mehr benoetigt: dieser Befehl war Diagnose-
+  // Hilfsmittel zum Aufdecken des _buildin_keys-Cache-Bugs in
+  // TransportKeyStore::getAutoKeyFor (Wunschliste 41 / Commit 5610d2cf).
+  // Nicht in 'help' Liste aufgenommen (versteckt). Kann komplett
+  // ersatzlos geloescht werden -- die State-Variablen, die hier
+  // ausgegeben werden, lesen direkt aus _prefs / _serial.
   // State-Dump fuer Scope-Entscheidung (nightly-flood Debugging).
-  // User-Beobachtung: 'advert flood' Cmd-Handler sagt 'default = #ostfriesland',
-  // gleichzeitig doNightFloodAdvert trace sagt 'scope=#local (last-resort)'.
-  // Beide lesen _prefs.default_scope_key -- mismatch ist Logik-Bug.
-  // Befehl dumpt alle relevanten State-Bits damit wir das aufdecken koennen.
   if (starts_with_word(cmd, "debugscope") || starts_with_word(cmd, "dbgscope")) {
     char line[160];
     // 1) default_scope: name + 16 byte hex
@@ -8807,6 +8816,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   }
 
   // ---------- bleinfo (Wunschliste 40, 2026-06-04) ----------------------
+  // ENTFERNBAR sobald BLE-Stabilitaet final ist: Diagnose-Hilfsmittel fuer
+  // Connection-Stability-Debug. Versteckt (nicht in 'help' no-arg Liste).
+  // Liest disconnect_count + last-reason aus _serial (SerialBLEInterface)
+  // und Heap-Stats aus ESP. Wenn dieser Befehl entfernt wird, sollten auch
+  // entfernt werden:
+  //   - BaseSerialInterface getDisconnectCount/Reason/Overflow virtuals
+  //   - SerialBLEInterface member-vars _disconnect_count, _last_disconnect_reason,
+  //     _recv/send_overflow_count, _high_water
+  //   - Periodic ble-diag Loop in MyMesh::loop() (trace_bt gated)
+  //   - TRACE_BT flag in MyMesh.h trace_cats[]
+  //   - _next_heap_log_at / _last_logged_disconnect_count / _session_min_heap
+  //     / _last_ble_diag_log_at in MyMesh.h
+  // Was BEHALTEN werden sollte (= permanente Fixes, NICHT diagnostisch):
+  //   - FRAME_QUEUE_SIZE 4 -> 16 in SerialBLEInterface.h
+  //   - 2-param onDisconnect override in SerialBLEInterface (Library-API).
+  //     Daraus bedienter Counter ist diagnostisch, der Callback aber harmlos.
   // BLE-Disconnect-Counter, letzter Reason-Code, Heap-Stats. Snapshot
   // jederzeit abfragbar; pushDebugLog macht periodische Aufzeichnung.
   if (starts_with_word(cmd, "bleinfo") || starts_with_word(cmd, "bledbg")) {

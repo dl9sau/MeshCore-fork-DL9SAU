@@ -2298,4 +2298,75 @@ Ressourcen:
 Quelle: User-Bericht 2026-06-04 nach mehreren Anlauf-Versuchen.
 
 
+--------------------------------------------------------------------------------
+41. Upstream-Bug: TransportKeyStore::getAutoKeyFor Cache nur per id
+--------------------------------------------------------------------------------
+
+Status: gefunden + lokal umgangen (Commit 5610d2cf, 2026-06-05).
+        Upstream-Report ausstehend.
+
+Bug-Lokation:
+  src/helpers/TransportKeyStore.cpp::getAutoKeyFor()
+
+Signatur:
+  void getAutoKeyFor(uint16_t id, const char* name, TransportKey& dest);
+
+Bug:
+  Cache wird NUR per uint16_t 'id' indiziert, NICHT per name. Die
+  Funktion sieht zwar 'name' als Eingabe, aber Cache-Lookup ignoriert
+  ihn. Wenn dieselbe id mit unterschiedlichen Namen in Folge aufgerufen
+  wird, gibt der Cache ab dem 2. Aufruf den FALSCHEN Key zurueck.
+
+Code (Auszug):
+  for (int i = 0; i < num_cache; i++) {
+    if (cache_ids[i] == id) {       // <-- nur id geprueft
+      dest = cache_keys[i];
+      return;
+    }
+  }
+  // berechne sha256(name) und cache mit id
+
+Wirkung in unserer Fork:
+  MyMesh::begin() initialisierte _buildin_keys[] in einer Schleife
+  mit immer id=0 aber wechselnden Namen. Iteration 0 cached
+  sha256('#europe') unter id=0. Iterationen 1..N bekamen Cache-Hit
+  -> alle _buildin_keys[i>0] enthielten sha256('#europe').
+
+  Folge:
+  - chooseGeoFallbackScope picked korrekt das kleinste Bbox-Match
+    (z.B. ostfriesland), gab aber _buildin_keys[ostfriesland_idx]
+    zurueck = europe-Key.
+  - Trace-Label-Check verglich Returned-Key mit _buildin_keys
+    [idx_local] -- ebenfalls europe-Key -> MATCH -> Label
+    'last-resort/local' obwohl ostfriesland gepicked wurde.
+
+Unsere Workaround (Commit 5610d2cf):
+  SHA256 direkt rechnen statt buggy getAutoKeyFor benutzen:
+    SHA256 sha;
+    sha.update((const uint8_t*)tag, strlen(tag));
+    sha.finalize(_buildin_keys[i].key, sizeof(_buildin_keys[i].key));
+
+Vorschlag fuer Upstream-Fix:
+  (a) Cache auch per name hashen (preferred):
+      cache_keys[i] entries muessen name (oder name-hash) zusaetzlich
+      zur id speichern und beim lookup beides matchen.
+  (b) Doku der bestehenden Semantik: 'id ist eine Cache-Key, fuer
+      gleichen Namen sollte ein eindeutiger id reserviert werden'.
+      Diese Variante erfordert dass alle Caller eindeutige ids
+      vergeben.
+
+Andere bekannte Caller pruefen (vor Upstream-PR):
+  - simple_repeater example
+  - andere examples die mit Scopes / Group-Channels arbeiten
+  - Test ob die uebrigen Caller alle einzigartige ids nutzen
+    oder ob das Problem auch dort latent ist
+
+Bei Upstream-Report:
+  - Repo: https://github.com/meshcore-mesh/MeshCore (oder aktuelles Mirror)
+  - Issue + ggf. PR mit Vorschlag (a)
+
+Quelle: User-Debug-Session 2026-06-05 via 'debugscope' CLI-Tool.
+
+
+
 

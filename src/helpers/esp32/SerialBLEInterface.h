@@ -17,10 +17,13 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   uint32_t _pin_code;
   unsigned long _last_write;
   unsigned long adv_restart_time;
-  // DL9SAU 2026-06-04: Disconnect-Diagnose (Wunschliste 40).
+  // ENTFERNBAR (Wunschliste 40): BLE-Diagnose-Counter. Wenn 'bleinfo' CLI
+  // entfernt wird, koennen diese 6 member-vars + die zugehoerigen Override-
+  // Getter + die Increments in onWrite/writeFrame/onDisconnect raus. Der
+  // 2-param onDisconnect-Callback selbst (Library-API) kann bleiben, da
+  // harmlos (ohne diese Diag-Felder ist er einfach no-op).
   uint32_t _disconnect_count;
   uint8_t  _last_disconnect_reason;
-  // DL9SAU 2026-06-05: Queue-Overflow-Diagnose.
   uint32_t _recv_overflow_count;
   uint32_t _send_overflow_count;
   uint8_t  _recv_queue_high_water;
