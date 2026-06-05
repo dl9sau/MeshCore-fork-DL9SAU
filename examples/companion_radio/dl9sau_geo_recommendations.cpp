@@ -94,7 +94,7 @@ static const GeoRegion regions[] = {
 
   // Local specials (DL9SAU's two geo-fence regions, see chooseGeoFallbackScope)
   GEO("de-bebb",      51.36, 53.56, 11.27, 14.77),  // Berlin/Brandenburg bridge (=de-bb box)
-  GEO("ostfriesland", 53.10, 53.80,  6.50,  8.50),
+  GEO("ostfriesland", 52.95, 53.80,  6.50,  8.50),   // Sued-Grenze 53.10 -> 52.95 (Papenburg + ~10km Margin, User-Wunsch 2026-06-05)
 
   // Special-Scopes (Wunschliste 11 Schritte 10-12): position-unabhaengig,
   // Default-Pin damit out-of-the-box aktiv. advert-off weil sie nicht als
