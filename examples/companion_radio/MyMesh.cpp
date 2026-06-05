@@ -8728,6 +8728,72 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
+  // ---------- debugscope (Wunschliste 40, 2026-06-05) -------------------
+  // State-Dump fuer Scope-Entscheidung (nightly-flood Debugging).
+  // User-Beobachtung: 'advert flood' Cmd-Handler sagt 'default = #ostfriesland',
+  // gleichzeitig doNightFloodAdvert trace sagt 'scope=#local (last-resort)'.
+  // Beide lesen _prefs.default_scope_key -- mismatch ist Logik-Bug.
+  // Befehl dumpt alle relevanten State-Bits damit wir das aufdecken koennen.
+  if (starts_with_word(cmd, "debugscope") || starts_with_word(cmd, "dbgscope")) {
+    char line[160];
+    // 1) default_scope: name + 16 byte hex
+    const uint8_t* k = _prefs.default_scope_key;
+    bool key_null = true;
+    for (int i = 0; i < 16; i++) if (k[i]) { key_null = false; break; }
+    snprintf(line, sizeof(line),
+      "default_scope_name='%s'\n"
+      "key isNull=%d mode=%d",
+      _prefs.default_scope_name[0] ? _prefs.default_scope_name : "(empty)",
+      (int)key_null, (int)_prefs.scope_advert_auto);
+    pushCompanionMessage(line);
+    snprintf(line, sizeof(line),
+      "key=%02x%02x%02x%02x %02x%02x%02x%02x\n"
+      "    %02x%02x%02x%02x %02x%02x%02x%02x",
+      k[0],k[1],k[2],k[3],k[4],k[5],k[6],k[7],
+      k[8],k[9],k[10],k[11],k[12],k[13],k[14],k[15]);
+    pushCompanionMessage(line);
+    // 2) chooseGeoFallbackScope direkt aufrufen
+    TransportKey geo;
+    bool geo_ok = chooseGeoFallbackScope(geo);
+    snprintf(line, sizeof(line),
+      "chooseGeoFallback=%d\n"
+      "geo[0..3]=%02x%02x%02x%02x  geo[4..7]=%02x%02x%02x%02x",
+      (int)geo_ok,
+      geo.key[0],geo.key[1],geo.key[2],geo.key[3],
+      geo.key[4],geo.key[5],geo.key[6],geo.key[7]);
+    pushCompanionMessage(line);
+    // 3) resolveDefaultOrGeo direkt aufrufen
+    TransportKey rdg;
+    bool rdg_ok = resolveDefaultOrGeo(rdg);
+    snprintf(line, sizeof(line),
+      "resolveDefaultOrGeo=%d\n"
+      "out[0..3]=%02x%02x%02x%02x  out[4..7]=%02x%02x%02x%02x",
+      (int)rdg_ok,
+      rdg.key[0],rdg.key[1],rdg.key[2],rdg.key[3],
+      rdg.key[4],rdg.key[5],rdg.key[6],rdg.key[7]);
+    pushCompanionMessage(line);
+    // 4) chooseNightFloodScope direkt aufrufen
+    TransportKey nfs;
+    bool nfs_ok = chooseNightFloodScope(nfs);
+    snprintf(line, sizeof(line),
+      "chooseNightFloodScope=%d\n"
+      "out[0..3]=%02x%02x%02x%02x  out[4..7]=%02x%02x%02x%02x",
+      (int)nfs_ok,
+      nfs.key[0],nfs.key[1],nfs.key[2],nfs.key[3],
+      nfs.key[4],nfs.key[5],nfs.key[6],nfs.key[7]);
+    pushCompanionMessage(line);
+    // 5) Build-in #local key zur Vergleich
+    int li = dl9sau_find_region_index("local");
+    if (li >= 0 && li < _buildin_keys_count) {
+      const uint8_t* lk = _buildin_keys[li].key;
+      snprintf(line, sizeof(line),
+        "local[0..3]=%02x%02x%02x%02x  local[4..7]=%02x%02x%02x%02x",
+        lk[0],lk[1],lk[2],lk[3],lk[4],lk[5],lk[6],lk[7]);
+      pushCompanionMessage(line);
+    }
+    return;
+  }
+
   // ---------- bleinfo (Wunschliste 40, 2026-06-04) ----------------------
   // BLE-Disconnect-Counter, letzter Reason-Code, Heap-Stats. Snapshot
   // jederzeit abfragbar; pushDebugLog macht periodische Aufzeichnung.
