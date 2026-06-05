@@ -3529,13 +3529,25 @@ void MyMesh::begin(bool has_display) {
     size_t n = dl9sau_region_count();
     if (n > (size_t)SCOPE_BUILDIN_KEY_CACHE_MAX) n = SCOPE_BUILDIN_KEY_CACHE_MAX;
     _buildin_keys_count = (int)n;
-    TransportKeyStore tmp;
+    // FIX 2026-06-05: BUG! TransportKeyStore::getAutoKeyFor cacht NUR
+    // per uint16_t id, NICHT per name. Wenn wir tmp.getAutoKeyFor(0, ...)
+    // in einer Schleife mit immer id=0 aber verschiedenen Namen aufrufen,
+    // gibt Iteration 2+ den GECACHEDETEN Key der ersten Iteration zurueck
+    // -- ALLE _buildin_keys[1..] enthielten sha256("#europe"). Folge:
+    // chooseGeoFallbackScope picked ostfriesland-bbox, gab #europe-Key
+    // zurueck. _buildin_keys[idx_local] auch = #europe-Key. Trace-Label-
+    // Check (memcmp scope.key vs _buildin_keys[idx_local]) matchte und
+    // labelt "last-resort/local". User-Beobachtung 2026-06-05 (debugscope).
+    //
+    // Bypass: SHA256 direkt rechnen statt buggy getAutoKeyFor benutzen.
     for (size_t i = 0; i < n; i++) {
       const char* name = NULL;
       if (!dl9sau_get_region(i, &name, NULL, NULL, NULL, NULL)) continue;
       char tag[40];
       snprintf(tag, sizeof(tag), "#%s", name);
-      tmp.getAutoKeyFor(0, tag, _buildin_keys[i]);
+      SHA256 sha;
+      sha.update((const uint8_t*)tag, strlen(tag));
+      sha.finalize(_buildin_keys[i].key, sizeof(_buildin_keys[i].key));
     }
   }
 
