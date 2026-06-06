@@ -2418,6 +2418,76 @@ Alternativer Hebel falls PATH-Discovery in mobilem Betrieb stoert
 Quelle: User-Idee 2026-06-06 + selbst-kritische Reflektion.
 
 
+--------------------------------------------------------------------------------
+43. BLE-Sleep-Cycle wenn App lange disconnected
+--------------------------------------------------------------------------------
+
+Status: Idee, vor Implementierung Upstream-1.16 abwarten -- vielleicht
+        haben sie das schon abgedeckt (ESP power saving improvements #1687).
+
+Hintergrund:
+  BLE-Stack auf ESP32-S3 verbraucht im idle-Advertising-Modus
+  permanent ~5-15mA. Bei Powerbank-Betrieb ueber Tage summiert sich
+  das auf. Wenn die App ohnehin nicht connected ist (z.B. waehrend
+  Mobil-/Aussen-Aktivitaet wo der User nicht aufs Handy schaut),
+  ist permanentes Advertise/Connect-Bereitschaft Energie-Verlust
+  ohne praktischen Nutzen.
+
+Vorschlag:
+
+  Phase 1 -- 'lange disconnected' Detection:
+    Wenn _serial->isConnected() == false fuer X Minuten (z.B. 10),
+    BLE-Stack mit pServer->getAdvertising()->stop() pausieren oder
+    via deinitBT / esp_bt_controller_disable() abschalten.
+
+  Phase 2 -- periodisches Wake-Window:
+    Alle Y Minuten (z.B. 30) BLE fuer Z Minuten (z.B. 1-2)
+    wieder anstellen. Wenn App in dem Fenster connected -> bleibt
+    an bis disconnected (Phase 1 resumed). Wenn nicht -> wieder
+    schlafen.
+
+  Phase 3 -- Wakeup-Optionen (User-Trigger):
+    - Hardware-Button: GPIO-Press weckt BLE sofort auf
+    - LoRa-RX-Event: bei eingehender Nachricht aufwachen damit App
+      bei naechstem Connect die Message sehen kann
+    - Zeit-basiert: Time-of-Day-Schedule ('App tagsueber connected')
+
+Caveats / Discussion-Points:
+
+  - Tradeoff Reaktivitaet vs Strom: User der gelegentlich aufs
+    Geraet schaut sieht 1-Minuten-Lag bis BLE wieder bereit ist.
+    Akzeptabel? Ja, fuer Powerbank-Use-Case OK.
+
+  - Periodic-Push-Frames: pushDebugLog / pushCompanionMessage
+    fuellen offline-Queue weiter (RAM). Bei langer Sleep-Periode
+    + viel Traffic koennten Buckets ueberlaufen. Aktuell ist
+    BUCKET_CAP_HASHTAG=24 / DM=24. Wenn Flash-Persistenz aktiv
+    (Wunschliste 19 Phase C) ist Verlust kein Drama, sonst evtl.
+    aelteste Messages weg.
+
+  - User-Erwartung 'App-Verbindung immer da' vs Stromsparen.
+    Sollte Opt-In sein, nicht Default. CLI:
+      set ble_sleep_after <N min>   (0 = aus)
+      set ble_wake_interval <M min>
+      set ble_wake_window <K min>
+
+  - Recovery-Pfad: Wenn BLE haengt und User kommt nicht ran:
+    USB-Serial bleibt erreichbar -> Doku explizit.
+
+  - dt267-Inspiration (Wunschliste 33): die machen sowas
+    aehnliches. Falls deren Code-Pfad ein guter Startpunkt waere,
+    Recherche im dt267-Fork.
+
+Vor-Implementierung-Check:
+  Upstream 1.16 (Issue #1687) auf entsprechende Logik pruefen.
+  Falls sie das schon umgesetzt haben -- ihre Loesung uebernehmen
+  und nicht parallel implementieren. Falls nicht, mit obigen
+  Phasen starten.
+
+Quelle: User-Idee 2026-06-06 (Wunschliste-Sammlung vor Upstream-1.16-Merge).
+
+
+
 
 
 
