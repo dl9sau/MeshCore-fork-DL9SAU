@@ -470,6 +470,74 @@ muesste sich als CHAT advertisen und intern trotzdem repeaten -- das
 ist exakt das was die Default-Matrix in profile=defensive macht.
 
 
+---- Nachtrag (Upstream-1.16-Recherche, 2026-06-06) ----------------------------
+
+ANON_REQ -- wer beantwortet was, und das Anon-Contact-Slot-Konzept:
+
+Antwort-Matrix:
+
+  Target              | upstream-1.16        | DL9SAU-Fork
+  --------------------+----------------------+----------------------------
+  simple_repeater     | OWNER+REGIONS+BASIC  | gleich
+  simple_room_server  | Login + co           | gleich
+  simple_sensor       | BASIC (clock)        | gleich
+  companion_radio     | KEIN onAnonDataRecv- | antwortet je nach
+                      | Override -> stumm    | effectiveAdvertRole
+                      |                      | (Wunschliste 7 Phase 3)
+
+DL9SAU-Companion-Rollen-Tabelle (companion_radio/MyMesh.cpp:2253 ff):
+
+  effectiveAdvertRole | beantwortet
+  --------------------+-----------------------------------------
+  CHAT (Default)      | BASIC (clock+features) -- minimal
+  REPEATER            | OWNER + REGIONS + BASIC + handleRequest
+  SENSOR              | BASIC (clock+features) -- minimal
+  ROOM                | nichts (Wunschliste 9 offen)
+
+  Zusaetzlich Gate: NUR bei isRouteDirect() (zero-hop). Flooded
+  ANON_REQs werden ignoriert -- schuetzt vor Spam-Last im Mesh.
+
+Wichtige Abgrenzung: Sensor-Telemetrie laeuft NICHT via ANON_REQ,
+sondern via REQ/RESP nach Contact-Aufnahme:
+  - REQ_TYPE_GET_TELEMETRY_DATA = 0x03 (SensorMesh.cpp:54)
+  - handleRequest() (SensorMesh.cpp:173 ff)
+  - Pfad: onContactRequest -> handleRequest -> reply via createReply
+  ANON_REQ vom Sensor liefert nur BASIC-Clock+Features, nicht die
+  Telemetrie-Werte selbst.
+
+Anon-Contact-Slot-Konzept (Upstream-1.16, BaseChatMesh.h:36-65):
+
+  #define MAX_CONTACTS         32   (Companion overridet auf 100)
+  #define MAX_ANON_CONTACTS    8
+  ContactInfo contacts[MAX_CONTACTS + MAX_ANON_CONTACTS]
+
+  EIN Array, zwei semantische Bereiche. "Anon" wird markiert durch
+  type == ADV_TYPE_NONE. Allocator (allocateContactSlot,
+  BaseChatMesh.cpp:70) routet basierend auf 'transient_only'-Flag:
+  - Voll-Contacts und Anon-Contacts konkurrieren nicht um Plaetze
+  - Persist-Filter: ADV_TYPE_NONE-Eintraege werden nicht in den
+    DataStore geschrieben (MyMesh.cpp:5134), Reboot raeumt auf
+
+Sender-Use-Cases (Initiator-Seite, fuer den hauptsaechlich
+gemacht):
+  - Server-Login per QR ohne Contact-Aufnahme im Voraus
+  - "Wer bist Du" (ANON_REQ_TYPE_OWNER) auf einen unbekannten
+    Sender ohne ihn als Contact zu speichern
+  - Sensor-Discovery-Pings, einmal-Anfragen an Public-Services
+
+Vor 1.16 brauchte der Sender zwingend einen vollwertigen
+ContactInfo-Slot. Friction beim Login, verstopfte Contact-Liste
+mit Halbwissen aus fehlgeschlagenen Logins.
+
+DL9SAU-Companion bekommt durch den Merge:
+  - 8 zusaetzliche Anon-Slots (RAM ~3KB, neutral)
+  - CMD_SEND_ANON_REQ-Handler (MyMesh.cpp:4652+) kann jetzt an
+    Pub-Keys senden, die nicht als Contact bekannt sind
+  - Aktuell nicht aktiv von DL9SAU-Code genutzt -- Wunschliste 7c
+    (ANON_REQ_TYPE_REGIONS-Auto-Fire pro REPEATER-RESP) arbeitet
+    mit bereits etablierten Contacts
+
+
 --------------------------------------------------------------------------------
 8. repeater profile [defensive | normal] — temporaerer "wie ein Repeater"  ERLEDIGT
 --------------------------------------------------------------------------------
