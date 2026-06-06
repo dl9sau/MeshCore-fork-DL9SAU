@@ -1520,7 +1520,7 @@ static FreqRange repeat_freq_ranges[] = {
   { 867400, 867600 },
   { 868700, 869200 },   // EU 869 MHz g3 band
   { 869400, 869650 },   // EU 869 MHz narrow band (max BW 250 kHz)
-  { 902000, 928000 }    // US 915 MHz ISM band (902.0-928.0 MHz)
+  { 918000, 918000 }    // US 915 ISM (= upstream-1.16 Default, single-point 918.0)
   // Amateur radio 70cm (430.000 - 439.999 MHz). CAVE: MeshCore encrypts
   // payloads end-to-end, which is generally not permitted on amateur
   // radio frequencies (open-mode requirement). Only uncomment if you are
@@ -1542,8 +1542,8 @@ static FreqRange repeat_freq_ranges_strict[] = {
   { 866800, 867000 },
   { 867400, 867600 },
   { 868700, 869200 },   // EU 869 g3
-  { 869400, 869587 },   // EU 869 narrow OHNE 869.618 (compliant)
-  { 902000, 928000 }    // US 915
+  { 869495, 869495 },   // EU 869 narrow exakt 869.495 (upstream-1.16 Default, gem. PR a37078f6: 10% duty 500mW ERP); 869.618 weiter ueber 'force' verfuegbar
+  { 918000, 918000 }    // US 915 ISM (= upstream-1.16 Default, single-point 918.0)
 };
 
 void MyMesh::applyRadioPolicy() {
