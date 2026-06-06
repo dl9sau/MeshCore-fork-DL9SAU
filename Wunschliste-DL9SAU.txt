@@ -2368,5 +2368,56 @@ Bei Upstream-Report:
 Quelle: User-Debug-Session 2026-06-05 via 'debugscope' CLI-Tool.
 
 
+--------------------------------------------------------------------------------
+42. Distanz-basierte Eviction der heard_list bei mobilem Betrieb -- LOHNT NICHT, ERLEDIGT
+--------------------------------------------------------------------------------
+
+Status: Idee verworfen nach Diskussion 2026-06-06. Nicht implementiert.
+
+Ursprueglicher Vorschlag:
+  heard_list[64] (1-Byte-Hash + last_heard, TTL 48h) wird im defensive
+  Repeater-Profil zum PATH-Discovery-Filter benutzt -- nur Pakete von
+  lokal gehoerten Knoten werden weitergeleitet. Wenn der User mobil
+  ist und sich von einem gehoerten Knoten entfernt, koennte man den
+  Knoten frueher droppen als die 48h-TTL:
+    - Chat-Knoten:   > 1h + > 3km entfernt -> evict
+    - Repeater etc.: > 1h + > 10km entfernt -> evict
+  Damit haette der defensive Repeater im Mobilbetrieb eine schaerfere
+  Lokal-Definition.
+
+Warum verworfen:
+
+  (1) heard_list wird NUR von onAdvertRecv(path_len=0) befuellt
+      (Direct-zero-hop-Adverts). Regulaere Nachrichten (TXT_MSG,
+      GRP_TXT, REQ, ...) markieren NICHT als 'heard'.
+
+  (2) Damit haengt die Idee davon ab dass die heard-Knoten regel-
+      maessig adverten UND in ihren Adverts Position teilen.
+
+  (3) Viele Repeater adverten 1x/Woche oder gar nicht. Sie kommen
+      nie/selten in heard_list rein. Wenn sie drin sind, fehlt
+      oft die Position (kein advert_loc_policy oder unbekannte
+      Geo-Policy bei Fremd-Knoten).
+
+  (4) Damit haetten wir den Mechanismus nur fuer CHAT-User die
+      periodisch mit Position adverten. Genau die fallen aber
+      durch die 48h-TTL natuerlich raus wenn sie nicht weiter
+      adverten -- der Mechanismus liefe ins Leere.
+
+  (5) Im mobilen Use-Case ist PATH-Discovery sowieso nicht stark
+      betroffen weil Hop-Counter + Path-Discovery selbst die
+      'wir sind ihr Nachbar'-Annahme zeitnah auflisten. heard_list
+      ist nur ein zusaetzlicher Filter, nicht die einzige Schiene.
+
+Alternativer Hebel falls PATH-Discovery in mobilem Betrieb stoert
+(low priority, NICHT umgesetzt):
+  Im defensive-Profil bei `_is_moving=1` PATH-Repeating temporaer
+  aus. Aehnlich Wunschliste 34 (is_moving-Block fuer general
+  repeating), aber spezifisch fuer PATH. Erwaegung bei Bedarf.
+
+Quelle: User-Idee 2026-06-06 + selbst-kritische Reflektion.
+
+
+
 
 
