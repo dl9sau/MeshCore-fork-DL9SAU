@@ -1793,25 +1793,56 @@ void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, ui
 }
 void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis) {
   // TODO: have per-channel send_scope
-  // upstream-1.16: App-explicit unscoped hat Vorrang.
-  if (send_unscoped) {
-    sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
-    return;
-  }
+  //
+  // Architektur Scope-Auswahl vs Routing-Policy (Channel-Send):
+  //
+  // upstream-1.16 hat 'send_unscoped' als App-CMD eingefuehrt
+  // (CMD_SET_FLOOD_SCOPE_KEY [1]=1, globaler State). Naiv-Interpretation
+  // waere: "App will unscoped flood -> mach unscoped flood, jetzt".
+  // DL9SAU-Sicht: 'send_unscoped' ist ein Scope-AUSWAHL-Signal
+  // ("kein Scope verwenden"), KEIN Routing-Befehl ("flood erzwingen").
+  // Routing entscheidet die Firmware-Policy via Wunschliste 25
+  // (_unscoped_channel_direct). Andernfalls wuerde App-Klick die
+  // User-Policy 'unscoped-channel = direct' umgehen.
+  //
+  // Reihenfolge:
+  // 1. send_unscoped       -> null-Scope (Scope-Auswahl)
+  // 2. send_scope          -> per-send override
+  // 3. resolveDefaultOrGeo -> Default-Scope / Geo-Fallback
+  // 4. sonst null-Scope
+  //
+  // Bei null-Scope (egal aus welchem Pfad oben) greift dann
+  // Wunschliste-25-Routing: direct (Default) oder flood (CLI-Override).
   TransportKey eff_scope;
-  if (!send_scope.isNull()) {
+  if (send_unscoped) {
+    memset(eff_scope.key, 0, sizeof(eff_scope.key));
+  } else if (!send_scope.isNull()) {
     eff_scope = send_scope;
   } else if (!resolveDefaultOrGeo(eff_scope)) {
     memset(eff_scope.key, 0, sizeof(eff_scope.key));
   }
-  // Wunschliste 25 (Floodless unscoped channels, 2026-05-30): wenn kein
-  // Scope greift (kein send_scope, kein Default, kein Geo-Fallback) UND
-  // unscoped-channel-Direct-Modus aktiv ist (Default), Channel-Msg als
-  // Zero-Hop senden statt fluten. Verhindert dass z.B. ein User-Channel
-  // 'meineHausgemeinschaft' ohne Scope Europa-weit geflood wird.
-  // Override via 'unscoped-channelmessages flood' (runtime-only).
+  // Wunschliste 25 (Floodless unscoped channels, 2026-05-30):
+  // bei null-Scope -- direct (zero-hop) statt flood. Zwei Beweggruende:
+  //   1) Netzentlastung. Unscoped Flood propagiert bis flood_max-Hops
+  //      (typisch 63 Hops Reichweite). Neulinge die stundenlang im
+  //      Public-Channel quatschen ohne Scope-Konfiguration verursachen
+  //      massiv Netz-Traffic ohne Mehrwert (Empfaenger sitzen meist
+  //      lokal).
+  //   2) Privacy / lokale Channels. Ohne dieses Feature war ein
+  //      "lokaler Kanal, der NICHT weitergereicht werden soll" nicht
+  //      einrichtbar -- jede unscoped Channel-Msg wurde gefloodet.
+  //      Mit _unscoped_channel_direct=Default kann der User einen
+  //      privaten Channel 'meineHausgemeinschaft' fuehren ohne dass
+  //      Repeater die Nachrichten weiterreichen.
+  // Default-Aktiv. Override via 'unscoped-channelmessages flood'
+  // (runtime-only) falls Flooding doch erwuenscht (z.B. fuer einen
+  // bewusst grossraeumigen Public-Channel ohne Scope).
   if (eff_scope.isNull() && _unscoped_channel_direct) {
     sendZeroHop(pkt, delay_millis);
+    return;
+  }
+  if (eff_scope.isNull()) {
+    sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
     return;
   }
   sendFloodScoped(eff_scope, pkt, delay_millis);
@@ -11043,7 +11074,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (strcmp(key, "flood_max_unscoped_companions") == 0
-          || strcmp(key, "flood.max.unscoped.companions") == 0) {
+          || strcmp(key, "flood.max.unscoped.companions") == 0
+          || strcmp(key, "flood_max_unscoped") == 0
+          || strcmp(key, "flood.max.unscoped") == 0) {
+        bool is_upstream_alias =
+            (strcmp(key, "flood_max_unscoped") == 0
+             || strcmp(key, "flood.max.unscoped") == 0);
+        if (is_upstream_alias) {
+          pushCompanionMessage(
+            "Hinweis: 'flood_max_unscoped' (upstream) -> hier\n"
+            "Alias auf 'flood_max_unscoped_companions'.");
+        }
         pushCompanionMessage(
           "set flood_max_unscoped_companions:\n"
           "  Cap fuer unscoped Companion-Flood\n"
@@ -11054,7 +11095,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  off    = nicht repeaten\n"
           "  1..63  = expliziter Cap");
         pushCompanionMessage(
-          "REQ/RESP/ANON_REQ unscoped bleiben geblockt.");
+          "Geblockt: REQ/RESP/ANON_REQ unscoped +\n"
+          "Infra-Adverts (REPEATER/ROOM/SENSOR).");
         return;
       }
       if (strcmp(key, "txdelay") == 0) {
@@ -11643,8 +11685,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // <follow|off|1..63>. Cap fuer ROUTE_TYPE_FLOOD ohne Scope, nur fuer
     // ADV_TYPE_CHAT-Adverts + TXT_MSG (User-Erstkontakt). REQ/RESP/ANON_REQ
     // unscoped bleiben geblockt.
+    //
+    // Upstream-1.16 hat 'flood_max_unscoped' eingefuehrt (RepeaterPrefs,
+    // globaler Repeat-Cap). Im DL9SAU-Companion gibt es das Feld NICHT,
+    // weil wir defensiv unscoped-Repeats nur fuer Companion-Erstkontakt
+    // erlauben. Damit User die upstream-CLI-Form gewohnheitsmaessig
+    // tippen koennen, akzeptieren wir 'flood_max_unscoped' als Alias und
+    // erklaeren die Umlenkung.
     if (strcmp(key, "flood_max_unscoped_companions") == 0
-        || strcmp(key, "flood.max.unscoped.companions") == 0) {
+        || strcmp(key, "flood.max.unscoped.companions") == 0
+        || strcmp(key, "flood_max_unscoped") == 0
+        || strcmp(key, "flood.max.unscoped") == 0) {
+      bool is_upstream_alias =
+          (strcmp(key, "flood_max_unscoped") == 0
+           || strcmp(key, "flood.max.unscoped") == 0);
       uint8_t newval;
       if (strcmp(value_lc, "follow") == 0) {
         newval = CH_HOPS_OFF;
@@ -11663,6 +11717,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       _prefs.flood_max_unscoped_companions = newval;
       savePrefs();
+      if (is_upstream_alias) {
+        pushCompanionMessage(
+          "Hinweis: 'flood_max_unscoped' (upstream) -> hier\n"
+          "Alias auf 'flood_max_unscoped_companions'.");
+        pushCompanionMessage(
+          "(DL9SAU: unscoped-Repeat nur fuer CHAT-Adverts\n"
+          "+ TXT_MSG; REQ/RESP und Infrastruktur-\n"
+          "Adverts (REPEATER/ROOM/SENSOR) geblockt.)");
+      }
       char r[140];
       if (newval == CH_HOPS_OFF)
         snprintf(r, sizeof(r),
