@@ -1520,7 +1520,7 @@ static FreqRange repeat_freq_ranges[] = {
   { 867400, 867600 },
   { 868700, 869200 },   // EU 869 MHz g3 band
   { 869400, 869650 },   // EU 869 MHz narrow band (max BW 250 kHz)
-  { 918000, 918000 }    // US 915 ISM (= upstream-1.16 Default, single-point 918.0)
+  { 902000, 928000 }    // US 915 MHz ISM band (902.0-928.0 MHz)
   // Amateur radio 70cm (430.000 - 439.999 MHz). CAVE: MeshCore encrypts
   // payloads end-to-end, which is generally not permitted on amateur
   // radio frequencies (open-mode requirement). Only uncomment if you are
