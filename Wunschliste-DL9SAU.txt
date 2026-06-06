@@ -2487,6 +2487,121 @@ Vor-Implementierung-Check:
 Quelle: User-Idee 2026-06-06 (Wunschliste-Sammlung vor Upstream-1.16-Merge).
 
 
+--------------------------------------------------------------------------------
+44. Companion-Deep-Sleep wenn BLE schlaeft UND GPS aus
+--------------------------------------------------------------------------------
+
+Status: Idee, hoehere Prio. Vor Implementierung Strommessung
+        zur Quantifizierung (Heltec Wireless Tracker).
+
+Hintergrund:
+  simple_repeater/main.cpp:155-160 zeigt: board.sleep(30) (ESP32)
+  bzw. board.sleep(0) (NRF52) ist KEIN voller Cold-Sleep, sondern
+  ein Pause-Modus -- RTC-Domain bleibt an, LoRa-RX wacht via
+  ext1_wakeup auf P_LORA_DIO_1 (Heltec V3/V4 Board-Code), BLE-
+  Stack wird NICHT geteardown. Lohnt sich auch bei viel Traffic.
+
+  Im Companion ist das aber bisher nicht aktiviert -- weil
+  BLE-Connection und GPS-Cycle "live" sein muessen.
+
+  Mit Wunschliste 43 (BLE-Sleep wenn App > N min disconnected,
+  ERLEDIGT) existiert jetzt ein klar definierter "BLE schlaeft"-
+  Zustand. Wenn zusaetzlich das GPS gerade ausser Cycle-Window
+  ist (gps_power_mode=0 cycle UND ausserhalb gps_lead_min vor
+  naechstem Advert), ist die CPU im Companion *vollstaendig
+  arbeitsfrei* zwischen LoRa-Paketen. Genau wie im Repeater.
+
+Conditions fuer Deep-Sleep-Eligibility:
+  - BLE-Stack disabled (Wunschliste 43 BLE-Sleep aktiv)
+  - GPS aus oder zumindest nicht im Cycle-Lead-Window
+  - kein pending TX in Dispatcher-Queue
+  - kein pending Advert (motion-adaptive Cadence + nightly +
+    advert_role-Heartbeat alle X min)
+  - Battery > Minimum (sonst eher graceful brownout, Wunschliste 2)
+
+Wake-Quellen:
+  - ext1_wakeup auf P_LORA_DIO_1 (LoRa-RX-Event)
+  - Timer-Wakeup zum naechsten Advert-Slot
+  - optional Wake-Button (P_USER_BTN o.ae.)
+
+Tradeoffs / Caveats:
+  - Heltec Wireless Tracker hat MicroNMEA-State im RAM, GPS-
+    Modul-State extern. RTC-Domain on lassen (ESP_PD_DOMAIN_RTC_
+    PERIPH = ESP_PD_OPTION_ON), wie HeltecV3Board.h:56 macht.
+  - LoRa-RX bleibt aktiv waehrend "Sleep" (Radio-Driver im RX-
+    Modus, DIO1 weckt CPU). Strombudget dominiert vom Radio
+    (~10mA RX-Idle) -- CPU-Einsparung trotzdem signifikant
+    relativ zum normalen CPU-Takt-Verbrauch.
+  - GPS-Fix laut User-Erfahrung schnell (warmer Almanac), also
+    keine Sorge wegen Cold-Start-Lag.
+  - 30s-Verzoegerung beim naechsten Zero-Hop-Advert / nightly
+    Advert nach Aufwachen ist akzeptabel.
+  - LBT-Stub (Wunschliste 45): falls aktiv, vor Sleep noch
+    sicherstellen dass noise_floor-Sampling abgeschlossen ist.
+
+Vor-Implementierung-Check:
+  Upstream 1.16 (#1687, ESP power saving improvements) hat
+  evtl. Teile -- pruefen, ob deren Ansatz fuer Companion uebernehmbar.
+  Repeater-Code (board.sleep(secs)) als Referenz-Implementierung
+  studieren.
+
+Quelle: User-Idee 2026-06-06, mit Klarstellung dass 30s-Pause
+        (nicht 10-30 min Cold-Sleep) ausreicht und LoRa-RX als
+        ext1-Wake bleibt.
+
+
+--------------------------------------------------------------------------------
+45. LBT (Listen-Before-Talk) Stub im Companion entfernen
+--------------------------------------------------------------------------------
+
+Status: Idee, niedrigere Prio als Deep-Sleep (Wunschliste 44).
+        Bedingt durch upstream-`currentRSSI()`-Problem.
+
+Hintergrund:
+  Upstream-Repeater (simple_repeater, simple_room_server) hat
+  funktionalen LBT-Pfad:
+    - CLI 'int.thresh <N>' setzt _prefs.interference_threshold
+    - getInterferenceThreshold() in MyMesh.h:150 gibt Pref zurueck
+    - Dispatcher::checkSend() (Z. 290) prueft _radio->isReceiving()
+      -> isChannelActive() vergleicht aktuellen RSSI gegen
+      _noise_floor + _threshold
+    - Default 0 = disabled, aber CLI-aktivierbar
+
+  Im Companion (examples/companion_radio/MyMesh.cpp:655) ist der
+  Override hardcoded auf:
+    int MyMesh::getInterferenceThreshold() const {
+      return 0; // disabled for now, until currentRSSI() problem
+                // is resolved
+    }
+  -> Companion brueellt nach wie vor los, ohne CAD/LBT-Check.
+  Der CLI-Pref ist also wirkungslos im Companion.
+
+Vorschlag:
+  Schritt 1: Upstream-Status pruefen -- ist 'currentRSSI() problem'
+             noch akut? Issue/PR-Tracker durchsehen, vermutlich
+             im RadioLibWrapper bei SX1262/SX1268.
+  Schritt 2: Wenn behoben oder Workaround moeglich: Stub entfernen
+             (companion_radio/MyMesh.cpp:655-657) und auf Base-
+             Default fallen lassen (Dispatcher.h:168 = 0) oder
+             dieselbe Logik wie simple_repeater (gibt _prefs.
+             interference_threshold zurueck).
+  Schritt 3: Validierung auf Heltec Wireless Tracker -- noise_floor-
+             Konvergenz + getCurrentRSSI()-Genauigkeit. Strom-
+             Bilanz pruefen (LBT-Wait koennte TX leicht verzoegern).
+
+Caveats:
+  - LBT verzoegert TX bei besetztem Kanal. Bei Companion mit
+    user-getriggerten Sendungen ggf. wahrnehmbar.
+  - Auto-Mode-Empfehlung waere: dim per Repeater-Profile (Wunschliste 8)
+    -- aktiv wenn 'repeater profile defensive|normal', off im
+    Pure-Client-Mode.
+
+Quelle: User-Anfrage 2026-06-06 ("ob das andere feature im repeater
+        code, listen before talk hardwareseitig mittlerweile
+        gefixt ist"). Antwort: Repeater ja, Companion nein.
+
+
+
 
 
 
