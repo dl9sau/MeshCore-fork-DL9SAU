@@ -427,4 +427,13 @@ struct NodePrefs {  // persisted to file
   //   1..flood_max        = expliziter Cap
   // CLI: set flood_max_unscoped_companions <follow|off|1..63>
   uint8_t        flood_max_unscoped_companions;
+  // Reise-Wunsch 2026-06-08: Toggle fuer scope-Annotation an
+  // Channel-Sender-Namen ('Name (#scope[, direct])') und DM-Vorab-
+  // Frame ('[#scope, direct]'). Default on (Wunschliste 35 Verhalten).
+  //   1 = on  -> annotation einfuegen (Default)
+  //   0 = off -> Original-Text/Frame ohne scope-Info
+  // CLI: 'messages append-scope-to-name on|off'
+  // Wirkung: bei off kann die App den Sender-Namen wieder unverändert
+  // gegen ihre DB matchen -> Pfad-Anzeige funktioniert wieder.
+  uint8_t        messages_append_scope_to_name;
 };

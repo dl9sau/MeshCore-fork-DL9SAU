@@ -298,6 +298,10 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // CH_HOPS_OFF = follow flood_max_scope_region).
     file.read((uint8_t *)&_prefs.flood_max_unscoped_companions,
               sizeof(_prefs.flood_max_unscoped_companions));
+    // Reise-Wunsch 2026-06-08: messages_append_scope_to_name. Bei alten
+    // Files liefert file.read 0 Bytes -> Pre-Init in begin() (default 1).
+    file.read((uint8_t *)&_prefs.messages_append_scope_to_name,
+              sizeof(_prefs.messages_append_scope_to_name));
 
     file.close();
   }
@@ -382,6 +386,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Wunschliste 39
     file.write((uint8_t *)&_prefs.flood_max_unscoped_companions,
                sizeof(_prefs.flood_max_unscoped_companions));
+    // Reise-Wunsch 2026-06-08: messages_append_scope_to_name
+    file.write((uint8_t *)&_prefs.messages_append_scope_to_name,
+               sizeof(_prefs.messages_append_scope_to_name));
 
     file.close();
   }

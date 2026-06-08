@@ -1309,7 +1309,10 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // vom Sender'. Vorab-Timestamp = sender_timestamp - 1 damit die
   // Annotation chronologisch oberhalb der eigentlichen Nachricht
   // einsortiert wird.
-  if (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN) {
+  // Reise-Toggle 2026-06-08: DM-Vorab-Frame [#scope, direct] nur wenn
+  // messages_append_scope_to_name on. Default off.
+  if ((txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN)
+      && _prefs.messages_append_scope_to_name) {
     uint32_t name_h = fnv1a32((const char*)from.id.pub_key, 6);
     uint32_t scope_h;
     const char* scope_label = NULL;
@@ -2170,7 +2173,9 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   const char* effective_text = text;
   char augmented[MAX_TEXT_LEN + 64];
   const char* sep = strstr(text, ": ");
-  if (sep) {
+  // Reise-Toggle 2026-06-08: messages_append_scope_to_name aus -> Augment
+  // ueberspringen. Default off (App-Pfad-Anzeige funktioniert dann wieder).
+  if (sep && _prefs.messages_append_scope_to_name) {
     // Sender-Name extrahieren (prefix vor ': ').
     size_t name_len = (size_t)(sep - text);
     uint32_t name_h = fnv1a32(text, name_len);
@@ -6986,6 +6991,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint ("telemetry_mode_loc",   _prefs.telemetry_mode_loc);
   kv_uint ("telemetry_mode_env",   _prefs.telemetry_mode_env);
   kv_uint ("buzzer_quiet",         _prefs.buzzer_quiet);
+  kv_uint ("messages_append_scope_to_name", _prefs.messages_append_scope_to_name);
   kv_float("rxdelay",              _prefs.rx_delay_base, 3);
   kv_float("txdelay",              _prefs.tx_delay_factor, 3);
   kv_float("direct_txdelay",       _prefs.direct_tx_delay_factor, 3);
@@ -7698,6 +7704,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "flood_max_req_resp") == 0){ _prefs.flood_max_req_resp= (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_unknown_chan") == 0){ _prefs.flood_max_unknown_chan= (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_unscoped_companions") == 0){ _prefs.flood_max_unscoped_companions = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "messages_append_scope_to_name") == 0){ _prefs.messages_append_scope_to_name = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "time_sync_mode") == 0)         { _prefs.time_sync_mode         = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start);   _br_applied++; return; }
       if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start);   _br_applied++; return; }
@@ -11441,6 +11448,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Default off. Numerisch 0..3 auch erlaubt.");
         return;
       }
+      if (strcmp(key, "messages_append_scope_to_name") == 0
+          || strcmp(key, "messages.append.scope.to.name") == 0) {
+        pushCompanionMessage(
+          "set messages_append_scope_to_name <on|off>:\n"
+          "  Channel-Sender 'Name (#scope, direct)' und\n"
+          "  DM-Vorab-Frame '[#scope, direct]' beim 1. Auftreten\n"
+          "  pro (channel, sender, scope, direct)-Tupel.");
+        pushCompanionMessage(
+          "Default: off.");
+        pushCompanionMessage(
+          "WARNUNG bei on: die App zeigt 'Keine Pfadinfo'\n"
+          "fuer annotierte Messages (bekannte Limitierung,\n"
+          "App-Lookup matched modifizierten Sender-Namen nicht).");
+        return;
+      }
       if (strcmp(key, "flood_max_unscoped_companions") == 0
           || strcmp(key, "flood.max.unscoped.companions") == 0
           || strcmp(key, "flood_max_unscoped") == 0
@@ -12046,6 +12068,37 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "OK - flood_max_req_resp = %u", (unsigned)newval);
       pushCompanionMessage(r);
       pushCompanionMessage("Empfehlung: 4..8 (eng=4 Stadt, 8=weiter).");
+      return;
+    }
+
+    // Reise-Wunsch 2026-06-08: set messages_append_scope_to_name <on|off>
+    // Toggle fuer Wunschliste-35-Annotation (Channel-Sender '(#scope[,
+    // direct])' + DM-Vorab-Frame '[#scope, direct]').
+    if (strcmp(key, "messages_append_scope_to_name") == 0
+        || strcmp(key, "messages.append.scope.to.name") == 0) {
+      uint8_t newval;
+      if (strcmp(value_lc, "on") == 0 || strcmp(value_lc, "1") == 0
+          || strcmp(value_lc, "true") == 0) {
+        newval = 1;
+      } else if (strcmp(value_lc, "off") == 0 || strcmp(value_lc, "0") == 0
+                 || strcmp(value_lc, "false") == 0) {
+        newval = 0;
+      } else {
+        pushCompanionMessage("Wert: on / off");
+        return;
+      }
+      _prefs.messages_append_scope_to_name = newval;
+      savePrefs();
+      if (newval) {
+        pushCompanionMessage(
+          "OK - messages_append_scope_to_name = on");
+        pushCompanionMessage(
+          "WARNUNG: App zeigt 'Keine Pfadinfo' fuer annotierte\n"
+          "Messages (bekannte Limitierung).");
+      } else {
+        pushCompanionMessage(
+          "OK - messages_append_scope_to_name = off");
+      }
       return;
     }
 
