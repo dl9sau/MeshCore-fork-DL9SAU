@@ -6626,14 +6626,18 @@ void MyMesh::doNightFloodAdvert() {
 void MyMesh::manageGpsPower() {
 #if ENV_INCLUDE_GPS == 1
   if (!_prefs.gps_enabled) return;   // user disabled GPS entirely
-  if (!_gps_had_fix_ever) return;    // still in initial boot search — keep GPS on
 
   unsigned long now = millis();
   bool gps_is_on = false;
   const char* cur = sensors.getSettingByKey("gps");
   if (cur != NULL) gps_is_on = (cur[0] == '1');
 
-  // always-on Modus: nicht cyceln, GPS dauerhaft an
+  // always-on Modus: nicht cyceln, GPS dauerhaft an. Reise-Fix
+  // 2026-06-08: dieser Block lief VORHER nach dem !_gps_had_fix_ever
+  // early-return -- d.h. solange noch kein Fix gehabt, blieb GPS im
+  // sleeping-State haengen (manageGpsPower returnte frueh, ohne dass
+  // sensors.setSettingValue("gps","1") aufgerufen wurde). Jetzt VOR
+  // dem fix-ever-Check: always-on greift sofort, unabhaengig vom Fix.
   if (_prefs.gps_power_mode == 1) {
     if (!gps_is_on) {
       sensors.setSettingValue("gps", "1");
@@ -6645,6 +6649,9 @@ void MyMesh::manageGpsPower() {
     }
     return;
   }
+
+  if (!_gps_had_fix_ever) return;    // cycle mode + still in initial boot search
+                                      // -- keep current state (was ON beim Boot)
 
   // Lead-Zeit aus _prefs.gps_lead_min (Minuten). Backward-compat: wenn der
   // gespeicherte Wert 0 ist (z.B. alte Datei ohne Feld), nutze Default 5.
@@ -9656,6 +9663,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (strcmp(sub, "always-on") == 0) {
         _prefs.gps_power_mode = 1;
         savePrefs();
+        // Reise-Fix 2026-06-08: always-on sofort wirksam machen --
+        // GPS-Modul einschalten wenn aktuell aus.
+        if (_prefs.gps_enabled) {
+          sensors.setSettingValue("gps", "1");
+          _gps_woke_at_millis = millis();
+          if (_gps_woke_at_millis == 0) _gps_woke_at_millis = 1;
+          _gps_fix_seen_this_wake = false;
+        }
         pushCompanionMessage("OK - gps power = always-on (kein Cycling).");
         return;
       }
@@ -9703,6 +9718,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.gps_enabled = 1;
       savePrefs();
       reevaluateRepeaterBbox();  // Reise-Fix 2026-06-08
+      // Reise-Fix 2026-06-08: GPS-Modul sofort physisch einschalten
+      // (analog App-Pfad CMD_SET_RADIO_PARAMS). Vorher musste man auf
+      // den naechsten manageGpsPower-Tick warten -- und wenn
+      // !gps_had_fix_ever, returnte der frueh und schaltete nie ein.
+      sensors.setSettingValue("gps", "1");
+      _gps_woke_at_millis = millis();
+      if (_gps_woke_at_millis == 0) _gps_woke_at_millis = 1;
+      _gps_fix_seen_this_wake = false;
+      _gps_user_override_until_advert = true;
       // D3: informativer als nur "OK - GPS enabled". Zeige aktuelle
       // power-Konfig damit User direkt sieht was greift.
       const char* pmode = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
@@ -9715,6 +9739,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.gps_enabled = 0;
       savePrefs();
       reevaluateRepeaterBbox();  // Reise-Fix 2026-06-08
+      // GPS-Modul sofort physisch ausschalten.
+      sensors.setSettingValue("gps", "0");
+      _gps_user_override_until_advert = false;
       pushCompanionMessage("OK - GPS disabled.");
     } else if (strcmp(arg, "sync") == 0) {
       // Einmaliger Wake-Trigger - GPS bleibt wach bis zum naechsten Advert
