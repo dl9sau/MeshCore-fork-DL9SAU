@@ -520,6 +520,8 @@ private:
     int8_t  our_snr_q4;      // unsere SNR-Sicht auf ihren RESP
     int8_t  our_rssi_dbm;    // unsere RSSI-Sicht (dBm, int8); their_rssi nicht im Protokoll
     bool    full_pubkey;     // true wenn 32 byte, false wenn 8 byte prefix
+    uint32_t recv_at_rtc;    // Reise-Wunsch 2026-06-08: RTC bei Eintrags-Empfang
+                              // fuer 15-min-Cache + LRU-Overwrite bei voller Liste
   };
   static const int MAX_DISCOVER_ENTRIES = 16;
   // ---- (a) Sender 'discover*' ---------------------------------------------

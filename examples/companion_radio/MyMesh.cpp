@@ -2961,7 +2961,18 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
 
   // Listening-Window: 30 s
   _discover_active = true;
-  _discover_count = 0;
+  // Reise-Wunsch 2026-06-08: 15-min-Cache. Wenn der letzte Discover
+  // weniger als 15 Min her ist, bestehende Eintraege behalten -- neue
+  // Antworten ergaenzen sie (per pub_key-Match) oder ueberschreiben
+  // den aeltesten bei voller Liste. Vorher: _discover_count = 0 hat
+  // alle Eintraege geloescht, selbst wenn der User wiederholt
+  // 'discover regions' gemacht hat und manche Repeater nur sporadisch
+  // antworten.
+  uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  bool keep_cache = (_discover_last_at_rtc != 0
+                     && now_rtc >= _discover_last_at_rtc
+                     && (now_rtc - _discover_last_at_rtc) <= 15UL * 60UL);
+  if (!keep_cache) _discover_count = 0;
   _discover_expiry_ms = futureMillis(30000);
   _discover_next_allowed_ms = futureMillis(60000);  // 60 s bis naechster discover
 
@@ -2990,8 +3001,38 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   // Pub_key extrahieren (32 byte full ODER 8 byte prefix)
   size_t pk_len = packet->payload_len - 6;
   if (pk_len != 32 && pk_len != 8) return;
-  if (_discover_count >= MAX_DISCOVER_ENTRIES) return;
-  DiscoverEntry& e = _discover_entries[_discover_count++];
+  // Reise-Wunsch 2026-06-08: 15-min-Cache + slot-Reuse.
+  // 1) Wenn pub_key bereits in der Liste -> existing slot ueberschreiben
+  //    (neueste Daten gewinnen).
+  // 2) Sonst wenn Platz frei -> hinten anhaengen.
+  // 3) Sonst (voll) -> aeltesten Eintrag per recv_at_rtc ueberschreiben.
+  uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  // Kompare-Laenge: voll-key vergleichen wenn beide full, sonst prefix
+  size_t cmp_len = (pk_len == 32) ? 8 : pk_len;  // 8-byte-prefix reicht
+                                                  // fuer Duplikat-Erkennung
+  int target_idx = -1;
+  for (uint8_t i = 0; i < _discover_count; i++) {
+    if (memcmp(_discover_entries[i].pub_key, &packet->payload[6], cmp_len) == 0) {
+      target_idx = i;
+      break;
+    }
+  }
+  if (target_idx < 0) {
+    if (_discover_count < MAX_DISCOVER_ENTRIES) {
+      target_idx = _discover_count++;
+    } else {
+      // Liste voll -- aeltesten Eintrag finden und ueberschreiben.
+      uint32_t oldest_rtc = 0xFFFFFFFFUL;
+      target_idx = 0;
+      for (uint8_t i = 0; i < _discover_count; i++) {
+        if (_discover_entries[i].recv_at_rtc < oldest_rtc) {
+          oldest_rtc = _discover_entries[i].recv_at_rtc;
+          target_idx = i;
+        }
+      }
+    }
+  }
+  DiscoverEntry& e = _discover_entries[target_idx];
   memset(e.pub_key, 0, sizeof(e.pub_key));
   memcpy(e.pub_key, &packet->payload[6], pk_len);
   e.full_pubkey = (pk_len == 32);
@@ -2999,6 +3040,7 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   e.their_snr_q4 = their_snr_q4;
   e.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
   e.our_rssi_dbm = (int8_t)radio_driver.getLastRSSI();
+  e.recv_at_rtc = now_rtc;
 
   // Chain-Modus: 'discover regions' (no args) hat den CTL-REQ getriggert.
   // Pro REPEATER-RESP sofort eine zero-hop ANON_REQ_TYPE_REGIONS abfeuern.
