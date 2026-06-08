@@ -2959,6 +2959,43 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
   }
   sendZeroHop(pkt);
 
+  // Reise-Wunsch 2026-06-08: bei 'discover regions' (chain-Modus)
+  // BEKANNTE Direct-Repeater aus _neighbours (Wunschliste 15) zusaetzlich
+  // sofort per zero-hop ANON_REQ_TYPE_REGIONS anfragen. Vorteil:
+  //  - hoehere Hit-Rate bei Repeatern die nur sporadisch antworten
+  //  - kein 30s-Wartebedarf fuer die Bekannten
+  //  - bei 0 CTL-Antworten haben wir trotzdem etwas
+  // Filter: nur ADV_TYPE_REPEATER + heard_timestamp <= 3h alt
+  // (3h-Grenze nach User-Wunsch -- Repeater die stuendlich adverten
+  // werden auch wenn 1 advert verpasst war innerhalb 3h gesichert
+  // gehoert).
+  // Dedup gegen spaetere CTL-Antworten passiert in
+  // sendRegionsQueryZeroHop selbst.
+  if (_discover_regions_chained) {
+    uint32_t now_rtc = getRTCClock()->getCurrentTime();
+    const uint32_t NEIGHBOUR_MAX_AGE_SECS = 3UL * 3600UL;  // 3h
+    uint8_t pre_queried = 0;
+    for (int i = 0; i < _neighbours_count; i++) {
+      const RuntimeNeighbour& n = _neighbours[i];
+      if (n.heard_timestamp == 0) continue;
+      if (n.adv_type != ADV_TYPE_REPEATER) continue;
+      if (now_rtc < n.heard_timestamp) continue;  // RTC moved back
+      if (now_rtc - n.heard_timestamp > NEIGHBOUR_MAX_AGE_SECS) continue;
+      ContactInfo* known = lookupContactByPubKey(n.pub_key, PUB_KEY_SIZE);
+      if (sendRegionsQueryZeroHop(n.pub_key, known ? known->name : "")) {
+        pre_queried++;
+      }
+    }
+    if (pre_queried > 0) {
+      char r[140];
+      snprintf(r, sizeof(r),
+               "discover regions: %u bekannte REPEATER\n"
+               "(zero-hop, <= 3h) vorab angefragt.",
+               (unsigned)pre_queried);
+      pushCompanionMessage(r);
+    }
+  }
+
   // Listening-Window: 30 s
   _discover_active = true;
   // Reise-Wunsch 2026-06-08: 15-min-Cache. Wenn der letzte Discover
@@ -3053,6 +3090,15 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
 
 bool MyMesh::sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name) {
   if (_regions_pending_count >= MAX_PENDING_REGIONS) return false;
+  // Reise-Fix 2026-06-08: Dedup gegen bereits offene REGIONS-Queries.
+  // Wichtig wenn Pre-Discover-Phase (_neighbours-Iteration) und CTL-
+  // Discover-Response unabhaengig denselben Repeater treffen -- ohne
+  // diesen Check wuerden wir 2x denselben ANON_REQ senden.
+  for (uint8_t i = 0; i < _regions_pending_count; i++) {
+    if (memcmp(_regions_pending[i].pubkey, pubkey32, PUB_KEY_SIZE) == 0) {
+      return false;  // already pending
+    }
+  }
   // Temp ContactInfo. Nur die Felder die sendAnonReq braucht:
   //   id.pub_key (fuer createAnonDatagram + ECDH shared_secret)
   //   out_path_len = 0 -> sendAnonReq nimmt sendDirect mit empty path
