@@ -4501,7 +4501,14 @@ void MyMesh::handleCmdFrame(size_t len) {
       //                     plausibel)
       //   delta > 3600s   : RTC aktualisieren UND Slot invalidieren
       if (delta <= 10) {
-        // praktisch synchron -- still OK
+        // praktisch synchron -- still OK. Aber: Sync-State auch hier
+        // aktualisieren, damit der Marker auf 'App' wechselt (war
+        // moeglicherweise Boot-Bootstrap, jetzt durch App bestaetigt).
+        // age = now - last_at_rtc rutscht damit zurueck nahe 0.
+        // Reise-Fix 2026-06-08.
+        _time_sync_last_at_rtc = secs;
+        _time_sync_done_since_boot = true;
+        memset(_time_sync_last_pubkey, 0, sizeof(_time_sync_last_pubkey));
         writeOKFrame();
       } else {
         getRTCClock()->setCurrentTime(secs);
@@ -6410,6 +6417,15 @@ void MyMesh::updateMotionTracking() {
 
   if (!_gps_had_fix_ever) {
     _gps_had_fix_ever = true;
+    // Reise-Fix 2026-06-08: GPS-Marker setzen damit clock-Display auch
+    // nach 'gps off' weiss dass die letzte Sync-Quelle GPS war.
+    // pub_key=[0xFE,0xFE,0xFE] = GPS (anders als 0xFF Bootstrap, 0x00 App).
+    // MicroNMEALocationProvider setzt RTC direkt ueber _clock->setCurrentTime
+    // (deep in Lib), kann unsere Companion-State-Variablen nicht erreichen
+    // -- hier nachholen.
+    _time_sync_last_at_rtc = getRTCClock()->getCurrentTime();
+    _time_sync_done_since_boot = true;
+    memset(_time_sync_last_pubkey, 0xFE, sizeof(_time_sync_last_pubkey));
     {
       char st[140];
       appendGpsTraceStatus(st, sizeof(st));
@@ -10726,15 +10742,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (_time_sync_done_since_boot && _time_sync_last_at_rtc > 0) {
       uint32_t age = (now >= _time_sync_last_at_rtc)
                      ? (now - _time_sync_last_at_rtc) : 0;
-      char src[40];
+      char src[60];
       bool app_sync = (_time_sync_last_pubkey[0] == 0
                        && _time_sync_last_pubkey[1] == 0
                        && _time_sync_last_pubkey[2] == 0);
       bool bootstrap_sync = (_time_sync_last_pubkey[0] == 0xFF
                              && _time_sync_last_pubkey[1] == 0xFF
                              && _time_sync_last_pubkey[2] == 0xFF);
+      bool gps_marker = (_time_sync_last_pubkey[0] == 0xFE
+                         && _time_sync_last_pubkey[1] == 0xFE
+                         && _time_sync_last_pubkey[2] == 0xFE);
       if (isGpsAuthoritative()) {
-        snprintf(src, sizeof(src), "GPS");
+        snprintf(src, sizeof(src), "GPS (active)");
+      } else if (gps_marker) {
+        snprintf(src, sizeof(src), "GPS (zuletzt; jetzt off)");
       } else if (app_sync) {
         snprintf(src, sizeof(src), "App (CMD_SET_DEVICE_TIME)");
       } else if (bootstrap_sync) {
