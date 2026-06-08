@@ -2923,6 +2923,50 @@ Quelle: User-Reise-Notiz 2026-06-08, Verifikation per
         Empirie (mEDI-Bot ohne Contact-Eintrag, Reboot-Test).
 
 
+--------------------------------------------------------------------------------
+49. TXT_TYPE_SIGNED_PLAIN -- Sender-Side implementieren + UI-Marker
+--------------------------------------------------------------------------------
+
+Status: Future-Feature. Empfangs-Pfad ist vorhanden, Send-Pfad
+        nicht. UI-Marker fehlt.
+
+Hintergrund:
+  TXT_TYPE_SIGNED_PLAIN (2) = plain text mit Sender-Signatur
+  (Definition src/helpers/TxtDataHelpers.h:8). Unterscheidet sich
+  von TXT_TYPE_PLAIN (0) dadurch dass der Sender mit seinem
+  privaten Schluessel signiert -- der Empfaenger kann ueber den
+  Pub-Key verifizieren dass die Nachricht wirklich vom deklarierten
+  Sender stammt.
+
+  Wert: Schutz gegen Identity-Spoofing bei kompromittiertem
+  Endpoint oder shared-secret-Leak. Bei TXT_TYPE_PLAIN garantiert
+  das Crypto nur 'wurde mit unserem gemeinsamen Secret
+  verschluesselt'. Bei SIGNED zusaetzlich 'wurde vom Sender-Pub-Key
+  signiert'.
+
+Empfangs-Pfad (vorhanden):
+  BaseChatMesh.cpp:283-300: erkennt SIGNED_PLAIN, ruft
+  onSignedMessageRecv-Hook fuer UI-Hinweis. Implementiert.
+
+Send-Pfad (FEHLT):
+  BaseChatMesh.cpp:516 (sendMessage) setzt hard
+  'temp[4] = 0;  // TXT_TYPE_PLAIN'. Keine Sender-API um SIGNED
+  zu waehlen. Future-Feature.
+
+DL9SAU-UI-Marker fuer SIGNED-DMs (Future, wenn Send-Pfad da):
+  - bei DM-Vorab-Frame '[#scope, direct]' optional ein
+    Verifikations-Symbol einfuegen, z.B. '[#scope, direct, ✓]'.
+  - alternativ separates Push-Frame oder UI-Symbol in der
+    Companion-App
+  - Achtung: User-Hinweis 2026-06-08 -- vielleicht zeigt die App
+    SIGNED selbst an, sobald das Feature standard-side aktiv ist.
+    Dann waere unser UI-Marker redundant. Erst empirisch testen
+    wenn upstream/App SIGNED-Send implementiert hat.
+
+Quelle: User-Frage 2026-06-08 ('was ist TXT_TYPE_SIGNED_PLAIN?').
+
+
+
 
 
 
