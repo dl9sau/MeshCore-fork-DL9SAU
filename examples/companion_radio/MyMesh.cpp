@@ -2082,6 +2082,29 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   // direct_flag: pkt->path_len == 0 (direkt gehoert, kein Repeater
   // im Pfad). Gilt fuer DIRECT-routed und FLOOD-routed (beide haben
   // path_len 0 bei direktem Empfang).
+  //
+  // ENTFERNBAR-MARKER (Reise-Notiz 2026-06-08, Wunschliste 48):
+  // Diese augmented-text-Logik bricht die App-Pfad-Anzeige
+  // ('Nachrichtenpfad ansehen' -> 'Keine Pfadinfo') fuer Messages
+  // mit Suffix. App matched vermutlich Sender-Name (oder text-Hash)
+  // gegen ihre interne Live-DB; mit Suffix kein Match.
+  // KISS-Mode/PUSH_CODE_LOG_RX_DATA (Z. 771 logRxRaw) liefert die
+  // ROH-Bytes unveraendert -- das ist absichtlich (transparenter
+  // Funk-Mitschnitt). Augment greift NUR im UI-Frame
+  // RESP_CODE_CHANNEL_MSG_RECV (Z. ~2148 unten).
+  //
+  // Wenn User entscheidet das Suffix wegen Pfad-Anzeige-Bruch
+  // wieder zu entfernen, RUECKSTANDSLOS:
+  //   - Block 2085-2128 entfernen ('const char* effective_text = text;'
+  //     bis Ende '...} // (sep) sep-Block')
+  //   - 'effective_text' wieder durch 'text' ersetzen weiter unten
+  //   - channelSenderSeenLookupOrAdd-Helper + _channel_sender_seen[]
+  //     Member-Liste koennen bleiben (kein toter Code, nur ungenutzt)
+  //     ODER auch entfernen wenn ENTFERNBAR-Cleanup gewuenscht.
+  //
+  // Feature-Request (Wunschliste 48): CLI-Toggle
+  //   set scope_suffix_in_msgs on|off
+  // damit User waehlt Pfad-Anzeige (off) ODER Scope-Sichtbarkeit (on).
   const char* effective_text = text;
   char augmented[MAX_TEXT_LEN + 64];
   const char* sep = strstr(text, ": ");

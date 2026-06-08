@@ -2871,6 +2871,59 @@ Reserved-Words-Konflikt (Edge-Case zu Punkt 16):
 Quelle: User-Reise-Notizen 2026-06-07/08.
 
 
+--------------------------------------------------------------------------------
+48. Scope-Suffix bei Channel-Messages -- CLI-Toggle + Pfad-Anzeige-Bruch
+--------------------------------------------------------------------------------
+
+Status: Aktueller Stand experimentell (Suffix EINGESCHALTET, bricht
+        Pfad-Anzeige). Plan: erstmal so lassen, beobachten, ggf.
+        rueckstandslos entfernen.
+
+Hintergrund:
+  Wunschliste 35 (Mai 2026) annotiert Channel-Messages mit dem
+  Scope-Tag des Senders: 'Sender (#scope[, direct]): text'.
+  Pro (Name, Scope, Direct)-Tuple einmal beim ersten Empfang.
+
+Beobachtung User-Reise 2026-06-08:
+  Mit Suffix bricht die App-Funktion 'Nachrichtenpfad ansehen'
+  -- App zeigt 'Keine Pfadinfo' fuer alle augmentierten Messages.
+  Empirischer Befund:
+  - mEDI...-Bot ist nicht in User-Contact-Liste, App zeigt aber
+    normalerweise Pfad-Info (vorausgesetzt App war live beim Empfang)
+  - Reboot des Trackers + App-Restart: Pfad-Info bleibt erhalten
+    (App-Persistenz)
+  - App offline beim Empfang: Pfad-Info verloren (Companion-Wire-
+    Format speichert in der offline-queue kein Pfad-Array)
+  - Mit augmentierter Sender-Annotation: Pfad-Info bricht
+
+Modell:
+  - Companion pusht JEDES empfangene Funk-Paket via
+    PUSH_CODE_LOG_RX_DATA (Dispatcher.cpp:200, logRxRaw,
+    MyMesh.cpp:771) inkl. ROH-Bytes + Pfad-Array zur App.
+  - ROH-Push ist UNVERAENDERT (KISS-Mode bleibt transparent).
+  - Augment greift NUR im UI-Frame
+    RESP_CODE_CHANNEL_MSG_RECV (MyMesh.cpp:~2148).
+  - App matched die zwei Streams vermutlich ueber Sender-Name
+    (oder text-Hash). Mit Suffix bricht der Match.
+
+Trade-off (aktuell aktiv):
+  + User sieht Scope-Tag pro Sender (Erst-Identifikation)
+  - User verliert App-'Pfad ansehen' fuer betroffene Messages
+
+Feature-Request: CLI-Toggle 'set scope_suffix_in_msgs on|off'
+  - on (Default): Suffix wie bisher, Pfad-Anzeige bricht
+  - off: kein Suffix, Pfad-Anzeige funktioniert
+  Persistent (NodePrefs erweitern, 1 Byte). User waehlt selbst.
+
+Rueckstandslose-Entfernung (falls noetig):
+  Code-Stelle MyMesh.cpp ~Z. 2085-2128 (effective_text Block).
+  ENTFERNBAR-Marker mit Detail-Anweisung steht im Code-Kommentar.
+
+Quelle: User-Reise-Notiz 2026-06-08, Verifikation per
+        Empirie (mEDI-Bot ohne Contact-Eintrag, Reboot-Test).
+
+
+
 
 
 
