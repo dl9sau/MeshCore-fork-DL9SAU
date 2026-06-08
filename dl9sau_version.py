@@ -30,10 +30,10 @@ def _git_short_hash(repo_dir):
 
 git_hash = _git_short_hash(env["PROJECT_DIR"])
 build_date = datetime.now().strftime("%d %b %Y")              # 11 chars
-# Format: "v1.15.0gitXX-DL9SAU" (19 chars). XX = last 2 chars of the
+# Format: "v1.16.0gitXX-DL9SAU" (19 chars). XX = last 2 chars of the
 # 8-char git short hash. Sacrifices uniqueness for readability of the
 # full upstream version + DL9SAU tag in the 20-byte wire field.
-firmware_version = "v1.15.0git{}-DL9SAU".format(git_hash[-2:] if git_hash != "nogit" else "00")
+firmware_version = "v1.16.0git{}-DL9SAU".format(git_hash[-2:] if git_hash != "nogit" else "00")
 
 # Use CPPDEFINES with the value already quoted so SCons/gcc see it as a
 # proper string literal. Plain BUILD_FLAGS '-DFOO=\\"bar\\"' gets the
