@@ -1009,8 +1009,16 @@ void MyMesh::maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestam
     // Replay-Schutz pro Source
     if (adv_timestamp <= _time_sync_strict_last_ts[src_idx]) return;
     int32_t delta = (int32_t)(adv_timestamp - now_rtc);
-    // Drift-Schwelle 20s
-    if (delta > -20 && delta < 20) return;
+    // Drift-Schwelle 120s (User-Wunsch 2026-06-08): kleiner als 2 Min
+    // Drift lohnt keinen RTC-Update. Begruendung: ESP32-RTC driftet
+    // nur Millisekunden pro Stunde, Funk-Latenz + advert-Aging
+    // erzeugen aber leicht Sub-Sekunden- bis Sekunden-Noise. Bei
+    // drift < 2 min ist der adv-timestamp NICHT zuverlaessig besser
+    // als unser aktueller RTC -- nicht ueberschreiben.
+    if (delta > -120 && delta < 120) {
+      _last_adv_sync_outcome = 4; // skipped: drift too small
+      return;
+    }
     // Single-Source-Heuristik: bei nur 1 configured AND nach Boot-First-Sync
     // sehr grossen Drift ignorieren (koennte falsche Source sein). Erste
     // Sync nach Boot umgeht das (RTC kann real wild off sein).
@@ -10651,7 +10659,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           (_last_adv_sync_outcome == 1) ? "applied"
         : (_last_adv_sync_outcome == 2) ? "skipped (24h-cap: App/recent sync hat Vorrang)"
         : (_last_adv_sync_outcome == 3) ? "skipped (replay)"
-        : (_last_adv_sync_outcome == 4) ? "skipped (drift < 20s)"
+        : (_last_adv_sync_outcome == 4) ? "skipped (drift < 2 min, nicht der Update wert)"
         : (_last_adv_sync_outcome == 5) ? "skipped (single-source, drift > 1h)"
         : "?";
       uint32_t age_attempt = (now >= _last_adv_sync_at_rtc)
