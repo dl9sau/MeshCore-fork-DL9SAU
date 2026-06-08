@@ -3089,7 +3089,8 @@ void MyMesh::printRepeaterLegendEntry(const DiscoverEntry& e,
                                       their_lat, their_lon);
     int    brg = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
                                       their_lat, their_lon);
-    snprintf(dist_buf, sizeof(dist_buf), " %.0fkm @%d°", km, brg);
+    // Reise-Wunsch 2026-06-08: 1 Dezimalstelle (100m-Aufloesung)
+    snprintf(dist_buf, sizeof(dist_buf), " %.1fkm @%d°", km, brg);
   }
   // 'no regions' nur wenn Chain-Modus aktiv UND wir haben keine CSV
   const char* suffix = (_discover_regions_chained && !csv_or_null)
@@ -3268,6 +3269,17 @@ void MyMesh::discoverFinishAndPrint() {
   // (wir brauchen es im RESP-Pfad fuer from_chain-Klassifikation; aber
   // sendRegionsQueryZeroHop sieht es nur waehrend dieses CTL-Loops).
   if (_discover_regions_chained) {
+    // Reise-Bugfix 2026-06-08: wenn Phase 1 (REPEATER-Discover) gar keine
+    // Antworten brachte, Sofort beenden statt nochmal 30s auf ein
+    // Region-Aggregat zu warten (das ohnehin leer waere). Vorher: 1 Min
+    // umsonst gewartet.
+    if (_discover_count == 0) {
+      pushCompanionMessage("discover regions: keine REPEATER in 30s.");
+      _discover_regions_chained = false;
+      _regions_chain_finalize_at = 0;
+      _regions_pending_count = 0;
+      return;
+    }
     char r[140];
     snprintf(r, sizeof(r),
              "discover regions chain: %u REPEATER,\n"
@@ -10119,7 +10131,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                          their_lat, their_lon);
         int brg   = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
                                          their_lat, their_lon);
-        snprintf(dist_buf, sizeof(dist_buf), " %.0fkm @%d°", their_km, brg);
+        snprintf(dist_buf, sizeof(dist_buf), " %.1fkm @%d°", their_km, brg);
       }
 
       // Filter gemaess Modus. Direkt-gehoerte werden IMMER gezeigt.
