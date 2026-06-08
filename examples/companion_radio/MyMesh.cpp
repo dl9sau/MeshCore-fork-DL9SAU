@@ -1487,6 +1487,44 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   bool decision = false;
   const char* reject_reason = "?";
 
+  // Wunschliste 32 Pre-Flight: GRP-Cap-Check als Vor-Berechnung.
+  // Cap-Encoding: CH_HOPS_OFF=skip / 0=immer droppen / 1..N=droppen wenn
+  // path_hash_count > N. Restriktivster Match aus allen matchenden Slots +
+  // External-Eintraegen gewinnt. Unbekannter ch_hash: flood_max_unknown_chan.
+  // Ergebnis wird im scope-Block (else-if unten) konsumiert.
+  bool grp_cap_violated = false;
+  const char* grp_cap_reason = NULL;
+  if ((ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
+      && packet->payload_len >= 1) {
+    uint8_t ch_hash = packet->payload[0];
+    uint8_t eff_cap = CH_HOPS_OFF;
+    bool matched = false;
+    for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
+      ChannelDetails ch;
+      if (!getChannel(ci, ch)) continue;
+      if (ch.name[0] == 0) continue;
+      if (ch.channel.hash[0] != ch_hash) continue;
+      matched = true;
+      uint8_t cap = _channel_hops_cap_cache[ci];
+      if (cap == CH_HOPS_OFF) continue;
+      if (eff_cap == CH_HOPS_OFF || cap < eff_cap) eff_cap = cap;
+    }
+    for (uint8_t e = 0; e < _prefs.channel_hops_count; e++) {
+      const auto& en = _prefs.channel_hops_list[e];
+      if (!(en.flags & CH_HOPS_FLAG_EXTERNAL)) continue;
+      if (en.channel_hash != ch_hash) continue;
+      matched = true;
+      if (en.cap == CH_HOPS_OFF) continue;
+      if (eff_cap == CH_HOPS_OFF || en.cap < eff_cap) eff_cap = en.cap;
+    }
+    if (!matched) eff_cap = _prefs.flood_max_unknown_chan;
+    if (eff_cap != CH_HOPS_OFF
+        && (eff_cap == 0 || packet->getPathHashCount() > eff_cap)) {
+      grp_cap_violated = true;
+      grp_cap_reason = matched ? "ch.hops-cap" : "unknown-chan-cap";
+    }
+  }
+
   // Wunschliste 6b: Loop-Detection-Vorbereitung. Pre-compute ob das
   // Paket im normal-Profile als Loop verworfen werden soll. Wir nutzen
   // das Ergebnis als else-if-Pruefer, damit nicht-geloopte Pakete den
@@ -1548,57 +1586,35 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
            && packet->getPathHashCount() > effectiveFloodMaxReqResp()) {
     reject_reason = "req-resp-cap";
   }
-  // Wunschliste 32: per-Channel Repeat-Cap fuer Group-Messages.
-  // payload[0] = channel_hash[0] (1-byte-truncated). Wir scannen alle
-  // matchenden Slots in channels[] und nehmen den restriktivsten Cap
-  // (= niedrigster Wert). Damit kommt $companion (forced 0) zuverlaessig
-  // zum Tragen, auch wenn ein anderer Channel mit hash[0] kollidiert.
-  // Unbekannter channel_hash (kein Slot matched): flood_max_unknown_chan.
+  // Wunschliste 32 (per-Channel Repeat-Cap fuer Group-Messages) wurde
+  // urspruenglich als eigener else-if-Branch implementiert und hat dabei
+  // versehentlich den scope-Check fuer GRP-Pakete umgangen -- weil GRP_TXT/
+  // GRP_DATA im exklusiven else-if landeten und decision=true im scope-Block
+  // weiter unten nie erreicht wurde. Resultat: ALLE GRP-Pakete wurden mit
+  // 'reject reason=?' verworfen, grp=0 in tx-repeated-Stats.
+  //
+  // Fix (2026-06-08): Cap-Check als Pre-Flight VOR dem else-if-Strang. Das
+  // Ergebnis (grp_cap_violated/grp_cap_reason) wird im scope-Block unten
+  // konsumiert, sodass GRP-Pakete normal durch hasTransportCodes/
+  // scopeAllowedForRepeat laufen.
+  //
   // Cap-Encoding:
   //   CH_HOPS_OFF (254) -> kein Cap, skip
   //   0                 -> immer droppen
   //   1..N              -> droppen wenn path_hash_count > N
-  else if ((ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
-           && packet->payload_len >= 1) {
-    uint8_t ch_hash = packet->payload[0];
-    uint8_t eff_cap = CH_HOPS_OFF;
-    bool matched = false;
-    for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
-      ChannelDetails ch;
-      if (!getChannel(ci, ch)) continue;
-      if (ch.name[0] == 0) continue;  // leerer Slot
-      if (ch.channel.hash[0] != ch_hash) continue;
-      matched = true;
-      uint8_t cap = _channel_hops_cap_cache[ci];
-      if (cap == CH_HOPS_OFF) continue;
-      // restriktivster Cap gewinnt (0 schlaegt alles, dann kleinster N)
-      if (eff_cap == CH_HOPS_OFF || cap < eff_cap) eff_cap = cap;
-    }
-    // External-Eintraege (nicht-abonnierte Hashtag-Channels): channel_hash
-    // wurde beim Eintragen aus sha256(name) abgeleitet, kann hier direkt
-    // gegen das Wire-Byte gematcht werden. Restriktivster Cap gewinnt --
-    // gilt auch wenn ein Slot-Match parallel existiert.
-    for (uint8_t e = 0; e < _prefs.channel_hops_count; e++) {
-      const auto& en = _prefs.channel_hops_list[e];
-      if (!(en.flags & CH_HOPS_FLAG_EXTERNAL)) continue;
-      if (en.channel_hash != ch_hash) continue;
-      matched = true;
-      if (en.cap == CH_HOPS_OFF) continue;
-      if (eff_cap == CH_HOPS_OFF || en.cap < eff_cap) eff_cap = en.cap;
-    }
-    if (!matched) eff_cap = _prefs.flood_max_unknown_chan;
-    if (eff_cap != CH_HOPS_OFF
-        && (eff_cap == 0 || packet->getPathHashCount() > eff_cap)) {
-      reject_reason = matched ? "ch.hops-cap" : "unknown-chan-cap";
-    }
-  }
-  // ADVERTs and ACKs: forward only if the packet is scoped (transport-coded)
   else if (ptype == PAYLOAD_TYPE_ADVERT || ptype == PAYLOAD_TYPE_ACK ||
       ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA ||
       ptype == PAYLOAD_TYPE_MULTIPART || ptype == PAYLOAD_TYPE_CONTROL ||
       ptype == PAYLOAD_TYPE_RAW_CUSTOM || ptype == PAYLOAD_TYPE_TRACE ||
       ptype == PAYLOAD_TYPE_REQ || ptype == PAYLOAD_TYPE_RESPONSE ||
       ptype == PAYLOAD_TYPE_TXT_MSG || ptype == PAYLOAD_TYPE_ANON_REQ) {
+    // Wunschliste 32 (Fix 2026-06-08): GRP-Cap-Verstoss hat Vorrang vor
+    // dem hasTransportCodes/scope-Check. Wenn das Pre-Flight oben einen
+    // Cap-Verstoss erkannt hat, droppen wir ohne weitere Pruefung.
+    if (grp_cap_violated) {
+      reject_reason = grp_cap_reason;
+      // decision bleibt false
+    } else {
     decision = packet->hasTransportCodes();
     if (!decision) {
       // Wunschliste 39 (2026-06-04): Selektives Aufweichen des
@@ -1706,6 +1722,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
         }
       }
     }
+    }  // ende else-Branch fuer grp_cap_violated-Wrap (Wunschliste 32 Fix)
   } else if (ptype == PAYLOAD_TYPE_PATH) {
     // PATH discovery. Wunschliste 8:
     //   defensive (Default): nur fuer lokale Nodes repeaten (heard < 48h
