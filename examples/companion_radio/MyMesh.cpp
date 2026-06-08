@@ -955,6 +955,25 @@ void MyMesh::maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestam
       || adv_timestamp > 4070908800UL /* 2099-01-01 */) return;
 
   uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  // Plausibility-Check 2 (User-Wunsch 2026-06-08): adv_timestamp muss
+  // innerhalb +/- 4 Wochen vom aktuellen RTC liegen. Deckt typische
+  // Powerbank-/Geraete-Pausen ab (User: 'eine Woche ausgeschaltet ist
+  // realistisch'). Bei laengeren Pausen muss User App-Sync via
+  // CMD_SET_DEVICE_TIME ODER GPS-Sync den RTC erst plausibel machen.
+  // Schuetzt vor: Replay alter Adverts, falsch-gesyncten Repeatern,
+  // korrupten advert-timestamps die durch das breite 2020..2099-Fenster
+  // sonst durchrutschen wuerden.
+  const uint32_t PLAUSIBILITY_WINDOW_SECS = 28UL * 86400UL;  // 4 Wochen
+  uint32_t plaus_diff = (adv_timestamp >= now_rtc)
+                       ? (adv_timestamp - now_rtc)
+                       : (now_rtc - adv_timestamp);
+  if (plaus_diff > PLAUSIBILITY_WINDOW_SECS) {
+    pushDebugLog("[rtc] adv-sync REJECTED: ts %lu vs rtc %lu diff %lus > 4 weeks\n",
+                 (unsigned long)adv_timestamp,
+                 (unsigned long)now_rtc,
+                 (unsigned long)plaus_diff);
+    return;
+  }
   // 24h-Cap (nur wenn schon einmal synced):
   if (_time_sync_done_since_boot
       && _time_sync_last_at_rtc > 0
