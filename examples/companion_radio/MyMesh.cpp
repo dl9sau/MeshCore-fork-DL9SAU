@@ -5218,13 +5218,15 @@ void MyMesh::handleCmdFrame(size_t len) {
     //                         Repeater darf alle Band-Frequenzen nutzen
     //   profile=defensive  -> strict-Liste (repeat_freq_ranges_strict):
     //                         nur Mesh-Hauptfrequenzen erlaubt
-    //   client_repeat_force gesetzt + repeat=on -> wide-Liste auch in
-    //                         defensive, damit User mit gesetztem
-    //                         force-Flag in der App seine Freq weiter
-    //                         speichern kann (sonst wuerde die App die
-    //                         aktuelle Freq als ungueltig markieren).
+    //   client_repeat_force gesetzt -> wide-Liste auch in defensive,
+    //                         damit User mit gesetztem force-Flag in
+    //                         der App seine Freq weiter speichern kann
+    //                         (sonst wuerde die App die aktuelle Freq
+    //                         als ungueltig markieren). Unabhaengig von
+    //                         repeat on/off -- force ist die explizite
+    //                         User-Entscheidung 'meine Freq ist OK'.
     bool wide_list = (_prefs.repeater_profile == 1 /* normal */)
-                  || (_prefs.client_repeat != 0 && _prefs.client_repeat_force != 0);
+                  || (_prefs.client_repeat_force != 0);
     int i = 0;
     out_frame[i++] = RESP_ALLOWED_REPEAT_FREQ;
     if (wide_list) {
