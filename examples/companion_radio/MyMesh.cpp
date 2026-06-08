@@ -10079,11 +10079,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     int shown = 0;
 
     // Akkumulierender Buffer wie bei prefs (mehrzeilig pro push).
+    // Reise-Fix 2026-06-08: Flush-Schwelle 130 -> 100 damit ein zusaetzlicher
+    // 40-byte-Eintrag (Name+age+km+bearing) sicher unter 145-Byte-Wire-Limit
+    // bleibt. Vorher: Split mitten in UTF-8 °-Symbol -> '@359' im Folgepush.
     char buf[200];
     size_t buf_used = 0;
     auto flush = [&](bool force) {
       if (buf_used == 0) return;
-      if (!force && buf_used < 130) return;
+      if (!force && buf_used < 100) return;
       buf[buf_used] = 0;
       pushCompanionMessage(buf);
       buf_used = 0;
