@@ -2000,6 +2000,11 @@ void MyMesh::rebuildChannelHopsCache() {
   // repeated, auch wenn er irgendwie ins Funkfeld entfleucht.
   // COMPANION_CHANNEL_NAME ist weiter unten definiert; hardcode "companion".
   channelHopsUpsert(_prefs, fnv1a32_cstr("companion"), 0, 0, 0, "companion");
+  // Punkt 7 Reise-Fix 2026-06-08: TerminalCLI (dz264-Konvention) bekommt
+  // dieselbe Sicherheits-Sperre wie 'companion', falls der User von dz264
+  // zu unserer Firmware wechselt und den TerminalCLI-Channel im Slot
+  // behaelt -- darf NIE repeated werden (App-Control-Traffic).
+  channelHopsUpsert(_prefs, fnv1a32_cstr("TerminalCLI"), 0, 0, 0, "TerminalCLI");
 
   memset(_channel_hops_cap_cache, CH_HOPS_OFF, sizeof(_channel_hops_cap_cache));
   for (int slot = 0; slot < MAX_GROUP_CHANNELS; slot++) {
@@ -4493,7 +4498,14 @@ void MyMesh::handleCmdFrame(size_t len) {
       freq = (uint32_t)(CR_NARROW_FREQ_ACTUAL * 1000.0f + 0.5f);
     }
 
-    if (repeat && !_prefs.client_repeat_force && !isValidClientRepeatFreq(freq)) {
+    // Punkt 10 Reise-Fix 2026-06-08: force-Check NUR in profile=defensive
+    // anwenden. In profile=normal (echter Repeater) sind alle Frequenzen
+    // aus der wide-Liste legitim ohne force-Flag. Vorher schlug 'repeating
+    // on' in der App mit 'Illegal value' fehl, weil App keine
+    // force-Option hat und der Check immer feuerte.
+    bool defensive_mode = (_prefs.repeater_profile == 0 /* defensive */);
+    if (repeat && defensive_mode
+        && !_prefs.client_repeat_force && !isValidClientRepeatFreq(freq)) {
       // App will Repeater aktivieren auf einer Freq die ausserhalb des
       // strict-Range liegt UND der Force-Flag wurde nicht gesetzt (siehe
       // Companion-Befehl "repeater on force"). Ablehnen.
@@ -5120,10 +5132,19 @@ void MyMesh::handleCmdFrame(size_t len) {
     out_frame[i++] = _prefs.autoadd_max_hops;
     _serial->writeFrame(out_frame, i);
   } else if (cmd_frame[0] == CMD_GET_ALLOWED_REPEAT_FREQ) {
+    // Punkt 11 Reise-Fix 2026-06-08: App fragt nach erlaubten Repeat-
+    // Frequenzen. Vorher lieferten wir repeat_freq_ranges (wide-Liste,
+    // identisch mit der Band-Validierung) -- das ist aber die zu
+    // permissive Liste fuer Repeat-Zwecke. Stattdessen die strict-Liste
+    // (repeat_freq_ranges_strict) zurueckgeben: nur Mesh-Hauptfrequenzen
+    // sind hier "erlaubt zum Repeaten". Wer abweichen will, nutzt
+    // 'repeater on force' (CLI, nicht App).
     int i = 0;
     out_frame[i++] = RESP_ALLOWED_REPEAT_FREQ;
-    for (int k = 0; k < sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]) && i + 8 < sizeof(out_frame); k++) {
-      auto r = &repeat_freq_ranges[k];
+    for (int k = 0;
+         k < (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0]))
+         && i + 8 < (int)sizeof(out_frame); k++) {
+      auto r = &repeat_freq_ranges_strict[k];
       memcpy(&out_frame[i], &r->lower_freq, 4); i += 4;
       memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
     }
@@ -7698,6 +7719,21 @@ void MyMesh::setupCompanionChannel() {
     }
   }
 
+  // (2b) Punkt 7 Reise-Fix 2026-06-08: Fallback auf "TerminalCLI"
+  //      (dz264-Konvention). Wenn der User von dz264 zu unserer Firmware
+  //      wechselt und seinen TerminalCLI-Channel mitgebracht hat, nehmen
+  //      wir diesen als App-Control-Channel statt einen neuen
+  //      "companion"-Channel anzulegen. Wenn $companion ZUSAETZLICH
+  //      vorhanden ist, gewinnt $companion (oben in (1) bzw. (2)
+  //      gefunden -> wir kommen hier nicht her).
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    if (getChannel(i, ch)
+        && strncmp(ch.name, "TerminalCLI", sizeof(ch.name)) == 0) {
+      _companion_channel_idx = (uint8_t)i;
+      goto done;
+    }
+  }
+
   // (3) Nicht gefunden -- ersten freien Slot suchen und neu anlegen.
   {
     int target = -1;
@@ -8389,6 +8425,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  flood_max_req_resp (def 0=erbt infra)");
         pushCompanionMessage(
           "  flood_max_scope_region\n"
+          "  flood_max_unscoped_companions\n"
+          "    (= alias 'flood_max_unscoped' upstream)\n"
           "  loop_detect (off|minimal|moderate|strict)\n"
           "  ch.hops -> 'help ch.hops'\n"
           "  ('set <key>' ohne Wert -> Detailhilfe)");
@@ -9880,15 +9918,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         flush_b(false);
       };
       add_b("ch.hops status:");
+      // Punkt 5 Reise-Fix 2026-06-08: $-Praefix bei Channel-Namen + klarere
+      // Wording. Vorher 'companion = off (nicht repeaten)' war unklar
+      // (User-Frage: was ist 'companion'?). Jetzt: '$companion'.
       for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
         ChannelDetails ch;
         if (!getChannel(i, ch)) continue;
         if (ch.name[0] == 0) continue;
         uint8_t cap = _channel_hops_cap_cache[i];
         if (cap == CH_HOPS_OFF) continue;  // nicht zeigen
+        char display[24];
+        snprintf(display, sizeof(display), "$%s", ch.name);
         char line[80];
-        if (cap == 0) snprintf(line, sizeof(line), "  %-20.20s = off (nicht repeaten)", ch.name);
-        else          snprintf(line, sizeof(line), "  %-20.20s = %u", ch.name, (unsigned)cap);
+        if (cap == 0) snprintf(line, sizeof(line), "  %-20.20s = 0 hops (off, nicht repeated)", display);
+        else          snprintf(line, sizeof(line), "  %-20.20s = %u hops", display, (unsigned)cap);
         add_b(line);
         n_shown++;
       }
@@ -9898,12 +9941,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         const auto& en = _prefs.channel_hops_list[e];
         if (!(en.flags & CH_HOPS_FLAG_EXTERNAL)) continue;
         char display[24];
-        snprintf(display, sizeof(display), "%s (ext)", en.name);
+        snprintf(display, sizeof(display), "#%s (ext)", en.name);
         char line[80];
         if (en.cap == 0)
-          snprintf(line, sizeof(line), "  %-20.20s = off (nicht repeaten)", display);
+          snprintf(line, sizeof(line), "  %-20.20s = 0 hops (off, nicht repeated)", display);
         else
-          snprintf(line, sizeof(line), "  %-20.20s = %u", display, (unsigned)en.cap);
+          snprintf(line, sizeof(line), "  %-20.20s = %u hops", display, (unsigned)en.cap);
         add_b(line);
         n_shown++;
       }
@@ -9913,13 +9956,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         char line[80];
         if (_prefs.flood_max_unknown_chan == CH_HOPS_OFF)
           snprintf(line, sizeof(line),
-                   "  <unknown channels>   = follow (-> %u)",
+                   "  <unknown channels>   = follow flood_max (%u hops)",
                    (unsigned)_prefs.flood_max);
         else if (_prefs.flood_max_unknown_chan == 0)
           snprintf(line, sizeof(line),
-                   "  <unknown channels>   = 0 (nicht repeaten)");
+                   "  <unknown channels>   = 0 hops (off, nicht repeated)");
         else
-          snprintf(line, sizeof(line), "  <unknown channels>   = %u",
+          snprintf(line, sizeof(line), "  <unknown channels>   = %u hops",
                    (unsigned)_prefs.flood_max_unknown_chan);
         add_b(line);
         n_shown++;
@@ -11035,7 +11078,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* key_start = p;
     while (*p && *p != ' ' && *p != '\t') p++;
     size_t key_len = (size_t)(p - key_start);
-    char key[24];
+    // 40 Byte fasst auch lange Keys wie 'flood_max_unscoped_companions' (29).
+    // Vorher 24 -> truncated zu 'flood_max_unscoped_comp', set-Befehl schlug fehl.
+    char key[40];
     if (key_len >= sizeof(key)) key_len = sizeof(key) - 1;
     memcpy(key, key_start, key_len);
     key[key_len] = 0;
@@ -12037,13 +12082,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // ohne App eintragen oder sichern moechten.
   if (starts_with_word(cmd, "get")) {
     const char* p = strchr(cmd, ' ');
-    char key[24];
+    // 40 Byte fasst auch lange Keys wie 'flood_max_unscoped_companions' (29).
+    char key[40];
     key[0] = 0;
     if (p) {
       while (*p == ' ') p++;
       if (*p) {
         size_t klen = 0;
-        while (p[klen] && p[klen] != ' ' && p[klen] != '\t' && klen < 23) klen++;
+        while (p[klen] && p[klen] != ' ' && p[klen] != '\t' && klen < (int)sizeof(key) - 1) klen++;
         memcpy(key, p, klen); key[klen] = 0;
       }
     }
@@ -13395,13 +13441,44 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       //   auto = prefer
       //   prefer: Geo gewinnt vor Default
       // Die Legende-Zeilen erscheinen NUR fuer die aktuell aktiven Werte.
+      // Punkt 12 Reise-Fix 2026-06-08: bei geo-fallback den Namen des
+      // gewaehlten Scopes anzeigen (smallest containing bbox), damit User
+      // sieht WELCHER Scope greift.
+      char geo_name_buf[40];
+      const char* geo_name_str = "";
+      if (has_geo) {
+        // Reverse-Lookup: TransportKey -> Region-Name. Iteriere build-in
+        // + extras, finde den Eintrag der den geo_k.key liefert.
+        for (int gi = 0; gi < _buildin_keys_count; gi++) {
+          if (memcmp(_buildin_keys[gi].key, geo_k.key, sizeof(geo_k.key)) == 0) {
+            const char* nm = NULL;
+            if (dl9sau_get_region((size_t)gi, &nm, NULL, NULL, NULL, NULL) && nm) {
+              snprintf(geo_name_buf, sizeof(geo_name_buf), " (#%s)", nm);
+              geo_name_str = geo_name_buf;
+            }
+            break;
+          }
+        }
+      }
+
       const char* active_val;
+      char active_legend_buf[80];
       const char* active_legend;   // NULL = kein Legende-Zeile noetig
       if (override_active)         { active_val = "override";     active_legend = NULL; }
       else if (bake_set)           { active_val = "bake";         active_legend = "flooded advert, nightly"; }
-      else if (geo_wins_default)   { active_val = "geo-fallback"; active_legend = "Geo gewinnt vor Default (auto=prefer)"; }
+      else if (geo_wins_default)   {
+        active_val = "geo-fallback";
+        snprintf(active_legend_buf, sizeof(active_legend_buf),
+                 "Geo gewinnt vor Default (auto=prefer)%s", geo_name_str);
+        active_legend = active_legend_buf;
+      }
       else if (default_set)        { active_val = "default";      active_legend = "configured catchall scope"; }
-      else if (geo_is_fallback)    { active_val = "geo-fallback"; active_legend = "kein Default gesetzt"; }
+      else if (geo_is_fallback)    {
+        active_val = "geo-fallback";
+        snprintf(active_legend_buf, sizeof(active_legend_buf),
+                 "kein Default gesetzt%s", geo_name_str);
+        active_legend = active_legend_buf;
+      }
       else                         { active_val = "#local";       active_legend = "last-resort (kein Default/Geo)"; }
 
       const char* auto_val;
@@ -13489,10 +13566,41 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       { "regions",  false },  // 8  - Built-in Region-Tabelle (read-only)
       { "advert",   false },  // 9  - Sub-Namespace: Advert-Policy (Wunschliste 13)
     };
+    // Punkt 16 Reise-Fix 2026-06-08: Pre-Flight Region-Lookup.
+    // Wenn das erste Wort ein bekannter Region-Name ist (z.B. 'de',
+    // 'lokal'), darf match_choice ihn NICHT als Prefix eines Sub-Befehls
+    // wie 'default' interpretieren. Vorher: 'scope de advert off' wurde
+    // als 'scope default = #advert' verstanden -- Region-Vorrang fehlte.
+    bool is_region_ref = false;
+    {
+      char fw_norm[16];
+      const char* qp = arg;
+      if (*qp == '#') qp++;
+      // first-word kopieren, lowercase, max 15 chars
+      size_t qfl = 0;
+      while (*qp && *qp != ' ' && *qp != '\t' && qfl + 1 < sizeof(fw_norm)) {
+        char c = *qp++;
+        if (c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+        fw_norm[qfl++] = c;
+      }
+      fw_norm[qfl] = 0;
+      if (qfl > 0 && findScopeByName(fw_norm).storage != SCOPE_NONE) {
+        is_region_ref = true;
+      }
+    }
+
     char scope_ambig[80];
-    int sub_idx = match_choice(arg, scope_subs,
-                               (int)(sizeof(scope_subs)/sizeof(scope_subs[0])),
-                               scope_ambig, sizeof(scope_ambig));
+    int sub_idx;
+    if (is_region_ref) {
+      // Erzwinge "kein Sub-Befehl-Match" -> faellt in den Region-Lookup
+      // unten (Z. 13503+).
+      sub_idx = -2;
+      scope_ambig[0] = 0;
+    } else {
+      sub_idx = match_choice(arg, scope_subs,
+                             (int)(sizeof(scope_subs)/sizeof(scope_subs[0])),
+                             scope_ambig, sizeof(scope_ambig));
+    }
     if (sub_idx == -1) {
       char r[120]; snprintf(r, sizeof(r), "Mehrdeutig: %s", scope_ambig);
       pushCompanionMessage(r); return;
@@ -14009,7 +14117,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope default <name>|clear"); return; }
-      if (strcmp(sub, "clear") == 0) {
+      // Punkt 17 Reise-Fix 2026-06-08: clear/none/off als Synonyme.
+      // User-Erfahrung: 'scope default off' wurde frueher als Region-Name
+      // "off" interpretiert ('OK - scope default = #off') -- konfus. Jetzt
+      // alle drei Formen ergeben Clear-Operation.
+      if (strcmp(sub, "clear") == 0 || strcmp(sub, "none") == 0 || strcmp(sub, "off") == 0) {
         memset(_prefs.default_scope_name, 0, sizeof(_prefs.default_scope_name));
         memset(_prefs.default_scope_key,  0, sizeof(_prefs.default_scope_key));
         savePrefs();
@@ -14034,7 +14146,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope bake <name>|clear"); return; }
-      if (strcmp(sub, "clear") == 0) {
+      // Punkt 17 Fix: clear/none/off als Synonyme.
+      if (strcmp(sub, "clear") == 0 || strcmp(sub, "none") == 0 || strcmp(sub, "off") == 0) {
         memset(_prefs.bake_scope_name, 0, sizeof(_prefs.bake_scope_name));
         memset(_prefs.bake_scope_key,  0, sizeof(_prefs.bake_scope_key));
         savePrefs();
@@ -14059,7 +14172,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope override <name> [<n>h|<n>d] | clear"); return; }
-      if (strcmp(sub, "clear") == 0) {
+      // Punkt 17 Fix: clear/none/off als Synonyme.
+      if (strcmp(sub, "clear") == 0 || strcmp(sub, "none") == 0 || strcmp(sub, "off") == 0) {
         memset(_prefs.override_scope_name, 0, sizeof(_prefs.override_scope_name));
         memset(_prefs.override_scope_key,  0, sizeof(_prefs.override_scope_key));
         _prefs.override_expiry = 0;
