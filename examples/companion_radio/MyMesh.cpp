@@ -1290,7 +1290,11 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
       scope_label = "#*";
     }
     uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
-    bool already_seen = channelSenderSeenLookupOrAdd(name_h, scope_h, direct_flag);
+    // DM-Pfad: channel_hash=0 (kein Channel-Bezug). User-Wunsch 2026-06-08:
+    // wenn ein Sender seinen scope aendert, soll die '[#scope, direct]'-
+    // Vorab-Message neu kommen -- ist durch das scope_h-Tuple-Member
+    // automatisch (neuer scope_h => neuer Tuple => !already_seen).
+    bool already_seen = channelSenderSeenLookupOrAdd(0 /* DM */, name_h, scope_h, direct_flag);
     if (!already_seen) {
       // Separate Vorab-Frame mit Metadata-Text.
       char meta_text[48];
@@ -2037,12 +2041,14 @@ uint32_t MyMesh::fnv1a32_cstr(const char* s) {
   return fnv1a32(s, strlen(s));
 }
 
-bool MyMesh::channelSenderSeenLookupOrAdd(uint32_t name_fnv1a,
+bool MyMesh::channelSenderSeenLookupOrAdd(uint32_t channel_hash,
+                                          uint32_t name_fnv1a,
                                           uint32_t scope_fnv1a,
                                           uint8_t direct_flag) {
   for (uint8_t i = 0; i < _channel_sender_seen_count; i++) {
     const ChannelSenderSeen& e = _channel_sender_seen[i];
-    if (e.name_fnv1a == name_fnv1a
+    if (e.channel_hash == channel_hash
+        && e.name_fnv1a == name_fnv1a
         && e.scope_fnv1a == scope_fnv1a
         && e.direct_flag == direct_flag) return true;
   }
@@ -2054,6 +2060,7 @@ bool MyMesh::channelSenderSeenLookupOrAdd(uint32_t name_fnv1a,
     slot = _channel_sender_seen_next;
     _channel_sender_seen_next = (uint8_t)((_channel_sender_seen_next + 1) % CHANNEL_SENDER_SEEN_MAX);
   }
+  _channel_sender_seen[slot].channel_hash = channel_hash;
   _channel_sender_seen[slot].name_fnv1a = name_fnv1a;
   _channel_sender_seen[slot].scope_fnv1a = scope_fnv1a;
   _channel_sender_seen[slot].direct_flag = direct_flag;
@@ -2135,7 +2142,16 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
       scope_label = "#*";
     }
     uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
-    bool already_seen = channelSenderSeenLookupOrAdd(name_h, scope_h, direct_flag);
+    // User-Wunsch 2026-06-08: per-Channel-Separation. 4 Bytes aus dem
+    // GroupChannel-Hash als channel-Identifier. Derselbe Sender in
+    // zwei verschiedenen Channels triggert die Annotation in jedem
+    // Channel einmal (eigene Tuples). Bei DM nutzen wir 0 als
+    // Sentinel -- 4-Byte-channel-Hash kann nicht 0 sein (collision
+    // unwahrscheinlich).
+    uint32_t channel_h;
+    memcpy(&channel_h, channel.hash, sizeof(channel_h));
+    if (channel_h == 0) channel_h = 1;  // collision-safe vs DM-Sentinel
+    bool already_seen = channelSenderSeenLookupOrAdd(channel_h, name_h, scope_h, direct_flag);
     if (!already_seen) {
       // One-time Annotation. Format: 'Name (#scope[, direct]): text'
       const char* dir_suffix = direct_flag ? ", direct" : "";

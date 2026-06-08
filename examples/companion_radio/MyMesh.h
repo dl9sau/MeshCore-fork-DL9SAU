@@ -1014,6 +1014,7 @@ private:
   //   0xFFFFFFFF = '#*' (unscoped)
   //   andere     = FNV-1a vom Scope-Namen
   struct ChannelSenderSeen {
+    uint32_t channel_hash; // 0 = DM (kein Channel), sonst 4-Byte Channel-Hash
     uint32_t name_fnv1a;
     uint32_t scope_fnv1a;
     uint8_t  direct_flag;  // 0 = via repeats, 1 = direkt gehoert (path_len==0)
@@ -1029,7 +1030,10 @@ private:
   // Liefert true wenn das Tuple in der seen-Liste war (also schon annotiert).
   // Andernfalls: ein neuer Eintrag wird angelegt und false zurueckgegeben
   // (caller fuegt die Annotation diesmal hinzu).
-  bool channelSenderSeenLookupOrAdd(uint32_t name_fnv1a, uint32_t scope_fnv1a,
+  // channel_hash=0 fuer DMs (kein Channel-Bezug), sonst 4-Byte Channel-Hash
+  // (per-Channel-Separation: derselbe Sender in zwei Channels = zwei Tupel).
+  bool channelSenderSeenLookupOrAdd(uint32_t channel_hash,
+                                    uint32_t name_fnv1a, uint32_t scope_fnv1a,
                                     uint8_t direct_flag);
 
   // Lazy-Mode Boot-Collection-Phase: bis zu 5 Kandidaten ueber 3 Min
