@@ -2966,6 +2966,66 @@ DL9SAU-UI-Marker fuer SIGNED-DMs (Future, wenn Send-Pfad da):
 Quelle: User-Frage 2026-06-08 ('was ist TXT_TYPE_SIGNED_PLAIN?').
 
 
+--------------------------------------------------------------------------------
+50. TZ-Override via CLI / GPS-basierte TZ-Bestimmung
+--------------------------------------------------------------------------------
+
+Status: Future-Feature, niedrige Prio. Aktueller Stand reicht
+        fuer 99% der User (stationaer in EU).
+
+Ist-Zustand:
+  RTC im Tracker laeuft UTC (Unix-Epoch, MeshCore-Konvention).
+  Tracker-Anzeige 'clock' rechnet via hardcoded TZ:
+    LOCAL_TZ_OFFSET_SECS  (build-flag, fuer DL9SAU = +3600 = CET)
+    LOCAL_TZ_DST_EU       (build-flag, aktiviert EU-DST-Logik)
+  Code: localTzOffsetSecs(utc) in MyMesh.cpp:325 -- regelbasierte
+  Berechnung der CET/CEST-Umschaltung aus der UTC.
+
+  Wirkung:
+   - Wire-Format (Adverts, DMs, Channel-Msgs) immer UTC. Korrekt.
+   - clock-Display im Tracker zeigt CET/CEST automatisch (DST-aware
+     ueber die Jahre). Korrekt fuer stationaere EU-User.
+   - App rechnet eigenstaendig auf Phone-TZ. Reisende sehen
+     korrekte App-Zeit, aber im Tracker-Display bleibt CET/CEST.
+
+Use-Case Reisen:
+  User fliegt z.B. nach New York. RTC bleibt UTC (App synced bei
+  Connect mit Phone-UTC). App zeigt EST. Tracker-Display zeigt
+  CET/CEST -- falsch.
+  Workaround heute: keiner; nur App-Display nutzen.
+
+Vorschlag:
+  Phase 1 (klein):
+    set tz <offset_min>       -- z.B. 'set tz 120' (CEST)
+    set tz auto-eu             -- regelbasiert wie heute (Default)
+    set tz utc                 -- =0, Tracker zeigt UTC im 'loc'-Feld
+    set tz <name>              -- z.B. 'CET', 'EST', 'PST' (Lookup)
+    Persistent in NodePrefs (int16_t tz_offset_min, uint8_t tz_mode).
+    'clock' nutzt den Pref statt der hardcoded compile-time-Konstante.
+
+  Phase 2 (groesser):
+    GPS-basierte TZ-Bestimmung. Bei Live-Fix die Position via
+    geographische TZ-Tabelle (z.B. simplified longitude-->offset,
+    oder GPSZONE-Lookup-Lib) auf TZ ableiten.
+    Achtung: politische Grenzen folgen nicht der Geographie sauber
+    (China = 1 TZ ueber 5 geo-Zonen, Spanien = CET trotz westlich
+    von Greenwich). Simple longitude/15 + DST-Logik fuer EU genuegt
+    fuer Mitteleuropa.
+    DST-Logik fuer Nicht-EU-Zonen (USA, AU) ist anders strukturiert
+    -- evtl. nur EU-DST + fixed Offsets fuer Rest.
+
+Caveats:
+  - TZ und DST sind politisch und aendern sich (Russland 2011/2014,
+    EU-Diskussion ueber DST-Abschaffung). Hardcoded Tabellen veralten.
+  - GPS-basierte TZ-Bestimmung braucht GPS-Fix, das man im Indoor
+    haeufig nicht hat.
+  - Pragmatisch: 'set tz <offset>' deckt 95% der Use-Cases, Phase 2
+    nur wenn jemand wirklich GPS-basierten Modus will.
+
+Quelle: User-Frage 2026-06-08 (TZ-Anzeige beim Reisen).
+
+
+
 
 
 
