@@ -3598,7 +3598,10 @@ void MyMesh::begin(bool has_display) {
     _prefs.direct_tx_delay_factor = -1.0f;  // auto
   }
   if (_prefs.repeat_scope_mode > REPEAT_SCOPE_MODE_ALLOWLIST) {
-    _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
+    // Out-of-range -> defensive default. Reise-Wunsch 2026-06-08:
+    // Default fuer Neuinstall = ALLOWLIST (sicher, User entscheidet
+    // welche Scopes weitergeleitet werden), nicht ALL.
+    _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALLOWLIST;
   }
 
   // Kanonische Region-Eintraege (de, de-by, ..., de-bebb, ostfriesland,
@@ -3758,6 +3761,15 @@ void MyMesh::begin(bool has_display) {
         any_applied = true;
       }
     }
+    // Reise-Fix 2026-06-08: fresh-install soll repeat_scope_mode auf
+    // ALLOWLIST defaulten (sicher, User entscheidet). Bisheriger Default
+    // 'all' wurde User-Erfahrung als zu permissiv empfunden -- ein
+    // frisches Geraet wuerde sonst sofort Pakete aus allen Regionen
+    // weiterleiten.
+    if (_prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL) {
+      _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALLOWLIST;
+      any_applied = true;
+    }
     if (any_applied) _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
 
@@ -3774,10 +3786,11 @@ void MyMesh::begin(bool has_display) {
   // schon getEffectiveLatLon mit fixed-fallback, RECEIVE-Pfad
   // (scopeAllowedForRepeat ueber _buildin_in_bbox[]) tat es nicht.
   //
-  // Live-GPS-Fix ueberschreibt das spaeter in updateMotionTracking.
+  // Live-GPS-Fix ueberschreibt das spaeter in updateMotionTracking
+  // (nur bei profile=defensive; bei profile=normal bleibt fixed location).
   {
     double init_lat, init_lon;
-    if (getEffectiveLatLon(init_lat, init_lon)) {
+    if (getRepeaterBboxLatLon(init_lat, init_lon)) {
       evaluateScopeBboxes(init_lat, init_lon);
     }
   }
@@ -5200,21 +5213,36 @@ void MyMesh::handleCmdFrame(size_t len) {
     out_frame[i++] = _prefs.autoadd_max_hops;
     _serial->writeFrame(out_frame, i);
   } else if (cmd_frame[0] == CMD_GET_ALLOWED_REPEAT_FREQ) {
-    // Punkt 11 Reise-Fix 2026-06-08: App fragt nach erlaubten Repeat-
-    // Frequenzen. Vorher lieferten wir repeat_freq_ranges (wide-Liste,
-    // identisch mit der Band-Validierung) -- das ist aber die zu
-    // permissive Liste fuer Repeat-Zwecke. Stattdessen die strict-Liste
-    // (repeat_freq_ranges_strict) zurueckgeben: nur Mesh-Hauptfrequenzen
-    // sind hier "erlaubt zum Repeaten". Wer abweichen will, nutzt
-    // 'repeater on force' (CLI, nicht App).
+    // Punkt 11 Reise-Fix 2026-06-08: profile-aware Frequenz-Liste.
+    //   profile=normal     -> wide-Liste (repeat_freq_ranges): echter
+    //                         Repeater darf alle Band-Frequenzen nutzen
+    //   profile=defensive  -> strict-Liste (repeat_freq_ranges_strict):
+    //                         nur Mesh-Hauptfrequenzen erlaubt
+    //   client_repeat_force gesetzt + repeat=on -> wide-Liste auch in
+    //                         defensive, damit User mit gesetztem
+    //                         force-Flag in der App seine Freq weiter
+    //                         speichern kann (sonst wuerde die App die
+    //                         aktuelle Freq als ungueltig markieren).
+    bool wide_list = (_prefs.repeater_profile == 1 /* normal */)
+                  || (_prefs.client_repeat != 0 && _prefs.client_repeat_force != 0);
     int i = 0;
     out_frame[i++] = RESP_ALLOWED_REPEAT_FREQ;
-    for (int k = 0;
-         k < (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0]))
-         && i + 8 < (int)sizeof(out_frame); k++) {
-      auto r = &repeat_freq_ranges_strict[k];
-      memcpy(&out_frame[i], &r->lower_freq, 4); i += 4;
-      memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
+    if (wide_list) {
+      for (int k = 0;
+           k < (int)(sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]))
+           && i + 8 < (int)sizeof(out_frame); k++) {
+        auto r = &repeat_freq_ranges[k];
+        memcpy(&out_frame[i], &r->lower_freq, 4); i += 4;
+        memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
+      }
+    } else {
+      for (int k = 0;
+           k < (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0]))
+           && i + 8 < (int)sizeof(out_frame); k++) {
+        auto r = &repeat_freq_ranges_strict[k];
+        memcpy(&out_frame[i], &r->lower_freq, 4); i += 4;
+        memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
+      }
     }
     _serial->writeFrame(out_frame, i);
   } else if (cmd_frame[0] == CMD_SEND_RAW_PACKET && len >= 4) {
@@ -5688,6 +5716,28 @@ bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
     return true;
   }
   return false;
+}
+
+// Reise-Wunsch 2026-06-08: profile-aware Bbox-Quelle.
+//
+// profile=normal (echter Repeater): hat einen FESTEN Standort. User
+// hat den per 'set lat/lon' konfiguriert. Live-GPS-Fix wird fuer
+// die Bbox-Membership IGNORIERT -- auch wenn das GPS-Modul gerade
+// Position liefert (z.B. fuer Time-Sync oder Tracker-Co-Existenz).
+//
+// profile=defensive (Client mit Repeat-Funktion): Live-GPS-Position
+// hat Vorrang, fixed location ist Fallback (analog Send-Pfad).
+//
+// Wenn weder Live-GPS noch fixed location verfuegbar: false (kein
+// Geo-Match moeglich; AUTO-Scopes greifen nicht, nur explizit-pinned).
+bool MyMesh::getRepeaterBboxLatLon(double& lat, double& lon) const {
+  if (_prefs.repeater_profile == 1 /* normal */) {
+    if (sensors.node_lat == 0.0 && sensors.node_lon == 0.0) return false;
+    lat = sensors.node_lat;
+    lon = sensors.node_lon;
+    return true;
+  }
+  return getEffectiveLatLon(lat, lon);
 }
 
 // --- Scope-Registry-Helpers (Liste A) ---------------------------------------
@@ -6266,7 +6316,11 @@ void MyMesh::updateMotionTracking() {
     _pos_anchor_lon = cur_lon;
     _pos_anchor_millis = now;
     // Position erstmals bekannt — Scope-Bbox-Membership evaluieren.
-    evaluateScopeBboxes(cur_lat, cur_lon);
+    // Reise-Fix 2026-06-08: bei profile=normal Live-GPS ignorieren,
+    // Bbox bleibt auf fixed location aus dem Boot-Init.
+    if (_prefs.repeater_profile != 1 /* nicht normal */) {
+      evaluateScopeBboxes(cur_lat, cur_lon);
+    }
     return;
   }
 
@@ -6305,7 +6359,10 @@ void MyMesh::updateMotionTracking() {
     // Position-Anker frisch — Scope-Bbox-Membership neu bewerten.
     // Das 370m-Anker-Update wirkt als Hysterese (Aufruf nur bei
     // signifikanter Distanz).
-    evaluateScopeBboxes(cur_lat, cur_lon);
+    // Reise-Fix 2026-06-08: bei profile=normal Live-GPS ignorieren.
+    if (_prefs.repeater_profile != 1 /* nicht normal */) {
+      evaluateScopeBboxes(cur_lat, cur_lon);
+    }
   }
 #else
   _is_moving = false;
@@ -8744,9 +8801,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Bei is_moving: Repeating wird\n"
           "  automatisch pausiert.");
         pushCompanionMessage(
+          "  Bbox (geo-scopes): Live-GPS-Position\n"
+          "  oder fixed location (set lat/lon)\n"
+          "  als Fallback bei GPS aus/kein Fix.");
+        pushCompanionMessage(
           "profile=normal:\n"
           "  vollwertiger Repeater, alle PATH-Pakete,\n"
           "  volle Power + konfigurierte CR.");
+        pushCompanionMessage(
+          "  Bbox (geo-scopes): NUR fixed location\n"
+          "  (set lat/lon). Live-GPS wird ignoriert\n"
+          "  -- echter Repeater steht fest.");
         pushCompanionMessage(
           "Wechsel via 'repeater profile <defensive|normal>'");
         pushCompanionMessage(
@@ -10108,12 +10173,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.trace_flags_persistent = 0;
       _prefs.gps_power_mode = 0;
       _prefs.gps_lead_min = 5;
-      // repeat_scope_mode auf ALL (Default). Scope-User-Customizations
-      // (scope_buildin_status + scope_extras) bleiben erhalten — User
-      // soll sie nicht durch einen prefs-reset verlieren. Wer das auch
-      // los werden will: 'scope <name> off|delete' pro Eintrag,
-      // bzw. 'scope remove <name>' fuer Extras.
-      _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALL;
+      // repeat_scope_mode auf ALLOWLIST (Default). Reise-Wunsch 2026-06-08:
+      // sicheres Default = User entscheidet welche Scopes weitergeleitet.
+      // Scope-User-Customizations (scope_buildin_status + scope_extras)
+      // bleiben erhalten -- User soll sie nicht durch einen prefs-reset
+      // verlieren. Wer das auch los werden will: 'scope <name> off|delete'
+      // pro Eintrag, bzw. 'scope remove <name>' fuer Extras.
+      _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALLOWLIST;
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
       pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.\n"
@@ -10305,14 +10371,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (lead != 5) non_default_count++;
     }
-    // repeat_scope_mode (Liste B Policy)
-    if (show_all || _prefs.repeat_scope_mode != REPEAT_SCOPE_MODE_ALL) {
+    // repeat_scope_mode (Liste B Policy). Reise-Fix 2026-06-08:
+    // Default ist jetzt 'allowlist' (sicher, User entscheidet).
+    if (show_all || _prefs.repeat_scope_mode != REPEAT_SCOPE_MODE_ALLOWLIST) {
       const char* mode = (_prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALLOWLIST)
                          ? "allowlist" : "all";
       snprintf(tmp, sizeof(tmp), "  repeat_scope_mode = %s%s", mode,
-               _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALL ? " [default]" : " (default: all)");
+               _prefs.repeat_scope_mode == REPEAT_SCOPE_MODE_ALLOWLIST ? " [default]" : " (default: allowlist)");
       add_line(tmp);
-      if (_prefs.repeat_scope_mode != REPEAT_SCOPE_MODE_ALL) non_default_count++;
+      if (_prefs.repeat_scope_mode != REPEAT_SCOPE_MODE_ALLOWLIST) non_default_count++;
     }
     // Hinweis: Scope-Liste hier nicht mehr inline. 'scope list' /
     // 'scope rep' zeigen die User-Customizations + Extras getrennt.

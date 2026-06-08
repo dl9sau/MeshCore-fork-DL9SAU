@@ -658,6 +658,10 @@ private:
   void markHeardDirect(uint8_t hash);   // call only for zero-hop adverts
   bool isLocallyHeard(uint8_t hash) const;
   bool getEffectiveLatLon(double& lat, double& lon) const;
+  // Profile-aware Bbox-Quelle (Reise-Fix 2026-06-08):
+  //   profile=normal    -> nur fixed location (sensors.node_lat/lon)
+  //   profile=defensive -> wie getEffectiveLatLon (GPS-Live + fixed-fallback)
+  bool getRepeaterBboxLatLon(double& lat, double& lon) const;
   bool chooseGeoFallbackScope(TransportKey& out_key) const;
   bool chooseNightFloodScope(TransportKey& out_key) const;
   // "Default-oder-Geo" Helper fuer Sende-Pfade. Wenn
