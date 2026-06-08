@@ -3714,6 +3714,30 @@ void MyMesh::begin(bool has_display) {
   _active_ble_pin = 0;
 #endif
 
+  // Punkt 15 Reise-Wunsch 2026-06-08: Fresh-Install-Defaults fuer
+  // scope-advert. Grosse Regionen (europe, de, de-*) sollen ab Werk
+  // advert=off haben, damit das Netz nicht mit Adverts dieser breiten
+  // Regionen ueberflutet wird. Trigger: scope_buildin_status_count == 0
+  // UND scope_extras_count == 0 (= unangetastete Erst-Konfiguration).
+  // Bei bestehenden Installs mit count > 0 keine Migration -- User
+  // koennte eigene Konfig haben.
+  if (_prefs.scope_buildin_status_count == 0 && _prefs.scope_extras_count == 0) {
+    static const char* fresh_install_advert_off[] = {
+      "europe", "de", "de-sued", "de-west", "de-nord", "de-mitte", "de-ost"
+    };
+    bool any_applied = false;
+    for (size_t k = 0; k < sizeof(fresh_install_advert_off)/sizeof(fresh_install_advert_off[0]); k++) {
+      int idx = dl9sau_find_region_index(fresh_install_advert_off[k]);
+      if (idx >= 0) {
+        uint8_t st = getBuildinStatus(idx);
+        st |= SCOPE_STATUS_ADVERT_OFF;
+        setBuildinStatus(idx, st);
+        any_applied = true;
+      }
+    }
+    if (any_applied) _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  }
+
   resetContacts();
   _store->loadContacts(this);
   bootstrapRTCfromContacts();
