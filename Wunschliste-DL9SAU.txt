@@ -2669,6 +2669,137 @@ Quelle: User-Anfrage 2026-06-06 ("ob das andere feature im repeater
         gefixt ist"). Antwort: Repeater ja, Companion nein.
 
 
+--------------------------------------------------------------------------------
+46. Filter-System fuer eingehende Pakete (Spam-Schutz)
+--------------------------------------------------------------------------------
+
+Status: Idee, mittlere Prio. App kann nicht filtern (closed source),
+        Firmware bietet das. Vier-Phasen-Plan.
+
+Hintergrund:
+  Beobachtung User 2026-06-07/08 auf Reise: viele Spam-Channels,
+  Bots mit Pong/Bitcoin-Inhalten, fremde Regions-Adverts, etc.
+  Storage und Aufmerksamkeit werden belastet. Filter sollen VOR
+  App-Push und VOR Storage-Aufnahme greifen.
+
+Konzept-Achsen:
+
+  Filter-Typ:     sender / text / region / advert
+  Wirkrichtung:   drop (Negativ-Liste) vs accept (Positiv-Liste)
+  Wirkbereich:    for-us (lokale Anzeige) / repeat / complete
+  Skopus:         global / per-channel-Override
+
+  Glob-Pattern (case-sensitive, UTF-8-byte-basiert):
+    *foo*    substring
+    ^foo     startsWith
+    foo$     endsWith
+    ^foo$    exact
+    foo      ohne Anker = substring (gleichbedeutend *foo*)
+    Quotes fuer Strings mit Leerzeichen
+
+  Sender-Filter wirkt auf DM UND Channel (Spam-Schutz).
+  Text-/Region-/Advert-Filter wirken nur auf Channel.
+
+Phasen-Plan:
+
+  Phase 1 -- MVP (minimal funktional):
+    filter sender drop add/remove/list/clear <pattern>
+    filter text   drop add/remove/list/clear <pattern>
+    filter <type> profile <for-us|repeat|complete>
+      (Default: for-us)
+    Sender-Filter ersetzt Namen mit '[filtered]' im App-Push,
+    Advert bleibt aber durch (User kann via heard_list spaeter
+    re-investigieren).
+
+  Phase 2 -- Channel-Verfeinerung:
+    filter <type> exempt-channel #<name>
+      (Filter gilt ueberall AUSSER in den genannten Channels)
+    ch.mute <channel>          (lokal nicht anzeigen)
+    ch.mute <channel> off
+    ch.mute list
+
+  Phase 3 -- Positiv-Listen:
+    filter <type> allow add/remove/list/clear <pattern>
+    filter <type> mode strict|lenient
+      strict:  nur allow-Liste durchlassen
+      lenient: drop-Liste droppt, Rest durch (Default)
+
+  Phase 4 -- Advanced:
+    filter region drop/allow <name>
+      Achtung: filter region kollidiert konzeptionell mit
+      scope-System (Wunschliste 11+). Alternativ-Vorschlag:
+      scope-System um Display-Achse erweitern
+      (scope <name> display|hide), statt parallelen Filter-Layer.
+      Vor Implementierung diskutieren.
+    filter advert drop <pattern>
+      Wirkt nur auf App-Push + UI-Anzeige, NICHT auf interne
+      heard_list (wir brauchen die fuer Pfad-Lernen + Distanz-
+      Vergleich, auch fuer ungewuenschte Bitcoin-Knoten).
+    filter sender drop pubkey <hex-prefix>
+      Pub-Key-basierter Hard-Block fuer Spammer die Namen aendern.
+
+Channel-Mute vs Filter -- Namespacing-Diskussion:
+
+  ch.hops      = Repeat-Cap pro Channel (Wunschliste 32, schon da)
+  ch.mute      = lokale Anzeige aus  (Phase 2 oben)
+
+  Beide haben 'ch.'-Prefix aber unterschiedliche Semantik:
+  ch.hops = Forwarder-Logik, ch.mute = User-UI-Logik. Risiko
+  Verwirrung. Alternativen falls Phase 2 implementiert wird:
+    (a) ch.repeat <chan> hops <N>   +  ch.show <chan> on/off
+    (b) ch.hops bleibt, ch.mute waere neu (Status quo Vorschlag)
+    (c) Komplett verben-basiert: 'mute', 'repeat-cap'
+  Bei Implementation Phase 2 entscheiden.
+
+Storage-Konzept:
+
+  Pro Filter-Typ ein Array (16-32 Slots), je Slot:
+    char pattern[31]   (UTF-8-Bytes)
+    uint8_t flags      (anchor-bits, profile-bits, drop/allow)
+  -> ~36 Byte pro Slot, total ~2-4 KB persistent.
+
+  Persistent in DataStore-Erweiterung (append-region, nicht im
+  NodePrefs-Layout um Backward-Compat zu wahren).
+
+Performance:
+
+  Pro eingehendem Paket O(n_filter) Glob-Match. Bei viel Traffic
+  + grosser Filter-Liste relevant fuer CPU-Bilanz. Mitigation:
+    - Filter nur fuer relevante ptype (sender-Filter braucht
+      Sender-Bytes, text-Filter nur PAYLOAD_TYPE_GRP_TXT usw.)
+    - Early-exit beim ersten Match
+    - Bei wirklich vielen Filtern: spaeter Bloom-Filter o.ae.
+
+Syntax-Entscheidung -- explizite Befehle vs Mini-Sprache:
+
+  Alternative-Vorschlag (Mini-Sprache, User 2026-06-08):
+    filter text add +*-#ping-#bots:pong
+    filter text add +#*-#ping-#bots:pong  (#* = alle Channels)
+    filter text add +#ping:*              (alles in #ping)
+    filter sender add +*:-"Freund1":"Bekannter2 foo"
+
+  Mächtig aber kryptisch, mehrere Operatoren (+/-/*/#/:/quotes)
+  auf einer Zeile. Schwer zu lernen, schwer im 'help' darstellbar.
+
+  DL9SAU-Vorschlag stattdessen (explizit, MVP-Phase 1):
+    filter text drop add "*bot*"
+    filter text drop exempt-channel #ping
+    filter text drop exempt-channel #bots
+
+  Weniger kompakt, dafuer transparent + jeder Befehl gut in
+  'help' beschreibbar. Bei Implementation finalisieren.
+
+Vor-Implementierung-Check:
+  - Upstream 1.16+ auf Filter-Features pruefen. Falls dt267-Fork
+    (siehe Wunschliste 33) das schon hat, deren Konzept als
+    Referenz.
+  - User-Story: typischer User hat 5-10 Filter-Eintraege.
+    16 Slots pro Typ Initial-Schaetzung. Skalierbarkeit testen.
+
+Quelle: User-Idee 2026-06-08 (Reise-Notiz, Spam-Erfahrungen).
+
+
+
 
 
 
