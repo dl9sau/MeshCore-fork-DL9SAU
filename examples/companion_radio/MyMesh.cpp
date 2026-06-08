@@ -6650,8 +6650,47 @@ void MyMesh::manageGpsPower() {
     return;
   }
 
-  if (!_gps_had_fix_ever) return;    // cycle mode + still in initial boot search
-                                      // -- keep current state (was ON beim Boot)
+  // Reise-Wunsch 2026-06-08: Cold-Start-Cycle vor first-fix.
+  // Vorher: cycle-Mode + !fix_ever -> manageGpsPower returnte frueh,
+  // GPS blieb vom Boot an dauernd an (= 100% Stromverbrauch). Bei
+  // problematischem Empfang (Indoor + Modul-Empfindlichkeitsschwankung)
+  // hat das den Akku unnoetig belastet.
+  //
+  // Neu: 10 min an + 10 min aus (50% Strom) bis first-fix. Manche
+  // GPS-Module brauchen volle 10 min fuer Almanac-Load -- 5 min waeren
+  // grenzwertig. Modul-RAM verliert bei sleep den Almanac, naechster
+  // Wake ist wieder Cold-Start -- aber 10 min reichen typisch.
+  //
+  // Sobald first-fix da: bisheriger normaler cycle-Mode mit lead_min.
+  if (!_gps_had_fix_ever) {
+    if (gps_is_on) {
+      // Cold-Start in progress -- nach 10 min wach ohne Fix schlafen
+      unsigned long awake_for = (_gps_woke_at_millis == 0)
+                               ? 0 : (now - _gps_woke_at_millis);
+      if (awake_for >= CR_GPS_COLD_START_WAKE_MS) {
+        sensors.setSettingValue("gps", "0");
+        _gps_off_at_millis = (now == 0 ? 1 : now);
+        _gps_woke_at_millis = 0;
+        pushDebugLog("[GPS-DBG] cold-start sleep (no fix in %lus)\n",
+                     awake_for / 1000UL);
+        traceCompanion(TRACE_GPS, "[gps] cold-start sleep");
+      }
+    } else {
+      // GPS schlafend in cold-start-cycle. Nach 10 min wieder aufwecken.
+      unsigned long off_for = (_gps_off_at_millis == 0)
+                             ? 0 : (now - _gps_off_at_millis);
+      if (_gps_off_at_millis == 0 || off_for >= CR_GPS_COLD_START_SLEEP_MS) {
+        sensors.setSettingValue("gps", "1");
+        _gps_woke_at_millis = (now == 0 ? 1 : now);
+        _gps_off_at_millis = 0;
+        _gps_fix_seen_this_wake = false;
+        pushDebugLog("[GPS-DBG] cold-start wake (slept %lus)\n",
+                     off_for / 1000UL);
+        traceCompanion(TRACE_GPS, "[gps] cold-start wake");
+      }
+    }
+    return;
+  }
 
   // Lead-Zeit aus _prefs.gps_lead_min (Minuten). Backward-compat: wenn der
   // gespeicherte Wert 0 ist (z.B. alte Datei ohne Feld), nutze Default 5.

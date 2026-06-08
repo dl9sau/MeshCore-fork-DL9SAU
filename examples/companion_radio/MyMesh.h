@@ -182,6 +182,16 @@ struct AdvertPath {
 #ifndef CR_GPS_TIME_SYNC_INTERVAL_MS
 #define CR_GPS_TIME_SYNC_INTERVAL_MS     (6UL * 3600UL * 1000UL)
 #endif
+// Reise-Wunsch 2026-06-08: Cold-Start-Cycle bevor !_gps_had_fix_ever.
+// Manche GPS-Module brauchen bis 10 Min fuer einen ersten Almanac-Load.
+// 10 min an + 10 min aus = 50% Stromverbrauch wenn der Cold-Start
+// lange dauert. Vorher: GPS dauerhaft an = 100% bis erster Fix.
+#ifndef CR_GPS_COLD_START_WAKE_MS
+#define CR_GPS_COLD_START_WAKE_MS        (10UL * 60UL * 1000UL)
+#endif
+#ifndef CR_GPS_COLD_START_SLEEP_MS
+#define CR_GPS_COLD_START_SLEEP_MS       (10UL * 60UL * 1000UL)
+#endif
 
 // periodic advert feature — dynamic interval
 // 3h: no location in advert, or GPS enabled but no fix
