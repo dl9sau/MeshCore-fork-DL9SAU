@@ -1491,6 +1491,21 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   bool decision = false;
   const char* reject_reason = "?";
 
+  // Reise-Hardening 2026-06-08: Defense-in-Depth gegen Self-Echo.
+  // Schicht A (SimpleMeshTables::hasSeen) speichert beim Senden den
+  // packet-hash (Mesh.cpp:652+). Echo wird normalerweise dort gedroppt.
+  // ABER: Ringbuffer ist 160 Slots gross -- bei viel Traffic koennte
+  // ein eigenes Paket nach Eviction wieder duplikat-frei erscheinen.
+  // Schicht B (DL9SAU _self_initiated + _self_repeated, je 32/128 Slots)
+  // haelt eigene Hashes separat. Hier als zusaetzlicher Drop-Check
+  // VOR allen anderen Filter-Stufen: wenn das Paket schon mal von uns
+  // initiiert oder repeated wurde, niemals wieder repeaten.
+  if (matchSelfHash(calcShortHash(packet)) != 0) {
+    traceCompanion(TRACE_FILTER, "[filter] reject %s hops=%u reason=self-echo",
+                   ptypeName(ptype), (unsigned)packet->getPathHashCount());
+    return false;
+  }
+
   // Wunschliste 32 Pre-Flight: GRP-Cap-Check als Vor-Berechnung.
   // Cap-Encoding: CH_HOPS_OFF=skip / 0=immer droppen / 1..N=droppen wenn
   // path_hash_count > N. Restriktivster Match aus allen matchenden Slots +
