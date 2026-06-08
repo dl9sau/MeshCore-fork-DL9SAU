@@ -1001,6 +1001,16 @@ private:
   uint32_t      _time_sync_strict_last_ts[3]; // Replay: pro Strict-Source letzter akzept. timestamp
   uint8_t       _time_sync_last_pubkey[3];   // 3-Byte Prefix der zuletzt genutzten Quelle (Display)
   bool          _time_sync_done_since_boot;  // erster Sync nach Boot vollzogen (Boot-Drift-Bypass)
+  // Reise-Wunsch 2026-06-08: letzter adv-sync-CANDIDATE merken (egal ob
+  // applied oder skipped), fuer Diagnose im clock-Befehl. Wird bei JEDEM
+  // maybeAdvertTimeSync-Aufruf gesetzt der die Plausibility passiert.
+  uint8_t       _last_adv_sync_pubkey[3];    // Pubkey-Prefix des letzten Versuchs
+  uint32_t      _last_adv_sync_ts;           // Sender-timestamp im Versuch
+  uint32_t      _last_adv_sync_at_rtc;       // RTC-Zeit zum Zeitpunkt des Versuchs
+  int32_t       _last_adv_sync_delta;        // ts - rtc beim Versuch
+  uint8_t       _last_adv_sync_outcome;      // 0=none yet, 1=applied, 2=skipped-24h-cap,
+                                              // 3=skipped-replay, 4=skipped-too-small,
+                                              // 5=skipped-too-big-1src
 
   // ---- Wunschliste 35: Channel-Message Sender-Annotation (Once-per-Tuple) ----
   // Bei Channel-Messages anhaengen einer Annotation '(#scope[, direct])' an

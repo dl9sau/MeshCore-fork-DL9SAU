@@ -974,11 +974,23 @@ void MyMesh::maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestam
                  (unsigned long)plaus_diff);
     return;
   }
+  // Letzten Versuch fuer Diagnose merken (alle Pfade unten beerben den
+  // outcome). Wird vom 'clock'-Befehl als Diagnose-Zeile angezeigt.
+  memcpy(_last_adv_sync_pubkey, id.pub_key, 3);
+  _last_adv_sync_ts = adv_timestamp;
+  _last_adv_sync_at_rtc = now_rtc;
+  _last_adv_sync_delta = (int32_t)(adv_timestamp - now_rtc);
   // 24h-Cap (nur wenn schon einmal synced):
   if (_time_sync_done_since_boot
       && _time_sync_last_at_rtc > 0
       && now_rtc >= _time_sync_last_at_rtc
-      && (now_rtc - _time_sync_last_at_rtc) < 86400UL) return;
+      && (now_rtc - _time_sync_last_at_rtc) < 86400UL) {
+    _last_adv_sync_outcome = 2; // skipped 24h-cap
+    pushDebugLog("[rtc] adv-sync SKIPPED (24h-cap): src=%02x%02x%02x ts=%lu delta=%lds\n",
+                 id.pub_key[0], id.pub_key[1], id.pub_key[2],
+                 (unsigned long)adv_timestamp, (long)_last_adv_sync_delta);
+    return;
+  }
 
   // ----- Strict mode: nur konfigurierte Sources -----
   if (_prefs.time_sync_mode == 2) {
@@ -1014,6 +1026,7 @@ void MyMesh::maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestam
     _time_sync_strict_last_ts[src_idx] = adv_timestamp;
     _time_sync_done_since_boot = true;
     memcpy(_time_sync_last_pubkey, id.pub_key, 3);
+    _last_adv_sync_outcome = 1; // applied
     pushDebugLog("[rtc] adv-sync from %02x%02x%02x delta=%lds (strict)\n",
                  id.pub_key[0], id.pub_key[1], id.pub_key[2], (long)delta);
     return;
@@ -3471,6 +3484,12 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _time_sync_lazy_count = 0;
   _time_sync_lazy_started_ms = 0;
   _time_sync_lazy_done = false;
+  // Reise-Diagnose 2026-06-08: letzter adv-sync candidate
+  memset(_last_adv_sync_pubkey, 0, sizeof(_last_adv_sync_pubkey));
+  _last_adv_sync_ts = 0;
+  _last_adv_sync_at_rtc = 0;
+  _last_adv_sync_delta = 0;
+  _last_adv_sync_outcome = 0;
   // Wunschliste 35: channel-sender-seen Liste leer
   memset(_channel_sender_seen, 0, sizeof(_channel_sender_seen));
   _channel_sender_seen_count = 0;
@@ -8014,6 +8033,12 @@ void MyMesh::clearStats() {
   _time_sync_lazy_count = 0;
   _time_sync_lazy_started_ms = 0;
   _time_sync_lazy_done = false;
+  // Reise-Diagnose 2026-06-08: letzter adv-sync candidate
+  memset(_last_adv_sync_pubkey, 0, sizeof(_last_adv_sync_pubkey));
+  _last_adv_sync_ts = 0;
+  _last_adv_sync_at_rtc = 0;
+  _last_adv_sync_delta = 0;
+  _last_adv_sync_outcome = 0;
   // Wunschliste 35: channel-sender-seen Liste leer
   memset(_channel_sender_seen, 0, sizeof(_channel_sender_seen));
   _channel_sender_seen_count = 0;
@@ -10616,6 +10641,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(line);
     } else if (_prefs.time_sync_mode != 0 && !isGpsAuthoritative()) {
       pushCompanionMessage("  (advert-sync aktiv, noch keine Quelle gehoert)");
+    }
+    // Reise-Diagnose 2026-06-08: letzten adv-sync-Versuch zeigen (egal
+    // ob applied oder skipped). Hilfreich um zu sehen welche Adverts
+    // kommen und warum sie evtl. NICHT die RTC ueberschreiben (24h-cap
+    // weil App schon gesynced hat, etc.).
+    if (_last_adv_sync_outcome != 0) {
+      const char* oc =
+          (_last_adv_sync_outcome == 1) ? "applied"
+        : (_last_adv_sync_outcome == 2) ? "skipped (24h-cap: App/recent sync hat Vorrang)"
+        : (_last_adv_sync_outcome == 3) ? "skipped (replay)"
+        : (_last_adv_sync_outcome == 4) ? "skipped (drift < 20s)"
+        : (_last_adv_sync_outcome == 5) ? "skipped (single-source, drift > 1h)"
+        : "?";
+      uint32_t age_attempt = (now >= _last_adv_sync_at_rtc)
+                            ? (now - _last_adv_sync_at_rtc) : 0;
+      char line2[160];
+      snprintf(line2, sizeof(line2),
+               "  letzter adv-sync: %02x%02x%02x delta=%lds vor %lus\n"
+               "  -> %s",
+               _last_adv_sync_pubkey[0],
+               _last_adv_sync_pubkey[1],
+               _last_adv_sync_pubkey[2],
+               (long)_last_adv_sync_delta,
+               (unsigned long)age_attempt,
+               oc);
+      pushCompanionMessage(line2);
     }
     return;
   }
