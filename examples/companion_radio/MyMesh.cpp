@@ -3829,6 +3829,19 @@ void MyMesh::begin(bool has_display) {
   resetContacts();
   _store->loadContacts(this);
   bootstrapRTCfromContacts();
+  // Reise-Fix 2026-06-08: nach Boot-Bootstrap unsere Sync-State-Marker
+  // initialisieren, damit clock-Display die Quelle 'Bootstrap (last
+  // advert)' anzeigt statt einer evtl. spaeter eingefangenen Stale-
+  // Advert-Sync-Quelle. last_at_rtc = aktueller RTC = 'gerade synchron'.
+  // pub_key=[0xFF,0xFF,0xFF] als Bootstrap-Marker (App-Sync nutzt 0x00).
+  {
+    uint32_t rtc_after_bootstrap = getRTCClock()->getCurrentTime();
+    if (rtc_after_bootstrap > 1577836800UL /* 2020-01-01 */) {
+      _time_sync_last_at_rtc = rtc_after_bootstrap;
+      _time_sync_done_since_boot = true;
+      memset(_time_sync_last_pubkey, 0xFF, sizeof(_time_sync_last_pubkey));
+    }
+  }
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
   // Companion-Channel (lokal, kein RF) anlegen oder Index aus persistiertem
@@ -4433,6 +4446,14 @@ void MyMesh::handleCmdFrame(size_t len) {
         writeOKFrame();
       } else {
         getRTCClock()->setCurrentTime(secs);
+        // Reise-Fix 2026-06-08: App-Sync ueberschreibt auch unseren
+        // advert-sync-State. Ohne das blieb _time_sync_last_at_rtc auf
+        // dem (moeglicherweise alten) Wert eines frueheren adv-syncs
+        // haengen, und 'clock' zeigte 'age = jetzt - alter advert',
+        // teilweise Jahre Diff. pub_key={0,0,0} markiert App als Quelle.
+        _time_sync_last_at_rtc = secs;
+        _time_sync_done_since_boot = true;
+        memset(_time_sync_last_pubkey, 0, sizeof(_time_sync_last_pubkey));
         bool invalidate = (delta > 3600);
         if (invalidate) next_night_flood_unix = 0;
         pushDebugLog("[ADV-DBG] CMD_SET_DEVICE_TIME: rtc %lu -> %lu (delta %lus)%s\n",
@@ -10553,8 +10574,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       uint32_t age = (now >= _time_sync_last_at_rtc)
                      ? (now - _time_sync_last_at_rtc) : 0;
       char src[40];
+      bool app_sync = (_time_sync_last_pubkey[0] == 0
+                       && _time_sync_last_pubkey[1] == 0
+                       && _time_sync_last_pubkey[2] == 0);
+      bool bootstrap_sync = (_time_sync_last_pubkey[0] == 0xFF
+                             && _time_sync_last_pubkey[1] == 0xFF
+                             && _time_sync_last_pubkey[2] == 0xFF);
       if (isGpsAuthoritative()) {
         snprintf(src, sizeof(src), "GPS");
+      } else if (app_sync) {
+        snprintf(src, sizeof(src), "App (CMD_SET_DEVICE_TIME)");
+      } else if (bootstrap_sync) {
+        snprintf(src, sizeof(src), "Boot-Bootstrap (last advert in DB)");
       } else {
         snprintf(src, sizeof(src), "advert %02x%02x%02x",
                  _time_sync_last_pubkey[0],
