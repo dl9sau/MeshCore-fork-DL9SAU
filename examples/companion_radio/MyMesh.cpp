@@ -8706,6 +8706,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "App: name manual_add_contacts multi_acks\n"
           "  autoadd_config autoadd_max_hops\n"
           "  path_hash_mode buzzer_quiet\n"
+          "  messages_append_scope_to_name (on|off)\n"
           "  owner_info (max 119, '|' -> Newline)");
         pushCompanionMessage(
           "Identity (Reboot noetig!):\n"
@@ -12555,6 +12556,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_uint  ("telemetry_mode_loc",  _prefs.telemetry_mode_loc,    0);
       emit_uint  ("telemetry_mode_env",  _prefs.telemetry_mode_env,    0);
       emit_uint  ("buzzer_quiet",        _prefs.buzzer_quiet,          0);
+      emit_uint  ("messages_append_scope_to_name",
+                                         _prefs.messages_append_scope_to_name, 0);
       emit_float ("rxdelay",             _prefs.rx_delay_base,         0.0f,                   "",     3);
       // txdelay / direct_txdelay: Sentinel -1 = auto. Sonderdarstellung
       // statt nackter "-1.000". Default ist auto.
@@ -12712,6 +12715,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "telemetry_mode_loc") == 0) snprintf(r, sizeof(r), "telemetry_mode_loc = %u", (unsigned)_prefs.telemetry_mode_loc);
     else if (strcmp(key, "telemetry_mode_env") == 0) snprintf(r, sizeof(r), "telemetry_mode_env = %u", (unsigned)_prefs.telemetry_mode_env);
     else if (strcmp(key, "buzzer_quiet") == 0)      snprintf(r, sizeof(r), "buzzer_quiet = %u", (unsigned)_prefs.buzzer_quiet);
+    else if (strcmp(key, "messages_append_scope_to_name") == 0
+             || strcmp(key, "messages.append.scope.to.name") == 0)
+      snprintf(r, sizeof(r), "messages_append_scope_to_name = %s",
+               _prefs.messages_append_scope_to_name ? "on" : "off");
     else if (strcmp(key, "rxdelay") == 0)           snprintf(r, sizeof(r), "rxdelay = %.3f", _prefs.rx_delay_base);
     else if (strcmp(key, "txdelay") == 0) {
       if (_prefs.tx_delay_factor < 0.0f)
