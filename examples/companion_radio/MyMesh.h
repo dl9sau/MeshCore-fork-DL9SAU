@@ -662,6 +662,11 @@ private:
   //   profile=normal    -> nur fixed location (sensors.node_lat/lon)
   //   profile=defensive -> wie getEffectiveLatLon (GPS-Live + fixed-fallback)
   bool getRepeaterBboxLatLon(double& lat, double& lon) const;
+  // Helper: Bbox-Membership neu evaluieren via getRepeaterBboxLatLon.
+  // Wenn keine Quelle verfuegbar (profile=defensive + gps an + nie Fix),
+  // wird die Bbox komplett geleert. Wird gerufen nach Profile-Wechsel,
+  // gps on/off-Toggle, fixed-location-Aenderung.
+  void reevaluateRepeaterBbox();
   bool chooseGeoFallbackScope(TransportKey& out_key) const;
   bool chooseNightFloodScope(TransportKey& out_key) const;
   // "Default-oder-Geo" Helper fuer Sende-Pfade. Wenn

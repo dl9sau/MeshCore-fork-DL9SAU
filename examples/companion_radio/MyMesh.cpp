@@ -4472,6 +4472,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       // User just programmed a fixed location — re-evaluate scope-recommendation
       // so the app sees the matching #region list right away.
       maybePushGeoRecommendation(sensors.node_lat, sensors.node_lon);
+      // Reise-Fix 2026-06-08: Bbox-Membership neu evaluieren (insbes. fuer
+      // profile=normal -- Live-GPS ignoriert, fixed location ist die Quelle).
+      reevaluateRepeaterBbox();
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG); // invalid geo coordinate
@@ -5153,6 +5156,11 @@ void MyMesh::handleCmdFrame(size_t len) {
         if (strcmp(sp, "gps") == 0) {
           _prefs.gps_enabled = (np[0] == '1') ? 1 : 0;
           savePrefs();
+          // Reise-Fix 2026-06-08: gps on/off-Wechsel -> Bbox-Quelle aendert
+          // sich (defensive + gps on + nie Fix -> keine Bbox; defensive +
+          // gps off -> fixed location als Bbox). Re-Eval, sonst bleibt
+          // alte Bbox vom vorigen Modus haengen.
+          reevaluateRepeaterBbox();
           if (_prefs.gps_enabled) {
             // User just enabled GPS via the app. Hold GPS on until at least
             // the next periodic advert is sent (regardless of fix status),
@@ -5855,6 +5863,18 @@ bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
 //
 // Wenn weder Live-GPS noch fixed location verfuegbar: false (kein
 // Geo-Match moeglich; AUTO-Scopes greifen nicht, nur explizit-pinned).
+void MyMesh::reevaluateRepeaterBbox() {
+  double new_lat, new_lon;
+  if (getRepeaterBboxLatLon(new_lat, new_lon)) {
+    evaluateScopeBboxes(new_lat, new_lon);
+  } else {
+    // Keine Quelle (z.B. defensive + gps on + nie Fix). Bbox leeren --
+    // AUTO-Scopes greifen nicht. Pinned bleiben unberuehrt.
+    memset(_buildin_in_bbox, 0, sizeof(_buildin_in_bbox));
+    memset(_extras_in_bbox,  0, sizeof(_extras_in_bbox));
+  }
+}
+
 bool MyMesh::getRepeaterBboxLatLon(double& lat, double& lon) const {
   if (_prefs.repeater_profile == 1 /* normal */) {
     if (sensors.node_lat == 0.0 && sensors.node_lon == 0.0) return false;
@@ -9682,6 +9702,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (m == 1) {
       _prefs.gps_enabled = 1;
       savePrefs();
+      reevaluateRepeaterBbox();  // Reise-Fix 2026-06-08
       // D3: informativer als nur "OK - GPS enabled". Zeige aktuelle
       // power-Konfig damit User direkt sieht was greift.
       const char* pmode = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
@@ -9693,6 +9714,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     } else if (m == 0) {
       _prefs.gps_enabled = 0;
       savePrefs();
+      reevaluateRepeaterBbox();  // Reise-Fix 2026-06-08
       pushCompanionMessage("OK - GPS disabled.");
     } else if (strcmp(arg, "sync") == 0) {
       // Einmaliger Wake-Trigger - GPS bleibt wach bis zum naechsten Advert
@@ -15301,18 +15323,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.repeater_profile = (uint8_t)pm;
       savePrefs();
       recomputeRepeatingAllowed("profile change");
-      // Reise-Fix 2026-06-08: Profile-Wechsel => Bbox-Quelle aendert sich
-      // (normal: fixed-only; defensive: GPS-live wenn Fix da, sonst nichts
-      // bei gps_enabled+no-fix). Bbox initial neu evaluieren oder leeren.
-      {
-        double new_lat, new_lon;
-        if (getRepeaterBboxLatLon(new_lat, new_lon)) {
-          evaluateScopeBboxes(new_lat, new_lon);
-        } else {
-          memset(_buildin_in_bbox, 0, sizeof(_buildin_in_bbox));
-          memset(_extras_in_bbox,  0, sizeof(_extras_in_bbox));
-        }
-      }
+      // Reise-Fix 2026-06-08: Profile-Wechsel => Bbox-Quelle aendert sich.
+      reevaluateRepeaterBbox();
       char r[160];
       snprintf(r, sizeof(r),
         "OK - repeater profile = %s.\n"
