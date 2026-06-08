@@ -5727,8 +5727,23 @@ bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
 // die Bbox-Membership IGNORIERT -- auch wenn das GPS-Modul gerade
 // Position liefert (z.B. fuer Time-Sync oder Tracker-Co-Existenz).
 //
-// profile=defensive (Client mit Repeat-Funktion): Live-GPS-Position
-// hat Vorrang, fixed location ist Fallback (analog Send-Pfad).
+// profile=defensive (Client mit Repeat-Funktion):
+//   - GPS aus  -> fixed location als Fallback (User hat bewusst
+//                 GPS aus, fixed ist die deklarierte Position).
+//   - GPS an + noch nie Fix bekommen -> KEINE Bbox-Quelle.
+//                 Defensive Haltung: wir wissen noch nicht wo wir
+//                 sind, also keine AUTO-Scopes greifen lassen. Erst
+//                 wenn der erste Fix da war (gps_had_fix_ever),
+//                 wechseln wir auf Live-GPS.
+//                 Folge: GRP/TXT/ADVERT/REQ/RESP von scoped Paketen
+//                 die nur per AUTO-Scope greifen wuerden, werden in
+//                 dieser Phase nicht repeated. PINNED Scopes
+//                 (SCOPE_STATUS_REPEAT_ON) bleiben unberuehrt --
+//                 scopeStatusAllowsRepeat returnt fuer REPEAT_ON
+//                 immer true, unabhaengig von in_bbox. Unscoped
+//                 CHAT-Adverts + TXT_MSG laufen ueber Wunschliste 39.
+//   - GPS an + Fix erhalten -> Live-GPS-Position (fixed-Fallback bei
+//                 spaeterem Fix-Verlust dank getEffectiveLatLon).
 //
 // Wenn weder Live-GPS noch fixed location verfuegbar: false (kein
 // Geo-Match moeglich; AUTO-Scopes greifen nicht, nur explizit-pinned).
@@ -5739,6 +5754,14 @@ bool MyMesh::getRepeaterBboxLatLon(double& lat, double& lon) const {
     lon = sensors.node_lon;
     return true;
   }
+  // defensive
+#if ENV_INCLUDE_GPS == 1
+  if (_prefs.gps_enabled && !_gps_had_fix_ever) {
+    // GPS aktiv aber noch nie ein Fix. Defensive Haltung: nicht
+    // auf fixed location zurueckfallen, sondern warten.
+    return false;
+  }
+#endif
   return getEffectiveLatLon(lat, lon);
 }
 
@@ -15073,6 +15096,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.repeater_profile = (uint8_t)pm;
       savePrefs();
       recomputeRepeatingAllowed("profile change");
+      // Reise-Fix 2026-06-08: Profile-Wechsel => Bbox-Quelle aendert sich
+      // (normal: fixed-only; defensive: GPS-live wenn Fix da, sonst nichts
+      // bei gps_enabled+no-fix). Bbox initial neu evaluieren oder leeren.
+      {
+        double new_lat, new_lon;
+        if (getRepeaterBboxLatLon(new_lat, new_lon)) {
+          evaluateScopeBboxes(new_lat, new_lon);
+        } else {
+          memset(_buildin_in_bbox, 0, sizeof(_buildin_in_bbox));
+          memset(_extras_in_bbox,  0, sizeof(_extras_in_bbox));
+        }
+      }
       char r[160];
       snprintf(r, sizeof(r),
         "OK - repeater profile = %s.\n"
