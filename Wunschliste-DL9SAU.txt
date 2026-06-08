@@ -2799,6 +2799,79 @@ Vor-Implementierung-Check:
 Quelle: User-Idee 2026-06-08 (Reise-Notiz, Spam-Erfahrungen).
 
 
+--------------------------------------------------------------------------------
+47. scope-UX Sammelliste -- Klarstellungen + Reserved-Words
+--------------------------------------------------------------------------------
+
+Status: Doku + Code, parallel zu Punkt 12-19 der User-Reise-Notiz.
+        Punkte 12, 16, 17 werden direkt implementiert; 13, 14, 18,
+        19 bleiben hier als Doku-Anchor.
+
+13. help scope: Wording 'off' unscharf
+    Aktuell: "off: Geo wird nie verwendet, nur Default/Bake/Override."
+    Bezieht sich auf scope_advert_auto Mode (Send-Pfad), nicht auf
+    Repeat. Aenderung: "off (Send-Pfad): Geo wird beim Senden nie
+    als Fallback verwendet -- nur Default/Bake/Override."
+    Trennung Send vs Repeat explizit benennen.
+
+14. Zwei Info-Ansichten konsolidieren:
+    'scope info <name>' vs 'scope <name> info'
+    Beide existieren mit unterschiedlicher Tiefe. Konfus.
+    Vorschlag: eine als kanonisch waehlen (vermutlich
+    'scope <name> info' weil konsistent mit anderen
+    Sub-Commands wie 'scope <name> repeat/advert/disable'),
+    andere als deprecated markieren oder ganz entfernen.
+
+15. Default-Konfiguration fuer Neuinstallationen
+    (User hat das in seiner Testinstallation manuell gesetzt;
+    Punkt fuer Neuinstallationen vermerken)
+      scope europe advert off
+      scope de advert off
+      scope de-sued advert off
+      scope de-west advert off
+      scope de-nord advert off
+      scope de-mitte advert off
+      scope de-ost advert off
+    Reduziert "Advert-Spam" der grossen Regionen ab Werk.
+    Migration fuer bestehende Installs NICHT durchfuehren (User
+    koennte eigene Konfig haben). Nur in begin() setzen wenn
+    SCOPE_STATUS noch ganz initialisiert wird (Erst-Install).
+
+18. 'scope #de adv off' mit #-Prefix als Workaround:
+    Funktioniert bereits, ist die eindeutige Region-Referenz.
+    Ist nach Fix von Punkt 16 nicht mehr noetig, aber bleibt
+    als robuste Form fuer Reserved-Word-Konflikte.
+
+19. 'scope advert default <name>' ist Synonym von
+    'scope default <name>'
+    Aktueller Help-Text formuliert das missverstaendlich. User-
+    Test bestaetigt beide Formen wirken gleich. Doku-Aenderung:
+    klar als 'gleichwertige Kurz-/Langform' beschreiben.
+
+20. Sender-Suffix '(#scope)' bricht App-Pfad-Anzeige
+    (App nutzt Sender-Name fuer Pub-Key-Lookup gegen
+    interne Contact/Advert-DB; mit Suffix kein Match)
+    Per-channel-cache _channel_sender_seen reduziert das schon
+    auf 'einmal pro neuem (sender, scope, direct)-Tupel'.
+    Persistenz ueber Reboot ausgeschlossen (User: 'so stoerend
+    sind die Angaben nicht'). Empirischer Test andere
+    Suffix-Formate (#scope ohne Klammer, [#scope], usw.)
+    gelegentlich beim Flashen probieren.
+
+Reserved-Words-Konflikt (Edge-Case zu Punkt 16):
+  Wenn ein User wirklich einen Scope namens 'default', 'bake',
+  'override', 'clear', 'advert', 'repeat' oder 'info' anlegt,
+  bleibt der Konflikt mit Sub-Commands bestehen.
+  Loesungs-Kombination:
+    a) whole-word match fuer Sub-Commands (Fix Punkt 16)
+    b) #-Prefix bleibt eindeutige Region-Referenz
+    c) Beim Scope-Add mit Reserved-Name eine Warnung pushen
+       (Pflicht auf #-Form hinweisen)
+
+Quelle: User-Reise-Notizen 2026-06-07/08.
+
+
+
 
 
 
