@@ -3761,6 +3761,27 @@ void MyMesh::begin(bool has_display) {
     if (any_applied) _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
 
+  // Reise-Bugfix 2026-06-08: Bbox-Membership initial setzen via
+  // getEffectiveLatLon. Vorher wurde evaluateScopeBboxes nur in
+  // updateMotionTracking aufgerufen, das bei !loc->isValid() (kein
+  // Live-Fix) early-returnt -- ohne fixed-location-Fallback. Damit
+  // blieb _buildin_in_bbox[] auf false fuer alle Regionen, AUTO-Scopes
+  // konnten nicht matchen. Folge: User mit konfigurierter fixed
+  // location (z.B. Indoor, GPS gestoert) hatte effektiv keine
+  // funktionierende geo-basierte Repeat-Allowlist.
+  //
+  // Inkonsistenz-Beseitigung: SEND-Pfad (chooseGeoFallbackScope) nutzt
+  // schon getEffectiveLatLon mit fixed-fallback, RECEIVE-Pfad
+  // (scopeAllowedForRepeat ueber _buildin_in_bbox[]) tat es nicht.
+  //
+  // Live-GPS-Fix ueberschreibt das spaeter in updateMotionTracking.
+  {
+    double init_lat, init_lon;
+    if (getEffectiveLatLon(init_lat, init_lon)) {
+      evaluateScopeBboxes(init_lat, init_lon);
+    }
+  }
+
   resetContacts();
   _store->loadContacts(this);
   bootstrapRTCfromContacts();
@@ -6162,6 +6183,12 @@ void MyMesh::updateMotionTracking() {
     // GPS turned off by the user — drop tracking state entirely.
     _is_moving = false;
     _pos_anchor_millis = 0;
+    // Reise-Fix 2026-06-08: trotzdem Bbox-Membership pflegen wenn
+    // sensors.node_lat/lon konfiguriert ist (User hat fixed location
+    // gesetzt + GPS aus). Sonst wuerden AUTO-Scopes nie matchen.
+    if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
+      evaluateScopeBboxes(sensors.node_lat, sensors.node_lon);
+    }
     return;
   }
   LocationProvider* loc = sensors.getLocationProvider();
@@ -13488,43 +13515,51 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       //   auto = prefer
       //   prefer: Geo gewinnt vor Default
       // Die Legende-Zeilen erscheinen NUR fuer die aktuell aktiven Werte.
-      // Punkt 12 Reise-Fix 2026-06-08: bei geo-fallback den Namen des
-      // gewaehlten Scopes anzeigen (smallest containing bbox), damit User
-      // sieht WELCHER Scope greift.
-      char geo_name_buf[40];
-      const char* geo_name_str = "";
+      // Punkt 12 Reise-Fix 2026-06-08 (v2): bei geo-fallback den Namen des
+      // gewaehlten Scopes IM active_val anzeigen, nicht in der Legend.
+      // Vorher: 'active = geo-fallback; geo-fallback: kein Default gesetzt
+      // (#de-be)' -- User-Feedback 2026-06-08: missverstaendlich, '(#de-be)'
+      // wirkte wie eine Annotation der Default-Aussage. Jetzt klarer:
+      //   'active = geo-fallback: #de-be'
+      //   'geo-fallback: kein Default gesetzt'
+      char geo_name_buf[40] = "";
       if (has_geo) {
-        // Reverse-Lookup: TransportKey -> Region-Name. Iteriere build-in
-        // + extras, finde den Eintrag der den geo_k.key liefert.
         for (int gi = 0; gi < _buildin_keys_count; gi++) {
           if (memcmp(_buildin_keys[gi].key, geo_k.key, sizeof(geo_k.key)) == 0) {
             const char* nm = NULL;
             if (dl9sau_get_region((size_t)gi, &nm, NULL, NULL, NULL, NULL) && nm) {
-              snprintf(geo_name_buf, sizeof(geo_name_buf), " (#%s)", nm);
-              geo_name_str = geo_name_buf;
+              StrHelper::strncpy(geo_name_buf, nm, sizeof(geo_name_buf));
             }
             break;
           }
         }
       }
 
+      char active_val_buf[60];
       const char* active_val;
-      char active_legend_buf[80];
       const char* active_legend;   // NULL = kein Legende-Zeile noetig
       if (override_active)         { active_val = "override";     active_legend = NULL; }
       else if (bake_set)           { active_val = "bake";         active_legend = "flooded advert, nightly"; }
       else if (geo_wins_default)   {
-        active_val = "geo-fallback";
-        snprintf(active_legend_buf, sizeof(active_legend_buf),
-                 "Geo gewinnt vor Default (auto=prefer)%s", geo_name_str);
-        active_legend = active_legend_buf;
+        if (geo_name_buf[0]) {
+          snprintf(active_val_buf, sizeof(active_val_buf),
+                   "geo-fallback: #%s", geo_name_buf);
+          active_val = active_val_buf;
+        } else {
+          active_val = "geo-fallback";
+        }
+        active_legend = "Geo gewinnt vor Default (auto=prefer)";
       }
       else if (default_set)        { active_val = "default";      active_legend = "configured catchall scope"; }
       else if (geo_is_fallback)    {
-        active_val = "geo-fallback";
-        snprintf(active_legend_buf, sizeof(active_legend_buf),
-                 "kein Default gesetzt%s", geo_name_str);
-        active_legend = active_legend_buf;
+        if (geo_name_buf[0]) {
+          snprintf(active_val_buf, sizeof(active_val_buf),
+                   "geo-fallback: #%s", geo_name_buf);
+          active_val = active_val_buf;
+        } else {
+          active_val = "geo-fallback";
+        }
+        active_legend = "kein Default gesetzt";
       }
       else                         { active_val = "#local";       active_legend = "last-resort (kein Default/Geo)"; }
 
