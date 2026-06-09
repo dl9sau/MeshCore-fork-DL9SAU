@@ -2766,12 +2766,37 @@ Hintergrund:
   Storage und Aufmerksamkeit werden belastet. Filter sollen VOR
   App-Push und VOR Storage-Aufnahme greifen.
 
-Konzept-Achsen:
+Konzept-Achsen (User-Zusammenfassung 2026-06-09):
 
-  Filter-Typ:     sender / text / region / advert
-  Wirkrichtung:   drop (Negativ-Liste) vs accept (Positiv-Liste)
-  Wirkbereich:    for-us (lokale Anzeige) / repeat / complete
-  Skopus:         global / per-channel-Override
+  Filter-Typ      Wo wirkt                          profile-Achse?
+  -----------     ----------------------------      --------------
+  sender          DM + Channels (alle/bestimmte)    ja
+  text            Channels (alle/bestimmte)         ja
+  scope           Channels (alle/bestimmte)         NEIN (Display-only,
+                                                    Repeat-Regeln
+                                                    liegen im Repeater-
+                                                    Profil)
+  advert (P4)     Adverts                           ja
+  region (P4)     vs. scope-Konflikt -- siehe Phase 4
+
+  Wirkrichtung:   drop (Negativ-Liste) + keep (Positiv-Liste,
+                  vorher 'allow' genannt)
+  profile-Achse:  for-us (Display) / repeat / complete (beide)
+                  Bei scope-Filter NICHT verfuegbar -- die
+                  Repeat-Welt liegt im Repeater-Profil
+                  (Wunschliste 11/24/27).
+  Skopus:         global / on-channel <liste> / exempt-channel <liste>
+                  Listen sind komma-getrennt:
+                    on-channel Public,#test
+                    exempt-channel Public,#test
+                  on-channel  = nur auf diesen Channels
+                  exempt-channel = ueberall ausser diesen Channels
+
+  Negations-Anwendungsfall (User 2026-06-09):
+    "foobar global droppen, aber auf Public+#test erlauben"
+    -> filter text drop foobar
+       filter text exempt-channel Public,#test
+    (kein '!'-Sigil noetig; exempt-channel deckt das ab)
 
   Glob-Pattern (case-sensitive, UTF-8-byte-basiert):
     *foo*    substring
