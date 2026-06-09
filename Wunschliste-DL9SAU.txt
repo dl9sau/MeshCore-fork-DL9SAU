@@ -2825,21 +2825,42 @@ Phasen-Plan:
   Phase 5 -- Scope-Filter (Channel-bezogen + Auto-Follow):
 
   Motivation (User-Erfahrung 2026-06-09):
-    Public-Channel ist unuebersichtlich -- mischt unscoped +
+    Channel Public ist unuebersichtlich -- mischt unscoped +
     #de + alle #de-* + #europe-* etc. Mehrwert: Scopes je
     Channel droppen/erlauben. In Public droppt User unscoped
     + #de + #de-*; in #de oder #all (hypothetisch) bleiben
     sie sichtbar.
 
-    filter scope drop add <scope-name> [on-channel <#chan>]
-    filter scope allow add <scope-name> [on-channel <#chan>]
+    [Channel-Naming-Hinweis: Channels heissen ohne '#'
+    (Public, ping, bots, ...). Das '#'-Prefix ist
+    Scope-Prefix (#de, #de-be, ...). In Befehlsstrings nicht
+    verwechseln.]
+
+    filter scope drop add <scope-name> [on-channel <chan>]
+    filter scope allow add <scope-name> [on-channel <chan>]
     filter scope drop list
     filter scope drop remove <idx|pattern>
       Wirkt auf eingehende GRP_TXT vor App-Push. Channel-
       spezifisch via 'on-channel'; default = global.
 
+  Repeat-Verschraenkung mit ch.hops (Wunschliste 32):
+    User-Beobachtung: "wenn ich kein #de und kein unscoped
+    auf Public will, will ich's vermutlich auch nicht
+    repeaten." Konsequenz: filter scope drop koennte
+    optional auch den Repeat-Cap fuer diese
+    Channel+Scope-Kombi auf 0 setzen.
+
+      filter scope drop add unscoped on-channel Public \
+        also-block-repeat
+      filter scope drop add de on-channel Public also-block-repeat
+
+    Default offen: nur UI-Drop oder UI+Repeat-Drop? Bei
+    Implementation entscheiden. Vermutung: User-Default
+    ist konservativ (nur UI), Power-User schaltet
+    'also-block-repeat' explizit zu.
+
   Scope-Follow-Smallest-Region (Auto-Adapt):
-    filter scope drop mode follow-smallest-region [pinned ...]
+    filter scope drop mode follow-smallest-region
       Wenn aktiv, ergibt sich der Drop-Set automatisch aus der
       eigenen Position (getEffectiveLatLon / scope-Bbox-Cache):
       - Allow: scope passt auf eigene Position UND ist
@@ -2847,16 +2868,10 @@ Phasen-Plan:
         enclosing scope der Position).
       - Drop: alle scopes die groesser sind als smallest +
         alle die die eigene Position NICHT enthalten.
-      - Pinned-Scopes (explizit allow-list) bleiben immer
-        sichtbar -- z.B. 'local', 'lokal', 'region', 'regional'
-        sowie persoenlich pinned scopes (bspw. Heimatdistrikt
-        wenn man auf Reisen ist).
 
     Beispiel Berlin:
       - smallest enclosing = #de-be (Stadtstaat)
-      - Sichtbar:  #de-be, alle pinned (z.B. local/lokal/
-                   region/regional, plus persoenlich gepinned
-                   #de-bebb-strausberg)
+      - Sichtbar:  #de-be
       - Gedroppt:  #de-bebb (Brandenburg-Ost), #de-bb (BB
                    ganz), #de, #europe, unscoped, #de-by,
                    #de-by-muc, ...
@@ -2864,27 +2879,43 @@ Phasen-Plan:
     Beispiel Ostfriesland (Mobil unterwegs):
       - smallest enclosing = #de-ni-aurich oder ein
         sub-regionaler scope falls vorhanden
-      - Sichtbar: dieser scope + pinned
-      - Heimatregion #de-bebb-strausberg taucht nur auf wenn
-        explizit pinned
+      - Sichtbar: dieser scope
 
   Datenbasis: scope-Bbox-Cache existiert bereits (Wunschliste 11
     + 24 + 27). Smallest-Containing-Scope-Lookup ist O(n_scopes)
     pro Paket -- akzeptabel weil Scope-Liste klein (<100).
 
-  Edge-Case Permanent-Reise: scope-Update getriggert wie heute
-    (GPS-Update + scope-Bbox-Refresh nach n Minuten). Bei
-    schneller Bewegung (Auto/Bahn) ggf. Hysterese: smallest-
-    scope nur wechseln wenn neue Position >X km im neuen scope
-    oder Y Minuten stabil.
+  Hysterese: braucht's NICHT als Filter-eigenes Feature. Das
+    GPS-/Scope-Update-Konzept (Wunschliste 11/24/27 etc.)
+    handelt Position-Refresh + Bbox-Recompute schon mit
+    sinnvoller Frequenz/Stabilitaet -- der Filter folgt
+    einfach dem aktuellen scope-Set.
+
+  Pinned-Konzept -- noch zu klaeren:
+    Erster Entwurf hatte "pinned scopes" (z.B. local/region
+    oder persoenlich Heimatdistrikt) die immer sichtbar
+    bleiben. Problem (User 2026-06-09):
+      Scopes sind Reichweiten-Definition, keine Routing-
+      Anweisung. Repeater forwarden NUR scopes die sie selbst
+      eingetragen haben. Ein "pinned #meineReisegruppe" oder
+      "pinned #heimat-distrikt" kommt am Reiseort gar nicht
+      an wenn die lokalen Repeater den scope nicht kennen.
+    Pinned 'local'/'lokal'/'region'/'regional' (die
+    semantischen Range-Scopes) waeren konzeptionell
+    weniger problematisch, weil die ueberall denselben
+    Semantik-Sinn haben. Pinned auf konkrete Geo-Scopes
+    (z.B. #de-bebb-strausberg) waere ein Mismatch zwischen
+    Wunsch und Forwarding-Realitaet.
+    -> Pinned-Feature verschieben oder weglassen, je nach
+    Diskussion. MVP Phase 5 startet OHNE pinned.
 
   Konzeptueller Bezug:
     - Wunschliste 11/24/27: scope-Bbox-System (Datenbasis)
-    - Wunschliste 32: ch.hops (Repeat-Cap-Layer, NICHT
-      Display-Layer -- klar trennen)
+    - Wunschliste 32: ch.hops (Repeat-Cap-Layer)
     - Wunschliste 46 Phase 2: ch.mute (lokal hide whole channel)
     - Diese Phase 5 ist die feinkoernige Scope-Achse INNERHALB
-      eines Channels.
+      eines Channels -- mit OPTIONALER Repeat-Cap-Kopplung
+      (also-block-repeat) zu Wunschliste 32.
 
   Vor Implementation: entscheiden ob 'filter scope' eigener
     Befehlsbaum oder Erweiterung von Phase 4 'filter region
