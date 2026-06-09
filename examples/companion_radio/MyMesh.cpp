@@ -876,7 +876,9 @@ void MyMesh::markHeardDirect(uint8_t hash) {
 }
 
 // Wunschliste 46 Phase 1 (Reise 2026-06-09).
-// Filter-Pattern-Match.
+// Filter-Pattern-Match. Case-INSENSITIVE (User-Wunsch 2026-06-09:
+// Bot-Antworten variieren Grossschreibung 'Pong'/'pong'/'PONG'; case-
+// sensitive zwingt User zu mehreren Patterns pro Bot).
 // Flags: bit0 = anchor start (^foo), bit1 = anchor end (foo$).
 //   both = exact, none = substring.
 bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) {
@@ -887,11 +889,16 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   bool anchor_start = (e.flags & 0x01) != 0;
   bool anchor_end   = (e.flags & 0x02) != 0;
   if (anchor_start && anchor_end) {
-    return sl == pl && memcmp(s, e.pattern, pl) == 0;
+    return sl == pl && strncasecmp(s, e.pattern, pl) == 0;
   }
-  if (anchor_start) return memcmp(s, e.pattern, pl) == 0;
-  if (anchor_end)   return memcmp(s + sl - pl, e.pattern, pl) == 0;
-  return strstr(s, e.pattern) != NULL;
+  if (anchor_start) return strncasecmp(s, e.pattern, pl) == 0;
+  if (anchor_end)   return strncasecmp(s + sl - pl, e.pattern, pl) == 0;
+  // substring (case-insensitive). strcasestr ist GNU-Extension --
+  // manuell implementieren fuer Portabilitaet.
+  for (size_t i = 0; i + pl <= sl; i++) {
+    if (strncasecmp(s + i, e.pattern, pl) == 0) return true;
+  }
+  return false;
 }
 
 bool MyMesh::filterSenderDropMatch(const char* sender_name) const {
@@ -8957,27 +8964,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "filter")) {
         pushCompanionMessage(
-          "filter (Wunschliste 46 Phase 1):\n"
-          "  Spam-Filter fuer eingehende Pakete.\n"
-          "  Wirkt 'for-us' -- App-Push unterdrueckt,\n"
-          "  Repeat-Funktion unbeeinflusst.");
+          "filter: Spam-Filter eingehender Pakete.\n"
+          "Wirkt 'for-us' (App-Push only),\n"
+          "Repeat-Funktion bleibt aktiv.");
         pushCompanionMessage(
-          "Syntax:\n"
-          "  filter <sender|text> drop add <pat>\n"
-          "  filter <sender|text> drop remove <pat|idx>\n"
-          "  filter <sender|text> drop list\n"
-          "  filter <sender|text> drop clear");
+          "Befehle (TYPE = sender oder text):\n"
+          "  filter TYPE drop add <pat>\n"
+          "  filter TYPE drop remove <pat|idx>");
+        pushCompanionMessage(
+          "  filter TYPE drop list\n"
+          "  filter TYPE drop clear");
         pushCompanionMessage(
           "Pattern-Anker:\n"
-          "  foo      = substring (ueberall)\n"
-          "  ^foo     = beginnt mit foo\n"
-          "  foo$     = endet mit foo\n"
-          "  ^foo$    = exact match\n"
-          "  \"foo bar\" = Quotes fuer Leerzeichen");
+          "  foo    = substring\n"
+          "  ^foo   = beginnt mit\n"
+          "  foo$   = endet mit\n"
+          "  ^foo$  = exact");
         pushCompanionMessage(
-          "sender-Filter wirkt auf DM-Absender und\n"
+          "  \"x y\" = Quotes fuer Leerzeichen");
+        pushCompanionMessage(
+          "sender-Filter: DM-Absender +\n"
           "Channel-Sender (Prefix vor ': ').\n"
-          "text-Filter wirkt auf Channel-Text-Teil.\n"
+          "text-Filter: Channel-Text-Teil.\n"
           "Je 16 Slots, persistent.");
         return;
       }
@@ -11433,8 +11441,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (a_start && a_end) { prefix = "^"; suffix = "$"; }
         else if (a_start)     { prefix = "^"; }
         else if (a_end)       { suffix = "$"; }
+        // Index 1-basiert anzeigen (User-Wunsch 2026-06-09: 'normale
+        // Menschen zaehlen ab 1'). remove akzeptiert den 1-basierten
+        // Index ebenfalls.
         snprintf(line, sizeof(line), "  %u: %s%s%s",
-                 (unsigned)i, prefix, arr[i].pattern, suffix);
+                 (unsigned)(i + 1), prefix, arr[i].pattern, suffix);
         size_t ll = strlen(line);
         if (bu + ll + 2 >= sizeof(buf)) flushb();
         if (bu > 0) buf[bu++] = '\n';
@@ -11455,8 +11466,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       p += 3;
       while (*p == ' ' || *p == '\t') p++;
       if (!*p) { pushCompanionMessage("Usage: filter ... drop add <pattern>"); return; }
-      // Quotes optional strippen
-      const char* pat = p;
+      // Pattern aus raw_cmd holen (case-preserving). cmd ist die
+      // lowercase-Kopie -- wuerden wir 'pat = p' nehmen, landet
+      // 'FooBar' als 'foobar' in der Liste. Offset relativ zum
+      // cmd-Anfang ist mit raw_cmd-Offset identisch (gleiche Laenge).
+      const char* pat = raw_cmd + (p - cmd);
       size_t plen = strlen(pat);
       if (plen >= 2 && pat[0] == '"' && pat[plen-1] == '"') {
         pat++; plen -= 2;
@@ -11483,10 +11497,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      // Dedup: gleicher Pattern + Flags?
+      // Dedup: gleicher Pattern + Flags? case-insensitive analog Match.
       for (uint8_t i = 0; i < cnt; i++) {
         if (arr[i].flags == flags
-            && strncmp(arr[i].pattern, pat, plen) == 0
+            && strncasecmp(arr[i].pattern, pat, plen) == 0
             && arr[i].pattern[plen] == 0) {
           pushCompanionMessage("(Pattern bereits in Liste -- skip)");
           return;
@@ -11510,13 +11524,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       p += 6;
       while (*p == ' ' || *p == '\t') p++;
       if (!*p) { pushCompanionMessage("Usage: filter ... drop remove <pattern|index>"); return; }
-      // Versuche zuerst als Index zu parsen
+      // Versuche zuerst als Index zu parsen.
+      // User-Wunsch 2026-06-09: Index 1-basiert (Listen-Anzeige zaehlt
+      // auch ab 1). Internal Array-Index = idx-1. Buffer-Underflow-
+      // Schutz: idx muss >=1 sein, idx-1 muss <cnt sein.
       char* endp = NULL;
       long idx = strtol(p, &endp, 10);
-      if (endp && endp != p && (*endp == 0 || *endp == ' ' || *endp == '\t')
-          && idx >= 0 && (uint8_t)idx < cnt) {
-        // Slot idx loeschen, Liste kompaktieren
-        for (uint8_t j = (uint8_t)idx; j + 1 < cnt; j++) {
+      bool looks_like_index = (endp && endp != p
+                               && (*endp == 0 || *endp == ' ' || *endp == '\t'));
+      if (looks_like_index) {
+        if (idx < 1 || (uint32_t)idx > cnt) {
+          char r[80];
+          snprintf(r, sizeof(r), "Index %ld ungueltig (1..%u erlaubt).",
+                   idx, (unsigned)cnt);
+          pushCompanionMessage(r);
+          return;
+        }
+        uint8_t i = (uint8_t)(idx - 1);
+        for (uint8_t j = i; j + 1 < cnt; j++) {
           arr[j] = arr[j+1];
         }
         memset(&arr[cnt-1], 0, sizeof(arr[cnt-1]));
@@ -11528,8 +11553,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      // Sonst als Pattern-Match
-      const char* pat = p;
+      // Sonst als Pattern-Match. Pattern aus raw_cmd holen (case-
+      // preserving fuer korrekten Vergleich gegen gespeicherte Patterns
+      // -- diese sind case-preserving seit Add-Fix vom 2026-06-09).
+      const char* pat = raw_cmd + (p - cmd);
       size_t plen = strlen(pat);
       // trailing whitespace strippen
       while (plen > 0 && (pat[plen-1] == ' ' || pat[plen-1] == '\t'
@@ -11540,9 +11567,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       uint8_t flags = 0;
       if (plen > 0 && pat[0] == '^') { flags |= 0x01; pat++; plen--; }
       if (plen > 0 && pat[plen-1] == '$') { flags |= 0x02; plen--; }
+      // Match case-insensitive (User-Wunsch 2026-06-09: case-insensitive
+      // im Filter -- analog match-Funktion).
       for (uint8_t i = 0; i < cnt; i++) {
         if (arr[i].flags == flags
-            && strncmp(arr[i].pattern, pat, plen) == 0
+            && strncasecmp(arr[i].pattern, pat, plen) == 0
             && arr[i].pattern[plen] == 0) {
           for (uint8_t j = i; j + 1 < cnt; j++) arr[j] = arr[j+1];
           memset(&arr[cnt-1], 0, sizeof(arr[cnt-1]));
