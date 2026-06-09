@@ -3225,11 +3225,13 @@ void MyMesh::printRepeaterLegendEntry(const DiscoverEntry& e,
   const char* name = known ? known->name : "(unknown)";
   char line[160];
   if (verbose) {
-    // Fuer 'discover': raw Werte mitausgeben. their=ihre RX unseres REQ,
-    // our=unsere RX ihrer RESP (SNR + RSSI). their RSSI ist im Protokoll
-    // nicht enthalten -- darum nur SNR-Wert fuer 'their'.
+    // Fuer 'discover': raw Werte mitausgeben (Reise-Wunsch 2026-06-09:
+    // Wording 'our/their' -> 'rx_us/rx_him' -- klarer welche
+    // Empfangsrichtung gemeint ist):
+    //   rx_him = unsere RX seiner RESP (SNR + RSSI) -- wir hoeren ihn
+    //   rx_us  = seine RX unseres REQ (SNR, sein RSSI nicht im Protokoll)
     snprintf(line, sizeof(line),
-             "%s %.30s [%s %s] our=%+.1fdB/%ddBm their=%+.1fdB%s%s",
+             "%s %.30s [%s %s] rx_him=%+.1fdB/%ddBm rx_us=%+.1fdB%s%s",
              prefix6, name, role, qual,
              (double)e.our_snr_q4 / 4.0, (int)e.our_rssi_dbm,
              (double)e.their_snr_q4 / 4.0,
