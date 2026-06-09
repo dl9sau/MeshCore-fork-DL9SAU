@@ -3110,46 +3110,187 @@ Quelle: User-Frage 2026-06-08 (TZ-Anzeige beim Reisen).
 
 
 --------------------------------------------------------------------------------
-51. USB-Serial BREAK-Signal -- Reboot / CLI-Aktivierung
+51. USB-Serial BREAK-Signal -- CLI-Aktivierung + Reboot
 --------------------------------------------------------------------------------
 
-Status: Idee, niedrige Prio. Frage: ist BREAK ueberhaupt erkennbar
-        auf ESP32-S3 USB-CDC (HWCDC)?
+Status: Idee. Frage: ist BREAK ueberhaupt erkennbar auf ESP32-S3
+        USB-CDC (HWCDC)?
 
 Hintergrund:
   BREAK ist ein Klassik-RS232-Signal -- die TX-Line wird fuer mehr
-  als eine Frame-Dauer auf LOW gehalten. Klassischer 'kontrollierter
-  Reset' oder 'Get attention' Befehl in serial-Protokollen.
-  Auf USB-CDC ist BREAK ein VIRTUAL-Signal (in der CDC-Spec
-  definiert, vom Host als 'SEND_BREAK' Request an das Device).
+  als eine Frame-Dauer auf LOW gehalten. Auf USB-CDC ist BREAK ein
+  VIRTUAL-Signal (in der CDC-Spec definiert, vom Host als
+  'SEND_BREAK' Request an das Device).
 
-Use-Cases bei DL9SAU:
-  - Soft-Reboot des Geraets ohne Power-Cycle (User-Fall:
-    Tracker haengt sich in einem Zustand auf, USB-Connect, BREAK
-    senden, Geraet reboot't).
-  - Companion-CLI auf USB aktivieren. Aktuell laeuft die CLI nur
-    via BLE oder via spezielle Frames. Mit BREAK koennte man via
-    USB-Terminal interaktiv ins CLI rein. CLI-Befehl 'serial-cli
-    off' wuerde das Feature wieder ausschalten.
-  - Befehl 'serial-on' (CLI) wuerde das Feature ohne BREAK
-    aktivieren (im normalen Modus).
+Zwei Konzepte (User-Klarstellung 2026-06-09):
+
+  A) Erstes BREAK -> CLI-on
+     Companion-CLI wird auf USB-Serial verfuegbar (interaktiv).
+     Aktuell laeuft die CLI nur ueber BLE oder spezielle Frames.
+     User kann jetzt z.B. 'bluetooth on' eingeben um BLE wieder
+     einzuschalten wenn das Geraet im Schlaf-Cycle ist.
+     CLI-Befehl 'serial-cli off' (oder analog) beendet das Feature.
+
+  B) DOPPEL-BREAK -> Reboot
+     Zweites BREAK innerhalb von 30-60s (Fenster konfigurierbar)
+     loest board.reboot() aus.
+     User-Anweisung 2026-06-09: 'nicht dass BREAK -> cli, serial
+     off, BREAK einen reboot ausloest; der zweite BREAK kurz nach
+     serial off war vielleicht weil user einen Befehl vergessen
+     hatte einzugeben und deshalb nochmal die CLI haben will.'
+     -> Window-Timer: nach jedem BREAK + Aktion ein Cooldown von
+     z.B. 60s in dem ein erneutes BREAK wieder als 'CLI-on'-
+     Trigger interpretiert wird, NICHT als Doppel-BREAK-Reboot.
+
+  Plus Befehl 'serial-on' (CLI, ohne BREAK): explizit aktivieren.
+  Plus Befehl 'serial-cli off' (CLI): beenden.
 
 Vor-Implementierung-Check:
   - ESP32-S3 USB-CDC (HWCDC) API: gibt es einen BREAK-Callback?
     Arduino-Framework: HWCDC::onEvent (?) auf BREAK?
-  - Falls nicht direkt verfuegbar: dauerhaftes LOW auf RX-Line
-    detektieren waere ein Workaround, aber HWCDC abstrahiert das.
+  - Falls nicht direkt verfuegbar: alternative Trigger pruefen
+    (z.B. spezielle Magic-Sequenz auf der seriellen Eingabe).
 
 Caveats:
   - User-Fehlerresistenz: BREAK darf nicht versehentlich aus einem
-    Terminal-Programm kommen (z.B. minicom Strg+A F sendet BREAK).
-    Default-Verhalten 'BREAK reboot't' koennte ueberraschen.
-    Empfehlung: per Pref aktivierbar machen.
-  - Recovery-Pfad wenn BLE haengt: BREAK als 'always-on'-Pruefung
-    machen Sinn (User kommt sonst nicht ran). Pref-Default
-    waere dann 'reboot' aktiv.
+    Terminal-Programm den Reboot ausloesen. Daher die Doppel-
+    BREAK-Logik + Cooldown-Window oben.
+  - Recovery-Pfad wenn BLE haengt + Hardware ohne Button: BREAK
+    waere DER Recovery-Pfad. Default 'enabled' angezeigt.
 
-Quelle: User-Idee 2026-06-09.
+Quelle: User-Idee 2026-06-09 + Klarstellung 2026-06-09.
+
+
+--------------------------------------------------------------------------------
+52. Remote-Administration im profile=normal -- REQ_TYPE_CLI
+--------------------------------------------------------------------------------
+
+Status: Soll VOR/MIT Wunschliste 43 (BLE-Power-Cycle) implementiert
+        werden -- sonst hat man nach 'bluetooth off' keine remote
+        Wiederbelebungsmoeglichkeit ausser Button vor Ort.
+Prio: HOCH (Backstop fuer BLE-Power-Feature).
+
+Aktueller Stand:
+  onContactRequest in MyMesh.cpp:2478 handhabt nur:
+    REQ_TYPE_GET_STATUS   (Wunschliste 7 Phase 4, nur REPEATER-Role)
+    REQ_TYPE_GET_OWNER_INFO
+
+  KEIN REQ_TYPE_CLI fuer Remote-Admin-Befehle.
+
+  simple_repeater hat das ueber CommonCLI::handleCommand
+  (CommonCLI.cpp:215-219+): reboot, poweroff, clkreboot,
+  advert.zerohop, etc. Plus Admin-Permission-System
+  (ContactInfo::flags & 0x01 = favourite/admin).
+
+DL9SAU-Companion Plan:
+  - REQ_TYPE_CLI Handler im onContactRequest hinzufuegen.
+  - User-Wunsch 2026-06-09: 'vollstaendiges commandset' im
+    profile=normal -- nicht nur reboot, sondern alle CLI-Befehle
+    die wir auch lokal akzeptieren.
+  - Permission-Check: nur Contacts mit favourite/admin-Flag oder
+    spezifischer pubkey-allowlist duerfen.
+  - REPEATER-Role-Gate: nur wenn effectiveAdvertRole() == REPEATER.
+    Im CHAT-Mode oder Pure-Companion-Mode bleibt Remote-CLI off.
+
+Konkrete Befehle die remote sinnvoll sind:
+  reboot                  -- BLE-Recovery via Remote
+  bluetooth on/off        -- BLE explizit toggeln (sobald
+                              Wunschliste 43 implementiert)
+  gps on/off              -- GPS Power-Mode
+  set <key> <value>       -- Pref-Aenderung
+  get <key>               -- Pref-Lesen
+  stats                   -- Status / Diagnose
+  trace ...               -- Debug-Trace ein/aus
+  scope ...               -- Scope-Management
+  clock                   -- Uhrzeit pruefen
+  discover ...            -- Mesh-Discovery triggern
+  -- usw, alles was 'handleCompanionCommand' kennt.
+
+Wire-Format:
+  REQ_TYPE_CLI := 0x?? (Wert in BaseChatMesh.h definieren)
+  Payload: [4]sender_timestamp [N]command_text (ASCII)
+  Reply:   [4]sender_timestamp [M]response_text (ASCII, max 160-4)
+
+Implementations-Idee:
+  1) onContactRequest: bei data[0] == REQ_TYPE_CLI Permission-Check
+  2) Command-String aus data[1..] extrahieren
+  3) handleCompanionCommand mit Capture-Mechanismus aufrufen
+     (oder kompletter handleCommonCLI-Pfad mit reply-Buffer)
+  4) Response in reply-Buffer schreiben
+
+Caveats:
+  - Sicherheit: ohne Admin-Permission koennte jeder Mesh-User den
+    Repeater rebooten. Whitelist VOR Implementation festlegen.
+  - 160-Byte-Limit pro Wire-Frame -- lange Befehle/Responses
+    eventuell aufteilen (multi-frame).
+  - Wenn Companion-CLI an pushCompanionMessage Strings pushed,
+    muessten die via Remote umgelenkt werden (z.B. capture-buffer).
+
+Quelle: User-Wunsch 2026-06-09 ('vollstaendiges commandset'
+        fuer Fernadministration im normal-Mode).
+
+
+--------------------------------------------------------------------------------
+53. Hardware-Watchdog ESP32 -- Hang-Recovery
+--------------------------------------------------------------------------------
+
+Status: TODO Liste (User-Wunsch 2026-06-09). Vor Aktivierung
+        Stabilitaetstests noetig.
+
+Aktueller Stand:
+  - Arduino-ESP32-Framework: Task-Watchdog (TWDT) fuer loopTask
+    ist DEAKTIVIERT (default in neueren Versionen). Kein automatisches
+    Reboot bei haengendem loop().
+  - Wir nutzen den TWDT nirgendwo explizit.
+  - simple_repeater nutzt ihn auch nicht.
+  - Nur ein BLE-Advertising-Watchdog auf NRF52
+    (SerialBLEInterface.cpp:343) -- 10s check, restart wenn
+    Advertising gestoppt. ESP32-Aequivalent fehlt.
+
+Use-Case:
+  Wenn die Firmware in einem Deadlock haengt (z.B. Memory-Corruption,
+  Stack-Overflow, infinite loop in einem Callback), sollte das
+  Geraet sich selber neu starten statt 'tot' im Feld zu stehen.
+
+Plan:
+  Phase 1 -- TWDT initial aktivieren mit grossem Timeout (z.B. 60s):
+    esp_task_wdt_init(60, true);   // panic_handler reboot
+    esp_task_wdt_add(NULL);        // current task (loop)
+    Plus in loop(): esp_task_wdt_reset() bei jedem Iteration.
+
+  Phase 2 -- Mehrere Task-Pfade.
+    User-Erfahrung (LoRa-APRS-Firmware, User-Notiz 2026-06-09):
+    'Es gibt 2 threads, main und Webserver (eigentlich noch 2
+    weitere, bluetooth und serial). Alle laufen unabhaengig und
+    alle muessen den watchdog triggern.'
+    -> Pro Task ein esp_task_wdt_add(task_handle).
+    -> Pro Task ein periodischer Reset (z.B. am Anfang vom
+       jeweiligen FreeRTOS-Task-Loop).
+    DL9SAU-Tasks:
+       - loop() (main)
+       - BLE-Task (NimBLE/Bluedroid)
+       - vermutlich Wifi-Task wenn relevant
+       - LoRa-Driver-Task (Radio-IRQ-Handling)
+
+  Phase 3 -- Timeout abstimmen:
+    Tradeoff zwischen False-Positives (zu kurz = Reboot bei
+    legitimen langen Operationen) und Recovery-Speed (zu lang =
+    User wartet ewig).
+    Plausibel: 60s Timeout, weil eine LoRa-TX max ~10s dauert plus
+    Margin fuer flash-write etc.
+
+Caveats:
+  - User-Erfahrung 2026-06-09: 'Hat mich etwas Muehe gekostet, aber
+    das Ergebnis ist klasse (schuetzt bei Haengern, und loeste nie
+    faelschlicherweise aus).' -> erwartetes Tuning-Effort.
+  - Vor Aktivierung im normalen Betrieb: ausreichend Tests im
+    Stress-Mode (BLE-Traffic, viele Repeats, GPS-Cycling) sodass
+    keine Legitime-Pfad-Reboots passieren.
+  - Optional: User-Pref um WDT auf/aus zu schalten (z.B.
+    'set watchdog on/off') -- Default 'on' nach Tests.
+
+Quelle: User-Wunsch 2026-06-09, basierend auf positiver Erfahrung
+        in einer LoRa-APRS-Firmware mit Multi-Thread-WDT.
 
 
 
