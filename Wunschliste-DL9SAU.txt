@@ -2766,6 +2766,78 @@ Hintergrund:
   Storage und Aufmerksamkeit werden belastet. Filter sollen VOR
   App-Push und VOR Storage-Aufnahme greifen.
 
+Uebersicht -- Wire-Pakete vs Heutiges Verhalten
+(Stand 2026-06-09, mit default-scope ab Firmware 1.15):
+
+  Paket-Typ                       | Display heute     | Repeat heute
+  --------------------------------|-------------------|---------------------------
+  GRP_TXT scoped, bekannt         | zeigt (Klartext)  | scope-Allowlist + ch.hops
+  GRP_TXT scoped, unbekannt       | unmoeglich        | scope-Allowlist + ch.hops
+  GRP_TXT unscoped, bekannt       | zeigt (Klartext)  | flood_max_unscoped_comp (cap)
+  GRP_TXT unscoped, unbekannt     | unmoeglich        | flood_max_unscoped_comp (cap)
+  DM scoped (Absender default)    | zeigt (an mich)   | Flood-Routing scoped
+  DM unscoped (Legacy-Absender)   | zeigt (an mich)   | Flood-Routing unscoped
+  DM via known out_path           | zeigt (an mich)   | Direct (kein flood, kein scope)
+  Advert User scoped              | App-Push          | flood scope-Regeln
+  Advert User unscoped            | App-Push          | flood, scope-Regeln
+  Advert Repeater                 | UI optional       | flood, scope-Regeln
+  PathReturn/Ack scoped           | n/a               | flood scoped oder direct
+  PathReturn/Ack unscoped         | n/a               | flood unscoped oder direct
+  REQ/RESP/ANON_REQ scoped        | n/a               | scope-aware
+  REQ/RESP/ANON_REQ unscoped      | n/a               | gedroppt (global)
+
+  Hinweis ab Firmware 1.15 + default_scope:
+    Wenn der Absender default_scope konfiguriert hat, ist
+    ALLES was floodet auch gescoped (DM/Advert/GRP_TXT/PathReturn).
+    'unscoped' wird damit Legacy-Modus oder bewusste Wahl
+    (App-Flag send_unscoped).
+
+
+Filter-Achsen-Uebersicht:
+
+  Filter (Phase)        | profile     | Skopus            | Wirkt auf
+  ----------------------|-------------|-------------------|---------------------------
+  sender drop/keep (1)  | for/rep/cpl | bekannte Channels | GRP_TXT + DM (Klartext-Name)
+  text drop/keep (1)    | for/rep/cpl | bekannte Channels | GRP_TXT (Klartext)
+  scope drop/keep (5)   | for/rep/cpl | bekannte Channels | GRP_TXT (scope-Tag)
+  sender pubkey (4)     | repeat      | global Wire       | alle Wire mit Sender-Hash
+                        |             |                   | (Spammer-Hardblock)
+  advert drop (4)       | for-us      | n/a               | Advert-Push (App+UI),
+                        |             |                   | NICHT heard_list
+  unknown-channel       | repeat      | n/a (Wire)        | GRP_TXT auf unkonfigurierten
+    repeat 4-stufig (n) |             |                   | Channels
+  region drop (4)       | TBD         | TBD               | vs scope-Konflikt -- vor
+                        |             |                   | Implementation diskutieren
+
+
+Cave-Block -- wichtige Asymmetrien + Stolperfallen:
+
+  * 'all-channels' im Befehl = 'alle lokal konfigurierten Channels'.
+    NICHT 'alle Channel-Hashes auf der Wire'. Filter koennen nur
+    Channels referenzieren die das Geraet kennt.
+
+  * DM ist ab Firmware 1.15 + default_scope ebenfalls gescoped.
+    Ein 'scope drop unscoped'-Filter ginge auf DM nur dann los,
+    wenn der DM-Absender keinen default_scope hat (Legacy).
+
+  * sender-Filter (Phase 1) wirkt auf Klartext-Name; sender-Filter
+    pubkey (Phase 4) wirkt auf Wire-Hash -- zwei verschiedene
+    Achsen, beide zulaessig.
+
+  * unscoped GRP_TXT auf bekanntem Channel: erlaubt mit
+    flood_max_unscoped_companions Cap (heute). Filter 'drop unscoped'
+    schraenkt das pro Channel zusaetzlich ein.
+
+  * unbekannte Channels: Display trivial unmoeglich; Repeat steuerbar
+    via 'filter unknown-channel repeat yes|scoped|unscoped|no'.
+
+  * scope-Filter darf nur VERSCHAERFEN, nie LOCKERN. Globale
+    Allowlist im Repeater-Profil bleibt autoritativ.
+
+  * REQ/RESP/ANON_REQ auf unscoped droppen wir bereits global -- ein
+    spezifischer Filter dafuer ist nicht noetig.
+
+
 Konzept-Achsen (User-Zusammenfassung 2026-06-09):
 
   Filter-Typ      Wo wirkt                          profile-Achse?
@@ -3013,8 +3085,14 @@ Phasen-Plan:
     ja). Ob er solche Pakete weiterleiten soll oder nicht
     ist eine Forwarding-Policy-Frage, NICHT Display.
 
-      filter unknown-channel repeat yes|no
-        (Default yes -- erhaelt heutiges Verhalten)
+      filter unknown-channel repeat yes|scoped|unscoped|no
+        yes      -- alle unbekannten Channels weiterleiten
+                    (heutiges Default-Verhalten)
+        scoped   -- nur scoped weiterleiten, unscoped droppen
+        unscoped -- nur unscoped weiterleiten, scoped droppen
+                    (eher selten gebraucht, der Vollstaendigkeit
+                    halber)
+        no       -- gar nicht weiterleiten
 
     Wirkt ausschliesslich auf Repeat-Pfad. Display ist
     trivialerweise immer 'aus' (kein Klartext ohne Key).
