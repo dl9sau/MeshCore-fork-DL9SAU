@@ -2935,6 +2935,37 @@ Phasen-Plan:
            Channels (z.B. #test) bleibt's offen wie es das
            globale Profil zulaesst.
 
+  Reichweiten-Grenze (User-Konklusion 2026-06-09 abends):
+    Nach Durchspielen aller Filter-Kombinationen (allow-
+    neuer-scope, drop-bekannter-scope, drop-unscoped,
+    all-channels-Varianten + Negation):
+
+    Scope-Filter (display UND repeat-Profil) wirkt
+    ausschliesslich auf eingehende GRP_TXT auf BEKANNTEN
+    (lokal konfigurierten) Channels. Punkt.
+
+    Begruendung:
+      - 'all-channels' impliziert sonst Wirkung auf
+        unbekannte Channel-Hashes -> Tippbarkeit + Doku-
+        Klarheit leidet.
+      - Adverts/DM/REQ/RESP/path-discovery sind eigene
+        Wire-Welten (pubkey/hash-zentriert). Sie via
+        scope-Filter abzudecken vervielfacht Komplexitaet
+        ohne klar greifbaren Mehrwert.
+      - REQ/RESP/ANON_REQ auf unscoped droppen wir
+        ohnehin. DM laeuft unscoped. Sender-Filter via
+        pubkey-Hex (Phase 4) ist die richtige Achse fuer
+        Spammer-Hardblock auf Wire-Ebene.
+      - 'all-channels' im Befehl meint folglich 'alle lokal
+        konfigurierten Channels' -- nicht 'alle Channel-
+        Hashes auf der Wire'.
+
+    Selbe Reichweiten-Grenze gilt fuer text-Filter
+    (offensichtlich: Text ohne Key kein Klartext).
+    Sender-Filter (Klartext-Name) wirkt nur auf GRP_TXT
+    + DM wo der Sender-Name sichtbar ist; pubkey-Hardblock
+    (Phase 4) ist eine getrennte Wire-Achse.
+
   Motivation (User-Erfahrung 2026-06-09):
     Channel Public ist unuebersichtlich -- mischt unscoped +
     #de + alle #de-* + #europe-* etc. Mehrwert: Scopes je
