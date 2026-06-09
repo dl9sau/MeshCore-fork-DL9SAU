@@ -3162,8 +3162,12 @@ Quelle: User-Idee 2026-06-09 + Klarstellung 2026-06-09.
 
 
 --------------------------------------------------------------------------------
-52. Remote-Administration im profile=normal -- REQ_TYPE_CLI
+52. Remote-Administration im profile=normal -- REQ_TYPE_ADMIN_CMD
 --------------------------------------------------------------------------------
+(User-Klarstellung 2026-06-09: dies ist KEIN CLI im klassischen Sinne
+ -- kein interaktives Terminal, kein Prompt mit Historie. Es sind
+ RPC-artige Befehls-Strings in REQ/RESP-Wire-Frames. Wire-Konstante
+ daher REQ_TYPE_ADMIN_CMD, nicht REQ_TYPE_CLI.)
 
 Status: Soll VOR/MIT Wunschliste 43 (BLE-Power-Cycle) implementiert
         werden -- sonst hat man nach 'bluetooth off' keine remote
@@ -3175,7 +3179,7 @@ Aktueller Stand:
     REQ_TYPE_GET_STATUS   (Wunschliste 7 Phase 4, nur REPEATER-Role)
     REQ_TYPE_GET_OWNER_INFO
 
-  KEIN REQ_TYPE_CLI fuer Remote-Admin-Befehle.
+  KEIN REQ_TYPE_ADMIN_CMD fuer Remote-Admin-Befehle.
 
   simple_repeater hat das ueber CommonCLI::handleCommand
   (CommonCLI.cpp:215-219+): reboot, poweroff, clkreboot,
@@ -3183,7 +3187,7 @@ Aktueller Stand:
   (ContactInfo::flags & 0x01 = favourite/admin).
 
 DL9SAU-Companion Plan:
-  - REQ_TYPE_CLI Handler im onContactRequest hinzufuegen.
+  - REQ_TYPE_ADMIN_CMD Handler im onContactRequest hinzufuegen.
   - User-Wunsch 2026-06-09: 'vollstaendiges commandset' im
     profile=normal -- nicht nur reboot, sondern alle CLI-Befehle
     die wir auch lokal akzeptieren.
@@ -3221,7 +3225,7 @@ Passwort-basiertes Login (User-Wunsch 2026-06-09):
     guest_password (reduzierte Befehls-Whitelist).
     Bei Erfolg: RESP_SERVER_LOGIN_OK + Contact bekommt Permission-
     Marker (z.B. flags |= 0x01 wie simple_repeater).
-  REQ_TYPE_CLI: prueft Contact-Permission, fuehrt Befehl aus.
+  REQ_TYPE_ADMIN_CMD: prueft Contact-Permission, fuehrt Befehl aus.
   Guest-Befehle-Whitelist (Vorschlag, kann konfigurierbar werden):
     stats, clock, scope (read-only), get, trace (lesen)
   Admin-Befehle: alles (incl. reboot, bluetooth toggle, set, etc.).
@@ -3234,15 +3238,15 @@ Passwort-basiertes Login (User-Wunsch 2026-06-09):
       ANON_REQ_TYPE_BASIC     -- clock + features
     Diese drei bleiben immer Public-Read fuer alle Mesh-User
     (kein Login-Request davor noetig). Permission-Check NUR fuer
-    REQ_TYPE_CLI (Admin/Guest).
+    REQ_TYPE_ADMIN_CMD (Admin/Guest).
 
 Wire-Format:
-  REQ_TYPE_CLI := 0x?? (Wert in BaseChatMesh.h definieren)
+  REQ_TYPE_ADMIN_CMD := 0x?? (Wert in BaseChatMesh.h definieren)
   Payload: [4]sender_timestamp [N]command_text (ASCII)
   Reply:   [4]sender_timestamp [M]response_text (ASCII, max 160-4)
 
 Implementations-Idee:
-  1) onContactRequest: bei data[0] == REQ_TYPE_CLI Permission-Check
+  1) onContactRequest: bei data[0] == REQ_TYPE_ADMIN_CMD Permission-Check
   2) Command-String aus data[1..] extrahieren
   3) handleCompanionCommand mit Capture-Mechanismus aufrufen
      (oder kompletter handleCommonCLI-Pfad mit reply-Buffer)
