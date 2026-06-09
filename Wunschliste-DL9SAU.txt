@@ -2811,11 +2811,53 @@ Phasen-Plan:
     ch.mute <channel> off
     ch.mute list
 
-  Phase 3 -- Positiv-Listen:
-    filter <type> allow add/remove/list/clear <pattern>
-    filter <type> mode strict|lenient
-      strict:  nur allow-Liste durchlassen
-      lenient: drop-Liste droppt, Rest durch (Default)
+  Phase 3 -- Positiv-Listen (User-Idee 2026-06-09 vereinfacht):
+    filter <type> keep add/remove/list/clear <pattern>
+      (vorher 'allow' -- 'keep' ist intuitiver und passt zur
+      drop-Gegenseite)
+
+    KEIN separater 'mode strict|lenient'-Schalter noetig. Der
+    Modus ergibt sich aus den Listen-Eintraegen selbst:
+
+      - Nur drop-Eintraege:        klassischer Blocklist-Mode
+                                   (drop matched, Rest durch)
+      - Nur keep-Eintraege:        Erweiterung der Default-
+                                   Durchlass-Menge, droppt
+                                   nichts -- effektiv wirkungslos
+                                   solange kein 'drop' dazukommt
+      - drop + keep gemischt:      keep hat Vorrang -- gemachter
+                                   keep-Match laesst Paket durch,
+                                   ueberspringt drop-Check.
+      - 'drop *' + keep <pattern>: Whitelist-Mode. Alles wird
+                                   gedroppt AUSSER was die
+                                   keep-Liste matched.
+
+    Beispiel:
+      filter text drop add *bot*
+      filter text keep add "important-bot-alert"
+        -> Bot-Texte drop, aber explizit erlaubter Alert durch.
+
+      filter text drop add *
+      filter text keep add ping
+      filter text keep add pong
+        -> nur ping/pong durch, alles andere weg.
+
+    Channel-Mute als Spezialfall (User-Idee 2026-06-09):
+      filter text on-channel Public drop *
+        -> komplette Text-Anzeige auf Public stumm. Macht
+           Phase-2-'ch.mute Public' als eigenen Befehl im
+           Prinzip redundant.
+
+      filter text on-channel Public drop *
+      filter text on-channel Public keep ping
+        -> auf Public nur 'ping' sichtbar.
+
+    Vorteil: ein konsistentes Modell deckt Drop-Liste,
+    Allow-Liste, Mute und gemischte Faelle ab. Weniger
+    Befehlsstruktur zu erklaeren. Nachteil: 'drop *' fuer
+    Mute ist tippintensiv -- Convenience-Alias 'ch.mute'
+    kann optional draufgesetzt werden (Phase 2 dann
+    Syntax-Zucker statt eigener Mechanik).
 
   Phase 4 -- Advanced:
     filter region drop/allow <name>
