@@ -7847,6 +7847,8 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "override_scope_name") == 0) { brExtractString(val_start, val_len, _prefs.override_scope_name, sizeof(_prefs.override_scope_name)); _br_applied++; return; }
       if (strcmp(key, "override_scope_key") == 0)  { brExtractHex(val_start, val_len, _prefs.override_scope_key, sizeof(_prefs.override_scope_key)); _br_applied++; return; }
       if (strcmp(key, "owner_info") == 0)          { brExtractString(val_start, val_len, _prefs.owner_info, sizeof(_prefs.owner_info)); _br_applied++; return; }
+      if (strcmp(key, "passwd_admin") == 0)        { brExtractString(val_start, val_len, _prefs.passwd_admin, sizeof(_prefs.passwd_admin)); _br_applied++; return; }
+      if (strcmp(key, "passwd_guest") == 0)        { brExtractString(val_start, val_len, _prefs.passwd_guest, sizeof(_prefs.passwd_guest)); _br_applied++; return; }
     }
     if (val_type == 'a' && strcmp(key, "msg_store_limit") == 0) {
       brExtractUint8Array(val_start, val_len, _prefs.msg_store_limit, 5);
@@ -8894,7 +8896,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  autoadd_config autoadd_max_hops\n"
           "  path_hash_mode buzzer_quiet\n"
           "  messages_append_scope_to_name (on|off)\n"
-          "  owner_info (max 119, '|' -> Newline)");
+          "  owner_info (max 119, '|' -> Newline)\n"
+          "  passwd_admin / passwd_guest (Remote-CLI)");
         pushCompanionMessage(
           "Identity (Reboot noetig!):\n"
           "  set prv.key <128 hex chars>\n"
@@ -11922,6 +11925,53 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // -- set owner_info <text> (case-sensitiv, raw_cmd, lange Strings) --
+    // Reise-Wunsch 2026-06-09 (Wunschliste 52): Remote-Admin/Guest-
+    // Passwoerter persistent setzen.
+    //   'set passwd_admin <pw>'    -> Vollzugriff via Remote-CLI
+    //   'set passwd_guest <pw>'    -> Read-Only-Subset (optional)
+    //   'set passwd_admin clear'   -> Remote-Admin deaktivieren
+    //   'set passwd_admin'         -> leer = clear
+    //   'set passwd_guest clear/leer' analog
+    // Restliche CLI-Pfade (Wunschliste 52 Schritte 4-8) folgen separat.
+    if (strcmp(key, "passwd_admin") == 0
+        || strcmp(key, "passwd_guest") == 0
+        || strcmp(key, "passwd.admin") == 0
+        || strcmp(key, "passwd.guest") == 0) {
+      bool is_admin = (strcmp(key, "passwd_admin") == 0
+                       || strcmp(key, "passwd.admin") == 0);
+      char* dst = is_admin ? _prefs.passwd_admin : _prefs.passwd_guest;
+      size_t dst_sz = is_admin ? sizeof(_prefs.passwd_admin)
+                                : sizeof(_prefs.passwd_guest);
+      const char* what = is_admin ? "passwd_admin" : "passwd_guest";
+
+      // Wert ab raw_cmd nach 'set <key>' extrahieren
+      const char* rp = raw_cmd;
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;  // skip "set"
+      while (*rp == ' ' || *rp == '\t') rp++;
+      while (*rp && *rp != ' ' && *rp != '\t') rp++;  // skip "passwd_xxx"
+      while (*rp == ' ' || *rp == '\t') rp++;
+      if (!*rp || strcmp(rp, "clear") == 0) {
+        memset(dst, 0, dst_sz);
+        savePrefs();
+        char r[60]; snprintf(r, sizeof(r), "OK - %s cleared.", what);
+        pushCompanionMessage(r);
+        return;
+      }
+      // Copy + trailing whitespace strip
+      StrHelper::strncpy(dst, rp, dst_sz);
+      size_t L = strlen(dst);
+      while (L > 0 && (dst[L-1] == ' ' || dst[L-1] == '\t'
+                       || dst[L-1] == '\r' || dst[L-1] == '\n')) {
+        dst[--L] = 0;
+      }
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - %s gesetzt (%u Zeichen).",
+                          what, (unsigned)L);
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Wunschliste 7 Phase 1: free-form Beschreibung der Node. Max 119
     // Zeichen + NUL. '|' wird in '\n' uebersetzt (analog CommonCLI).
     if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) {
@@ -12985,6 +13035,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned)_prefs.flood_max_unscoped_companions);
     }
     else if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) snprintf(r, sizeof(r), "owner_info = %s", _prefs.owner_info[0] ? _prefs.owner_info : "(leer)");
+    else if (strcmp(key, "passwd_admin") == 0 || strcmp(key, "passwd.admin") == 0)
+      snprintf(r, sizeof(r), "passwd_admin = %s",
+               _prefs.passwd_admin[0] ? "(gesetzt)" : "(leer)");
+    else if (strcmp(key, "passwd_guest") == 0 || strcmp(key, "passwd.guest") == 0)
+      snprintf(r, sizeof(r), "passwd_guest = %s",
+               _prefs.passwd_guest[0] ? "(gesetzt)" : "(leer)");
     else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
       const char* nm = (_prefs.loop_detect == 0) ? "off" : (_prefs.loop_detect == 1) ? "minimal" : (_prefs.loop_detect == 2) ? "moderate" : "strict";
       snprintf(r, sizeof(r), "loop_detect = %s", nm);

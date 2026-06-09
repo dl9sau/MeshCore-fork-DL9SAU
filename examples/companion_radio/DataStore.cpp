@@ -302,6 +302,10 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // Files liefert file.read 0 Bytes -> Pre-Init in begin() (default 1).
     file.read((uint8_t *)&_prefs.messages_append_scope_to_name,
               sizeof(_prefs.messages_append_scope_to_name));
+    // Reise-Wunsch 2026-06-09 (Wunschliste 52): admin/guest passwords.
+    // Bei alten Files leer (memset 0 ist Default).
+    file.read((uint8_t *)_prefs.passwd_admin, sizeof(_prefs.passwd_admin));
+    file.read((uint8_t *)_prefs.passwd_guest, sizeof(_prefs.passwd_guest));
 
     file.close();
   }
@@ -389,6 +393,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Reise-Wunsch 2026-06-08: messages_append_scope_to_name
     file.write((uint8_t *)&_prefs.messages_append_scope_to_name,
                sizeof(_prefs.messages_append_scope_to_name));
+    // Reise-Wunsch 2026-06-09: passwd_admin/passwd_guest
+    file.write((uint8_t *)_prefs.passwd_admin, sizeof(_prefs.passwd_admin));
+    file.write((uint8_t *)_prefs.passwd_guest, sizeof(_prefs.passwd_guest));
 
     file.close();
   }

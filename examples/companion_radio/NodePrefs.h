@@ -436,4 +436,12 @@ struct NodePrefs {  // persisted to file
   // Wirkung: bei off kann die App den Sender-Namen wieder unverändert
   // gegen ihre DB matchen -> Pfad-Anzeige funktioniert wieder.
   uint8_t        messages_append_scope_to_name;
+  // Reise-Wunsch 2026-06-09 (Wunschliste 52): Remote-CLI-Login per
+  // Passwort. Admin-Passwort gibt vollen Zugriff auf alle Befehle,
+  // Guest-Passwort gibt reduzierten Read-only-Set (optional).
+  // Leer = jeweiliges Login deaktiviert. Anonyme Repeater-Queries
+  // (ANON_REQ_TYPE_OWNER/REGIONS/BASIC) brauchen kein Passwort.
+  // CLI: set passwd_admin <pw> / set passwd_guest <pw> / ...clear
+  char           passwd_admin[32];
+  char           passwd_guest[32];
 };
