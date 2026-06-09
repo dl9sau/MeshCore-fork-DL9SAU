@@ -2554,6 +2554,73 @@ Vor-Implementierung-Check:
 
 Quelle: User-Idee 2026-06-06 (Wunschliste-Sammlung vor Upstream-1.16-Merge).
 
+---- Erweiterung 2026-06-09 (User-Iteration analog GPS-Power) ----
+
+User hat das Konzept verfeinert -- 1:1 Analogie zur GPS-Power-Logik
+(Wunschliste 44 / aktueller Code manageGpsPower):
+
+CLI/Befehl-Set:
+  bluetooth power cycle      (= cycle-mode, schlaeft nach 5min ohne Verbindung)
+  bluetooth power always-on  (kein cycling)
+  bluetooth on               (sofort einschalten, persistent)
+  bluetooth off              (sofort ausschalten, persistent)
+  bluetooth tmp-off          (ausschalten, NICHT persistent -- ueberschreibt
+                              'on' nicht. Nach Reboot wieder an wenn 'on'
+                              persisted war.)
+
+Profile-Verhalten:
+  profile=normal (echter Repeater):
+    bluetooth power=cycle (Default) -> nach 5min ohne Connect: tmp-off.
+    Permanent abgeschaltet bleibt es ohne weiteres -- Repeater steht
+    fest, niemand connectet sich vermutlich. Stromersparnis maximal.
+
+  profile=defensive (Client mit Repeat):
+    bluetooth power=cycle -> nach 5min ohne Connect: tmp-off,
+    periodisches Wake-Window alle z.B. 30min fuer 1-2min.
+    User schaut spaeter aufs Geraet -> Wake erfolgt rechtzeitig.
+
+  profile=off (reiner Companion):
+    Default bluetooth on, kein Schlafen (User braucht die App).
+
+Wake-Trigger (alle):
+  - Hardware-Button (Menu-Auswahl) -- User-Notiz 2026-06-09: Button-
+    Behavior bleibt unveraendert, NICHT persistent (= nach Reboot
+    wieder Pref-State).
+  - LoRa-RX-Event mit Direkt-Nachricht an uns (User soll bei Connect
+    die neue Message sehen koennen).
+  - Optional: Time-of-Day-Schedule (z.B. App tagsueber wach).
+
+Persistenz-Konflikt geklaert:
+  'off' (CLI, persistent) -> nach Reboot bleibt aus.
+  'tmp-off' (runtime, nicht persistent) -> nach Reboot wieder an
+  (sofern Pref 'on' war).
+  'cycle' (Pref-Mode) -> ein/aus-Wechsel runtime, persistente Setting
+  ist 'cycle'.
+
+Hardware-Spezifika Heltec Wireless Tracker:
+  Display + Button -> Menu kann BLE toggeln (nicht persistent).
+  Ohne diese Hardware (z.B. Heltec V3 ohne Display): nur via CLI
+  oder via Wake-on-LoRa-RX rauskommen, wenn BLE aus.
+
+Recovery-Pfad fuer User-ohne-Hardware-Button:
+  - USB-Serial bleibt erreichbar (Doku explizit).
+  - LoRa-RX kann BLE wieder einschalten.
+
+Quelle: User-Iteration 2026-06-09 nach Entdeckung dass Heltec Wireless
+        Tracker Display + Button hat fuer Menu-basierte BLE-Toggle.
+
+Timings -- noch zu finalisieren (User-Vorschlag 2026-06-09):
+  180s sleep + 30s wait = 14% on, 86% off
+    Pro: maximale Stromsparen, ideal fuer profile=normal
+    Contra: App-User-Lag bis 180s (avg 90s)
+  Pragmatik-Diskussion vor Implementation:
+    profile=normal:    aggressiv 180s:30s (niemand schaut hin)
+    profile=defensive: konservativer 60s:30s (User schaut gelegentlich)
+    profile=off:       kein Cycle (Default BLE on)
+  Hot-Start-Bonus (Idee): nach jedem Disconnect 5min still 'on'
+  (in 'cycle'-Mode), erst danach ins Sleep-Pattern. Schuetzt vor
+  Frust bei kurzen App-Aussetzern.
+
 
 --------------------------------------------------------------------------------
 44. Companion-Deep-Sleep wenn BLE schlaeft UND GPS aus
@@ -3023,6 +3090,50 @@ Caveats:
     nur wenn jemand wirklich GPS-basierten Modus will.
 
 Quelle: User-Frage 2026-06-08 (TZ-Anzeige beim Reisen).
+
+
+--------------------------------------------------------------------------------
+51. USB-Serial BREAK-Signal -- Reboot / CLI-Aktivierung
+--------------------------------------------------------------------------------
+
+Status: Idee, niedrige Prio. Frage: ist BREAK ueberhaupt erkennbar
+        auf ESP32-S3 USB-CDC (HWCDC)?
+
+Hintergrund:
+  BREAK ist ein Klassik-RS232-Signal -- die TX-Line wird fuer mehr
+  als eine Frame-Dauer auf LOW gehalten. Klassischer 'kontrollierter
+  Reset' oder 'Get attention' Befehl in serial-Protokollen.
+  Auf USB-CDC ist BREAK ein VIRTUAL-Signal (in der CDC-Spec
+  definiert, vom Host als 'SEND_BREAK' Request an das Device).
+
+Use-Cases bei DL9SAU:
+  - Soft-Reboot des Geraets ohne Power-Cycle (User-Fall:
+    Tracker haengt sich in einem Zustand auf, USB-Connect, BREAK
+    senden, Geraet reboot't).
+  - Companion-CLI auf USB aktivieren. Aktuell laeuft die CLI nur
+    via BLE oder via spezielle Frames. Mit BREAK koennte man via
+    USB-Terminal interaktiv ins CLI rein. CLI-Befehl 'serial-cli
+    off' wuerde das Feature wieder ausschalten.
+  - Befehl 'serial-on' (CLI) wuerde das Feature ohne BREAK
+    aktivieren (im normalen Modus).
+
+Vor-Implementierung-Check:
+  - ESP32-S3 USB-CDC (HWCDC) API: gibt es einen BREAK-Callback?
+    Arduino-Framework: HWCDC::onEvent (?) auf BREAK?
+  - Falls nicht direkt verfuegbar: dauerhaftes LOW auf RX-Line
+    detektieren waere ein Workaround, aber HWCDC abstrahiert das.
+
+Caveats:
+  - User-Fehlerresistenz: BREAK darf nicht versehentlich aus einem
+    Terminal-Programm kommen (z.B. minicom Strg+A F sendet BREAK).
+    Default-Verhalten 'BREAK reboot't' koennte ueberraschen.
+    Empfehlung: per Pref aktivierbar machen.
+  - Recovery-Pfad wenn BLE haengt: BREAK als 'always-on'-Pruefung
+    machen Sinn (User kommt sonst nicht ran). Pref-Default
+    waere dann 'reboot' aktiv.
+
+Quelle: User-Idee 2026-06-09.
+
 
 
 
