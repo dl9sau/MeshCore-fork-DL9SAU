@@ -2966,12 +2966,27 @@ Phasen-Plan:
     Sauberer Bruch zur Display-Filter-Welt -- daher eigene
     Achse, nicht in Phase 5 untergebracht.
 
-    filter scope drop add <scope-name> [on-channel <chan>]
+    filter scope drop add <scope-liste> [on-channel <chan-liste>]
     filter scope drop list
     filter scope drop remove <idx|pattern>
       Wirkt auf eingehende GRP_TXT vor App-Push. Channel-
       spezifisch via 'on-channel'; default = global. Keine
       Repeat-Auswirkung.
+
+      Komma-Listen analog Sender/Text-Filtern:
+        filter scope drop add europe,de,unscoped \
+                              on-channel Public,#test
+
+    Reserved Pseudo-Token (User-Frage 2026-06-09):
+      'unscoped' ist semantisch kein scope -- aber wir
+      brauchen einen Weg "Pakete ohne scope-Tag" zu
+      adressieren. Daher Reserved-Wort in scope-Filter-Listen.
+      Plus moeglich (TBD): 'any' / '*' fuer "irgendein scope"
+      -- aber Vorsicht, das ist sehr maechtig (= komplette
+      scope-Achse abdrehen). Erstmal weglassen, nur 'unscoped'
+      als Reserved aufnehmen.
+      Quer-Verweis: siehe Wunschliste 47 (scope-UX Sammelliste)
+      fuer scope-Reserved-Words insgesamt.
 
   Optional, nur falls real-world gewuenscht --
   Scope-Follow-Smallest-Region (Geo-Auto-Adapt der Anzeige):
