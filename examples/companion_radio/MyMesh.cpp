@@ -1819,6 +1819,39 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     } else {
       reject_reason = "path-payload-too-short";
     }
+    // Reise-Fix 2026-06-09: Scope-Filter fuer PATH analog ADVERT/ACK-
+    // Block. Zwei Faelle:
+    //
+    // (a) scoped PATH: scopeAllowedForRepeat-Check. Wenn Sender
+    //     Scope gesetzt hat, respektieren -- nicht weiter repeaten
+    //     wenn ausserhalb unserer Allowlist.
+    //     User-Wunsch: 'User will mit scope die Reichweite seiner
+    //     path discoveries beschraenken'.
+    //
+    // (b) unscoped PATH: Hop-Cap via flood_max_unscoped_companions
+    //     (User-Klarstellung 2026-06-09: 'nur unscoped path soll
+    //     durch wenn < flood max unscoped companion -- damit
+    //     messages von companion zu companion oder companion durch
+    //     kommen'). Analog zur Wunschliste-39-Logik fuer unscoped
+    //     CHAT-Adverts + TXT_MSG: Erstkontakt-Pfad zwischen Companions
+    //     darf unscoped flutschen, aber begrenzt.
+    //     Sentinel CH_HOPS_OFF = follow flood_max_scope_region.
+    if (decision) {
+      if (packet->hasTransportCodes()) {
+        if (!scopeAllowedForRepeat(packet)) {
+          decision = false;
+          reject_reason = "scope-not-allowed";
+        }
+      } else {
+        uint8_t cap = _prefs.flood_max_unscoped_companions;
+        if (cap == CH_HOPS_OFF) cap = _prefs.flood_max_scope_region;
+        if (cap == 0 || packet->getPathHashCount() > cap) {
+          decision = false;
+          reject_reason = (cap == 0) ? "unscoped-companions-off"
+                                      : "unscoped-companions-cap";
+        }
+      }
+    }
   } else {
     reject_reason = "unknown-ptype";
   }
