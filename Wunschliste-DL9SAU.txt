@@ -2772,12 +2772,22 @@ Konzept-Achsen (User-Zusammenfassung 2026-06-09):
   -----------     ----------------------------      --------------
   sender          DM + Channels (alle/bestimmte)    ja
   text            Channels (alle/bestimmte)         ja
-  scope           Channels (alle/bestimmte)         NEIN (Display-only,
-                                                    Repeat-Regeln
-                                                    liegen im Repeater-
-                                                    Profil)
+  scope           Channels (alle/bestimmte)         ja (Korrektur
+                                                    2026-06-09, s.u.)
   advert (P4)     Adverts                           ja
   region (P4)     vs. scope-Konflikt -- siehe Phase 4
+
+  Korrektur scope+profile (User 2026-06-09): das Repeater-Profil
+  steuert die scope-Forwarding-Achse nur global (Scope-Liste:
+  'all' oder Allowlist + unscoped-Sonderregeln: DM durch,
+  User-Adverts durch, unscoped Companion-Messages flood_max
+  niedrig ~3). Es kann NICHT 'auf Channel X den Scope Y nicht
+  weiterleiten'. Daher braucht der scope-Filter doch eine
+  profile-Achse -- ABER mit strikter Semantik:
+    Filter darf nur VERSCHAERFEN, nie LOCKERN. Wenn das
+    Repeater-Profil scope Y global verbietet, kann ein
+    Filter Y nicht erlauben. Der Filter ist Drop-Veto-Layer
+    auf der Repeat-Seite, nicht alternativer Forwarder.
 
   Wirkrichtung:   drop (Negativ-Liste) + keep (Positiv-Liste,
                   vorher 'allow' genannt)
@@ -2900,16 +2910,30 @@ Phasen-Plan:
 
   Phase 5 -- Scope-Filter (DISPLAY-only, Channel-bezogen):
 
-  WICHTIG -- Grenze zum Repeater (User-Klarstellung 2026-06-09):
-    Phase 5 wirkt AUSSCHLIESSLICH auf die Anzeige in der App
-    (also auf eingehende GRP_TXT vor App-Push). Die Repeat-
-    /Forwarding-Logik fuer Scopes ist NICHT Teil dieses
-    Filters -- die ist im Repeater-Profil schon umfassend
-    abgedeckt (Wunschliste 11/24/27 etc.) und funktioniert.
-    Display und Repeat duerfen sich konzeptionell NICHT
-    vermischen. Wenn ein User scopes nicht repeaten will,
-    macht er das ueber die Repeater-Profil-Scope-Liste,
-    nicht ueber einen Display-Filter.
+  WICHTIG -- Grenze zum Repeater (Korrektur 2026-06-09 abends):
+    Erste Idee: Phase 5 AUSSCHLIESSLICH Display, weil Repeat
+    eh vom Repeater-Profil abgedeckt sei. STIMMT NICHT
+    vollstaendig: das Profil kann Scope-Liste nur global
+    konfigurieren ('all' oder Allowlist), KEINE Channel x
+    Scope-Matrix. Wenn User 'auf Public nicht de+unscoped
+    repeaten, auf #test schon' will, geht das im Profil
+    nicht.
+    Daher: Phase 5 doch mit profile-Achse (for-us/repeat/
+    complete). Aber: der Filter darf nur VERSCHAERFEN.
+    Globale Forwarding-Regeln des Repeater-Profils bleiben
+    autoritativ; der Filter ist Drop-Veto-Layer auf der
+    Repeat-Seite, nicht alternativer Forwarder.
+    Default-profile fuer scope-Filter: for-us (Display).
+    Wer Channel x Scope-Repeat-Verschaerfung will, setzt
+    explizit profile repeat oder complete.
+
+    Beispiel (User-Anwendungsfall 2026-06-09):
+      filter scope drop add de,unscoped \
+        on-channel Public profile repeat
+        -> Public-Repeats fuer scope de + unscoped werden
+           gedroppt; Display unveraendert; auf anderen
+           Channels (z.B. #test) bleibt's offen wie es das
+           globale Profil zulaesst.
 
   Motivation (User-Erfahrung 2026-06-09):
     Channel Public ist unuebersichtlich -- mischt unscoped +
@@ -3028,10 +3052,13 @@ Phasen-Plan:
 
   Konzeptueller Bezug:
     - Wunschliste 11/24/27: scope-Bbox-System (Datenbasis)
-    - Wunschliste 32: ch.hops (Repeat-Cap-Layer -- nicht hier)
+    - Wunschliste 32: ch.hops (Repeat-Cap pro Channel,
+      orthogonal -- arbeitet auf Hop-Count, nicht scope)
     - Wunschliste 46 Phase 2: ch.mute (lokal hide whole channel)
-    - Diese Phase 5 ist die feinkoernige Scope-Achse fuer die
-      DISPLAY-Seite -- KEINE Forwarding-Auswirkung.
+    - Diese Phase 5 ist feinkoernige Scope-Achse fuer DISPLAY
+      (default) UND optional Repeat-Verschaerfung
+      (profile repeat/complete). Globale Forwarding-Regeln
+      bleiben autoritativ im Repeater-Profil.
 
   Vor Implementation: entscheiden ob 'filter scope' eigener
     Befehlsbaum oder Erweiterung von Phase 4 'filter region
