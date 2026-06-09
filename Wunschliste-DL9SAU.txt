@@ -2609,17 +2609,34 @@ Recovery-Pfad fuer User-ohne-Hardware-Button:
 Quelle: User-Iteration 2026-06-09 nach Entdeckung dass Heltec Wireless
         Tracker Display + Button hat fuer Menu-basierte BLE-Toggle.
 
-Timings -- noch zu finalisieren (User-Vorschlag 2026-06-09):
-  180s sleep + 30s wait = 14% on, 86% off
-    Pro: maximale Stromsparen, ideal fuer profile=normal
-    Contra: App-User-Lag bis 180s (avg 90s)
-  Pragmatik-Diskussion vor Implementation:
-    profile=normal:    aggressiv 180s:30s (niemand schaut hin)
-    profile=defensive: konservativer 60s:30s (User schaut gelegentlich)
-    profile=off:       kein Cycle (Default BLE on)
-  Hot-Start-Bonus (Idee): nach jedem Disconnect 5min still 'on'
-  (in 'cycle'-Mode), erst danach ins Sleep-Pattern. Schuetzt vor
-  Frust bei kurzen App-Aussetzern.
+Timings -- finalisiert (User-Iteration 2026-06-09):
+  Steady-State-Cycle:
+    180s sleep + 30s wait = 14% on, 86% off
+    User-Lag bis 180s (avg 90s) -- via Button erweckbar wenn Hardware
+    das hat (Heltec Wireless Tracker hat Display + Button). Plus
+    LoRa-RX-Wake fuer eingehende DMs. 3min Wartezeit ist unkritisch.
+
+  Boot-Phase:
+    Direkt nach Boot bleibt BLE laenger an damit der User Zeit hat
+    fuer den initialen Connect. Sleep-Pattern startet:
+      - 30min nach Boot wenn nie connect kam, ODER
+      - 5min nach erstem Disconnect (Hot-Start-Bonus, s.u.)
+
+  Hot-Start-Bonus (nach erfolgreichem App-Disconnect):
+    Bevor das Sleep-Pattern wieder einsetzt, bleibt BLE noch 5min
+    'an'. Schuetzt vor Frust bei kurzen App-Aussetzern (Lockscreen,
+    Background, etc.). User-Wunsch 2026-06-09: 'erst 5min nach dem
+    Disconnect der bt-Verbindung kann wieder geschlafen werden'.
+
+  profile-Unterschied:
+    Aktuell sehe ich keinen funktionalen Grund fuer unterschiedliche
+    Timings pro Profile. Cycle 180s:30s mit Hot-Start funktioniert
+    fuer beide gleich. Bei Reise-Iteration ggf. noch unterscheiden
+    falls User-Test das nahelegt.
+
+  Profile-off (Pure-Companion):
+    bluetooth power cycle ergibt keinen Sinn (User braucht App).
+    Default sollte 'always-on' sein.
 
 
 --------------------------------------------------------------------------------
