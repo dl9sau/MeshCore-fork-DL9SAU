@@ -315,6 +315,11 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.filter_text_drop_count));
     file.read((uint8_t *)_prefs.filter_text_drop,
               sizeof(_prefs.filter_text_drop));
+    // Reise-Wunsch 2026-06-09 (Wunschliste 45): LBT + AGC-Reset
+    file.read((uint8_t *)&_prefs.interference_threshold,
+              sizeof(_prefs.interference_threshold));
+    file.read((uint8_t *)&_prefs.agc_reset_interval,
+              sizeof(_prefs.agc_reset_interval));
 
     file.close();
   }
@@ -414,6 +419,11 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.filter_text_drop_count));
     file.write((uint8_t *)_prefs.filter_text_drop,
                sizeof(_prefs.filter_text_drop));
+    // Reise-Wunsch 2026-06-09 (Wunschliste 45): LBT + AGC-Reset
+    file.write((uint8_t *)&_prefs.interference_threshold,
+               sizeof(_prefs.interference_threshold));
+    file.write((uint8_t *)&_prefs.agc_reset_interval,
+               sizeof(_prefs.agc_reset_interval));
 
     file.close();
   }

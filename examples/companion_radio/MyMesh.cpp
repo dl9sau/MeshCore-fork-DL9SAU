@@ -652,8 +652,19 @@ float MyMesh::getAirtimeBudgetFactor() const {
   return _prefs.airtime_factor;
 }
 
+// Wunschliste 45 (Reise 2026-06-09): Stub aufgehoben. Companion ist
+// jetzt fuer LBT konfigurierbar -- Wessel Nieboers AGC-Reset-Fix
+// (Feb 2026, RadioLibWrappers.cpp:77) hat das urspruengliche
+// stuck-_noise_floor=-120-Problem behoben. Default 14 (upstream-Doku),
+// User kann via 'set int.thresh <N>' tunen. 0 = off.
 int MyMesh::getInterferenceThreshold() const {
-  return 0; // disabled for now, until currentRSSI() problem is resolved
+  return _prefs.interference_threshold;
+}
+// Wunschliste 45: AGC-Reset-Interval (Sekunden/4, intern *4000 ms).
+// 0 = disabled. Periodischer AGC-Reset bei verrauschten RX-Standorten,
+// macht das Geraet fuer wenige ms taub -- bewusst sparsam nutzen.
+int MyMesh::getAGCResetInterval() const {
+  return ((int)_prefs.agc_reset_interval) * 4000;
 }
 
 int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
@@ -3839,6 +3850,14 @@ void MyMesh::begin(bool has_display) {
   // CH_HOPS_OFF = follow flood_max_scope_region (Default damit
   // Erstkontakt via unscoped CHAT-Adverts klappt).
   _prefs.flood_max_unscoped_companions = CH_HOPS_OFF;
+
+  // Wunschliste 45 Pre-Init (Reise 2026-06-09): LBT-Default 14 (upstream-
+  // Doku-Wert). Alte Pref-Files ohne dieses Feld lassen den Pre-Init
+  // stehen -> User aktiviert LBT automatisch ab nuechstem Boot. Wer
+  // explicit 0 in seinem File hat (= bewusst off): bleibt 0. AGC-Reset
+  // Default 0 (= disabled) -- selten gebraucht, User aktiviert manuell.
+  _prefs.interference_threshold = 14;
+  _prefs.agc_reset_interval = 0;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -7994,6 +8013,8 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "telemetry_mode_loc") == 0)    { _prefs.telemetry_mode_loc    = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "telemetry_mode_env") == 0)    { _prefs.telemetry_mode_env    = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "buzzer_quiet") == 0)          { _prefs.buzzer_quiet          = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0) { _prefs.interference_threshold = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "agc.reset.interval") == 0 || strcmp(key, "agc_reset_interval") == 0) { _prefs.agc_reset_interval = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "rxdelay") == 0)               { _prefs.rx_delay_base         = as_float();        _br_applied++; return; }
       if (strcmp(key, "txdelay") == 0)               { _prefs.tx_delay_factor       = as_float();        _br_applied++; return; }
       if (strcmp(key, "direct_txdelay") == 0)        { _prefs.direct_tx_delay_factor= as_float();        _br_applied++; return; }
@@ -8934,6 +8955,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Build-in Geo-Tabelle (RO)");
         return;
       }
+      if (topic_prefix_match(topic, "filter")) {
+        pushCompanionMessage(
+          "filter (Wunschliste 46 Phase 1):\n"
+          "  Spam-Filter fuer eingehende Pakete.\n"
+          "  Wirkt 'for-us' -- App-Push unterdrueckt,\n"
+          "  Repeat-Funktion unbeeinflusst.");
+        pushCompanionMessage(
+          "Syntax:\n"
+          "  filter <sender|text> drop add <pat>\n"
+          "  filter <sender|text> drop remove <pat|idx>\n"
+          "  filter <sender|text> drop list\n"
+          "  filter <sender|text> drop clear");
+        pushCompanionMessage(
+          "Pattern-Anker:\n"
+          "  foo      = substring (ueberall)\n"
+          "  ^foo     = beginnt mit foo\n"
+          "  foo$     = endet mit foo\n"
+          "  ^foo$    = exact match\n"
+          "  \"foo bar\" = Quotes fuer Leerzeichen");
+        pushCompanionMessage(
+          "sender-Filter wirkt auf DM-Absender und\n"
+          "Channel-Sender (Prefix vor ': ').\n"
+          "text-Filter wirkt auf Channel-Text-Teil.\n"
+          "Je 16 Slots, persistent.");
+        return;
+      }
       if (topic_prefix_match(topic, "ch.hops")) {
         pushCompanionMessage(
           "ch.hops: per-Channel Repeat-Cap fuer\n"
@@ -8992,9 +9039,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "  flood_max_scope_region\n"
           "  flood_max_unscoped_companions\n"
-          "    (= alias 'flood_max_unscoped' upstream)\n"
-          "  loop_detect (off|minimal|moderate|strict)\n"
-          "  ch.hops -> 'help ch.hops'\n"
+          "    (= alias 'flood_max_unscoped')\n"
+          "  loop_detect (off|min|mod|strict)");
+        pushCompanionMessage(
+          "  ch.hops -> 'help ch.hops'");
+        pushCompanionMessage(
+          "Radio LBT/AGC:\n"
+          "  int.thresh (0=off, default 14)\n"
+          "  agc.reset.interval (sec/4, 0=off)\n"
           "  ('set <key>' ohne Wert -> Detailhilfe)");
         pushCompanionMessage(
           "Delays: rxdelay txdelay direct_txdelay\n"
@@ -9379,7 +9431,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
       "  contact, backup, save, discover, tempradio,\n"
-      "  clear, reboot."
+      "  filter, clear, reboot."
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
     // (Wunschliste 40). Sehen Kommentare bei den Handlern.
@@ -13002,6 +13054,47 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Wunschliste 45 (Reise 2026-06-09): set int.thresh <N>
+    // RSSI-Margin (dB) ueber noise_floor. 0 = LBT off. Upstream-
+    // Doku-Default 14. Praxis: 1..14 je nach Standort/SF.
+    if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0) {
+      int v = atoi(value_lc);
+      if (v < 0 || v > 255) {
+        pushCompanionMessage("int.thresh ausserhalb 0..255");
+        return;
+      }
+      _prefs.interference_threshold = (uint8_t)v;
+      savePrefs();
+      char r[100];
+      if (v == 0) {
+        snprintf(r, sizeof(r), "OK - int.thresh = 0 (LBT off)");
+      } else {
+        snprintf(r, sizeof(r), "OK - int.thresh = %d dB (LBT on, default 14)", v);
+      }
+      pushCompanionMessage(r);
+      return;
+    }
+    // Wunschliste 45: set agc.reset.interval <S>
+    // S = Sekunden/4. 0 = disabled. AGC-Reset macht das Geraet fuer
+    // wenige ms taub -- bewusst sparsam nutzen.
+    if (strcmp(key, "agc.reset.interval") == 0 || strcmp(key, "agc_reset_interval") == 0) {
+      int v = atoi(value_lc);
+      if (v < 0 || v > 255) {
+        pushCompanionMessage("agc.reset.interval ausserhalb 0..255 (Schritte zu 4 sec)");
+        return;
+      }
+      _prefs.agc_reset_interval = (uint8_t)v;
+      savePrefs();
+      char r[100];
+      if (v == 0) {
+        snprintf(r, sizeof(r), "OK - agc.reset.interval = 0 (disabled)");
+      } else {
+        snprintf(r, sizeof(r), "OK - agc.reset.interval = %d (%d sec)", v, v * 4);
+      }
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Unbekannter key
     char r[120];
     snprintf(r, sizeof(r),
@@ -13131,6 +13224,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_uint  ("buzzer_quiet",        _prefs.buzzer_quiet,          0);
       emit_uint  ("messages_append_scope_to_name",
                                          _prefs.messages_append_scope_to_name, 0);
+      emit_uint  ("int.thresh",          _prefs.interference_threshold, 14);
+      emit_uint  ("agc.reset.interval",  _prefs.agc_reset_interval,    0);
       emit_float ("rxdelay",             _prefs.rx_delay_base,         0.0f,                   "",     3);
       // txdelay / direct_txdelay: Sentinel -1 = auto. Sonderdarstellung
       // statt nackter "-1.000". Default ist auto.
@@ -13288,6 +13383,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "telemetry_mode_loc") == 0) snprintf(r, sizeof(r), "telemetry_mode_loc = %u", (unsigned)_prefs.telemetry_mode_loc);
     else if (strcmp(key, "telemetry_mode_env") == 0) snprintf(r, sizeof(r), "telemetry_mode_env = %u", (unsigned)_prefs.telemetry_mode_env);
     else if (strcmp(key, "buzzer_quiet") == 0)      snprintf(r, sizeof(r), "buzzer_quiet = %u", (unsigned)_prefs.buzzer_quiet);
+    else if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0)
+      snprintf(r, sizeof(r), "int.thresh = %u dB%s", (unsigned)_prefs.interference_threshold,
+               _prefs.interference_threshold == 0 ? " (LBT off)" : "");
+    else if (strcmp(key, "agc.reset.interval") == 0 || strcmp(key, "agc_reset_interval") == 0)
+      snprintf(r, sizeof(r), "agc.reset.interval = %u (%u sec)%s",
+               (unsigned)_prefs.agc_reset_interval,
+               (unsigned)_prefs.agc_reset_interval * 4,
+               _prefs.agc_reset_interval == 0 ? " (disabled)" : "");
     else if (strcmp(key, "messages_append_scope_to_name") == 0
              || strcmp(key, "messages.append.scope.to.name") == 0)
       snprintf(r, sizeof(r), "messages_append_scope_to_name = %s",

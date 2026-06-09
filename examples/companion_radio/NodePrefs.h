@@ -455,6 +455,17 @@ struct NodePrefs {  // persisted to file
   uint8_t        filter_sender_drop_count;
   FilterEntry    filter_text_drop[16];
   uint8_t        filter_text_drop_count;
+  // Wunschliste 45 (Reise 2026-06-09): LBT-Stub-Removal.
+  // interference_threshold: RSSI-Margin (dB) ueber noise_floor.
+  // 0 = LBT off (no listen-before-talk). Upstream-Doku-Default: 14.
+  // Wessel Nieboers AGC-Reset-Fix (Feb 2026, RadioLibWrappers.cpp:77)
+  // schuetzt vor stuck _noise_floor=-120 -- damit ist LBT im Companion
+  // sicher aktivierbar.
+  // agc_reset_interval: Sekunden / 4 (* 4000ms intern). 0 = disabled.
+  // Periodischer AGC-Reset bei verrauschten/RX-uebersteuerten Standorten.
+  // Default 0 -- User aktiviert nach Bedarf.
+  uint8_t        interference_threshold;
+  uint8_t        agc_reset_interval;
   // Reise-Wunsch 2026-06-09 (Wunschliste 52): Remote-CLI-Login per
   // Passwort. Admin-Passwort gibt vollen Zugriff auf alle Befehle,
   // Guest-Passwort gibt reduzierten Read-only-Set (optional).
