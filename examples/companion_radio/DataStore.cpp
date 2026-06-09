@@ -306,6 +306,15 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // Bei alten Files leer (memset 0 ist Default).
     file.read((uint8_t *)_prefs.passwd_admin, sizeof(_prefs.passwd_admin));
     file.read((uint8_t *)_prefs.passwd_guest, sizeof(_prefs.passwd_guest));
+    // Reise-Wunsch 2026-06-09 (Wunschliste 46): Filter-Listen
+    file.read((uint8_t *)&_prefs.filter_sender_drop_count,
+              sizeof(_prefs.filter_sender_drop_count));
+    file.read((uint8_t *)_prefs.filter_sender_drop,
+              sizeof(_prefs.filter_sender_drop));
+    file.read((uint8_t *)&_prefs.filter_text_drop_count,
+              sizeof(_prefs.filter_text_drop_count));
+    file.read((uint8_t *)_prefs.filter_text_drop,
+              sizeof(_prefs.filter_text_drop));
 
     file.close();
   }
@@ -396,6 +405,15 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Reise-Wunsch 2026-06-09: passwd_admin/passwd_guest
     file.write((uint8_t *)_prefs.passwd_admin, sizeof(_prefs.passwd_admin));
     file.write((uint8_t *)_prefs.passwd_guest, sizeof(_prefs.passwd_guest));
+    // Reise-Wunsch 2026-06-09 (Wunschliste 46): Filter-Listen
+    file.write((uint8_t *)&_prefs.filter_sender_drop_count,
+               sizeof(_prefs.filter_sender_drop_count));
+    file.write((uint8_t *)_prefs.filter_sender_drop,
+               sizeof(_prefs.filter_sender_drop));
+    file.write((uint8_t *)&_prefs.filter_text_drop_count,
+               sizeof(_prefs.filter_text_drop_count));
+    file.write((uint8_t *)_prefs.filter_text_drop,
+               sizeof(_prefs.filter_text_drop));
 
     file.close();
   }

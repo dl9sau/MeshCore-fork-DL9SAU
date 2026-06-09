@@ -669,6 +669,13 @@ private:
   void applyRadioPolicy();   // calls radio_set_params() with freq/CR overrides
   void markHeardDirect(uint8_t hash);   // call only for zero-hop adverts
   bool isLocallyHeard(uint8_t hash) const;
+  // Wunschliste 46 Phase 1 (Reise 2026-06-09): Filter-System.
+  // pattern + flags (bit0=anchor start, bit1=anchor end, both=exact,
+  // none=substring). Returnt true wenn s das Pattern matched.
+  static bool filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s);
+  // Beide Helper: true wenn DROP greift (= mind. ein Filter matched).
+  bool filterSenderDropMatch(const char* sender_name) const;
+  bool filterTextDropMatch(const char* text) const;
   bool getEffectiveLatLon(double& lat, double& lon) const;
   // Profile-aware Bbox-Quelle (Reise-Fix 2026-06-08):
   //   profile=normal    -> nur fixed location (sensors.node_lat/lon)

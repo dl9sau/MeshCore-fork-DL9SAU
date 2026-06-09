@@ -436,6 +436,25 @@ struct NodePrefs {  // persisted to file
   // Wirkung: bei off kann die App den Sender-Namen wieder unverändert
   // gegen ihre DB matchen -> Pfad-Anzeige funktioniert wieder.
   uint8_t        messages_append_scope_to_name;
+  // Reise-Wunsch 2026-06-09 (Wunschliste 46 Phase 1): Filter-System
+  // fuer eingehende Pakete. Sender-Filter (drop) wirkt auf DM und
+  // Channel-Sender-Namen. Text-Filter (drop) wirkt auf Channel-Text.
+  // Pattern-Flags:
+  //   bit 0 = anchor start (^foo)
+  //   bit 1 = anchor end   (foo$)
+  //   beide = exact match  (^foo$)
+  //   keiner = substring   (*foo*)
+  // Filter sind 'for-us' (only) -- App-Push wird unterdrueckt, Repeat
+  // bleibt unbeeinflusst. Phase 1: nur drop-Listen, keine allow-
+  // Listen, keine per-Channel-Ausnahmen, keine Pattern-Sprache.
+  struct FilterEntry {
+    char pattern[31];
+    uint8_t flags;
+  };
+  FilterEntry    filter_sender_drop[16];
+  uint8_t        filter_sender_drop_count;
+  FilterEntry    filter_text_drop[16];
+  uint8_t        filter_text_drop_count;
   // Reise-Wunsch 2026-06-09 (Wunschliste 52): Remote-CLI-Login per
   // Passwort. Admin-Passwort gibt vollen Zugriff auf alle Befehle,
   // Guest-Passwort gibt reduzierten Read-only-Set (optional).

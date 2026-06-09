@@ -864,6 +864,43 @@ void MyMesh::markHeardDirect(uint8_t hash) {
   }
 }
 
+// Wunschliste 46 Phase 1 (Reise 2026-06-09).
+// Filter-Pattern-Match.
+// Flags: bit0 = anchor start (^foo), bit1 = anchor end (foo$).
+//   both = exact, none = substring.
+bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) {
+  size_t pl = strlen(e.pattern);
+  if (pl == 0) return false;
+  size_t sl = strlen(s);
+  if (sl < pl) return false;
+  bool anchor_start = (e.flags & 0x01) != 0;
+  bool anchor_end   = (e.flags & 0x02) != 0;
+  if (anchor_start && anchor_end) {
+    return sl == pl && memcmp(s, e.pattern, pl) == 0;
+  }
+  if (anchor_start) return memcmp(s, e.pattern, pl) == 0;
+  if (anchor_end)   return memcmp(s + sl - pl, e.pattern, pl) == 0;
+  return strstr(s, e.pattern) != NULL;
+}
+
+bool MyMesh::filterSenderDropMatch(const char* sender_name) const {
+  if (!sender_name || !*sender_name) return false;
+  for (uint8_t i = 0; i < _prefs.filter_sender_drop_count
+       && i < sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]); i++) {
+    if (filterPatternMatch(_prefs.filter_sender_drop[i], sender_name)) return true;
+  }
+  return false;
+}
+
+bool MyMesh::filterTextDropMatch(const char* text) const {
+  if (!text || !*text) return false;
+  for (uint8_t i = 0; i < _prefs.filter_text_drop_count
+       && i < sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]); i++) {
+    if (filterPatternMatch(_prefs.filter_text_drop[i], text)) return true;
+  }
+  return false;
+}
+
 bool MyMesh::isLocallyHeard(uint8_t hash) const {
   uint32_t now = getRTCClock()->getCurrentTime();
   for (int i = 0; i < CR_HEARD_TABLE_SIZE; i++) {
@@ -1307,6 +1344,13 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
 
 void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
                           uint32_t sender_timestamp, const uint8_t *extra, int extra_len, const char *text) {
+  // Wunschliste 46 Phase 1 (Reise 2026-06-09): Sender-Filter fuer DMs.
+  // Bei Match: komplett verwerfen (kein Push, kein Offline-Queue-Eintrag).
+  // 'for-us'-Filter -- Repeat wird vom Filter NICHT beeinflusst.
+  if (filterSenderDropMatch(from.name)) {
+    traceCompanion(TRACE_FILTER, "[filter] DM dropped: sender='%s'", from.name);
+    return;
+  }
   // Wunschliste 35 (DM): once-per-tuple Scope-/Direct-Annotation als
   // SEPARATE Vorab-Message '[#scope, direct]'. Separate Frame statt
   // Footer im Original-Text: (1) keine Laengen-Limit-Konflikte bei
@@ -2180,6 +2224,31 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   if (isCompanionChannel(ch_idx_check)) {
     MESH_DEBUG_PRINTLN("onChannelMessageRecv: dropping external $companion text");
     return;
+  }
+  // Wunschliste 46 Phase 1 (Reise 2026-06-09): Sender + Text Filter.
+  // Channel-Wire: '<sender_name>: <text>'. Sender bis ': ' extrahieren
+  // -- wenn Sender oder Text matched, komplett verwerfen.
+  // 'for-us'-Filter -- Repeat bleibt unbeeinflusst.
+  {
+    const char* sep = strstr(text, ": ");
+    char sender_buf[40];
+    sender_buf[0] = 0;
+    const char* text_only = text;
+    if (sep) {
+      size_t sl = (size_t)(sep - text);
+      if (sl >= sizeof(sender_buf)) sl = sizeof(sender_buf) - 1;
+      memcpy(sender_buf, text, sl);
+      sender_buf[sl] = 0;
+      text_only = sep + 2;
+    }
+    if (sender_buf[0] && filterSenderDropMatch(sender_buf)) {
+      traceCompanion(TRACE_FILTER, "[filter] GRP dropped: sender='%s'", sender_buf);
+      return;
+    }
+    if (filterTextDropMatch(text_only)) {
+      traceCompanion(TRACE_FILTER, "[filter] GRP dropped: text-match");
+      return;
+    }
   }
   // Wunschliste 35: Sender-Annotation '(#scope[, direct])' an Sender-Namen
   // anhaengen -- aber NUR EINMAL pro (Name, Scope, Direct)-Tuple. Sonst
@@ -11245,6 +11314,202 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Diagnose-CLI fuer Wunschliste 7: setzt den ADV_TYPE eines gespeicherten
   // Kontakts um, OHNE dass dieser dazu einen neuen Advert senden muss.
   // Damit laesst sich z.B. testen, ob die App weiterhin Chat anbietet wenn
+  // Wunschliste 46 Phase 1 (Reise 2026-06-09): 'filter sender|text
+  // drop add|remove|list|clear ...' Spam-Block fuer eingehende Pakete.
+  // Pattern-Syntax:
+  //   foo     = substring (matched ueberall)
+  //   ^foo    = anchor start (Sender/Text beginnt mit foo)
+  //   foo$    = anchor end (endet mit foo)
+  //   ^foo$   = exact match
+  // Phase 1: nur drop-Listen, kein allow/exempt, kein per-Channel,
+  // kein 'filter region'/'filter advert'. Filter wirkt 'for-us' --
+  // App-Push wird unterdrueckt, Repeat bleibt unbeeinflusst.
+  if (starts_with_word(cmd, "filter")) {
+    // Sub-Tokens: 'sender' oder 'text', dann 'drop', dann action.
+    const char* p = strchr(cmd, ' ');
+    if (!p) {
+      pushCompanionMessage(
+        "filter <sender|text> drop <add|remove|list|clear> [<pattern>]");
+      return;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    bool is_sender = false;
+    if (strncmp(p, "sender", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+      is_sender = true; p += 6;
+    } else if (strncmp(p, "text", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+      is_sender = false; p += 4;
+    } else {
+      pushCompanionMessage("Usage: filter <sender|text> drop ...");
+      return;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "drop", 4) != 0 || (p[4] && p[4] != ' ' && p[4] != '\t')) {
+      pushCompanionMessage("Usage: filter <sender|text> drop ...");
+      return;
+    }
+    p += 4;
+    while (*p == ' ' || *p == '\t') p++;
+    NodePrefs::FilterEntry* arr = is_sender ? _prefs.filter_sender_drop
+                                              : _prefs.filter_text_drop;
+    uint8_t& cnt = is_sender ? _prefs.filter_sender_drop_count
+                              : _prefs.filter_text_drop_count;
+    const size_t MAX_SLOTS = is_sender
+        ? sizeof(_prefs.filter_sender_drop) / sizeof(_prefs.filter_sender_drop[0])
+        : sizeof(_prefs.filter_text_drop) / sizeof(_prefs.filter_text_drop[0]);
+    const char* kind = is_sender ? "sender" : "text";
+
+    // 'list' / 'clear' / 'add <pattern>' / 'remove <pattern>'
+    if (!*p || strncmp(p, "list", 4) == 0) {
+      char hdr[80];
+      snprintf(hdr, sizeof(hdr), "filter %s drop (%u/%u):", kind,
+               (unsigned)cnt, (unsigned)MAX_SLOTS);
+      pushCompanionMessage(hdr);
+      if (cnt == 0) {
+        pushCompanionMessage("  (leer)");
+        return;
+      }
+      char buf[160]; size_t bu = 0; buf[0] = 0;
+      auto flushb = [&]() {
+        if (bu > 0) { pushCompanionMessage(buf); bu = 0; buf[0] = 0; }
+      };
+      for (uint8_t i = 0; i < cnt && i < MAX_SLOTS; i++) {
+        char line[60];
+        const char* prefix = "";
+        const char* suffix = "";
+        bool a_start = (arr[i].flags & 0x01) != 0;
+        bool a_end   = (arr[i].flags & 0x02) != 0;
+        if (a_start && a_end) { prefix = "^"; suffix = "$"; }
+        else if (a_start)     { prefix = "^"; }
+        else if (a_end)       { suffix = "$"; }
+        snprintf(line, sizeof(line), "  %u: %s%s%s",
+                 (unsigned)i, prefix, arr[i].pattern, suffix);
+        size_t ll = strlen(line);
+        if (bu + ll + 2 >= sizeof(buf)) flushb();
+        if (bu > 0) buf[bu++] = '\n';
+        memcpy(buf + bu, line, ll); bu += ll; buf[bu] = 0;
+      }
+      flushb();
+      return;
+    }
+    if (strncmp(p, "clear", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
+      memset(arr, 0, MAX_SLOTS * sizeof(arr[0]));
+      cnt = 0;
+      savePrefs();
+      char r[60]; snprintf(r, sizeof(r), "OK - filter %s drop cleared.", kind);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (strncmp(p, "add", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
+      p += 3;
+      while (*p == ' ' || *p == '\t') p++;
+      if (!*p) { pushCompanionMessage("Usage: filter ... drop add <pattern>"); return; }
+      // Quotes optional strippen
+      const char* pat = p;
+      size_t plen = strlen(pat);
+      if (plen >= 2 && pat[0] == '"' && pat[plen-1] == '"') {
+        pat++; plen -= 2;
+      }
+      // Anchor-Bytes detektieren
+      uint8_t flags = 0;
+      if (plen > 0 && pat[0] == '^') { flags |= 0x01; pat++; plen--; }
+      if (plen > 0 && pat[plen-1] == '$') { flags |= 0x02; plen--; }
+      if (plen == 0) {
+        pushCompanionMessage("Leeres Pattern nicht erlaubt.");
+        return;
+      }
+      if (plen >= sizeof(arr[0].pattern)) {
+        char r[80];
+        snprintf(r, sizeof(r), "Pattern zu lang (max %u Zeichen).",
+                 (unsigned)(sizeof(arr[0].pattern) - 1));
+        pushCompanionMessage(r);
+        return;
+      }
+      if (cnt >= MAX_SLOTS) {
+        char r[80];
+        snprintf(r, sizeof(r), "Filter-Liste voll (%u Slots). Erst 'clear' oder 'remove'.",
+                 (unsigned)MAX_SLOTS);
+        pushCompanionMessage(r);
+        return;
+      }
+      // Dedup: gleicher Pattern + Flags?
+      for (uint8_t i = 0; i < cnt; i++) {
+        if (arr[i].flags == flags
+            && strncmp(arr[i].pattern, pat, plen) == 0
+            && arr[i].pattern[plen] == 0) {
+          pushCompanionMessage("(Pattern bereits in Liste -- skip)");
+          return;
+        }
+      }
+      memset(&arr[cnt], 0, sizeof(arr[cnt]));
+      memcpy(arr[cnt].pattern, pat, plen);
+      arr[cnt].pattern[plen] = 0;
+      arr[cnt].flags = flags;
+      cnt++;
+      savePrefs();
+      char r[100];
+      const char* pfx = (flags & 0x01) ? "^" : "";
+      const char* sfx = (flags & 0x02) ? "$" : "";
+      snprintf(r, sizeof(r), "OK - filter %s drop add %s%.*s%s (%u/%u)",
+               kind, pfx, (int)plen, pat, sfx, (unsigned)cnt, (unsigned)MAX_SLOTS);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (strncmp(p, "remove", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+      p += 6;
+      while (*p == ' ' || *p == '\t') p++;
+      if (!*p) { pushCompanionMessage("Usage: filter ... drop remove <pattern|index>"); return; }
+      // Versuche zuerst als Index zu parsen
+      char* endp = NULL;
+      long idx = strtol(p, &endp, 10);
+      if (endp && endp != p && (*endp == 0 || *endp == ' ' || *endp == '\t')
+          && idx >= 0 && (uint8_t)idx < cnt) {
+        // Slot idx loeschen, Liste kompaktieren
+        for (uint8_t j = (uint8_t)idx; j + 1 < cnt; j++) {
+          arr[j] = arr[j+1];
+        }
+        memset(&arr[cnt-1], 0, sizeof(arr[cnt-1]));
+        cnt--;
+        savePrefs();
+        char r[80];
+        snprintf(r, sizeof(r), "OK - filter %s drop removed idx %ld (%u verbleibend)",
+                 kind, idx, (unsigned)cnt);
+        pushCompanionMessage(r);
+        return;
+      }
+      // Sonst als Pattern-Match
+      const char* pat = p;
+      size_t plen = strlen(pat);
+      // trailing whitespace strippen
+      while (plen > 0 && (pat[plen-1] == ' ' || pat[plen-1] == '\t'
+                           || pat[plen-1] == '\r' || pat[plen-1] == '\n')) plen--;
+      if (plen >= 2 && pat[0] == '"' && pat[plen-1] == '"') {
+        pat++; plen -= 2;
+      }
+      uint8_t flags = 0;
+      if (plen > 0 && pat[0] == '^') { flags |= 0x01; pat++; plen--; }
+      if (plen > 0 && pat[plen-1] == '$') { flags |= 0x02; plen--; }
+      for (uint8_t i = 0; i < cnt; i++) {
+        if (arr[i].flags == flags
+            && strncmp(arr[i].pattern, pat, plen) == 0
+            && arr[i].pattern[plen] == 0) {
+          for (uint8_t j = i; j + 1 < cnt; j++) arr[j] = arr[j+1];
+          memset(&arr[cnt-1], 0, sizeof(arr[cnt-1]));
+          cnt--;
+          savePrefs();
+          char r[80];
+          snprintf(r, sizeof(r), "OK - filter %s drop removed (%u verbleibend)",
+                   kind, (unsigned)cnt);
+          pushCompanionMessage(r);
+          return;
+        }
+      }
+      pushCompanionMessage("Pattern nicht in Liste.");
+      return;
+    }
+    pushCompanionMessage("Usage: filter <sender|text> drop <add|remove|list|clear>");
+    return;
+  }
+
   // ein Peer sich als SENSOR (oder REPEATER/ROOM) advertet.
   // Wunschliste 27: 'discover' -- Diagnose-Sender fuer CTL_TYPE_NODE_DISCOVER.
   // Sub-Optionen als Flags (Reihenfolge egal):
