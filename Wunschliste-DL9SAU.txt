@@ -2837,6 +2837,27 @@ Cave-Block -- wichtige Asymmetrien + Stolperfallen:
   * REQ/RESP/ANON_REQ auf unscoped droppen wir bereits global -- ein
     spezifischer Filter dafuer ist nicht noetig.
 
+  * 'Direct' ist mehrdeutig (User-Mahnung 2026-06-09):
+    - sendDirect(pkt, out_path, ...) = Unicast UEBER bekannten Pfad.
+      Repeater entlang des Pfads forwarden weil sie im Path-Header
+      adressiert sind. Kein Flood, kein scope-Check, keine
+      defensive-Auswertung.
+    - sendZeroHop(pkt, ...) = direkt-Adressierung OHNE Pfad
+      (1-Hop, kein flood, kein Repeater-Forward). Auch 'direct'
+      genannt, aber semantisch anders.
+    In Doku/Help bei jeder Erwaehnung klarstellen welche
+    Variante gemeint ist.
+
+  * Filter-Reichweite vs Unicast (User-Frage 2026-06-09):
+    Filter text/scope auf der Repeat-Seite wirken auf Flood-
+    Pakete. DM-Unicast ueber bekannten Pfad (sendDirect) ist
+    nicht filterbar durch diese Filter -- der Pfad steht, Paket
+    geht durch. Spammer mit gelerntem Direct-Pfad zum eigenen
+    Geraet: gegen den hilft 'sender drop' (Display-Verstecken)
+    oder 'sender pubkey' Phase 4 (Wire-Hardblock; greift vor
+    der Forwarding-Logik und blockiert daher auch
+    Direct-Unicast).
+
 
 Konzept-Achsen (User-Zusammenfassung 2026-06-09):
 
