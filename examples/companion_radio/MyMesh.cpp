@@ -1795,13 +1795,19 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     //   defensive (Default): nur fuer lokale Nodes repeaten (heard < 48h
     //     ODER known contact < 48h).
     //   normal: alle PATH-Pakete weiterleiten ("wie echter Repeater").
-    if (_prefs.repeater_profile == 1) {
-      decision = true;  // normal-Profil: kein lokaler Endpoint-Filter
-    } else if (packet->payload_len >= 2) {
+    //
+    // Reise-Fix 2026-06-09: Lokaler Endpoint ist PRIVILEGIERT. Wenn
+    // src ODER dest in unserer heard/contacts-Liste: durchlassen
+    // unabhaengig von scope/unscoped-cap. Begruendung User:
+    // 'Lokaler user macht unscoped path discovery. Antwort kommt via
+    // repeatern. Antwort muss durch kommen.' Plus: 'Entfernter user
+    // macht unscoped path discovery mit Ziel lokaler User. Antwort
+    // zu ihm muss durch kommen.'
+    bool is_local_endpoint = false;
+    if (packet->payload_len >= 2) {
       uint8_t dest_hash = packet->payload[0];
       uint8_t src_hash  = packet->payload[1];
       uint32_t now = getRTCClock()->getCurrentTime();
-
       auto matchHash = [&](uint8_t h) -> bool {
         if (isLocallyHeard(h)) return true;
         int num = getNumContacts();
@@ -1813,30 +1819,30 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
         }
         return self_id.isHashMatch(&h);
       };
+      is_local_endpoint = matchHash(dest_hash) || matchHash(src_hash);
+    }
 
-      decision = matchHash(dest_hash) || matchHash(src_hash);
+    if (_prefs.repeater_profile == 1) {
+      decision = true;  // normal-Profil: kein lokaler Endpoint-Filter
+    } else if (packet->payload_len >= 2) {
+      decision = is_local_endpoint;  // defensive: nur lokal-endpoint
       if (!decision) reject_reason = "path-endpoint-unknown";
     } else {
       reject_reason = "path-payload-too-short";
     }
-    // Reise-Fix 2026-06-09: Scope-Filter fuer PATH analog ADVERT/ACK-
-    // Block. Zwei Faelle:
+
+    // Scope-/Cap-Filter NUR bei nicht-lokalem Endpoint. Lokal-Endpoint
+    // wird privilegiert durchgelassen (User-Wunsch oben).
     //
-    // (a) scoped PATH: scopeAllowedForRepeat-Check. Wenn Sender
-    //     Scope gesetzt hat, respektieren -- nicht weiter repeaten
-    //     wenn ausserhalb unserer Allowlist.
-    //     User-Wunsch: 'User will mit scope die Reichweite seiner
-    //     path discoveries beschraenken'.
-    //
+    // (a) scoped PATH: scopeAllowedForRepeat. Wenn Sender Scope auf
+    //     Path-Discovery gesetzt hat, respektieren -- nicht weiter
+    //     repeaten wenn ausserhalb Allowlist.
     // (b) unscoped PATH: Hop-Cap via flood_max_unscoped_companions
-    //     (User-Klarstellung 2026-06-09: 'nur unscoped path soll
-    //     durch wenn < flood max unscoped companion -- damit
-    //     messages von companion zu companion oder companion durch
-    //     kommen'). Analog zur Wunschliste-39-Logik fuer unscoped
-    //     CHAT-Adverts + TXT_MSG: Erstkontakt-Pfad zwischen Companions
-    //     darf unscoped flutschen, aber begrenzt.
-    //     Sentinel CH_HOPS_OFF = follow flood_max_scope_region.
-    if (decision) {
+    //     (Sentinel CH_HOPS_OFF = follow flood_max_scope_region).
+    //     Analog zur Wunschliste-39-Logik fuer unscoped CHAT-Adverts
+    //     + TXT_MSG: 'damit messages von companion zu companion oder
+    //     companion durch kommen'.
+    if (decision && !is_local_endpoint) {
       if (packet->hasTransportCodes()) {
         if (!scopeAllowedForRepeat(packet)) {
           decision = false;
