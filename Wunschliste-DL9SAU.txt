@@ -2795,6 +2795,15 @@ Phasen-Plan:
     Advert bleibt aber durch (User kann via heard_list spaeter
     re-investigieren).
 
+    Profile-Hinweis (User 2026-06-09): bei sender/text-Filtern
+    macht 'repeat' bzw. 'complete' Sinn -- ein blockierter
+    Bot/Spammer/Bot-Text soll oft nicht nur lokal unsichtbar,
+    sondern auch nicht weiterverteilt werden. ANDERS als bei
+    scope-Filtern (Phase 5): dort gehoert die Forwarding-Frage
+    ausschliesslich ins Repeater-Profil + scope-Liste, NICHT
+    in den Display-Filter. Display- und Repeat-Welten klar
+    trennen.
+
   Phase 2 -- Channel-Verfeinerung:
     filter <type> exempt-channel #<name>
       (Filter gilt ueberall AUSSER in den genannten Channels)
@@ -2822,13 +2831,24 @@ Phasen-Plan:
     filter sender drop pubkey <hex-prefix>
       Pub-Key-basierter Hard-Block fuer Spammer die Namen aendern.
 
-  Phase 5 -- Scope-Filter (Channel-bezogen + Auto-Follow):
+  Phase 5 -- Scope-Filter (DISPLAY-only, Channel-bezogen):
+
+  WICHTIG -- Grenze zum Repeater (User-Klarstellung 2026-06-09):
+    Phase 5 wirkt AUSSCHLIESSLICH auf die Anzeige in der App
+    (also auf eingehende GRP_TXT vor App-Push). Die Repeat-
+    /Forwarding-Logik fuer Scopes ist NICHT Teil dieses
+    Filters -- die ist im Repeater-Profil schon umfassend
+    abgedeckt (Wunschliste 11/24/27 etc.) und funktioniert.
+    Display und Repeat duerfen sich konzeptionell NICHT
+    vermischen. Wenn ein User scopes nicht repeaten will,
+    macht er das ueber die Repeater-Profil-Scope-Liste,
+    nicht ueber einen Display-Filter.
 
   Motivation (User-Erfahrung 2026-06-09):
     Channel Public ist unuebersichtlich -- mischt unscoped +
     #de + alle #de-* + #europe-* etc. Mehrwert: Scopes je
-    Channel droppen/erlauben. In Public droppt User unscoped
-    + #de + #de-*; in #de oder #all (hypothetisch) bleiben
+    Channel in der App-Anzeige droppen koennen. In Public
+    droppt User unscoped + #de + #de-*; in #de bleiben
     sie sichtbar.
 
     [Channel-Naming-Hinweis: Channels heissen ohne '#'
@@ -2837,123 +2857,62 @@ Phasen-Plan:
     verwechseln.]
 
     filter scope drop add <scope-name> [on-channel <chan>]
-    filter scope allow add <scope-name> [on-channel <chan>]
     filter scope drop list
     filter scope drop remove <idx|pattern>
       Wirkt auf eingehende GRP_TXT vor App-Push. Channel-
-      spezifisch via 'on-channel'; default = global.
+      spezifisch via 'on-channel'; default = global. Keine
+      Repeat-Auswirkung.
 
-  Repeat-Verschraenkung mit ch.hops (Wunschliste 32):
-    User-Beobachtung: "wenn ich kein #de und kein unscoped
-    auf Public will, will ich's vermutlich auch nicht
-    repeaten." Konsequenz: filter scope drop koennte
-    optional auch den Repeat-Cap fuer diese
-    Channel+Scope-Kombi auf 0 setzen.
-
-      filter scope drop add unscoped on-channel Public \
-        also-block-repeat
-      filter scope drop add de on-channel Public also-block-repeat
-
-    Default offen: nur UI-Drop oder UI+Repeat-Drop? Bei
-    Implementation entscheiden. Vermutung: User-Default
-    ist konservativ (nur UI), Power-User schaltet
-    'also-block-repeat' explizit zu.
-
-  Scope-Follow-Smallest-Region (Auto-Adapt):
+  Optional, nur falls real-world gewuenscht --
+  Scope-Follow-Smallest-Region (Geo-Auto-Adapt der Anzeige):
     filter scope drop mode follow-smallest-region
-      Wenn aktiv, ergibt sich der Drop-Set automatisch aus der
-      eigenen Position (getEffectiveLatLon / scope-Bbox-Cache):
-      - Allow: scope passt auf eigene Position UND ist
-        kleiner-gleich der eigenen "Wohn"-Region (smallest
-        enclosing scope der Position).
-      - Drop: alle scopes die groesser sind als smallest +
-        alle die die eigene Position NICHT enthalten.
+      Wenn aktiv, ergibt sich der Drop-Set fuer geo-bezogene
+      Scopes automatisch aus der eigenen Position
+      (getEffectiveLatLon + scope-Bbox-Cache):
+      - Sichtbar: smallest enclosing scope der eigenen
+        Position. Beispiel Berlin -> #de-be sichtbar.
+      - Gedroppt: alle groesseren Geo-Scopes + alle die die
+        eigene Position NICHT enthalten.
+      Semantische Scopes (local/lokal/region/regional/direct)
+      sind hiervon NICHT betroffen -- die handhabt der User
+      explizit ueber 'filter scope drop add direct' o.ae.,
+      wenn er sie ausblenden moechte.
 
-    Beispiel Berlin:
-      - smallest enclosing = #de-be (Stadtstaat)
-      - Sichtbar:  #de-be
-      - Gedroppt:  #de-bebb (Brandenburg-Ost), #de-bb (BB
-                   ganz), #de, #europe, unscoped, #de-by,
-                   #de-by-muc, ...
-
-    Beispiel Ostfriesland (Mobil unterwegs):
-      - smallest enclosing = #de-ni-aurich oder ein
-        sub-regionaler scope falls vorhanden
-      - Sichtbar: dieser scope
+      KEIN Pin-Konzept noetig: wenn ein scope sichtbar sein
+      soll, einfach NICHT auf die Drop-Liste setzen.
 
   Datenbasis: scope-Bbox-Cache existiert bereits (Wunschliste 11
     + 24 + 27). Smallest-Containing-Scope-Lookup ist O(n_scopes)
     pro Paket -- akzeptabel weil Scope-Liste klein (<100).
 
-  Hysterese: braucht's NICHT als Filter-eigenes Feature. Das
-    GPS-/Scope-Update-Konzept (Wunschliste 11/24/27 etc.)
-    handelt Position-Refresh + Bbox-Recompute schon mit
-    sinnvoller Frequenz/Stabilitaet -- der Filter folgt
-    einfach dem aktuellen scope-Set.
+  Hysterese: NICHT als Filter-eigenes Feature. Das
+    GPS-/Scope-Update-Konzept (Wunschliste 11/24/27) handhabt
+    Position-Refresh + Bbox-Recompute bereits mit sinnvoller
+    Frequenz/Stabilitaet; der Filter folgt einfach dem
+    aktuellen scope-Set.
 
-  Pinned-Konzept (User-Praezisierung 2026-06-09):
-    Pinned-Liste = "immer sichtbar + immer durchgelassen
-    auch wenn smallest-region das sonst droppt".
-
-    Zuerst fragten wir uns ob das ueberhaupt Sinn macht --
-    scopes sind ja Reichweiten-Definition + Repeater
-    forwarden nur eingetragene scopes; ein 'pinned
-    #heimat-distrikt' auf Reisen kommt scheinbar nicht an.
-    Aber: zwei valide Use-Cases sprechen klar fuer pinned:
-
-    1) Direkt-Empfang ODER eigener Repeater traegt den scope:
-       Freundeskreis nutzt z.B. #foobar. Andere Repeater
-       repeaten den nicht -- aber User hoert die Freunde
-       direkt (LoS / kurze Distanz), ODER der EIGENE
-       (Companion-)Repeater hat #foobar explizit
-       eingetragen und forwarded selbst, waehrend die
-       umgebenden Repeater den scope nicht kennen. In
-       beiden Faellen kommen Pakete an + sollen NICHT vom
-       smallest-region-Filter gedroppt werden.
-
-    2) Portabler Repeater auf Reisen (defensive mode):
-       User nimmt seinen mobilen Repeater mit. Dieser
-       kennt #meineReisegruppe. Mitreisende funken in
-       diesem scope; mein Repeater forwarded, alle
-       anderen lokalen Repeater am Reiseort tun das
-       nicht. UI muss diese scope-Pakete weiter zeigen
-       obwohl smallest-region am Reiseort etwas ganz
-       anderes ist.
-
-    Lehre: pinned ist KEINE Routing-Anweisung; pinned sagt
-    nur "wenn das Paket dennoch ankommt (durch wessen
-    Verdienst auch immer -- direkt-Empfang oder eigener
-    Repeater), nicht vom smallest-region-Auto-Filter
-    abklemmen".
-
-    Pinned-Quellen die alle Sinn machen:
-      - 'local'/'lokal'/'region'/'regional' (semantische
-        Range-Scopes, universell sinnvoll)
-      - Persoenliche Freundeskreis-Scopes (#foobar)
-      - Reisegruppen-Scopes (#meineReisegruppe), v.a. wenn
-        man eigenen portablen Repeater mitnimmt
-
-    MVP Phase 5: pinned bleibt drin, default-Liste mit den
-    semantischen Range-Scopes vorbelegt; User kann beliebige
-    weitere scopes hinzufuegen.
-
-      filter scope pin add <scope-name>
-      filter scope pin remove <idx|name>
-      filter scope pin list
+  ACHTUNG -- Komplexitaets-Gefahr (User-Mahnung 2026-06-09):
+    Phase 5 ist offen-konzept, NICHT spec. Auto-Adapt-Mechaniken
+    klingen elegant, bergen aber Risiko: zuviel Automatik ->
+    User versteht nicht mehr was ein/aus ist + Edge-Cases
+    explodieren. MVP-Vorschlag: erstmal nur die explizite
+    Variante (filter scope drop add ...). Auto-Follow erst
+    nachschieben wenn explizite Variante in der Praxis als
+    "zu manuell" empfunden wird. Display- und Repeat-Welten
+    streng getrennt halten.
 
   Konzeptueller Bezug:
     - Wunschliste 11/24/27: scope-Bbox-System (Datenbasis)
-    - Wunschliste 32: ch.hops (Repeat-Cap-Layer)
+    - Wunschliste 32: ch.hops (Repeat-Cap-Layer -- nicht hier)
     - Wunschliste 46 Phase 2: ch.mute (lokal hide whole channel)
-    - Diese Phase 5 ist die feinkoernige Scope-Achse INNERHALB
-      eines Channels -- mit OPTIONALER Repeat-Cap-Kopplung
-      (also-block-repeat) zu Wunschliste 32.
+    - Diese Phase 5 ist die feinkoernige Scope-Achse fuer die
+      DISPLAY-Seite -- KEINE Forwarding-Auswirkung.
 
   Vor Implementation: entscheiden ob 'filter scope' eigener
     Befehlsbaum oder Erweiterung von Phase 4 'filter region
-    drop/allow' (siehe Display-Achse-Alternative oben). User-
-    Praeferenz 2026-06-09: lieber expliziter 'filter scope ...'
-    Befehl, weil semantisch klar an scope-System angedockt.
+    drop/allow'. User-Praeferenz 2026-06-09: expliziter
+    'filter scope ...' Befehl, weil semantisch klar an
+    scope-System angedockt.
 
 Channel-Mute vs Filter -- Namespacing-Diskussion:
 
