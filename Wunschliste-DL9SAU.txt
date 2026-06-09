@@ -3206,6 +3206,26 @@ Konkrete Befehle die remote sinnvoll sind:
   discover ...            -- Mesh-Discovery triggern
   -- usw, alles was 'handleCompanionCommand' kennt.
 
+Passwort-basiertes Login (User-Wunsch 2026-06-09):
+  Analog zu simple_room_server (CommonCLI.cpp:289+).
+  Neue Prefs:
+    char admin_password[32]   (Default: leer = kein Remote-Admin)
+    char guest_password[32]   (optional, fuer reduzierte Befehle)
+  CLI-Befehle:
+    set passwd_admin <pw>     (auch persistent)
+    set passwd_guest <pw>     (optional)
+    set passwd_admin clear    (loescht -> kein Remote-Admin moeglich)
+  Login-Mechanik via ANON_REQ:
+    Client sendet ANON_REQ_TYPE_LOGIN mit Password im Payload.
+    Server matched gegen admin_password (full perms) oder
+    guest_password (reduzierte Befehls-Whitelist).
+    Bei Erfolg: RESP_SERVER_LOGIN_OK + Contact bekommt Permission-
+    Marker (z.B. flags |= 0x01 wie simple_repeater).
+  REQ_TYPE_CLI: prueft Contact-Permission, fuehrt Befehl aus.
+  Guest-Befehle-Whitelist (Vorschlag, kann konfigurierbar werden):
+    stats, clock, scope (read-only), get, trace (lesen)
+  Admin-Befehle: alles (incl. reboot, bluetooth toggle, set, etc.).
+
 Wire-Format:
   REQ_TYPE_CLI := 0x?? (Wert in BaseChatMesh.h definieren)
   Payload: [4]sender_timestamp [N]command_text (ASCII)
