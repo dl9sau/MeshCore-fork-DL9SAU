@@ -3226,6 +3226,16 @@ Passwort-basiertes Login (User-Wunsch 2026-06-09):
     stats, clock, scope (read-only), get, trace (lesen)
   Admin-Befehle: alles (incl. reboot, bluetooth toggle, set, etc.).
 
+  Anonym (KEIN Passwort, jeder darf):
+    User-Wunsch 2026-06-09: 'Abfragen repeater: Owner immer ohne
+    Passwort moeglich'. Aktuell ist das schon so fuer:
+      ANON_REQ_TYPE_OWNER     -- Name + owner_info
+      ANON_REQ_TYPE_REGIONS   -- aktive Scopes
+      ANON_REQ_TYPE_BASIC     -- clock + features
+    Diese drei bleiben immer Public-Read fuer alle Mesh-User
+    (kein Login-Request davor noetig). Permission-Check NUR fuer
+    REQ_TYPE_CLI (Admin/Guest).
+
 Wire-Format:
   REQ_TYPE_CLI := 0x?? (Wert in BaseChatMesh.h definieren)
   Payload: [4]sender_timestamp [N]command_text (ASCII)
@@ -3311,6 +3321,60 @@ Caveats:
 
 Quelle: User-Wunsch 2026-06-09, basierend auf positiver Erfahrung
         in einer LoRa-APRS-Firmware mit Multi-Thread-WDT.
+
+
+--------------------------------------------------------------------------------
+54. REPEATER_DEFENSIVE_FORCE #ifdef -- defensive-force per Compile-Time
+--------------------------------------------------------------------------------
+
+Status: User-Wunsch 2026-06-09 vor GitHub-Veroeffentlichung.
+
+Hintergrund:
+  Der CLI-Befehl 'repeater on force' (+ App-Pfad mit client_repeat_force=1)
+  erlaubt im profile=defensive das Repeaten auf Frequenzen ausserhalb
+  der strict-Allowlist (z.B. EU 869.618 oder andere wo Client-Repeater
+  in der Community unerwuenscht sind). Die Option ist defensiv
+  gewollt, aber kann in Hand des falschen Users 'Mesh-Spam' erzeugen.
+
+User-Plan: DL9SAU-Fork auf GitHub veroeffentlichen, aber das
+  'client defensive repeat'-Feature soll in den compiled packages
+  und in der sichtbaren Doku/CLI NICHT erscheinen. User selber
+  baut sich seine Version mit dem Flag aktiviert.
+
+Implementation:
+  #ifdef REPEATER_DEFENSIVE_FORCE
+    ... Force-Check + CLI 'repeater on force' + Help-Erlaeuterung
+        + 'client_repeat_force' Pref-Lese/Schreibpfad + App-Pfad
+        mit force-Flag
+  #endif
+
+  Default: NICHT definiert -> Force-Feature komplett unsichtbar.
+  User-Build aktiviert via platformio.ini oder Build-Flag:
+    -DREPEATER_DEFENSIVE_FORCE=1
+  Oder ein Build-Time-Comment in der Datei beim User.
+
+Betroffene Code-Stellen (grep 'force\b' + 'client_repeat_force'):
+  - CMD_SET_RADIO_PARAMS Pfad (App-Sync):
+    bool defensive_mode = (...); if (... force ...) ...
+  - CLI 'repeater on force' Befehl-Parser
+  - help-Texte: 'force' Hinweise raus
+  - get all / get <key>: client_repeat_force-Anzeige raus
+  - prefs reset / backup-restore: client_repeat_force=0 setzen
+    (auch ohne ifdef -- Pref-Layout bleibt persistent, nur
+    nicht setzbar)
+  - CMD_GET_ALLOWED_REPEAT_FREQ wide-vs-strict Logik:
+    'force-Flag' Trigger raus, nur profile=normal triggert wide
+
+Caveats:
+  - Pref-Layout muss kompatibel bleiben: client_repeat_force-Byte
+    in der pref-Datei steht weiterhin (nicht entfernen, sonst
+    bricht der Restore von Test-Builds). Nur die User-sichtbaren
+    Pfade ifdef'en.
+  - Wenn jemand ohne den Flag die Firmware baut + nachher mit
+    Flag, muss client_repeat_force=0 sicher initialisiert sein
+    (Pre-Init in begin()).
+
+Quelle: User-Wunsch 2026-06-09, Vorbereitung GitHub-Fork-Veroeffentlichung.
 
 
 
