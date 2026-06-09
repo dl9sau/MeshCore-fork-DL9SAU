@@ -2918,10 +2918,53 @@ Phasen-Plan:
     droppt User unscoped + #de + #de-*; in #de bleiben
     sie sichtbar.
 
-    [Channel-Naming-Hinweis: Channels heissen ohne '#'
-    (Public, ping, bots, ...). Das '#'-Prefix ist
-    Scope-Prefix (#de, #de-be, ...). In Befehlsstrings nicht
-    verwechseln.]
+    [Channel-Naming -- Korrektur 2026-06-09 (User):
+    Es gibt DREI Channel-Modi:
+      Public          oeffentlich bekannt, kein eigener Key
+      #channelname    deterministischer Key aus Namen
+                      abgeleitet -- jeder kann hash berechnen,
+                      Inhalt aber nur mit Abo lesbar
+      channelname     User-definierter shared-key. Mehrere
+                      Channels gleichen Namens mit
+                      unterschiedlichen Keys koennen parallel
+                      existieren (test mit Key AAA, test mit
+                      Key BBB).
+    Das '#'-Prefix dieser Channel-Form NICHT mit Scope-Prefix
+    verwechseln -- Kontext (Channel- vs Scope-Befehl) macht
+    es eindeutig. In Filter-Listen sind '#test' und 'test'
+    verschiedene Eintraege.
+
+    ACHTUNG -- Syntax-Konflikt #channel vs #scope:
+    Protokoll-Designfehler: '#xxx' bedeutet je nach Kontext
+    'deterministisch-key Channel' ODER 'Scope-Tag innerhalb
+    Channel'. Quelle wiederkehrender Verwechslungen (auch
+    durch Tools/LLM). Dokumentation MUSS bei jeder Erwaehnung
+    klarstellen welche Bedeutung. Mitigation in CLI: Befehle
+    sind eindeutig kontextualisiert ('filter text on-channel
+    #foo' = Channel; 'filter scope drop add #foo' = Scope).]
+
+    Filter-Reichweite: 'on-channel'/'exempt-channel' Filter
+    koennen NUR Channels referenzieren, die das Geraet selbst
+    konfiguriert hat. Sonst kennen wir weder Namen noch Key.
+    Unbekannte Channels koennen nicht entschluesselt + nicht
+    angezeigt werden -- ein Display-Filter dafuer ist nicht
+    moeglich. Repeat-seitig sind sie aber sichtbar als
+    Paket -- siehe naechste Achse.
+
+  Repeat-only-Achse: filter unknown-channel
+  (User-Idee 2026-06-09):
+    Repeater sieht Pakete fuer Channels die er nicht
+    konfiguriert hat (entschluesselbar nein, weiterleitbar
+    ja). Ob er solche Pakete weiterleiten soll oder nicht
+    ist eine Forwarding-Policy-Frage, NICHT Display.
+
+      filter unknown-channel repeat yes|no
+        (Default yes -- erhaelt heutiges Verhalten)
+
+    Wirkt ausschliesslich auf Repeat-Pfad. Display ist
+    trivialerweise immer 'aus' (kein Klartext ohne Key).
+    Sauberer Bruch zur Display-Filter-Welt -- daher eigene
+    Achse, nicht in Phase 5 untergebracht.
 
     filter scope drop add <scope-name> [on-channel <chan>]
     filter scope drop list
