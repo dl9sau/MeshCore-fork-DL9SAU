@@ -2891,23 +2891,55 @@ Phasen-Plan:
     sinnvoller Frequenz/Stabilitaet -- der Filter folgt
     einfach dem aktuellen scope-Set.
 
-  Pinned-Konzept -- noch zu klaeren:
-    Erster Entwurf hatte "pinned scopes" (z.B. local/region
-    oder persoenlich Heimatdistrikt) die immer sichtbar
-    bleiben. Problem (User 2026-06-09):
-      Scopes sind Reichweiten-Definition, keine Routing-
-      Anweisung. Repeater forwarden NUR scopes die sie selbst
-      eingetragen haben. Ein "pinned #meineReisegruppe" oder
-      "pinned #heimat-distrikt" kommt am Reiseort gar nicht
-      an wenn die lokalen Repeater den scope nicht kennen.
-    Pinned 'local'/'lokal'/'region'/'regional' (die
-    semantischen Range-Scopes) waeren konzeptionell
-    weniger problematisch, weil die ueberall denselben
-    Semantik-Sinn haben. Pinned auf konkrete Geo-Scopes
-    (z.B. #de-bebb-strausberg) waere ein Mismatch zwischen
-    Wunsch und Forwarding-Realitaet.
-    -> Pinned-Feature verschieben oder weglassen, je nach
-    Diskussion. MVP Phase 5 startet OHNE pinned.
+  Pinned-Konzept (User-Praezisierung 2026-06-09):
+    Pinned-Liste = "immer sichtbar + immer durchgelassen
+    auch wenn smallest-region das sonst droppt".
+
+    Zuerst fragten wir uns ob das ueberhaupt Sinn macht --
+    scopes sind ja Reichweiten-Definition + Repeater
+    forwarden nur eingetragene scopes; ein 'pinned
+    #heimat-distrikt' auf Reisen kommt scheinbar nicht an.
+    Aber: zwei valide Use-Cases sprechen klar fuer pinned:
+
+    1) Direkt-Empfang ODER eigener Repeater traegt den scope:
+       Freundeskreis nutzt z.B. #foobar. Andere Repeater
+       repeaten den nicht -- aber User hoert die Freunde
+       direkt (LoS / kurze Distanz), ODER der EIGENE
+       (Companion-)Repeater hat #foobar explizit
+       eingetragen und forwarded selbst, waehrend die
+       umgebenden Repeater den scope nicht kennen. In
+       beiden Faellen kommen Pakete an + sollen NICHT vom
+       smallest-region-Filter gedroppt werden.
+
+    2) Portabler Repeater auf Reisen (defensive mode):
+       User nimmt seinen mobilen Repeater mit. Dieser
+       kennt #meineReisegruppe. Mitreisende funken in
+       diesem scope; mein Repeater forwarded, alle
+       anderen lokalen Repeater am Reiseort tun das
+       nicht. UI muss diese scope-Pakete weiter zeigen
+       obwohl smallest-region am Reiseort etwas ganz
+       anderes ist.
+
+    Lehre: pinned ist KEINE Routing-Anweisung; pinned sagt
+    nur "wenn das Paket dennoch ankommt (durch wessen
+    Verdienst auch immer -- direkt-Empfang oder eigener
+    Repeater), nicht vom smallest-region-Auto-Filter
+    abklemmen".
+
+    Pinned-Quellen die alle Sinn machen:
+      - 'local'/'lokal'/'region'/'regional' (semantische
+        Range-Scopes, universell sinnvoll)
+      - Persoenliche Freundeskreis-Scopes (#foobar)
+      - Reisegruppen-Scopes (#meineReisegruppe), v.a. wenn
+        man eigenen portablen Repeater mitnimmt
+
+    MVP Phase 5: pinned bleibt drin, default-Liste mit den
+    semantischen Range-Scopes vorbelegt; User kann beliebige
+    weitere scopes hinzufuegen.
+
+      filter scope pin add <scope-name>
+      filter scope pin remove <idx|name>
+      filter scope pin list
 
   Konzeptueller Bezug:
     - Wunschliste 11/24/27: scope-Bbox-System (Datenbasis)
