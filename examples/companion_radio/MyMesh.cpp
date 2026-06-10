@@ -12639,7 +12639,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       savePrefs();
       pushCompanionMessage(
         "OK - bluetooth off (persist).\n"
-        "Recovery: USB-Serial, Hardware-Button");
+        "Recovery: USB-Serial oder\n"
+        "Hardware-Button (Geraete mit Display).");
       return;
     }
     if (strncmp(p, "tmp-off", 7) == 0) {
