@@ -1178,10 +1178,12 @@ bool MyMesh::isRepeatingEffectivelyAllowed() const {
   if (_prefs.repeater_profile != 0) return true;   // normal: ignoriert moving + freq
   // defensive:
   if (_is_moving) return false;                    // is_moving suppressed defensive-rep
-  // freq muss in strict-Range sein ODER force gesetzt
+  // freq muss in strict-Range sein ODER (nur mit ifdef) force gesetzt
   uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
   if (isValidClientRepeatFreq(f_khz)) return true;
+#ifdef REPEATER_DEFENSIVE_FORCE
   if (_prefs.client_repeat_force) return true;
+#endif
   return false;
 }
 
@@ -5151,11 +5153,15 @@ void MyMesh::handleCmdFrame(size_t len) {
     // on' in der App mit 'Illegal value' fehl, weil App keine
     // force-Option hat und der Check immer feuerte.
     bool defensive_mode = (_prefs.repeater_profile == 0 /* defensive */);
+    bool force_override = false;
+#ifdef REPEATER_DEFENSIVE_FORCE
+    force_override = (_prefs.client_repeat_force != 0);
+#endif
     if (repeat && defensive_mode
-        && !_prefs.client_repeat_force && !isValidClientRepeatFreq(freq)) {
+        && !force_override && !isValidClientRepeatFreq(freq)) {
       // App will Repeater aktivieren auf einer Freq die ausserhalb des
-      // strict-Range liegt UND der Force-Flag wurde nicht gesetzt (siehe
-      // Companion-Befehl "repeater on force"). Ablehnen.
+      // strict-Range liegt. Ohne REPEATER_DEFENSIVE_FORCE-Build: hart
+      // ablehnen. Mit ifdef + force-Flag: User-Verantwortung.
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7000 &&
         bw <= 500000) {
@@ -5796,8 +5802,10 @@ void MyMesh::handleCmdFrame(size_t len) {
     //                         als ungueltig markieren). Unabhaengig von
     //                         repeat on/off -- force ist die explizite
     //                         User-Entscheidung 'meine Freq ist OK'.
-    bool wide_list = (_prefs.repeater_profile == 1 /* normal */)
-                  || (_prefs.client_repeat_force != 0);
+    bool wide_list = (_prefs.repeater_profile == 1 /* normal */);
+#ifdef REPEATER_DEFENSIVE_FORCE
+    if (_prefs.client_repeat_force != 0) wide_list = true;
+#endif
     int i = 0;
     out_frame[i++] = RESP_ALLOWED_REPEAT_FREQ;
     if (wide_list) {
@@ -7473,7 +7481,9 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("chat_name_mode",        _prefs.chat_name_mode);
   kv_str ("chat_name_custom",      _prefs.chat_name_custom);
   kv_uint("auto_advert_enabled",   _prefs.auto_advert_enabled);
+#ifdef REPEATER_DEFENSIVE_FORCE
   kv_uint("client_repeat_force",   _prefs.client_repeat_force);
+#endif
   kv_uint("repeater_profile",      _prefs.repeater_profile);
   kv_uint("loop_detect",           _prefs.loop_detect);
   kv_uint("duty_soft_pct",         _prefs.duty_soft_pct);
@@ -8172,7 +8182,13 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
     if (val_type == 'n') {
       if (strcmp(key, "chat_name_mode") == 0)        { _prefs.chat_name_mode        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "auto_advert_enabled") == 0)   { _prefs.auto_advert_enabled   = (uint8_t)as_uint(); _br_applied++; return; }
+#ifdef REPEATER_DEFENSIVE_FORCE
       if (strcmp(key, "client_repeat_force") == 0)   { _prefs.client_repeat_force   = (uint8_t)as_uint(); _br_applied++; return; }
+#else
+      // Force-Feature in diesem Build deaktiviert; Backup-Eintrag
+      // ignorieren (Pref bleibt persistent auf 0).
+      if (strcmp(key, "client_repeat_force") == 0)   { return; }
+#endif
       if (strcmp(key, "repeater_profile") == 0)      { _prefs.repeater_profile      = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "loop_detect") == 0)           { _prefs.loop_detect           = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "duty_soft_pct") == 0)         { _prefs.duty_soft_pct         = (uint8_t)as_uint(); _br_applied++; return; }
@@ -9529,6 +9545,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  -- echter Repeater steht fest.");
         pushCompanionMessage(
           "Wechsel via 'repeater profile <defensive|normal>'");
+#ifdef REPEATER_DEFENSIVE_FORCE
         pushCompanionMessage(
           "force (nur fuer defensive relevant):\n"
           "  auf manchen Frequenzen sind\n"
@@ -9538,6 +9555,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  'repeater on force' aktiviert es\n"
           "  trotzdem. Persistent ueber on/off.\n"
           "  signalFitsInIsmBand bleibt aktiv.");
+#endif
         return;
       }
       if (topic_prefix_match(topic, "status")) {
@@ -9736,7 +9754,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // 'defensive'. Bei aktiver Repeater-Funktion ist der Modus immer
       // sinnvoll; bei off lassen wir die Klammer weg.
       const char* prof = (_prefs.repeater_profile == 1) ? "full" : "defensive";
-      const char* frc  = _prefs.client_repeat_force ? ",force" : "";
+      const char* frc  = "";
+#ifdef REPEATER_DEFENSIVE_FORCE
+      if (_prefs.client_repeat_force) frc = ",force";
+#endif
       snprintf(line, sizeof(line),
                "autoadv: zerohop=%s nightly=%s  repeater=on (%s%s)",
                zh_str, nl_str, prof, frc);
@@ -10981,6 +11002,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.auto_advert_enabled != 0) non_default_count++;
     }
+#ifdef REPEATER_DEFENSIVE_FORCE
     // client_repeat_force
     if (show_all || _prefs.client_repeat_force != 0) {
       snprintf(tmp, sizeof(tmp), "  client_repeat_force = %u%s",
@@ -10989,6 +11011,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.client_repeat_force != 0) non_default_count++;
     }
+#endif
     // repeater_profile
     if (show_all || _prefs.repeater_profile != 0) {
       snprintf(tmp, sizeof(tmp), "  repeater_profile = %s%s",
@@ -16142,7 +16165,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (_prefs.repeater_profile == 0 && _is_moving) {
           runtime_suffix = ", paused (is_moving)";
         } else {
+#ifdef REPEATER_DEFENSIVE_FORCE
           runtime_suffix = ", blocked (freq braucht force, force=off)";
+#else
+          runtime_suffix = ", blocked (freq nicht in client-rep-Liste)";
+#endif
         }
       }
 
@@ -16174,6 +16201,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       //   force=off, freq braucht force -> Hinweis-Block
       //   force=off, no-need  -> (nichts -- alles sauber)
       if (_prefs.repeater_profile == 0) {
+#ifdef REPEATER_DEFENSIVE_FORCE
         bool has_force = _prefs.client_repeat_force != 0;
         bool freq_needs_force = !strict_ok;
         const char* bc = NULL;
@@ -16186,6 +16214,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                "  ('repeater on force' aktiviert das Repeating)";
         }
         if (bc) pushCompanionMessage(bc);
+#else
+        // Ohne ifdef: nur den 'freq nicht erlaubt'-Fall melden.
+        if (!strict_ok) {
+          pushCompanionMessage("Hinweis: freq nicht in defensive client-rep-Liste");
+        }
+#endif
       }
       return;
     }
@@ -16255,13 +16289,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     if (rm == 1) {
+      bool force = false;
+#ifdef REPEATER_DEFENSIVE_FORCE
       // "force"-Keyword erkennen (iOS-Tastatur macht aus "--force" einen
       // em-dash — daher ein einzelnes lowercase Wort statt Doppel-Hyphen).
-      bool force = false;
       const char* rest = arg;
       while (*rest && *rest != ' ' && *rest != '\t') rest++;  // skip on-Prefix
       while (*rest == ' ' || *rest == '\t') rest++;
       if (starts_with_word(rest, "force")) force = true;
+#endif
       // Sicherheitsgate 1: signalFitsInIsmBand (immer aktiv, auch mit force)
       uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
       uint32_t bw_hz = (uint32_t)(_prefs.bw * 1000.0f + 0.5f);
@@ -16273,17 +16309,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(line);
         return;
       }
-      // Sicherheitsgate 2: freq erlaubt client-rep ohne force? (sonst force noetig)
+      // Sicherheitsgate 2: freq erlaubt client-rep? (mit ifdef: force-Bypass)
       if (!force && !isValidClientRepeatFreq(f_khz)) {
         char line[160];
+#ifdef REPEATER_DEFENSIVE_FORCE
         snprintf(line, sizeof(line),
                  "Abgelehnt: %.4f MHz braucht force fuer client-rep.\n"
                  "Mit 'repeater on force' trotzdem aktivieren.", _prefs.freq);
+#else
+        snprintf(line, sizeof(line),
+                 "Abgelehnt: %.4f MHz nicht in defensive client-rep-Liste.",
+                 _prefs.freq);
+#endif
         pushCompanionMessage(line);
         return;
       }
       _prefs.client_repeat = 1;
+#ifdef REPEATER_DEFENSIVE_FORCE
       _prefs.client_repeat_force = force ? 1 : 0;
+#endif
       savePrefs();
       recomputeRepeatingAllowed(force ? "repeater on force" : "repeater on");
       char line[80];
@@ -16291,7 +16335,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(line);
       return;
     }
+#ifdef REPEATER_DEFENSIVE_FORCE
     pushCompanionMessage("Usage: repeater [on [force] | off]");
+#else
+    pushCompanionMessage("Usage: repeater [on | off]");
+#endif
     return;
   }
 

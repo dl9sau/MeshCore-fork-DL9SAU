@@ -151,6 +151,14 @@ struct NodePrefs {  // persisted to file
   // Wird gecleared sobald der Repeater per App auf 0 gesetzt wird ODER
   // per Companion "repeater on" (ohne force) bzw. "repeater off" - so muss
   // der force-Modus explizit per Companion-Geste reaktiviert werden.
+  //
+  // Build-Schalter REPEATER_DEFENSIVE_FORCE (Wunschliste 54):
+  //   nicht definiert (Default in GitHub-Release): User-sichtbare
+  //     Pfade (CLI 'repeater on force', App force-Flag, help, get all,
+  //     backup-export, status-Anzeige) sind aus-ifdef't. Pref-Layout
+  //     bleibt persistent kompatibel, der Wert wird aber ignoriert.
+  //   definiert (-DREPEATER_DEFENSIVE_FORCE=1 in platformio.ini):
+  //     komplettes Force-Feature aktiv.
   uint8_t client_repeat_force;
   // Duty-Cycle-Schwellen in % der regulatorischen 10% TX-Airtime-Grenze
   // (= 360 s in einem rollenden 1h-Fenster). Default 80 / 100.
