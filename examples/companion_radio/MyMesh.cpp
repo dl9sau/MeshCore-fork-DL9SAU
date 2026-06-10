@@ -3087,31 +3087,71 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
       memcpy(&reply[4], msg, ml);
       return 4 + ml;
     }
-    // Capture-Mode setzen, Befehl ausfuehren, Buffer als Reply.
-    char capture[155];
+    // Wunschliste 52 Pagination (2026-06-10): cmd kann mit trailing
+    // 'page N' enden (Client-driven). Server fuehrt cmd komplett aus
+    // in einem 800-byte Capture-Buffer, splittet in ~140-byte-Pages
+    // und liefert die angeforderte Page zurueck. Reply-Prefix
+    // '<page N/M>\n' damit Client weiss wie viele Seiten total.
+    int requested_page = 1;
+    {
+      // Suche letztes Vorkommen von ' page <num>' am Ende
+      char* p = cmd_buf + cmd_len;
+      // Trim erstmal trailing whitespace
+      while (p > cmd_buf && (p[-1] == ' ' || p[-1] == '\t')) p--;
+      // Rueckwaerts: Ziffern lesen
+      char* end_num = p;
+      while (p > cmd_buf && p[-1] >= '0' && p[-1] <= '9') p--;
+      if (p < end_num && p > cmd_buf + 5
+          && strncmp(p - 5, " page ", 6) == 0) {
+        long n = strtol(p, NULL, 10);
+        if (n >= 1 && n <= 99) {
+          requested_page = (int)n;
+          *(p - 5) = 0;  // strip ' page N' vom cmd
+          // re-trim trailing whitespace
+          char* t = p - 5;
+          while (t > cmd_buf && (t[-1] == ' ' || t[-1] == '\t')) {
+            *(--t) = 0;
+          }
+        }
+      }
+    }
+    // Capture-Mode setzen, Befehl ausfuehren, Buffer + Pages.
+    char capture[800];
     capture[0] = 0;
     _admin_reply_buf = capture;
     _admin_reply_max = sizeof(capture);
     _admin_reply_used = 0;
     _admin_capture_active = true;
     _admin_capture_truncated = false;
-    pushDebugLog("[admin] cmd from %s: %s\n", contact.name, cmd_buf);
+    pushDebugLog("[admin] cmd from %s (page %d): %s\n",
+                 contact.name, requested_page, cmd_buf);
     handleCompanionCommand(cmd_buf);
     _admin_capture_active = false;
     _admin_reply_buf = NULL;
     _admin_reply_max = 0;
-    size_t out_len = strlen(capture);
-    if (out_len == 0) {
-      // Leerer Reply: schreib OK damit Client weiss dass cmd akzeptiert.
-      const char* ok = "(OK, no reply)";
-      out_len = strlen(ok);
-      memcpy(capture, ok, out_len);
-      capture[out_len] = 0;
+    size_t total_len = strlen(capture);
+    if (total_len == 0) {
+      strcpy(capture, "(OK, no reply)");
+      total_len = strlen(capture);
     }
-    if (out_len > 155) out_len = 155;
+    const size_t PAGE_PAYLOAD = 140;
+    size_t total_pages = (total_len + PAGE_PAYLOAD - 1) / PAGE_PAYLOAD;
+    if (total_pages == 0) total_pages = 1;
+    if ((size_t)requested_page > total_pages) requested_page = (int)total_pages;
+    size_t page_start = ((size_t)requested_page - 1) * PAGE_PAYLOAD;
+    size_t page_len = total_len - page_start;
+    if (page_len > PAGE_PAYLOAD) page_len = PAGE_PAYLOAD;
+    char reply_buf[160];
+    size_t pre_len = snprintf(reply_buf, sizeof(reply_buf),
+                              "<page %d/%u>\n",
+                              requested_page, (unsigned)total_pages);
+    if (page_len + pre_len > sizeof(reply_buf)) {
+      page_len = sizeof(reply_buf) - pre_len;
+    }
+    memcpy(reply_buf + pre_len, capture + page_start, page_len);
     memcpy(reply, &sender_timestamp, 4);
-    memcpy(&reply[4], capture, out_len);
-    return (uint8_t)(4 + out_len);
+    memcpy(&reply[4], reply_buf, pre_len + page_len);
+    return (uint8_t)(4 + pre_len + page_len);
   }
 
   // Wunschliste 7 Phase 4: REQ_TYPE_GET_STATUS (RepeaterStats).
