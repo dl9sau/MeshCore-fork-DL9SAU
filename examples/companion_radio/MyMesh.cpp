@@ -9889,6 +9889,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "messages", "logging", "unscoped-channelmessages", "clear",
     "contact", "backup", "save", "discover",
     "ch.hops",
+    "admin", "bluetooth", "bt", "filter",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -10393,7 +10394,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "contact")) {
         pushCompanionMessage(
-          "contact <name-prefix> type [chat|repeater|sensor|room]\n"
+          "contact <name-prefix> type [<chat|repeater|sensor|room>]\n"
           "Diagnose-CLI: setzt ADV_TYPE eines gespeicherten Kontakts um."
         );
         pushCompanionMessage(
@@ -10402,8 +10403,50 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         pushCompanionMessage(
           "Zweck: testen ob die App weiter Chat anbietet wenn ein Peer\n"
-          "sich als SENSOR/REPEATER advertet (Wunschliste 7)."
+          "sich als SENSOR/REPEATER advertet."
         );
+        return;
+      }
+      if (topic_prefix_match(topic, "admin")) {
+        pushCompanionMessage(
+          "admin: Remote-Administration ueber Mesh-RPC.\n"
+          "Setzt voraus: Zielgeraet hat passwd_admin gesetzt\n"
+          "+ Du bist als Contact bekannt + Role REPEATER.");
+        pushCompanionMessage(
+          "  admin login <contact-name> <password>\n"
+          "    Login per Mesh-ANON_REQ.\n"
+          "    Antwort: '[admin] Login OK bei <name>'");
+        pushCompanionMessage(
+          "  admin <contact-name> <cmd-text>\n"
+          "    Cmd ausfuehren auf dem Remote-Geraet.\n"
+          "    Antwort: '[admin <name>]\\n<reply>'");
+        pushCompanionMessage(
+          "Multi-Frame-Reply via Pagination:\n"
+          "  admin <name> <cmd> page <N>\n"
+          "Standard ist page 1; Server zeigt <page N/M>.");
+        pushCompanionMessage(
+          "Guest-Whitelist (read-only): stats/status/uptime,\n"
+          "  clock/date/time, version/help/?, neighbors.\n"
+          "Admin: alle lokalen CLI-Befehle.");
+        return;
+      }
+      if (topic_prefix_match(topic, "bluetooth")
+          || topic_prefix_match(topic, "bt")) {
+        pushCompanionMessage(
+          "bluetooth: BLE-Power-Mode + Cycle.\n"
+          "  bluetooth                Status anzeigen\n"
+          "  bluetooth power <cycle|always-on>  (persist)");
+        pushCompanionMessage(
+          "  bluetooth <on|off>       persist\n"
+          "  bluetooth tmp-off        runtime (kein Reboot-Survival)");
+        pushCompanionMessage(
+          "Cycle-Mode (Default): 10min Boot-Grace,\n"
+          "  5min Hot-Start nach Disconnect, dann\n"
+          "  180s sleep + 30s wait Listening-Window.");
+        pushCompanionMessage(
+          "Wake-on-LoRa: eingehende DM oder admin-cmd\n"
+          "  weckt BLE fuer 5min HOT_START.\n"
+          "Display-Menue 5 (long-press) toggled tmp.");
         return;
       }
       if (topic_prefix_match(topic, "discover")) {
@@ -10932,9 +10975,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "    Auto-Matrix (siehe 'help advert'): folgt client_repeat\n"
         "    + repeater_profile.");
       pushCompanionMessage(
-        "  advert role fixed chat|repeater|sensor|room\n"
+        "  advert role fixed <chat|repeater|sensor|room>\n"
         "    Type fest pinnen -- beeinflusst createSelfAdvert\n"
-        "    + Discovery-Query (Wunschliste 7).");
+        "    + Discovery-Query.");
       return;
     }
 
