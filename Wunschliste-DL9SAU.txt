@@ -2634,6 +2634,31 @@ Timings -- finalisiert (User-Iteration 2026-06-09):
     fuer beide gleich. Bei Reise-Iteration ggf. noch unterscheiden
     falls User-Test das nahelegt.
 
+  Iteration 2026-06-10 (User-Klarstellung waehrend Phase-1-Test):
+    profile=normal (echter Repeater):
+      Nach 5min ohne Connect -> tmp-off MIT tmp=unendlich (= bleibt
+      aus bis Button-Press oder Admin-CMD-Wake). Kein periodisches
+      Wake-Window noetig: Repeater empfaengt keine DMs (App laesst
+      DM-Pfad bei advertised Repeater-Rolle nicht zu), also kein
+      Wake-on-LoRa-DM-Trigger. Admin-CMD-Wake bleibt jederzeit
+      moeglich via REQ_TYPE_ADMIN_CMD (Wunschliste 52).
+    profile=defensive (Companion mit Repeat) + Pure-Companion:
+      Verhalten wie heute mit Wunschliste-43-Phase-1-Implementation
+      (180s sleep + 30s wait, 5min Hot-Start nach Disconnect, Wake-
+      on-LoRa fuer DM + Admin-CMD).
+    Implementation-Hinweis: profile=normal-Pfad braucht eine eigene
+    State-Machine-Variante 'CYCLE_SUPPRESSED' die nach HOT_START
+    direkt nach OFF wechselt statt SLEEP. Plus die Drift-Detection
+    sollte das respektieren.
+
+  30:60-Sekunden-Iteration (User-Erinnerung 2026-06-10):
+    Frueh in der Diskussion stand mal '30s sleep + 60s wait' als
+    Alternativ-Cadence fuer defensive im Raum. Wurde verworfen
+    zugunsten 180:30 (mehr Stromsparen bei akzeptablem Lag). Plus
+    profile-spezifische Timings haben sich bei finalem Review als
+    nicht noetig erwiesen. Notiert fuer den Fall dass User-Tests
+    spaeter doch unterschiedliche Cadences nahe legen.
+
   Profile-off (Pure-Companion):
     bluetooth power cycle ergibt keinen Sinn (User braucht App).
     Default sollte 'always-on' sein.
@@ -3565,6 +3590,31 @@ Caveats:
     waere DER Recovery-Pfad. Default 'enabled' angezeigt.
 
 Quelle: User-Idee 2026-06-09 + Klarstellung 2026-06-09.
+
+Reisefix 2026-06-10 (User-Hinweis waehrend Wunschliste-Planung):
+  Wir muessen beruecksichtigen dass bei Firmware-Varianten OHNE
+  Bluetooth (USB-only Companion) die serielle Ausgabe schon den
+  App-Kommunikations-Kanal traegt -- Companion-App spricht via
+  CDC mit der Firmware. CLI auf der gleichen Linie wuerde die
+  App-Kommunikation zerschiessen.
+
+  Konsequenzen:
+   - Auf solchen Geraeten ist BREAK -> CLI nur sicher wenn keine
+     App connected ist. Detection: kein recvFrame fuer X Sekunden?
+     Oder explizit-flag im Setup ('cli mode' vs 'app mode').
+   - ABER: es macht durchaus Sinn fuer reine Repeater-USB-only
+     Geraete (Hardware ohne BT, betrieben als reiner Repeater,
+     kein App-Anschluss). Da ist die CLI auf USB-Console der
+     Haupt-Kanal -- der gleiche Sinn wie bei einem klassischen
+     server-on-headless-machine.
+   - Vor Implementation Hardware-Inventur: welche Boards in
+     unserem Build sind reine USB ohne BT? Plus User-Frage in
+     der Build-Config: 'cli-mode default' (CLI an, kein App-CDC)
+     vs 'app-mode default' (CDC fuer App, BREAK ggf. via
+     Argument moeglich).
+
+Quelle: User-Idee 2026-06-09 + Klarstellung 2026-06-09 +
+        USB-only-Konflikt-Beobachtung 2026-06-10.
 
 
 --------------------------------------------------------------------------------
