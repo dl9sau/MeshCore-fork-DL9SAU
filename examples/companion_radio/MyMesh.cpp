@@ -9284,7 +9284,7 @@ void MyMesh::clearStats() {
 
 // Wunschliste 43 BLE-Power-Cycle (2026-06-10).
 // State-Machine in loop() getickt. Timings hartcodiert:
-//   BOOT_GRACE  = 30 min nach Boot (kein Connect je)
+//   BOOT_GRACE  = 10 min nach Boot (kein Connect je)
 //   HOT_START   = 5 min nach erstem Disconnect (verhindert Frust bei
 //                 App-Background/Lockscreen)
 //   SLEEP       = 180 s aus
@@ -9332,10 +9332,13 @@ void MyMesh::manageBlePower() {
   }
   _ble_was_connected = connected;
 
-  // Initial-Boot: wenn noch nie connected war, bleibt 30 min an
+  // Initial-Boot: wenn noch nie connected war, bleibt 10 min an
+  // (User-Wunsch 2026-06-10: 30min war zu lang; 10min reicht damit
+  // User die App holt + erst-connectet, danach geht's in den cycle
+  // ueber den Cycle-Sleep oder Hot-Start wenn der erste Connect war).
   if (_ble_pwr_state == BLE_PWR_BOOT) {
     if (_ble_pwr_state_until == 0) {
-      _ble_pwr_state_until = now + 30UL * 60 * 1000;
+      _ble_pwr_state_until = now + 10UL * 60 * 1000;
       setBleEnabled(true);
     }
     if (connected) {
@@ -12584,8 +12587,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char r[140];
       snprintf(r, sizeof(r),
                "bluetooth: pref=%s state=%s\n"
-               "  power cycle|always-on (persist)\n"
-               "  on|off (persist) | tmp-off (runtime)",
+               "  power <cycle|always-on>  (persist)\n"
+               "  <on|off>  (persist)\n"
+               "  tmp-off  (runtime)",
                m, s);
       pushCompanionMessage(r);
       return;
@@ -12615,6 +12619,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       pushCompanionMessage("Erwartet: bluetooth power <cycle|always-on>");
+      // (User-Konvention 2026-06-10: <a|b|c> fuer Alternativen-Set)
       return;
     }
     if (strncmp(p, "on", 2) == 0 && (p[2] == 0 || p[2] == ' ')) {
@@ -12644,7 +12649,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("OK - bluetooth tmp-off (runtime only)");
       return;
     }
-    pushCompanionMessage("Erwartet: power cycle|always-on | on | off | tmp-off");
+    pushCompanionMessage(
+      "Erwartet:\n"
+      "  power <cycle|always-on>\n"
+      "  <on|off|tmp-off>");
     return;
   }
 
