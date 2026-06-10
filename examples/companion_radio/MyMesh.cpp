@@ -9276,13 +9276,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  drop add <pat> on-channel <liste>\n"
           "  drop add <pat> exempt-channel <liste>");
         pushCompanionMessage(
-          "Shortcut fuer alle Pattern des Typs:\n"
-          "  filter TYPE on-channel <liste>\n"
-          "  filter TYPE exempt-channel <liste>");
+          "Nachtraegliches Aendern: remove + neu add.");
         pushCompanionMessage(
-          "  filter TYPE on-channel clear\n"
-          "Default: global (alle Channels).\n"
-          "Nur bekannte Channels erlaubt.");
+          "Shortcut fuer ALLE Pattern des Typs:\n"
+          "  filter TYPE on-channel <liste>\n"
+          "  filter TYPE exempt-channel <liste>\n"
+          "  filter TYPE on-channel clear");
         pushCompanionMessage(
           "Pattern (literal, case-insens.):\n"
           "  foo   = exakt Wort 'foo'\n"
@@ -9299,11 +9298,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  'ping!' braucht 'ping*' oder\n"
           "  exakt 'ping!' als Pattern.");
         pushCompanionMessage(
-          "Mehrwort -- Quotes ZWINGEND:\n"
+          "Mehrwort braucht Quotes:\n"
           "  drop add \"erstes zweites\"\n"
           "  drop add \"foo bar*\" on-channel X\n"
-          "Sonst wird das 2. Wort als\n"
-          "  on-channel/exempt-channel erwartet.");
+          "2. Wort ohne Quote = Modifier-Versuch.");
         pushCompanionMessage("Umlaute Ae/Oe/Ue ok.");
         pushCompanionMessage(
           "sender-Filter: DM-Absender +\n"
@@ -11727,7 +11725,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* p = strchr(cmd, ' ');
     if (!p) {
       pushCompanionMessage(
-        "filter <sender|text> <drop|keep|on-channel|exempt-channel> ...");
+        "Usage (Kurzform):\n"
+        "  filter <s|t> drop|keep add <pat> [on-channel|exempt-channel <chans>]\n"
+        "  filter <s|t> drop|keep remove <pat|idx>");
+      pushCompanionMessage(
+        "  filter <s|t> drop|keep list|clear\n"
+        "  filter <s|t> on-channel|exempt-channel <chans|clear>\n"
+        "  filter list");
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
@@ -11813,7 +11817,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     } else if (strncmp(p, "text", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
       is_sender = false; p += 4;
     } else {
-      pushCompanionMessage("Usage: filter <sender|text> <drop|keep|on-channel|exempt-channel> ...");
+      pushCompanionMessage("Erwartet: filter <sender|text> <drop|keep|on-channel|exempt-channel>");
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
@@ -11973,7 +11977,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     } else if (strncmp(p, "keep", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
       is_keep_verb = true; p += 4;
     } else {
-      pushCompanionMessage("Usage: filter <sender|text> <drop|keep|on-channel|exempt-channel> ...");
+      pushCompanionMessage(
+        "Erwartet: drop|keep|on-channel|exempt-channel\n"
+        "(drop/keep nehmen ein Pattern; on/exempt-channel\n"
+        " eine Channel-Liste)");
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
@@ -12193,7 +12200,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (strncmp(p, "remove", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
       p += 6;
       while (*p == ' ' || *p == '\t') p++;
-      if (!*p) { pushCompanionMessage("Usage: filter ... drop remove <pattern|index>"); return; }
+      if (!*p) { pushCompanionMessage("Usage: filter ... <drop|keep> remove <pattern|index>"); return; }
       // Versuche zuerst als Index zu parsen.
       // User-Wunsch 2026-06-09: Index 1-basiert (Listen-Anzeige zaehlt
       // auch ab 1). Internal Array-Index = idx-1. Buffer-Underflow-
@@ -12267,7 +12274,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("Pattern nicht in Liste.");
       return;
     }
-    pushCompanionMessage("Usage: filter <sender|text> drop <add|remove|list|clear>");
+    pushCompanionMessage("Usage: filter <sender|text> <drop|keep> <add|remove|list|clear>");
     return;
   }
 
