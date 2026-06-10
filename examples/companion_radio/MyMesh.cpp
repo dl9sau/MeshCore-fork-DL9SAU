@@ -9299,8 +9299,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  'ping!' braucht 'ping*' oder\n"
           "  exakt 'ping!' als Pattern.");
         pushCompanionMessage(
-          "  \"x y*\" Quote fuer Mehrwort.\n"
-          "  Umlaute Ae/Oe/Ue ok.");
+          "Mehrwort -- Quotes ZWINGEND:\n"
+          "  drop add \"erstes zweites\"\n"
+          "  drop add \"foo bar*\" on-channel X\n"
+          "Sonst wird das 2. Wort als\n"
+          "  on-channel/exempt-channel erwartet.");
+        pushCompanionMessage("Umlaute Ae/Oe/Ue ok.");
         pushCompanionMessage(
           "sender-Filter: DM-Absender +\n"
           "Channel-Sender (Prefix vor ': ').\n"
