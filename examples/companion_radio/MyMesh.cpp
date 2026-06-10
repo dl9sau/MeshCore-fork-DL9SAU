@@ -1112,17 +1112,25 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   return false;
 }
 
-// channel-filter (Wunschliste 46 Phase 2, 2026-06-10):
-// channel_idx = -1 -> DM (Filter ohne Channel-Bezug, immer geprueft).
-// channel_idx >= 0 -> Index in channels[]. Masks im _prefs werden
-// konsultiert: on_mask != 0 -> nur diese Channels; sonst exempt_mask
-// != 0 -> alle ausser diese; sonst global.
+// channel-filter (Wunschliste 46 Phase 2/5, 2026-06-10):
+//   channel_idx = -1 -> DM-Pfad (mask ignoriert, filter immer geprueft)
+//   channel_idx = -2 -> unknown channel im Repeat-Pfad (Channel ist nicht
+//                       lokal konfiguriert). Mit on_mask: filter wirkt
+//                       NICHT (Channel nicht in Liste). Mit exempt_mask:
+//                       filter wirkt (Channel nicht in exempt-Liste).
+//                       Ohne Mask: filter wirkt global.
+//   channel_idx >= 0 -> Index in channels[]. Masks konsultieren.
 // ACHTUNG: nicht mit MeshCore-'scope' (TransportKey-Tags) verwechseln.
 static inline bool filterAppliesToChannel(int channel_idx,
                                           uint64_t on_mask,
                                           uint64_t exempt_mask) {
-  if (channel_idx < 0) return true;          // DM: kein Channel-Bezug
-  if (channel_idx >= 64) return true;        // out of mask range -> allow
+  if (channel_idx == -1) return true;        // DM
+  if (channel_idx == -2) {
+    if (on_mask != 0) return false;
+    if (exempt_mask != 0) return true;
+    return true;
+  }
+  if (channel_idx < 0 || channel_idx >= 64) return true;
   uint64_t bit = (uint64_t)1 << channel_idx;
   if (on_mask != 0) return (on_mask & bit) != 0;
   if (exempt_mask != 0) return (exempt_mask & bit) == 0;
@@ -2220,6 +2228,52 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     }
   } else {
     reject_reason = "unknown-ptype";
+  }
+
+  // Wunschliste 46 Phase 5 (Repeat-Pfad, 2026-06-10):
+  //   (a) scope-Filter mit profile=repeat/complete fuer GRP_TXT/GRP_DATA
+  //   (b) filter_unknown_channel_repeat fuer unbekannte Channels
+  // Erst nach allen anderen Checks, damit reject_reason erhalten bleibt
+  // wenn schon ein anderer Grund das Paket droppt.
+  if (decision && (ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
+      && packet->payload_len >= 1) {
+    // Channel-Index aus ch_hash ermitteln. -2 = unknown channel.
+    int ch_idx = -2;
+    uint8_t ch_hash = packet->payload[0];
+    for (int ci = 0; ci < MAX_GROUP_CHANNELS && ci < 64; ci++) {
+      ChannelDetails cd;
+      if (!getChannel(ci, cd)) continue;
+      if (cd.name[0] == 0) continue;
+      if (cd.channel.hash[0] != ch_hash) continue;
+      ch_idx = ci;
+      break;
+    }
+    // (b) Repeat-Achse fuer unbekannte Channels
+    if (ch_idx == -2) {
+      uint8_t mode = _prefs.filter_unknown_channel_repeat;
+      bool is_scoped = packet->hasTransportCodes();
+      if (mode == 3) {
+        decision = false;
+        reject_reason = "unknown-channel-no";
+      } else if (mode == 1 && !is_scoped) {
+        decision = false;
+        reject_reason = "unknown-channel-unscoped-drop";
+      } else if (mode == 2 && is_scoped) {
+        decision = false;
+        reject_reason = "unknown-channel-scoped-drop";
+      }
+    }
+    // (a) scope-Filter mit profile=repeat
+    if (decision) {
+      const char* sc_name = NULL;
+      if (packet->hasTransportCodes()) {
+        sc_name = lookupRegionByTransportCode(packet);
+      }
+      if (filterScopeMatch(sc_name, ch_idx, /*for_repeat=*/true)) {
+        decision = false;
+        reject_reason = "scope-filter";
+      }
+    }
   }
 
   if (decision) {
@@ -12321,21 +12375,54 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           while (sc_cur < sc_end && *sc_cur != ',' && *sc_cur != ' ' && *sc_cur != '\t') sc_cur++;
           size_t tlen = (size_t)(sc_cur - tok_st);
           if (tlen == 0) continue;
-          if (tlen >= sizeof(sarr[0].scope_name)) {
+          // Normalisieren: scope-Namen werden intern immer mit '#'-Prefix
+          // gespeichert (passend zur scope-Hash-Berechnung). Eingabe ohne
+          // '#' wird ergaenzt. '##' ist ungueltig. 'unscoped' (case-insens)
+          // bleibt Reserved-Pseudo-Token OHNE '#'.
+          char raw[32];
+          if (tlen >= sizeof(raw)) {
             char r[80];
             snprintf(r, sizeof(r), "Scope-Name zu lang (max %u).",
                      (unsigned)(sizeof(sarr[0].scope_name) - 1));
             pushCompanionMessage(r);
             return;
           }
+          memcpy(raw, tok_st, tlen); raw[tlen] = 0;
+          // '##' ablehnen
+          if (raw[0] == '#' && raw[1] == '#') {
+            char r[80];
+            snprintf(r, sizeof(r), "Ungueltig: '%s' (doppeltes '#').", raw);
+            pushCompanionMessage(r);
+            return;
+          }
+          bool is_unscoped = (strcasecmp(raw, "unscoped") == 0
+                              || strcasecmp(raw, "#unscoped") == 0);
           char nm[32];
-          memcpy(nm, tok_st, tlen); nm[tlen] = 0;
-          // Dedup: gleicher name (mit/ohne '#') + gleiche flags
-          const char* nm_canon = (nm[0] == '#') ? nm + 1 : nm;
+          size_t nlen;
+          if (is_unscoped) {
+            strcpy(nm, "unscoped");
+            nlen = 8;
+          } else if (raw[0] == '#') {
+            strcpy(nm, raw);
+            nlen = tlen;
+          } else {
+            nm[0] = '#';
+            memcpy(nm + 1, raw, tlen);
+            nm[1 + tlen] = 0;
+            nlen = 1 + tlen;
+          }
+          if (nlen >= sizeof(sarr[0].scope_name)) {
+            char r[80];
+            snprintf(r, sizeof(r), "Scope-Name zu lang (max %u nach #-Praefix).",
+                     (unsigned)(sizeof(sarr[0].scope_name) - 1));
+            pushCompanionMessage(r);
+            return;
+          }
+          // Dedup: gleicher name (case-insens, jetzt schon normalisiert)
+          // + gleiche flags
           bool dup = false;
           for (uint8_t i = 0; i < sc_cnt; i++) {
-            const char* st = (sarr[i].scope_name[0] == '#') ? sarr[i].scope_name + 1 : sarr[i].scope_name;
-            if (strcasecmp(st, nm_canon) == 0
+            if (strcasecmp(sarr[i].scope_name, nm) == 0
                 && (sarr[i].flags & 0x03) == add_profile) {
               dup = true; break;
             }
@@ -12343,8 +12430,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           if (dup) { skipped_dup++; continue; }
           if (sc_cnt >= SC_MAX) { skipped_full++; continue; }
           memset(&sarr[sc_cnt], 0, sizeof(sarr[sc_cnt]));
-          memcpy(sarr[sc_cnt].scope_name, nm, tlen);
-          sarr[sc_cnt].scope_name[tlen] = 0;
+          memcpy(sarr[sc_cnt].scope_name, nm, nlen);
+          sarr[sc_cnt].scope_name[nlen] = 0;
           sarr[sc_cnt].flags = add_profile & 0x03;
           sc_on_arr[sc_cnt] = add_on;
           sc_ex_arr[sc_cnt] = add_ex;
