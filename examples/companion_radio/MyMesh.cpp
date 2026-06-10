@@ -9348,14 +9348,35 @@ void MyMesh::manageBlePower() {
     }
     return;
   }
-  if (mode == 2 && _ble_pwr_state != BLE_PWR_TMP_OFF) {
-    // off (persistent): nur Boot-Phase noch akzeptiert, sonst aus
-    if (_ble_pwr_state != BLE_PWR_OFF) {
+  if (mode == 2) {
+    // Pref persistent off. ABER 'tmp-enabled' Override respektieren --
+    // wenn User ueber Display-Menue (oder externen Toggle) BLE manuell
+    // eingeschaltet hat, NICHT sofort wieder abdrehen.
+    // States die wir DURCHLASSEN:
+    //   HOT_START -- manuell on, 5min Window
+    //   AWAKE     -- App connected
+    //   TMP_OFF   -- manuell off (konsistent mit Pref)
+    //   OFF       -- bereits aus, fertig
+    if (_ble_pwr_state == BLE_PWR_OFF) {
+      setBleEnabled(false);
+      return;
+    }
+    if (_ble_pwr_state == BLE_PWR_TMP_OFF) {
+      setBleEnabled(false);
+      return;
+    }
+    if (_ble_pwr_state == BLE_PWR_HOT_START
+        || _ble_pwr_state == BLE_PWR_AWAKE) {
+      // tmp-enabled durch State-Machine handhaben (fallthrough).
+      // Wenn HOT_START abgelaufen, kommt unten der Cycle-Uebergang;
+      // dort wechseln wir bei Pref=off auf OFF statt SLEEP.
+    } else {
+      // Sonstige States (BOOT/WAIT/SLEEP): zurueck nach OFF.
       _ble_pwr_state = BLE_PWR_OFF;
       _ble_pwr_state_until = 0;
       setBleEnabled(false);
+      return;
     }
-    return;
   }
   uint32_t now = millis();
   bool connected = _serial->isConnected();
@@ -9404,9 +9425,18 @@ void MyMesh::manageBlePower() {
       return;
     }
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
-      _ble_pwr_state = BLE_PWR_SLEEP;
-      _ble_pwr_state_until = now + 180UL * 1000;
-      setBleEnabled(false);
+      // Hot-Start abgelaufen. Naechster State haengt vom Pref ab:
+      // bei Pref=off zurueck nach OFF (kein Cycle bei persistenter
+      // off-Pref), sonst Cycle SLEEP.
+      if (mode == 2) {
+        _ble_pwr_state = BLE_PWR_OFF;
+        _ble_pwr_state_until = 0;
+        setBleEnabled(false);
+      } else {
+        _ble_pwr_state = BLE_PWR_SLEEP;
+        _ble_pwr_state_until = now + 180UL * 1000;
+        setBleEnabled(false);
+      }
     }
     return;
   }
