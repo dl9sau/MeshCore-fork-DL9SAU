@@ -3037,6 +3037,8 @@ bool MyMesh::isAdminCmdAllowedForGuest(const char* cmd) const {
     "stats", "status", "uptime",
     "clock", "date", "time",
     "version", "help", "?",
+    "neighbors",  // direct heard <48h -- Mesh-Diagnose; Topologie ist
+                  // ohnehin halb-public ueber Adverts
     NULL
   };
   for (int k = 0; ALLOW[k]; k++) {
@@ -3356,6 +3358,46 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
   uint32_t tag;
   memcpy(&tag, data, 4);
+
+  // Wunschliste 52 (2026-06-10): Remote-Admin Antwort.
+  if ((pending_admin_pubkey[0] || pending_admin_pubkey[1]
+       || pending_admin_pubkey[2] || pending_admin_pubkey[3])
+      && memcmp(pending_admin_pubkey, contact.id.pub_key, 4) == 0) {
+    memset(pending_admin_pubkey, 0, sizeof(pending_admin_pubkey));
+    if (pending_admin_login) {
+      pending_admin_login = false;
+      // Login-Antwort: [4]ts [4]now [1]RESP [1]perm
+      if (len >= 10 && data[8] == RESP_SERVER_LOGIN_OK) {
+        const char* perm_s = (data[9] == 1) ? "admin"
+                            : (data[9] == 2) ? "guest" : "unknown";
+        char r[120];
+        snprintf(r, sizeof(r), "[admin] Login OK bei %s (perm=%s)",
+                 contact.name, perm_s);
+        pushCompanionMessage(r);
+      } else {
+        char r[100];
+        snprintf(r, sizeof(r), "[admin] Login failed bei %s", contact.name);
+        pushCompanionMessage(r);
+      }
+      return;
+    }
+    // CMD-Antwort: [4]ts_echo [N]response_text
+    if (len > 4) {
+      char r[200];
+      size_t pre_len = snprintf(r, sizeof(r), "[admin %s]\n", contact.name);
+      size_t avail = (sizeof(r) > pre_len + 1) ? (sizeof(r) - pre_len - 1) : 0;
+      size_t txt_len = (size_t)(len - 4);
+      if (txt_len > avail) txt_len = avail;
+      memcpy(r + pre_len, &data[4], txt_len);
+      r[pre_len + txt_len] = 0;
+      pushCompanionMessage(r);
+    } else {
+      char r[100];
+      snprintf(r, sizeof(r), "[admin %s] (leere Antwort)", contact.name);
+      pushCompanionMessage(r);
+    }
+    return;
+  }
 
   if (pending_login && memcmp(&pending_login, contact.id.pub_key, 4) == 0) { // check for login response
     // yes, is response to pending sendLogin()
@@ -12336,6 +12378,99 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Phase 1: nur drop-Listen, kein allow/exempt, kein per-Channel,
   // kein 'filter region'/'filter advert'. Filter wirkt 'for-us' --
   // App-Push wird unterdrueckt, Repeat bleibt unbeeinflusst.
+  // Wunschliste 52 (2026-06-10): Remote-Admin Client.
+  // 'admin login <contact-name> <password>' -- sendAnonReq + ANON_REQ_TYPE_LOGIN
+  // 'admin <contact-name> <cmd-text>'       -- sendRequest + REQ_TYPE_ADMIN_CMD
+  if (starts_with_word(cmd, "admin")) {
+    const char* p = strchr(cmd, ' ');
+    if (!p) {
+      pushCompanionMessage(
+        "Usage:\n"
+        "  admin login <contact-name> <password>\n"
+        "  admin <contact-name> <cmd-text>");
+      return;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    bool is_login = (strncmp(p, "login", 5) == 0
+                     && (p[5] == ' ' || p[5] == '\t'));
+    if (is_login) {
+      p += 5;
+      while (*p == ' ' || *p == '\t') p++;
+    }
+    // <contact-name> bis Whitespace
+    const char* name_start = p;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    if (p == name_start) {
+      pushCompanionMessage("Fehler: Contact-Name fehlt.");
+      return;
+    }
+    size_t name_len = (size_t)(p - name_start);
+    char name_prefix[40];
+    if (name_len >= sizeof(name_prefix)) name_len = sizeof(name_prefix) - 1;
+    memcpy(name_prefix, name_start, name_len);
+    name_prefix[name_len] = 0;
+    ContactInfo* c = searchContactsByPrefix(name_prefix);
+    if (!c) {
+      char r[80];
+      snprintf(r, sizeof(r), "Contact '%s' nicht gefunden.", name_prefix);
+      pushCompanionMessage(r);
+      return;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) {
+      pushCompanionMessage(is_login
+        ? "Fehler: Password fehlt."
+        : "Fehler: Cmd-Text fehlt.");
+      return;
+    }
+    // Payload bauen + senden
+    uint32_t tag = 0, est_timeout = 0;
+    if (is_login) {
+      // ANON_REQ: [ts(4)][type(1)][password(...)]
+      uint8_t payload[40];
+      uint32_t now = getRTCClock()->getCurrentTime();
+      memcpy(&payload[0], &now, 4);
+      payload[4] = ANON_REQ_TYPE_LOGIN;
+      size_t pw_len = strlen(p);
+      if (pw_len > 31) pw_len = 31;
+      memcpy(&payload[5], p, pw_len);
+      int result = sendAnonReq(*c, payload, (uint8_t)(5 + pw_len),
+                                tag, est_timeout);
+      if (result == MSG_SEND_FAILED) {
+        pushCompanionMessage("Senden fehlgeschlagen (queue voll).");
+        return;
+      }
+      memcpy(pending_admin_pubkey, c->id.pub_key, 4);
+      pending_admin_tag = tag;
+      pending_admin_login = true;
+      char r[100];
+      snprintf(r, sizeof(r), "OK - login Request an %s, est=%lums",
+               c->name, (unsigned long)est_timeout);
+      pushCompanionMessage(r);
+    } else {
+      // REQ: [type(1)][cmd_text(...)] + Framework praefixed ts.
+      uint8_t payload[160];
+      payload[0] = REQ_TYPE_ADMIN_CMD;
+      size_t cmd_len = strlen(p);
+      if (cmd_len > sizeof(payload) - 1) cmd_len = sizeof(payload) - 1;
+      memcpy(&payload[1], p, cmd_len);
+      int result = sendRequest(*c, payload, (uint8_t)(1 + cmd_len),
+                                tag, est_timeout);
+      if (result == MSG_SEND_FAILED) {
+        pushCompanionMessage("Senden fehlgeschlagen (queue voll).");
+        return;
+      }
+      memcpy(pending_admin_pubkey, c->id.pub_key, 4);
+      pending_admin_tag = tag;
+      pending_admin_login = false;
+      char r[100];
+      snprintf(r, sizeof(r), "OK - cmd Request an %s, est=%lums",
+               c->name, (unsigned long)est_timeout);
+      pushCompanionMessage(r);
+    }
+    return;
+  }
+
   if (starts_with_word(cmd, "filter")) {
     // Sub-Tokens: 'sender' oder 'text', dann 'drop', dann action.
     const char* p = strchr(cmd, ' ');

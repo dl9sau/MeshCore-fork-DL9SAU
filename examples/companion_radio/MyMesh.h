@@ -670,6 +670,14 @@ private:
   // Befehl aus. Antwort wird via pushCompanionMessage() zurückgegeben.
   void handleCompanionCommand(const char* cmd);
 
+  // Wunschliste 52 (2026-06-10): Remote-Admin Client-Pfad.
+  // pending_admin_pubkey[4]: Match-Suffix fuer onContactResponse, analog
+  // pending_login/status. Wenn != 0: kommende Response wird als Admin-CMD
+  // Antwort behandelt und in $companion gepushed.
+  uint8_t  pending_admin_pubkey[4] = {0,0,0,0};
+  uint32_t pending_admin_tag = 0;
+  bool     pending_admin_login = false;   // login vs cmd unterscheiden
+
   // Wunschliste 52 (2026-06-10): Remote-Admin Capture.
   // Wenn _admin_capture_active gesetzt, redirected pushCompanionMessage()
   // in _admin_reply_buf statt in die App-Push-Queue. So koennen wir den
