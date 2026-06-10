@@ -9384,9 +9384,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "  filter list  (Komplett-Uebersicht)");
         pushCompanionMessage(
-          "Befehle (TYPE = sender oder text):\n"
-          "  filter TYPE drop add <pat>\n"
-          "  filter TYPE drop remove <pat|idx>");
+          "Filter-Typen: sender, text, scope.\n"
+          "(scope = eigene Syntax, s.u.)\n"
+          "Befehle TYPE=sender|text:\n"
+          "  filter TYPE drop add <pat>");
         pushCompanionMessage(
           "  filter TYPE drop list|clear\n"
           "  filter TYPE keep add/remove/list/clear");
@@ -11871,7 +11872,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* p = strchr(cmd, ' ');
     if (!p) {
       pushCompanionMessage(
-        "Usage (TYPE = sender|text):\n"
+        "Usage:\n"
+        "  filter <sender|text|scope> ...\n"
+        "  TYPE = sender|text (eigene Syntax fuer scope):\n"
         "  filter TYPE drop|keep add <pat>\n"
         "    [on-channel|exempt-channel <chans>]");
       pushCompanionMessage(
@@ -12086,9 +12089,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // filter scope <drop|keep> list|clear
     // filter scope on-channel|exempt-channel <chans|clear>  (Shortcut)
     // ====================================================================
-    if (strncmp(p, "scope", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+    if (strncmp(p, "scope", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
       p += 5;
       while (*p == ' ' || *p == '\t') p++;
+      if (!*p) {
+        pushCompanionMessage(
+          "Usage: filter scope drop|keep\n"
+          "  add <list> [on-channel|exempt-channel <chans>]\n"
+          "    [profile for-us|repeat|complete]");
+        pushCompanionMessage(
+          "  remove <idx|name>\n"
+          "  list|clear\n"
+          "filter scope on-channel|exempt-channel <chans|clear>");
+        return;
+      }
 
       // Lokaler Channel-Liste-Parser (Kopie -- pragmatisch, Code-Duplikation
       // gegenueber sender/text-Block wird beim naechsten Refactor entfernt).
