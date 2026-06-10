@@ -675,8 +675,10 @@ private:
   // none=substring). Returnt true wenn s das Pattern matched.
   static bool filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s);
   // Beide Helper: true wenn DROP greift (= mind. ein Filter matched).
-  bool filterSenderDropMatch(const char* sender_name) const;
-  bool filterTextDropMatch(const char* text) const;
+  // Wunschliste 46 Phase 2: channel_idx = -1 fuer DM (Skopus ignoriert),
+  // sonst Index in channels[].
+  bool filterSenderDropMatch(const char* sender_name, int channel_idx = -1) const;
+  bool filterTextDropMatch(const char* text, int channel_idx = -1) const;
   bool getEffectiveLatLon(double& lat, double& lon) const;
   // Profile-aware Bbox-Quelle (Reise-Fix 2026-06-08):
   //   profile=normal    -> nur fixed location (sensors.node_lat/lon)

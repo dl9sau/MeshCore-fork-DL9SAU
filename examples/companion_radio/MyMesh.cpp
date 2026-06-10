@@ -1113,8 +1113,29 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   return false;
 }
 
-bool MyMesh::filterSenderDropMatch(const char* sender_name) const {
+// Phase 2 (2026-06-10): channel_idx = -1 -> DM (kein Channel-Skopus,
+// Filter wirkt immer wenn Pattern matched).
+// channel_idx >= 0 -> Index in channels[]. Skopus-Masks im _prefs
+// werden konsultiert: on_mask != 0 -> nur diese Channels; sonst:
+// exempt_mask != 0 -> diese Channels ausgenommen; sonst global.
+static inline bool filterChannelSkopusAllows(int channel_idx,
+                                             uint64_t on_mask,
+                                             uint64_t exempt_mask) {
+  if (channel_idx < 0) return true;          // DM-Pfad: Skopus ignoriert
+  if (channel_idx >= 64) return true;        // out of mask range -> allow
+  uint64_t bit = (uint64_t)1 << channel_idx;
+  if (on_mask != 0) return (on_mask & bit) != 0;
+  if (exempt_mask != 0) return (exempt_mask & bit) == 0;
+  return true;                               // global
+}
+
+bool MyMesh::filterSenderDropMatch(const char* sender_name, int channel_idx) const {
   if (!sender_name || !*sender_name) return false;
+  if (!filterChannelSkopusAllows(channel_idx,
+                                 _prefs.filter_sender_drop_on_channel_mask,
+                                 _prefs.filter_sender_drop_exempt_mask)) {
+    return false;
+  }
   for (uint8_t i = 0; i < _prefs.filter_sender_drop_count
        && i < sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]); i++) {
     if (filterPatternMatch(_prefs.filter_sender_drop[i], sender_name)) return true;
@@ -1122,8 +1143,13 @@ bool MyMesh::filterSenderDropMatch(const char* sender_name) const {
   return false;
 }
 
-bool MyMesh::filterTextDropMatch(const char* text) const {
+bool MyMesh::filterTextDropMatch(const char* text, int channel_idx) const {
   if (!text || !*text) return false;
+  if (!filterChannelSkopusAllows(channel_idx,
+                                 _prefs.filter_text_drop_on_channel_mask,
+                                 _prefs.filter_text_drop_exempt_mask)) {
+    return false;
+  }
   for (uint8_t i = 0; i < _prefs.filter_text_drop_count
        && i < sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]); i++) {
     if (filterPatternMatch(_prefs.filter_text_drop[i], text)) return true;
@@ -2473,11 +2499,12 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
       sender_buf[sl] = 0;
       text_only = sep + 2;
     }
-    if (sender_buf[0] && filterSenderDropMatch(sender_buf)) {
+    int ch_idx = (int)ch_idx_check;
+    if (sender_buf[0] && filterSenderDropMatch(sender_buf, ch_idx)) {
       traceCompanion(TRACE_FILTER, "[filter] GRP dropped: sender='%s'", sender_buf);
       return;
     }
-    if (filterTextDropMatch(text_only)) {
+    if (filterTextDropMatch(text_only, ch_idx)) {
       traceCompanion(TRACE_FILTER, "[filter] GRP dropped: text-match");
       return;
     }
@@ -4079,6 +4106,13 @@ void MyMesh::begin(bool has_display) {
   // Default 0 (= disabled) -- selten gebraucht, User aktiviert manuell.
   _prefs.interference_threshold = 14;
   _prefs.agc_reset_interval = 0;
+
+  // Wunschliste 46 Phase 2 (2026-06-10): per-Filter Channel-Skopus
+  // Pre-Init: alle Masks = 0 -> global (alle Channels).
+  _prefs.filter_sender_drop_on_channel_mask = 0;
+  _prefs.filter_sender_drop_exempt_mask = 0;
+  _prefs.filter_text_drop_on_channel_mask = 0;
+  _prefs.filter_text_drop_exempt_mask = 0;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -9203,6 +9237,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  filter TYPE drop list\n"
           "  filter TYPE drop clear");
         pushCompanionMessage(
+          "Channel-Skopus (Phase 2):\n"
+          "  filter TYPE on-channel Public,test\n"
+          "  filter TYPE exempt-channel #ping");
+        pushCompanionMessage(
+          "  filter TYPE on-channel list\n"
+          "  filter TYPE on-channel clear\n"
+          "  (analog exempt-channel)");
+        pushCompanionMessage(
+          "on-channel = nur diese\n"
+          "exempt-channel = alle ausser\n"
+          "Nur bekannte Channels erlaubt.");
+        pushCompanionMessage(
           "Pattern (Wort-Match, case-insens.):\n"
           "  foo   = ganzes Wort 'foo'\n"
           "  foo*  = Wort beginnt mit foo\n"
@@ -11644,8 +11690,124 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
+
+    // Phase 2 (2026-06-10): on-channel / exempt-channel Skopus-Befehle.
+    // Komma-Liste lokal konfigurierter Channel-Namen. Set ueberschreibt
+    // bestehende Mask + loescht die jeweils andere Mask (mutual excl).
+    bool is_on_chan = (strncmp(p, "on-channel", 10) == 0
+                       && (p[10] == ' ' || p[10] == '\t' || p[10] == 0));
+    bool is_ex_chan = (strncmp(p, "exempt-channel", 14) == 0
+                       && (p[14] == ' ' || p[14] == '\t' || p[14] == 0));
+    if (is_on_chan || is_ex_chan) {
+      p += is_on_chan ? 10 : 14;
+      while (*p == ' ' || *p == '\t') p++;
+      uint64_t& on_mask  = is_sender ? _prefs.filter_sender_drop_on_channel_mask
+                                      : _prefs.filter_text_drop_on_channel_mask;
+      uint64_t& ex_mask  = is_sender ? _prefs.filter_sender_drop_exempt_mask
+                                      : _prefs.filter_text_drop_exempt_mask;
+      const char* kind = is_sender ? "sender" : "text";
+      const char* mode = is_on_chan ? "on-channel" : "exempt-channel";
+      uint64_t& this_mask  = is_on_chan ? on_mask : ex_mask;
+      uint64_t& other_mask = is_on_chan ? ex_mask : on_mask;
+
+      if (!*p || strncmp(p, "list", 4) == 0) {
+        char hdr[100];
+        snprintf(hdr, sizeof(hdr), "filter %s %s:", kind, mode);
+        pushCompanionMessage(hdr);
+        if (this_mask == 0) {
+          pushCompanionMessage(is_on_chan
+            ? "  (leer -- Filter global aktiv)"
+            : "  (leer -- keine Ausnahme)");
+          if (other_mask != 0) {
+            char hint[80];
+            snprintf(hint, sizeof(hint), "  Anderer Modus aktiv: '%s'",
+                     is_on_chan ? "exempt-channel" : "on-channel");
+            pushCompanionMessage(hint);
+          }
+          return;
+        }
+        char buf[160]; size_t bu = 0; buf[0] = 0;
+        auto flushb2 = [&]() {
+          if (bu > 0) { pushCompanionMessage(buf); bu = 0; buf[0] = 0; }
+        };
+        for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
+          if ((this_mask & ((uint64_t)1 << i)) == 0) continue;
+          ChannelDetails cd;
+          if (!getChannel(i, cd)) continue;
+          char line[40];
+          snprintf(line, sizeof(line), "  %s", cd.name[0] ? cd.name : "(empty)");
+          size_t ll = strlen(line);
+          if (bu + ll + 2 >= sizeof(buf)) flushb2();
+          if (bu > 0) buf[bu++] = '\n';
+          memcpy(buf + bu, line, ll); bu += ll; buf[bu] = 0;
+        }
+        flushb2();
+        return;
+      }
+      if (strncmp(p, "clear", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
+        this_mask = 0;
+        savePrefs();
+        char r[80];
+        snprintf(r, sizeof(r), "OK - filter %s %s cleared.", kind, mode);
+        pushCompanionMessage(r);
+        return;
+      }
+      // Komma-Liste parsen, channel-Namen aufloesen, Mask bauen.
+      uint64_t new_mask = 0;
+      uint8_t unknown_count = 0;
+      char unknown_buf[80]; unknown_buf[0] = 0;
+      const char* cursor = p;
+      while (*cursor) {
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == ',') cursor++;
+        if (!*cursor) break;
+        const char* start = cursor;
+        while (*cursor && *cursor != ',' && *cursor != ' ' && *cursor != '\t') cursor++;
+        size_t nl = (size_t)(cursor - start);
+        if (nl == 0) continue;
+        char name[33];
+        if (nl >= sizeof(name)) nl = sizeof(name) - 1;
+        memcpy(name, start, nl); name[nl] = 0;
+        // Suche Channel-Name. case-insensitive Match.
+        int idx = -1;
+        for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
+          ChannelDetails cd;
+          if (!getChannel(i, cd)) continue;
+          if (cd.name[0] == 0) continue;
+          if (strcasecmp(cd.name, name) == 0) { idx = i; break; }
+        }
+        if (idx < 0) {
+          if (strlen(unknown_buf) + nl + 2 < sizeof(unknown_buf)) {
+            if (unknown_buf[0]) strcat(unknown_buf, ", ");
+            strcat(unknown_buf, name);
+          }
+          unknown_count++;
+          continue;
+        }
+        new_mask |= ((uint64_t)1 << idx);
+      }
+      if (unknown_count > 0) {
+        char r[140];
+        snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s\n"
+                 "(nur lokal konfigurierte Channels erlaubt)",
+                 unknown_buf);
+        pushCompanionMessage(r);
+        return;
+      }
+      if (new_mask == 0) {
+        pushCompanionMessage("Leere Channel-Liste. Nutze 'clear' zum Loeschen.");
+        return;
+      }
+      this_mask = new_mask;
+      other_mask = 0;   // mutual exclusive
+      savePrefs();
+      char r[80];
+      snprintf(r, sizeof(r), "OK - filter %s %s gesetzt.", kind, mode);
+      pushCompanionMessage(r);
+      return;
+    }
+
     if (strncmp(p, "drop", 4) != 0 || (p[4] && p[4] != ' ' && p[4] != '\t')) {
-      pushCompanionMessage("Usage: filter <sender|text> drop ...");
+      pushCompanionMessage("Usage: filter <sender|text> <drop|on-channel|exempt-channel> ...");
       return;
     }
     p += 4;
