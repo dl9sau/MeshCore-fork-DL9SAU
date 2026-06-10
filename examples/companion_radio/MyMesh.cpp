@@ -10000,7 +10000,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  path_hash_mode buzzer_quiet\n"
           "  messages_append_scope_to_name (on|off)\n"
           "  owner_info (max 119, '|' -> Newline)\n"
-          "  passwd_admin / passwd_guest (Remote-CLI)");
+          "  passwd_admin/_guest (max 31,\n"
+          "    'set passwd_admin clear' -> remote-CLI off)");
         pushCompanionMessage(
           "Identity (Reboot noetig!):\n"
           "  set prv.key <128 hex chars>\n"
@@ -14387,16 +14388,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      // Copy + trailing whitespace strip
-      StrHelper::strncpy(dst, rp, dst_sz);
-      size_t L = strlen(dst);
-      while (L > 0 && (dst[L-1] == ' ' || dst[L-1] == '\t'
-                       || dst[L-1] == '\r' || dst[L-1] == '\n')) {
-        dst[--L] = 0;
+      // Laengen-Check: max dst_sz-1 nutzbar (Storage incl. NUL).
+      // Bei Ueberlauf ablehnen statt silent truncate (sonst weiss
+      // User nicht warum sein langes Passwort nicht funktioniert).
+      size_t rp_len = strlen(rp);
+      // Trailing whitespace nicht mitzaehlen
+      while (rp_len > 0 && (rp[rp_len-1] == ' ' || rp[rp_len-1] == '\t'
+                            || rp[rp_len-1] == '\r' || rp[rp_len-1] == '\n')) {
+        rp_len--;
       }
+      if (rp_len >= dst_sz) {
+        char r[100];
+        snprintf(r, sizeof(r),
+                 "Abgelehnt: %s max %u Zeichen (Du: %u).",
+                 what, (unsigned)(dst_sz - 1), (unsigned)rp_len);
+        pushCompanionMessage(r);
+        return;
+      }
+      memset(dst, 0, dst_sz);
+      memcpy(dst, rp, rp_len);
       savePrefs();
       char r[80]; snprintf(r, sizeof(r), "OK - %s gesetzt (%u Zeichen).",
-                          what, (unsigned)L);
+                          what, (unsigned)rp_len);
       pushCompanionMessage(r);
       return;
     }
