@@ -3788,7 +3788,59 @@ Quelle: User-Wunsch 2026-06-09, Vorbereitung GitHub-Fork-Veroeffentlichung.
 
 
 
+--------------------------------------------------------------------------------
+55. prefs vs set/get-all Konsolidierung -- Doppel-Mappings aufraeumen
+--------------------------------------------------------------------------------
 
+Status: Aufraeum-Idee 2026-06-10. Erstmal lassen, spaeter ordnen.
+
+Hintergrund:
+  Mit der Zeit sind einige DL9SAU-Vars in beide Anzeige-Pfade
+  gewandert: 'prefs' (DL9SAU-Custom-Doku) UND 'set/get all'
+  (App-Mirror, Standard-MeshCore-Style). Plus einige Vars
+  haben Repeater-Context und gehoeren konzeptionell eher zu
+  set/get, sind aber auch in prefs gelistet.
+
+User-Beobachtung 2026-06-10 bei 'prefs all':
+
+Doppelte Anzeige (in prefs UND get all):
+  interference_threshold  / int.thresh
+  agc_reset_interval      / agc.reset.interval
+
+Eher get/set (Repeater-Context), aktuell in prefs:
+  passwd_admin / passwd_guest  (Remote-CLI-Auth, Wunschliste 52)
+  loop_detect                  (Repeater-Behavior)
+  owner_info                   (Repeater-Konfig)
+
+Plus weitere kandidaten sind noch zu pruefen (User sagte:
+'habe nicht auf Vollstaendigkeit geprueft').
+
+Plan:
+  1) Inventur: alle DL9SAU-Vars in beiden Listen kategorisieren
+     - 'gehoert in prefs' (DL9SAU-spezifisch ohne klares
+       Upstream-Aequivalent: filter*, scope_advert_auto etc.)
+     - 'gehoert in get/set' (Repeater-Verhalten, Standard-
+       MeshCore-erweitert: loop_detect, interference_threshold,
+       passwd_*)
+     - 'gehoert nur in einem' vs 'sinnvoll in beiden'
+  2) Doppelt-Mappings entfernen: wenn eine Var in get/set
+     gehoert, raus aus prefs-Display (Pref bleibt persistent,
+     nur die Anzeige aufraeumen).
+  3) Konsistenz-Regel dokumentieren: wann landet eine neue
+     Var in prefs vs get/set? Pragmatischer Schluessel:
+       prefs    -> DL9SAU-only Konzepte (filter, scope-customs)
+       set/get  -> MeshCore-aehnliche knobs (Repeater, Radio,
+                   Power, Loop-Detect, Auth)
+
+Cave-Block:
+  - Backup-Export-Block bleibt unveraendert (alles drin,
+    weil eindeutig ein 'dump alles fuer Restore').
+  - 'prefs reset' bleibt zustaendig fuer DL9SAU-Reset
+    (auch wenn die Var nicht mehr in 'prefs all' angezeigt
+    wird).
+
+Quelle: User-Beobachtung 2026-06-10 bei prefs/Backup/Restore-
+  Erweiterung fuer Filter (Wunschliste 46 Persistence).
 
 
 
