@@ -10854,7 +10854,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (starts_with_word(rarg, "fixed")) {
         const char* tv = strchr(rarg, ' ');
         if (tv) { while (*tv == ' ') tv++; }
-        if (!tv || *tv == 0) { pushCompanionMessage("Usage: advert role fixed chat|repeater|sensor|room"); return; }
+        if (!tv || *tv == 0) { pushCompanionMessage("Usage: advert role fixed <chat|repeater|sensor|room>"); return; }
         static const CompanionChoice rch[] = {
           { "chat",     false },  // -> 1
           { "repeater", false },  // -> 2
@@ -10864,7 +10864,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         char rambig[40];
         int ri = match_choice(tv, rch, 4, rambig, sizeof(rambig));
         if (ri == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rambig); pushCompanionMessage(r); return; }
-        if (ri < 0)   { pushCompanionMessage("Usage: advert role fixed chat|repeater|sensor|room"); return; }
+        if (ri < 0)   { pushCompanionMessage("Usage: advert role fixed <chat|repeater|sensor|room>"); return; }
         _prefs.advert_role = (uint8_t)(ri + 1);
         savePrefs();
         char r[120]; snprintf(r, sizeof(r),
@@ -10873,7 +10873,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      pushCompanionMessage("Usage: advert role [auto | fixed chat|repeater|sensor|room]");
+      pushCompanionMessage("Usage: advert role <auto | fixed <chat|repeater|sensor|room>>");
       return;
     }
 
@@ -11121,7 +11121,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("OK - gps power reset: mode=cycle, lead=5 min.");
         return;
       }
-      pushCompanionMessage("Usage: gps power [always-on | cycle | lead <N> | reset]");
+      pushCompanionMessage("Usage: gps power <always-on | cycle | lead <N> | reset>");
       return;
     }
 
@@ -11187,7 +11187,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Geo-Recommendation neu auswerten (analog CMD_SET_ADVERT_LATLON)
       maybePushGeoRecommendation(cur_lat, cur_lon);
     } else {
-      pushCompanionMessage("Usage: gps [on | off | sync | setloc | power ...]\n"
+      pushCompanionMessage("Usage: gps <on | off | sync | setloc | power ...>\n"
                            "ohne Arg -> Status");
     }
     return;
@@ -12393,7 +12393,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                    bucketName((MsgBucket)b));
           pushCompanionMessage(r);
         } else {
-          pushCompanionMessage("Usage: messages flash <type> on|off");
+          pushCompanionMessage("Usage: messages flash <type> <on|off>");
         }
       } else {  // limit
         if (!*arg || !(arg[0] >= '0' && arg[0] <= '9')) {
@@ -12491,7 +12491,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("OK - unscoped channel-msgs werden ab jetzt geflooded.");
       return;
     }
-    pushCompanionMessage("Usage: unscoped-channelmessages [direct|flood]");
+    pushCompanionMessage("Usage: unscoped-channelmessages <direct|flood>");
     return;
   }
 
@@ -12522,7 +12522,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (strcmp(sub, "usb") == 0)     { bit = 0; inverted = false; }
     else if (strcmp(sub, "channel") == 0) { bit = 1; inverted = true; }
     else {
-      pushCompanionMessage("Usage: logging usb|channel on|off");
+      pushCompanionMessage("Usage: logging <usb|channel> <on|off>");
       return;
     }
     int m = match_on_off(arg);
@@ -13119,7 +13119,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             "kein eigener Befehl. Aktiv-Anzeige:\n"
             "  filter scope drop list  (Suffix p:rep / p:cpl)");
         } else {
-          pushCompanionMessage("Erwartet: drop|keep|on-channel|exempt-channel");
+          pushCompanionMessage("Erwartet: <drop|keep|on-channel|exempt-channel>");
         }
         return;
       }
@@ -13401,7 +13401,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      pushCompanionMessage("Erwartet: add|remove|list|clear");
+      pushCompanionMessage("Erwartet: <add|remove|list|clear>");
       return;
     }
 
@@ -13572,7 +13572,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       is_keep_verb = true; p += 4;
     } else {
       pushCompanionMessage(
-        "Erwartet: drop|keep|on-channel|exempt-channel\n"
+        "Erwartet: <drop|keep|on-channel|exempt-channel>\n"
         "(drop/keep nehmen ein Pattern; on/exempt-channel\n"
         " eine Channel-Liste)");
       return;
@@ -14154,7 +14154,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
     if (!arg || *arg == 0) {
       pushCompanionMessage(
-        "Usage: contact <name-prefix> type [chat|repeater|sensor|room]\n"
+        "Usage: contact <name-prefix> type <chat|repeater|sensor|room>\n"
         "Ohne 'type ...' -> aktuellen Typ anzeigen.");
       return;
     }
@@ -14193,13 +14193,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     if (strncmp(arg, "type", 4) != 0 || (arg[4] != ' ' && arg[4] != '\t')) {
-      pushCompanionMessage("Usage: contact <name-prefix> type [chat|repeater|sensor|room]");
+      pushCompanionMessage("Usage: contact <name-prefix> type <chat|repeater|sensor|room>");
       return;
     }
     arg += 4;
     while (*arg == ' ' || *arg == '\t') arg++;
     if (!*arg) {
-      pushCompanionMessage("type ohne Argument. Erwartet: chat|repeater|sensor|room");
+      pushCompanionMessage("type ohne Argument. Erwartet: <chat|repeater|sensor|room>");
       return;
     }
     uint8_t new_type = 0;
