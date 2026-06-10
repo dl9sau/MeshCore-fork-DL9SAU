@@ -9311,6 +9311,20 @@ void MyMesh::setBleEnabled(bool en) {
 
 void MyMesh::manageBlePower() {
   if (!_serial) return;
+  // Deferred-disable check: wenn 'bluetooth off'-CLI gerade gesetzt
+  // wurde, lassen wir BLE noch 3s laufen damit App den OK-Frame ueber
+  // BLE empfangen kann. Erst wenn das Pending-Fenster abgelaufen ist,
+  // wenden wir den Pref-off-Effekt an.
+  if (_pending_ble_off_at != 0) {
+    if ((long)(millis() - _pending_ble_off_at) >= 0) {
+      _pending_ble_off_at = 0;
+      _ble_pwr_state = BLE_PWR_OFF;
+      _ble_pwr_state_until = 0;
+      setBleEnabled(false);
+    }
+    // waehrend Pending: keine State-Aenderung, BLE bleibt an
+    return;
+  }
   // External-Toggle-Detection (Wunschliste 43, User 2026-06-10):
   // UITask-Menue (Heltec Wireless Tracker Display + Button, Menupunkt 5
   // 'Bluetooth' mit long-press) ruft _serial->enable()/disable() direkt -- ohne
@@ -12752,14 +12766,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     if (strncmp(p, "off", 3) == 0 && (p[3] == 0 || p[3] == ' ')) {
       _prefs.bluetooth_power_mode = 2;
-      _ble_pwr_state = BLE_PWR_OFF;
-      _ble_pwr_state_until = 0;
-      setBleEnabled(false);
       savePrefs();
       pushCompanionMessage(
         "OK - bluetooth off (persist).\n"
         "Recovery: USB-Serial oder\n"
         "Hardware-Button (Geraete mit Display).");
+      // Deferred-disable analog Reboot-Pattern: 3s Zeit damit App den
+      // OK-Frame ueber BLE empfaengt bevor wir Chip abschalten. Sonst
+      // landet die OK-Message in der offline-Queue und User sieht sie
+      // erst beim naechsten Connect (verwirrend).
+      _pending_ble_off_at = millis() + 3000;
+      if (_pending_ble_off_at == 0) _pending_ble_off_at = 1;
       return;
     }
     if (strncmp(p, "tmp-off", 7) == 0) {
