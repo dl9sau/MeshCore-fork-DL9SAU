@@ -877,26 +877,238 @@ void MyMesh::markHeardDirect(uint8_t hash) {
 
 // Wunschliste 46 Phase 1 (Reise 2026-06-09).
 // Filter-Pattern-Match. Case-INSENSITIVE (User-Wunsch 2026-06-09:
-// Bot-Antworten variieren Grossschreibung 'Pong'/'pong'/'PONG'; case-
-// sensitive zwingt User zu mehreren Patterns pro Bot).
-// Flags: bit0 = anchor start (^foo), bit1 = anchor end (foo$).
-//   both = exact, none = substring.
+// Pattern-Sprache (Phase 1.5, 2026-06-10): Wort-Match als Default,
+// '*' als Wildcard pro Token, Multi-Token-Subsequenz, Anker ^/$.
+// Case-insensitive durchgaengig.
+//
+//   ping       Wort-Match: matched Token "ping", nicht "pingable"
+//   ping*      Token startsWith "ping": matched "pingable"
+//   *ping      Token endsWith   "ping": matched "doping"
+//   *ping*     Token contains   "ping": substring im Token
+//   "foo bar*" Multi-Token: konsekutive Subsequenz, jedes
+//              Pattern-Token wird per Glob gegen Text-Token gematched.
+//   ^foo       String beginnt mit Pattern (erstes Text-Token)
+//   foo$       String endet mit Pattern (letztes Text-Token)
+//   ^foo$      String ist genau Pattern
+//
+// Token-Trennung im Text: Whitespace + ASCII-Satzzeichen am Token-Rand
+// (z.B. 'ping!' wird als 'ping' gegen Pattern verglichen). Pattern
+// wird nur an Whitespace getrennt -- darin sind '*'-Sterne die einzige
+// Sonder-Syntax.
+
+static inline bool isFilterWordSep(unsigned char c) {
+  // Trennt Tokens im Text. Bytes >=128 (UTF-8 lead/cont) als word-char.
+  if (c < 32) return true;
+  switch (c) {
+    case ' ': case ',': case '.': case '!': case '?': case ':':
+    case ';': case '(': case ')': case '[': case ']': case '{':
+    case '}': case '"': case '\'': case '<': case '>': case '/':
+    case '\\':
+      return true;
+    default:
+      return false;
+  }
+}
+
+// UTF-8 codepoint decode. Returns codepoint, writes consumed bytes.
+// On invalid/incomplete returns the raw byte and consumes 1.
+static int utf8Decode(const char* p, size_t avail, size_t* consumed) {
+  if (avail == 0) { *consumed = 0; return -1; }
+  unsigned char c = (unsigned char)p[0];
+  if (c < 0x80) { *consumed = 1; return c; }
+  if ((c & 0xE0) == 0xC0 && avail >= 2) {
+    *consumed = 2;
+    return ((c & 0x1F) << 6) | ((unsigned char)p[1] & 0x3F);
+  }
+  if ((c & 0xF0) == 0xE0 && avail >= 3) {
+    *consumed = 3;
+    return ((c & 0x0F) << 12) | (((unsigned char)p[1] & 0x3F) << 6)
+         | ((unsigned char)p[2] & 0x3F);
+  }
+  if ((c & 0xF8) == 0xF0 && avail >= 4) {
+    *consumed = 4;
+    return ((c & 0x07) << 18) | (((unsigned char)p[1] & 0x3F) << 12)
+         | (((unsigned char)p[2] & 0x3F) << 6) | ((unsigned char)p[3] & 0x3F);
+  }
+  *consumed = 1;
+  return c;
+}
+
+// Case-fold to lowercase. ASCII A-Z plus deutsche Latin-1-Umlaute
+// (Ä/Ö/Ü -> ä/ö/ü). Eszett bleibt wie es ist.
+static inline int casefoldCp(int cp) {
+  if (cp >= 'A' && cp <= 'Z') return cp + 32;
+  if (cp == 0xC4) return 0xE4;  // Ä
+  if (cp == 0xD6) return 0xF6;  // Ö
+  if (cp == 0xDC) return 0xFC;  // Ü
+  return cp;
+}
+
+// True iff bytes p[0..pl) and t[0..tl) decode to the same codepoint
+// sequence under case-fold.
+static bool ciUtf8Equal(const char* p, size_t pl, const char* t, size_t tl) {
+  size_t pi = 0, ti = 0;
+  while (pi < pl && ti < tl) {
+    size_t pc, tc;
+    int pcp = utf8Decode(p + pi, pl - pi, &pc);
+    int tcp = utf8Decode(t + ti, tl - ti, &tc);
+    if (casefoldCp(pcp) != casefoldCp(tcp)) return false;
+    pi += pc;
+    ti += tc;
+  }
+  return pi == pl && ti == tl;
+}
+
+// True iff text starts with pattern (both byte-spans) under case-fold.
+static bool ciUtf8StartsWith(const char* t, size_t tl,
+                             const char* p, size_t pl) {
+  size_t pi = 0, ti = 0;
+  while (pi < pl) {
+    if (ti >= tl) return false;
+    size_t pc, tc;
+    int pcp = utf8Decode(p + pi, pl - pi, &pc);
+    int tcp = utf8Decode(t + ti, tl - ti, &tc);
+    if (casefoldCp(pcp) != casefoldCp(tcp)) return false;
+    pi += pc;
+    ti += tc;
+  }
+  return true;
+}
+
+// True iff substring p found in t (case-fold). Iteriert nur an
+// Codepoint-Grenzen im Text, damit wir nicht in der Mitte einer
+// UTF-8-Sequenz suchen.
+static bool ciUtf8Contains(const char* t, size_t tl,
+                           const char* p, size_t pl) {
+  size_t ti = 0;
+  while (ti < tl) {
+    if (ciUtf8StartsWith(t + ti, tl - ti, p, pl)) return true;
+    size_t step;
+    utf8Decode(t + ti, tl - ti, &step);
+    if (step == 0) break;
+    ti += step;
+  }
+  return false;
+}
+
+// True iff text ends with pattern (case-fold), iterating codepoint
+// boundaries from the end. Pragmatisch: vorwaerts iterieren, alle
+// codepoint-Grenzen aufzeichnen, dann den passenden Start finden.
+static bool ciUtf8EndsWith(const char* t, size_t tl,
+                           const char* p, size_t pl) {
+  if (pl == 0) return true;
+  if (pl > tl) return false;
+  // We try each codepoint-boundary starting from tl backwards. Forward
+  // scan accumulates boundaries, then iterate from largest.
+  const size_t MAX_B = 256;
+  size_t boundaries[MAX_B];
+  size_t bn = 0;
+  size_t ti = 0;
+  boundaries[bn++] = 0;
+  while (ti < tl && bn < MAX_B) {
+    size_t step;
+    utf8Decode(t + ti, tl - ti, &step);
+    if (step == 0) break;
+    ti += step;
+    boundaries[bn++] = ti;
+  }
+  // try boundaries from later to earlier
+  for (size_t i = bn; i > 0; i--) {
+    size_t bs = boundaries[i-1];
+    if (tl - bs < pl) continue;
+    if (ciUtf8Equal(p, pl, t + bs, tl - bs)) return true;
+  }
+  return false;
+}
+
+static bool tokenGlobMatch(const char* pat, size_t pl,
+                           const char* tok, size_t tl) {
+  if (pl == 0) return false;
+  bool wild_s = (pat[0] == '*');
+  bool wild_e = (pl > 0 && pat[pl-1] == '*');
+  if (pl == 1 && wild_s) return true;     // "*" matched alles
+  if (pl == 2 && wild_s && wild_e) return true;  // "**" auch
+  size_t ps = wild_s ? 1 : 0;
+  size_t pe = pl - (wild_e ? 1 : 0);
+  size_t plen = (pe > ps) ? (pe - ps) : 0;
+  if (plen == 0) return true;
+  if (wild_s && wild_e) {
+    return ciUtf8Contains(tok, tl, pat + ps, plen);
+  }
+  if (wild_s) {
+    return ciUtf8EndsWith(tok, tl, pat + ps, plen);
+  }
+  if (wild_e) {
+    return ciUtf8StartsWith(tok, tl, pat + ps, plen);
+  }
+  return ciUtf8Equal(pat + ps, plen, tok, tl);
+}
+
 bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) {
   size_t pl = strlen(e.pattern);
-  if (pl == 0) return false;
+  if (pl == 0 || !s) return false;
   size_t sl = strlen(s);
-  if (sl < pl) return false;
+  if (sl == 0) return false;
   bool anchor_start = (e.flags & 0x01) != 0;
   bool anchor_end   = (e.flags & 0x02) != 0;
-  if (anchor_start && anchor_end) {
-    return sl == pl && strncasecmp(s, e.pattern, pl) == 0;
+
+  // Tokenize Pattern (split by whitespace only -- '*' und Satzzeichen
+  // bleiben Teil eines Tokens, da Anwender sie evtl. literal meint).
+  const uint8_t MAX_PAT_TOKENS = 8;
+  uint16_t pat_off[MAX_PAT_TOKENS];
+  uint16_t pat_len[MAX_PAT_TOKENS];
+  uint8_t pat_count = 0;
+  {
+    size_t i = 0;
+    while (i < pl && pat_count < MAX_PAT_TOKENS) {
+      while (i < pl && (e.pattern[i] == ' ' || e.pattern[i] == '\t')) i++;
+      if (i >= pl) break;
+      size_t st = i;
+      while (i < pl && e.pattern[i] != ' ' && e.pattern[i] != '\t') i++;
+      pat_off[pat_count] = (uint16_t)st;
+      pat_len[pat_count] = (uint16_t)(i - st);
+      pat_count++;
+    }
   }
-  if (anchor_start) return strncasecmp(s, e.pattern, pl) == 0;
-  if (anchor_end)   return strncasecmp(s + sl - pl, e.pattern, pl) == 0;
-  // substring (case-insensitive). strcasestr ist GNU-Extension --
-  // manuell implementieren fuer Portabilitaet.
-  for (size_t i = 0; i + pl <= sl; i++) {
-    if (strncasecmp(s + i, e.pattern, pl) == 0) return true;
+  if (pat_count == 0) return false;
+
+  // Tokenize Text (split by whitespace + ASCII punctuation).
+  const uint8_t MAX_TXT_TOKENS = 64;
+  uint16_t txt_off[MAX_TXT_TOKENS];
+  uint16_t txt_len[MAX_TXT_TOKENS];
+  uint8_t txt_count = 0;
+  {
+    size_t i = 0;
+    while (i < sl && txt_count < MAX_TXT_TOKENS) {
+      while (i < sl && isFilterWordSep((unsigned char)s[i])) i++;
+      if (i >= sl) break;
+      size_t st = i;
+      while (i < sl && !isFilterWordSep((unsigned char)s[i])) i++;
+      txt_off[txt_count] = (uint16_t)st;
+      txt_len[txt_count] = (uint16_t)(i - st);
+      txt_count++;
+    }
+  }
+  if (txt_count == 0 || txt_count < pat_count) return false;
+
+  // Suche konsekutive Token-Subsequenz wo jedes Pattern-Token
+  // glob-matched.
+  uint8_t start_min = 0;
+  uint8_t start_max = (uint8_t)(txt_count - pat_count);
+  if (anchor_start) start_max = 0;
+  if (anchor_end)   start_min = (uint8_t)(txt_count - pat_count);
+  if (start_min > start_max) return false;
+
+  for (uint8_t st = start_min; st <= start_max; st++) {
+    bool ok = true;
+    for (uint8_t k = 0; k < pat_count; k++) {
+      if (!tokenGlobMatch(e.pattern + pat_off[k], pat_len[k],
+                          s + txt_off[st + k], txt_len[st + k])) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
   }
   return false;
 }
@@ -8975,13 +9187,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  filter TYPE drop list\n"
           "  filter TYPE drop clear");
         pushCompanionMessage(
-          "Pattern-Anker:\n"
-          "  foo    = substring\n"
-          "  ^foo   = beginnt mit\n"
-          "  foo$   = endet mit\n"
-          "  ^foo$  = exact");
+          "Pattern (Wort-Match, case-insens.):\n"
+          "  foo   = ganzes Wort 'foo'\n"
+          "  foo*  = Wort beginnt mit foo\n"
+          "  *foo  = Wort endet auf foo");
         pushCompanionMessage(
-          "  \"x y\" = Quotes fuer Leerzeichen");
+          "  *foo* = Wort enthaelt foo\n"
+          "  ^foo  = Text-Anfang Wort foo\n"
+          "  foo$  = Text-Ende Wort foo\n"
+          "  ^foo$ = Text ist genau foo");
+        pushCompanionMessage(
+          "  \"x y*\" Quote fuer Mehrwort,\n"
+          "  Folge im Text gesucht.\n"
+          "  Umlaute Ae/Oe/Ue ok.");
         pushCompanionMessage(
           "sender-Filter: DM-Absender +\n"
           "Channel-Sender (Prefix vor ': ').\n"

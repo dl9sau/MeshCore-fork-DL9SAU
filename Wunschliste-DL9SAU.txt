@@ -2901,13 +2901,45 @@ Konzept-Achsen (User-Zusammenfassung 2026-06-09):
        filter text exempt-channel Public,#test
     (kein '!'-Sigil noetig; exempt-channel deckt das ab)
 
-  Glob-Pattern (case-sensitive, UTF-8-byte-basiert):
-    *foo*    substring
-    ^foo     startsWith
-    foo$     endsWith
-    ^foo$    exact
-    foo      ohne Anker = substring (gleichbedeutend *foo*)
-    Quotes fuer Strings mit Leerzeichen
+  Glob-Pattern (case-insensitive seit 2026-06-09):
+
+    Phase 1 (alte Spec, deprecated -- nur fuer Historie):
+      *foo*    substring
+      foo      ohne Anker = substring (gleichbedeutend *foo*)
+
+    Phase 1.5 (Pattern-Sprache erweitert, User 2026-06-10):
+      Default = WORT-Match statt substring. '*' explizit als
+      Wildcard pro Wort. Vermeidet ungewollte Treffer auf
+      'pingable' wenn man 'ping' meinte.
+
+      Pattern         matched (Beispiele)         matched NICHT
+      ------------    --------------------------- ----------------------
+      ping            'ping', 'say ping!',        pingable, doping
+                      'ping pong'
+      ping*           ping, pingable, pings       doping
+      *ping           ping, doping, say-ping      pingable
+      *ping*          ping, pingable, doping      ohne ping-substring
+      "foo bar*"      'foo bart', 'say foo        'foo ba', 'foo Bart'
+                      barring', 'foo Bart'        (case-insens: Bart=bart)
+      ^foo            String beginnt mit 'foo'    mittendrin
+      foo$            String endet mit 'foo'      sonst
+      ^foo$           String ist exakt 'foo'      alles andere
+
+      Case:           insensitive (strncasecmp/strlwr-Vergleich)
+      Tokenisierung:  by whitespace, Trim leading/trailing
+                      Punctuation am Token-Rand ('ping!' wird
+                      als 'ping' verglichen).
+      Multi-Token:    Pattern mit Leerzeichen (Quotes noetig)
+                      -> konsekutive Subsequenz im Text,
+                      glob-per-Token.
+      Wildcards:      nur '*'-Sterne, kein '?'. Minimalismus.
+      Kein Escape:    im Gegensatz zur Unix-Shell bleibt '*'
+                      auch in Quotes Wildcard. Vereinfacht
+                      Anwender-Modell.
+      Anker:          '^'/'$' weiterhin als String-Anchor
+                      (bit0/bit1 in FilterEntry.flags).
+
+    Quotes fuer Strings mit Leerzeichen (CLI-Parser, schon da).
 
   Sender-Filter wirkt auf DM UND Channel (Spam-Schutz).
   Text-/Region-/Advert-Filter wirken nur auf Channel.
