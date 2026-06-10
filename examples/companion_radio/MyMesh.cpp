@@ -2942,8 +2942,12 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
     reply_data[8] = 0;  // keine Bridge-Features im Companion
     if (_prefs.client_repeat == 0) reply_data[8] |= 0x80;  // 'disabled' = nicht-repeating
     reply_len = 9;
-  } else if (req_type == ANON_REQ_TYPE_LOGIN && role == ADV_TYPE_REPEATER) {
+  } else if (req_type == ANON_REQ_TYPE_LOGIN && role == ADV_TYPE_REPEATER
+             && packet->isRouteDirect()) {
     // Wunschliste 52 (2026-06-10): Login via Password.
+    // isRouteDirect-Pflicht: unscoped flood-Login wird abgelehnt --
+    // Auth-Versuche sollen 1-Hop sein (Anti-Flooding + lokalisiert).
+    // Konsistent mit den anderen ANON_REQ-Handlern (OWNER/REGIONS/BASIC).
     // Payload nach data[5]: ASCII-Password (max 31 byte, evtl. ohne NUL).
     // Setzt CONTACT_FLAG_ADMIN_OK bit auf existierenden Contact (Sender
     // muss als Contact bekannt sein -- add via Advert + manual add).
