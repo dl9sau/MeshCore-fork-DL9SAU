@@ -7549,6 +7549,18 @@ void MyMesh::backupSaveToSerial() {
     first = false;
     Serial.print("  \""); Serial.print(name); Serial.print("\": "); Serial.print(v);
   };
+  auto kv_uint64_hex = [&](const char* name, uint64_t v) {
+    // 16-stelliger Hex-String fuer 64-bit-Channel-Masks. Lesbar +
+    // restore-parser kann mit strtoull(base 16) wieder einlesen.
+    if (!first) Serial.println(",");
+    first = false;
+    char buf[20];
+    snprintf(buf, sizeof(buf), "0x%08lx%08lx",
+             (unsigned long)((v >> 32) & 0xFFFFFFFFul),
+             (unsigned long)(v & 0xFFFFFFFFul));
+    Serial.print("  \""); Serial.print(name); Serial.print("\": \"");
+    Serial.print(buf); Serial.print("\"");
+  };
   auto kv_int = [&](const char* name, int32_t v) {
     if (!first) Serial.println(",");
     first = false;
@@ -7768,6 +7780,67 @@ void MyMesh::backupSaveToSerial() {
   }
   kv_float("lat",                  sensors.node_lat, 6);
   kv_float("lon",                  sensors.node_lon, 6);
+
+  // Wunschliste 46 Filter (Phase 1-5, 2026-06-10):
+  // Filter-Listen + channel-masks + Repeat-Achse exportieren.
+  kv_uint("filter_unknown_channel_repeat", _prefs.filter_unknown_channel_repeat);
+  auto emit_filter_list = [&](const char* base, NodePrefs::FilterEntry* arr,
+                              uint8_t cnt, const uint64_t* c_on, const uint64_t* c_ex) {
+    char k[64];
+    snprintf(k, sizeof(k), "%s_count", base);
+    kv_uint(k, cnt);
+    for (uint8_t i = 0; i < cnt; i++) {
+      snprintf(k, sizeof(k), "%s_%u_pattern", base, (unsigned)i);
+      kv_str(k, arr[i].pattern);
+      snprintf(k, sizeof(k), "%s_%u_flags", base, (unsigned)i);
+      kv_uint(k, arr[i].flags);
+      snprintf(k, sizeof(k), "%s_%u_chan_on", base, (unsigned)i);
+      kv_uint64_hex(k, c_on[i]);
+      snprintf(k, sizeof(k), "%s_%u_chan_ex", base, (unsigned)i);
+      kv_uint64_hex(k, c_ex[i]);
+    }
+  };
+  auto emit_filter_scope_list = [&](const char* base, NodePrefs::FilterScopeEntry* arr,
+                                    uint8_t cnt, const uint64_t* c_on, const uint64_t* c_ex) {
+    char k[64];
+    snprintf(k, sizeof(k), "%s_count", base);
+    kv_uint(k, cnt);
+    for (uint8_t i = 0; i < cnt; i++) {
+      snprintf(k, sizeof(k), "%s_%u_name", base, (unsigned)i);
+      kv_str(k, arr[i].scope_name);
+      snprintf(k, sizeof(k), "%s_%u_flags", base, (unsigned)i);
+      kv_uint(k, arr[i].flags);
+      snprintf(k, sizeof(k), "%s_%u_chan_on", base, (unsigned)i);
+      kv_uint64_hex(k, c_on[i]);
+      snprintf(k, sizeof(k), "%s_%u_chan_ex", base, (unsigned)i);
+      kv_uint64_hex(k, c_ex[i]);
+    }
+  };
+  emit_filter_list("filter_sender_drop", _prefs.filter_sender_drop,
+                   _prefs.filter_sender_drop_count,
+                   _prefs.filter_sender_drop_chan_on,
+                   _prefs.filter_sender_drop_chan_ex);
+  emit_filter_list("filter_sender_keep", _prefs.filter_sender_keep,
+                   _prefs.filter_sender_keep_count,
+                   _prefs.filter_sender_keep_chan_on,
+                   _prefs.filter_sender_keep_chan_ex);
+  emit_filter_list("filter_text_drop", _prefs.filter_text_drop,
+                   _prefs.filter_text_drop_count,
+                   _prefs.filter_text_drop_chan_on,
+                   _prefs.filter_text_drop_chan_ex);
+  emit_filter_list("filter_text_keep", _prefs.filter_text_keep,
+                   _prefs.filter_text_keep_count,
+                   _prefs.filter_text_keep_chan_on,
+                   _prefs.filter_text_keep_chan_ex);
+  emit_filter_scope_list("filter_scope_drop", _prefs.filter_scope_drop,
+                         _prefs.filter_scope_drop_count,
+                         _prefs.filter_scope_drop_chan_on,
+                         _prefs.filter_scope_drop_chan_ex);
+  emit_filter_scope_list("filter_scope_keep", _prefs.filter_scope_keep,
+                         _prefs.filter_scope_keep_count,
+                         _prefs.filter_scope_keep_chan_on,
+                         _prefs.filter_scope_keep_chan_ex);
+
   Serial.println();
   Serial.println("}");
   Serial.println("--- BACKUP NODE MAIN END ---");
@@ -8408,6 +8481,143 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       _br_applied++;
       return;
     }
+    // Wunschliste 46 Filter Restore (2026-06-10).
+    if (val_type == 'n' && strcmp(key, "filter_unknown_channel_repeat") == 0) {
+      _prefs.filter_unknown_channel_repeat = (uint8_t)as_uint();
+      _br_applied++;
+      return;
+    }
+    // Prefix-Match auf 'filter_<typ>_<verb>_'. Extract index + suffix.
+    auto try_filter_field = [&](const char* base, NodePrefs::FilterEntry* arr,
+                                uint8_t* cnt_p, size_t max_slots,
+                                uint64_t* c_on, uint64_t* c_ex) -> bool {
+      size_t blen = strlen(base);
+      if (strncmp(key, base, blen) != 0 || key[blen] != '_') return false;
+      // Special: <base>_count
+      const char* tail = key + blen + 1;
+      if (val_type == 'n' && strcmp(tail, "count") == 0) {
+        *cnt_p = (uint8_t)as_uint();
+        if (*cnt_p > max_slots) *cnt_p = (uint8_t)max_slots;
+        _br_applied++;
+        return true;
+      }
+      // <base>_<N>_<suffix>
+      const char* idx_end = tail;
+      while (*idx_end && *idx_end != '_') idx_end++;
+      if (*idx_end != '_') return false;
+      char idxs[8];
+      size_t il = (size_t)(idx_end - tail);
+      if (il == 0 || il >= sizeof(idxs)) return false;
+      memcpy(idxs, tail, il); idxs[il] = 0;
+      char* iep = NULL;
+      long idx = strtol(idxs, &iep, 10);
+      if (!iep || *iep != 0 || idx < 0 || (size_t)idx >= max_slots) return false;
+      const char* suffix = idx_end + 1;
+      if (val_type == 's' && strcmp(suffix, "pattern") == 0) {
+        brExtractString(val_start, val_len, arr[idx].pattern, sizeof(arr[idx].pattern));
+        _br_applied++;
+        return true;
+      }
+      if (val_type == 'n' && strcmp(suffix, "flags") == 0) {
+        arr[idx].flags = (uint8_t)as_uint();
+        _br_applied++;
+        return true;
+      }
+      if (val_type == 's' && strcmp(suffix, "chan_on") == 0) {
+        char hexbuf[20];
+        brExtractString(val_start, val_len, hexbuf, sizeof(hexbuf));
+        c_on[idx] = strtoull(hexbuf, NULL, 0);
+        _br_applied++;
+        return true;
+      }
+      if (val_type == 's' && strcmp(suffix, "chan_ex") == 0) {
+        char hexbuf[20];
+        brExtractString(val_start, val_len, hexbuf, sizeof(hexbuf));
+        c_ex[idx] = strtoull(hexbuf, NULL, 0);
+        _br_applied++;
+        return true;
+      }
+      return false;
+    };
+    auto try_scope_field = [&](const char* base, NodePrefs::FilterScopeEntry* arr,
+                               uint8_t* cnt_p, size_t max_slots,
+                               uint64_t* c_on, uint64_t* c_ex) -> bool {
+      size_t blen = strlen(base);
+      if (strncmp(key, base, blen) != 0 || key[blen] != '_') return false;
+      const char* tail = key + blen + 1;
+      if (val_type == 'n' && strcmp(tail, "count") == 0) {
+        *cnt_p = (uint8_t)as_uint();
+        if (*cnt_p > max_slots) *cnt_p = (uint8_t)max_slots;
+        _br_applied++;
+        return true;
+      }
+      const char* idx_end = tail;
+      while (*idx_end && *idx_end != '_') idx_end++;
+      if (*idx_end != '_') return false;
+      char idxs[8];
+      size_t il = (size_t)(idx_end - tail);
+      if (il == 0 || il >= sizeof(idxs)) return false;
+      memcpy(idxs, tail, il); idxs[il] = 0;
+      char* iep = NULL;
+      long idx = strtol(idxs, &iep, 10);
+      if (!iep || *iep != 0 || idx < 0 || (size_t)idx >= max_slots) return false;
+      const char* suffix = idx_end + 1;
+      if (val_type == 's' && strcmp(suffix, "name") == 0) {
+        brExtractString(val_start, val_len, arr[idx].scope_name, sizeof(arr[idx].scope_name));
+        _br_applied++;
+        return true;
+      }
+      if (val_type == 'n' && strcmp(suffix, "flags") == 0) {
+        arr[idx].flags = (uint8_t)as_uint();
+        _br_applied++;
+        return true;
+      }
+      if (val_type == 's' && strcmp(suffix, "chan_on") == 0) {
+        char hexbuf[20];
+        brExtractString(val_start, val_len, hexbuf, sizeof(hexbuf));
+        c_on[idx] = strtoull(hexbuf, NULL, 0);
+        _br_applied++;
+        return true;
+      }
+      if (val_type == 's' && strcmp(suffix, "chan_ex") == 0) {
+        char hexbuf[20];
+        brExtractString(val_start, val_len, hexbuf, sizeof(hexbuf));
+        c_ex[idx] = strtoull(hexbuf, NULL, 0);
+        _br_applied++;
+        return true;
+      }
+      return false;
+    };
+    if (try_filter_field("filter_sender_drop", _prefs.filter_sender_drop,
+                          &_prefs.filter_sender_drop_count,
+                          sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]),
+                          _prefs.filter_sender_drop_chan_on,
+                          _prefs.filter_sender_drop_chan_ex)) return;
+    if (try_filter_field("filter_sender_keep", _prefs.filter_sender_keep,
+                          &_prefs.filter_sender_keep_count,
+                          sizeof(_prefs.filter_sender_keep)/sizeof(_prefs.filter_sender_keep[0]),
+                          _prefs.filter_sender_keep_chan_on,
+                          _prefs.filter_sender_keep_chan_ex)) return;
+    if (try_filter_field("filter_text_drop", _prefs.filter_text_drop,
+                          &_prefs.filter_text_drop_count,
+                          sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]),
+                          _prefs.filter_text_drop_chan_on,
+                          _prefs.filter_text_drop_chan_ex)) return;
+    if (try_filter_field("filter_text_keep", _prefs.filter_text_keep,
+                          &_prefs.filter_text_keep_count,
+                          sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]),
+                          _prefs.filter_text_keep_chan_on,
+                          _prefs.filter_text_keep_chan_ex)) return;
+    if (try_scope_field("filter_scope_drop", _prefs.filter_scope_drop,
+                         &_prefs.filter_scope_drop_count,
+                         sizeof(_prefs.filter_scope_drop)/sizeof(_prefs.filter_scope_drop[0]),
+                         _prefs.filter_scope_drop_chan_on,
+                         _prefs.filter_scope_drop_chan_ex)) return;
+    if (try_scope_field("filter_scope_keep", _prefs.filter_scope_keep,
+                         &_prefs.filter_scope_keep_count,
+                         sizeof(_prefs.filter_scope_keep)/sizeof(_prefs.filter_scope_keep[0]),
+                         _prefs.filter_scope_keep_chan_on,
+                         _prefs.filter_scope_keep_chan_ex)) return;
     _br_skipped++;
     return;
   }
@@ -11187,6 +11397,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // verlieren. Wer das auch los werden will: 'scope <name> off|delete'
       // pro Eintrag, bzw. 'scope remove <name>' fuer Extras.
       _prefs.repeat_scope_mode = REPEAT_SCOPE_MODE_ALLOWLIST;
+      // Wunschliste 46 Filter (2026-06-10): Reset auch Filter-Listen.
+      _prefs.filter_sender_drop_count = 0;
+      memset(_prefs.filter_sender_drop, 0, sizeof(_prefs.filter_sender_drop));
+      memset(_prefs.filter_sender_drop_chan_on, 0, sizeof(_prefs.filter_sender_drop_chan_on));
+      memset(_prefs.filter_sender_drop_chan_ex, 0, sizeof(_prefs.filter_sender_drop_chan_ex));
+      _prefs.filter_sender_keep_count = 0;
+      memset(_prefs.filter_sender_keep, 0, sizeof(_prefs.filter_sender_keep));
+      memset(_prefs.filter_sender_keep_chan_on, 0, sizeof(_prefs.filter_sender_keep_chan_on));
+      memset(_prefs.filter_sender_keep_chan_ex, 0, sizeof(_prefs.filter_sender_keep_chan_ex));
+      _prefs.filter_text_drop_count = 0;
+      memset(_prefs.filter_text_drop, 0, sizeof(_prefs.filter_text_drop));
+      memset(_prefs.filter_text_drop_chan_on, 0, sizeof(_prefs.filter_text_drop_chan_on));
+      memset(_prefs.filter_text_drop_chan_ex, 0, sizeof(_prefs.filter_text_drop_chan_ex));
+      _prefs.filter_text_keep_count = 0;
+      memset(_prefs.filter_text_keep, 0, sizeof(_prefs.filter_text_keep));
+      memset(_prefs.filter_text_keep_chan_on, 0, sizeof(_prefs.filter_text_keep_chan_on));
+      memset(_prefs.filter_text_keep_chan_ex, 0, sizeof(_prefs.filter_text_keep_chan_ex));
+      _prefs.filter_scope_drop_count = 0;
+      memset(_prefs.filter_scope_drop, 0, sizeof(_prefs.filter_scope_drop));
+      memset(_prefs.filter_scope_drop_chan_on, 0, sizeof(_prefs.filter_scope_drop_chan_on));
+      memset(_prefs.filter_scope_drop_chan_ex, 0, sizeof(_prefs.filter_scope_drop_chan_ex));
+      _prefs.filter_scope_keep_count = 0;
+      memset(_prefs.filter_scope_keep, 0, sizeof(_prefs.filter_scope_keep));
+      memset(_prefs.filter_scope_keep_chan_on, 0, sizeof(_prefs.filter_scope_keep_chan_on));
+      memset(_prefs.filter_scope_keep_chan_ex, 0, sizeof(_prefs.filter_scope_keep_chan_ex));
+      _prefs.filter_unknown_channel_repeat = 1;  // filter-unscoped Default
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
       pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.\n"
@@ -11448,6 +11684,66 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                lf == 0 ? " [default]" : " (default: 0x00 usb=off channel=on)");
       add_line(tmp);
       if (lf != 0) non_default_count++;
+    }
+
+    // Wunschliste 45 (LBT-Stub): interference_threshold + agc_reset_interval.
+    if (show_all || _prefs.interference_threshold != 14) {
+      snprintf(tmp, sizeof(tmp),
+               "  interference_threshold = %u%s",
+               (unsigned)_prefs.interference_threshold,
+               _prefs.interference_threshold == 14 ? " [default]" : " (default: 14)");
+      add_line(tmp);
+      if (_prefs.interference_threshold != 14) non_default_count++;
+    }
+    if (show_all || _prefs.agc_reset_interval != 0) {
+      snprintf(tmp, sizeof(tmp),
+               "  agc_reset_interval = %u%s",
+               (unsigned)_prefs.agc_reset_interval,
+               _prefs.agc_reset_interval == 0 ? " [default]" : " (default: 0)");
+      add_line(tmp);
+      if (_prefs.agc_reset_interval != 0) non_default_count++;
+    }
+    // Wunschliste 52 (Remote-Admin): passwd_admin/guest -- nur Count (Secret).
+    if (show_all || _prefs.passwd_admin[0] != 0 || _prefs.passwd_guest[0] != 0) {
+      snprintf(tmp, sizeof(tmp),
+               "  passwd_admin/guest = %s/%s",
+               _prefs.passwd_admin[0] ? "(set)" : "(empty)",
+               _prefs.passwd_guest[0] ? "(set)" : "(empty)");
+      add_line(tmp);
+      if (_prefs.passwd_admin[0] || _prefs.passwd_guest[0]) non_default_count++;
+    }
+
+    // Wunschliste 46 Filter (DL9SAU): Counts + unknown-channel-Achse.
+    {
+      uint8_t sd = _prefs.filter_sender_drop_count;
+      uint8_t sk = _prefs.filter_sender_keep_count;
+      uint8_t td = _prefs.filter_text_drop_count;
+      uint8_t tk = _prefs.filter_text_keep_count;
+      uint8_t pd = _prefs.filter_scope_drop_count;
+      uint8_t pk = _prefs.filter_scope_keep_count;
+      uint8_t any = sd | sk | td | tk | pd | pk;
+      uint8_t uc = _prefs.filter_unknown_channel_repeat;
+      if (show_all || any != 0 || uc != 1) {
+        snprintf(tmp, sizeof(tmp),
+                 "  filter sender drop/keep=%u/%u text=%u/%u scope=%u/%u",
+                 sd, sk, td, tk, pd, pk);
+        add_line(tmp);
+        add_line("    Details: 'filter list'");
+        if (any != 0) non_default_count++;
+      }
+      if (show_all || uc != 1) {
+        const char* rm = "filter-none";
+        switch (uc) {
+          case 1: rm = "filter-unscoped"; break;
+          case 2: rm = "filter-scoped"; break;
+          case 3: rm = "filter-all"; break;
+        }
+        snprintf(tmp, sizeof(tmp),
+                 "  filter unknown-channel = %s%s",
+                 rm, uc == 1 ? " [default]" : " (default: filter-unscoped)");
+        add_line(tmp);
+        if (uc != 1) non_default_count++;
+      }
     }
 
     if (!show_all && non_default_count == 0) {
