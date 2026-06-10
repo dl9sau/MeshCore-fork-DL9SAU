@@ -896,33 +896,16 @@ void MyMesh::markHeardDirect(uint8_t hash) {
 // wird nur an Whitespace getrennt -- darin sind '*'-Sterne die einzige
 // Sonder-Syntax.
 
-// Hard token separator: Whitespace + Control-Chars.
-// '/' und '\' bleiben Teil eines Tokens (URLs, Pfade, Bot-Namen wie
-// "BBX Bot/OBS"). Satzzeichen werden nicht hier getrennt sondern
-// nachher am Token-Rand getrimmt -- siehe isFilterEdgePunct.
+// Token-Separator: NUR Whitespace + Control-Chars.
+// User-Klarstellung 2026-06-10: Pattern ist literal. Wenn User
+// 'foo.bar' eintippt, will er das ganze Wort 'foo.bar' (analog
+// 'abc-def' oder 'xxx/yyy') -- kein automatisches Stripping von
+// Satzzeichen am Wort-Rand. Wer auch 'foo.bar.' oder 'Hallo,'
+// matchen will, schreibt 'foo.bar*' bzw. 'Hallo*' explizit als
+// Wildcard. Konsistent und vorhersehbar.
 static inline bool isFilterHardSep(unsigned char c) {
   if (c < 32) return true;
   return c == ' ' || c == 0x7F;
-}
-
-// Punctuation am Token-Rand: vor Vergleich abschneiden.
-// "ping!" -> "ping", "(Hallo)" -> "Hallo", "Bot/OBS" bleibt
-// unveraendert (kein edge-trim auf '/'). UTF-8 Multi-byte
-// (Umlaut-Anfuehrungszeichen, „...") bleibt im Token.
-static inline bool isFilterEdgePunct(unsigned char c) {
-  switch (c) {
-    case ',': case '.': case '!': case '?': case ':':
-    case ';': case '(': case ')': case '[': case ']': case '{':
-    case '}': case '"': case '\'': case '<': case '>':
-      return true;
-    default:
-      return false;
-  }
-}
-
-static inline void trimTokenEdges(const char* s, size_t& st, size_t& en) {
-  while (st < en && isFilterEdgePunct((unsigned char)s[st])) st++;
-  while (en > st && isFilterEdgePunct((unsigned char)s[en-1])) en--;
 }
 
 // UTF-8 codepoint decode. Returns codepoint, writes consumed bytes.
@@ -1067,10 +1050,10 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   bool anchor_start = (e.flags & 0x01) != 0;
   bool anchor_end   = (e.flags & 0x02) != 0;
 
-  // Tokenize Pattern (split by Hard-Sep, dann edge-punct-Trim).
-  // '*' bleibt Teil des Tokens (Wildcards), '/' bleibt drin (URL-/
-  // Bot-Namen). User-Pattern "ping!" -> getrimmt "ping" -- damit
-  // matched es symmetrisch zur Text-Tokenisierung.
+  // Tokenize Pattern und Text strikt by Hard-Sep (Whitespace).
+  // Tokens bleiben literal -- kein Edge-Trim. User-Pattern matched
+  // gegen Token byte-genau (mit case-fold + UTF-8). Flexibilitaet
+  // ueber Wildcards: 'ping*' fuer 'ping,' 'ping!' usw.
   const uint8_t MAX_PAT_TOKENS = 8;
   uint16_t pat_off[MAX_PAT_TOKENS];
   uint16_t pat_len[MAX_PAT_TOKENS];
@@ -1082,18 +1065,13 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
       if (i >= pl) break;
       size_t st = i;
       while (i < pl && !isFilterHardSep((unsigned char)e.pattern[i])) i++;
-      size_t en = i;
-      trimTokenEdges(e.pattern, st, en);
-      if (en > st) {
-        pat_off[pat_count] = (uint16_t)st;
-        pat_len[pat_count] = (uint16_t)(en - st);
-        pat_count++;
-      }
+      pat_off[pat_count] = (uint16_t)st;
+      pat_len[pat_count] = (uint16_t)(i - st);
+      pat_count++;
     }
   }
   if (pat_count == 0) return false;
 
-  // Tokenize Text (Hard-Sep + edge-punct-Trim).
   const uint8_t MAX_TXT_TOKENS = 64;
   uint16_t txt_off[MAX_TXT_TOKENS];
   uint16_t txt_len[MAX_TXT_TOKENS];
@@ -1105,13 +1083,9 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
       if (i >= sl) break;
       size_t st = i;
       while (i < sl && !isFilterHardSep((unsigned char)s[i])) i++;
-      size_t en = i;
-      trimTokenEdges(s, st, en);
-      if (en > st) {
-        txt_off[txt_count] = (uint16_t)st;
-        txt_len[txt_count] = (uint16_t)(en - st);
-        txt_count++;
-      }
+      txt_off[txt_count] = (uint16_t)st;
+      txt_len[txt_count] = (uint16_t)(i - st);
+      txt_count++;
     }
   }
   if (txt_count == 0 || txt_count < pat_count) return false;
@@ -9286,20 +9260,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  drop * + keep ping = Whitelist\n"
           "  (nur ping durch).");
         pushCompanionMessage(
-          "channel-filter (wo wirkt Filter):\n"
+          "channel-filter (global pro Typ):\n"
           "  filter TYPE on-channel Public,test\n"
-          "  filter TYPE exempt-channel #ping");
+          "  filter TYPE exempt-channel ping");
         pushCompanionMessage(
           "  filter TYPE on-channel list|clear\n"
           "  (analog exempt-channel)\n"
+          "Gilt fuer ALLE drop+keep des Typs.");
+        pushCompanionMessage(
+          "on-channel = nur diese Channels\n"
+          "exempt-channel = alle ausser diese\n"
           "Default: global (alle Channels).");
         pushCompanionMessage(
-          "on-channel = nur diese\n"
-          "exempt-channel = alle ausser\n"
-          "Nur bekannte Channels erlaubt.");
-        pushCompanionMessage(
-          "Pattern (Wort-Match, case-insens.):\n"
-          "  foo   = ganzes Wort 'foo'\n"
+          "Pattern (literal, case-insens.):\n"
+          "  foo   = exakt Wort 'foo'\n"
           "  foo*  = Wort beginnt mit foo\n"
           "  *foo  = Wort endet auf foo");
         pushCompanionMessage(
@@ -9308,8 +9282,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  foo$  = Text-Ende Wort foo\n"
           "  ^foo$ = Text ist genau foo");
         pushCompanionMessage(
-          "  \"x y*\" Quote fuer Mehrwort,\n"
-          "  Folge im Text gesucht.\n"
+          "Tokens by Whitespace.\n"
+          "Satzzeichen Teil des Wortes:\n"
+          "  'ping!' braucht 'ping*' oder\n"
+          "  exakt 'ping!' als Pattern.");
+        pushCompanionMessage(
+          "  \"x y*\" Quote fuer Mehrwort.\n"
           "  Umlaute Ae/Oe/Ue ok.");
         pushCompanionMessage(
           "sender-Filter: DM-Absender +\n"
@@ -11741,35 +11719,46 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Globaler Uebersichts-Befehl 'filter list' -- alle Filter-Typen
     // in einem Rutsch anzeigen (User-Wunsch 2026-06-10).
     if (strncmp(p, "list", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
+      // Akkumuliere Output in 145-Byte-Frames um App-Push-Queue
+      // nicht mit 13+ Einzel-Frames zu sprengen.
+      char acc[145]; size_t ap = 0; acc[0] = 0;
+      auto acc_flush = [&]() {
+        if (ap > 0) { pushCompanionMessage(acc); ap = 0; acc[0] = 0; }
+      };
+      auto acc_line = [&](const char* line) {
+        size_t ll = strlen(line);
+        if (ll == 0) return;
+        if (ap + ll + 2 >= sizeof(acc)) acc_flush();
+        if (ap > 0) acc[ap++] = '\n';
+        memcpy(acc + ap, line, ll); ap += ll; acc[ap] = 0;
+      };
+
       auto dump_list = [&](const char* label, NodePrefs::FilterEntry* arr,
                            uint8_t cnt, size_t max_slots) {
         char hdr[80];
+        if (cnt == 0) {
+          snprintf(hdr, sizeof(hdr), "%s (0/%u): (leer)",
+                   label, (unsigned)max_slots);
+          acc_line(hdr);
+          return;
+        }
         snprintf(hdr, sizeof(hdr), "%s (%u/%u):", label,
                  (unsigned)cnt, (unsigned)max_slots);
-        pushCompanionMessage(hdr);
-        if (cnt == 0) { pushCompanionMessage("  (leer)"); return; }
-        char buf[140]; size_t bu = 0; buf[0] = 0;
-        auto flush = [&]() {
-          if (bu > 0) { pushCompanionMessage(buf); bu = 0; buf[0] = 0; }
-        };
+        acc_line(hdr);
         for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
           const char* pfx = (arr[i].flags & 0x01) ? "^" : "";
           const char* sfx = (arr[i].flags & 0x02) ? "$" : "";
           char line[60];
           snprintf(line, sizeof(line), "  %u: %s%s%s",
                    (unsigned)(i+1), pfx, arr[i].pattern, sfx);
-          size_t ll = strlen(line);
-          if (bu + ll + 2 >= sizeof(buf)) flush();
-          if (bu > 0) buf[bu++] = '\n';
-          memcpy(buf + bu, line, ll); bu += ll; buf[bu] = 0;
+          acc_line(line);
         }
-        flush();
       };
       auto dump_chan = [&](const char* label, uint64_t on_mask, uint64_t ex_mask) {
         if (on_mask == 0 && ex_mask == 0) {
           char r[80];
           snprintf(r, sizeof(r), "%s: global (alle Channels)", label);
-          pushCompanionMessage(r);
+          acc_line(r);
           return;
         }
         bool is_on = (on_mask != 0);
@@ -11787,9 +11776,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           if (n > 0 && pos + n < sizeof(buf)) pos += n;
           first = false;
         }
-        pushCompanionMessage(buf);
+        acc_line(buf);
       };
-      pushCompanionMessage("--- Filter-Uebersicht ---");
       dump_list("sender drop", _prefs.filter_sender_drop,
                 _prefs.filter_sender_drop_count,
                 sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]));
@@ -11806,6 +11794,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                 sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]));
       dump_chan("text chan", _prefs.filter_text_drop_on_channel_mask,
                 _prefs.filter_text_drop_exempt_mask);
+      acc_flush();
       return;
     }
 
@@ -11885,6 +11874,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Komma-Liste parsen, channel-Namen aufloesen, Mask bauen.
       uint64_t new_mask = 0;
       uint8_t unknown_count = 0;
+      bool saw_subcmd = false;   // 'drop'/'keep'/'add'/etc als chan-name -> User-Hint
       char unknown_buf[80]; unknown_buf[0] = 0;
       const char* cursor = p;
       while (*cursor) {
@@ -11897,6 +11887,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         char name[33];
         if (nl >= sizeof(name)) nl = sizeof(name) - 1;
         memcpy(name, start, nl); name[nl] = 0;
+        // Falls User Sub-Befehl reinmixt ('drop', 'add' etc.):
+        // Hint setzen damit Error-Message klarer wird.
+        if (strcasecmp(name, "drop") == 0 || strcasecmp(name, "keep") == 0
+            || strcasecmp(name, "add") == 0 || strcasecmp(name, "remove") == 0
+            || strcasecmp(name, "list") == 0 || strcasecmp(name, "clear") == 0) {
+          saw_subcmd = true;
+        }
         // Suche Channel-Name. case-insensitive Match.
         int idx = -1;
         for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
@@ -11916,11 +11913,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         new_mask |= ((uint64_t)1 << idx);
       }
       if (unknown_count > 0) {
-        char r[140];
-        snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s\n"
-                 "(nur lokal konfigurierte Channels erlaubt)",
+        char r[160];
+        snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s",
                  unknown_buf);
         pushCompanionMessage(r);
+        if (saw_subcmd) {
+          pushCompanionMessage(
+            "Tipp: 'on-channel/exempt-channel' nimmt NUR\n"
+            "eine Komma-Liste von Channel-Namen (global\n"
+            "fuer alle drop+keep des Typs). Nicht mit\n"
+            "'drop'/'keep'/'add' kombinieren.");
+        }
         return;
       }
       if (new_mask == 0) {
@@ -11930,8 +11933,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       this_mask = new_mask;
       other_mask = 0;   // mutual exclusive
       savePrefs();
-      char r[80];
-      snprintf(r, sizeof(r), "OK - filter %s %s gesetzt.", kind, mode);
+      // Bestaetigung mit den gesetzten Channels.
+      char r[160];
+      size_t rp = snprintf(r, sizeof(r), "OK - filter %s %s: ", kind, mode);
+      bool first_ch = true;
+      for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
+        if ((new_mask & ((uint64_t)1 << i)) == 0) continue;
+        ChannelDetails cd;
+        if (!getChannel(i, cd)) continue;
+        const char* nm = cd.name[0] ? cd.name : "?";
+        int n = snprintf(r + rp, sizeof(r) - rp, "%s%s", first_ch ? "" : ",", nm);
+        if (n > 0 && rp + n < sizeof(r)) rp += n;
+        first_ch = false;
+      }
       pushCompanionMessage(r);
       return;
     }
