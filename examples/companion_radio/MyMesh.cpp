@@ -9837,12 +9837,12 @@ static const TraceCat trace_cats[] = {
   { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
   { "heard",   TRACE_HEARD,   "direkt gehoerte zero-hop-Adverts (default: nur neue; 'trace heard on all' = alle)" },
   { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
-  { "connect", TRACE_CONNECT, "BLE-App-Connect Events" },
+  { "connect", TRACE_CONNECT, "Bluetooth-App-Connect Events" },
   { "filter",  TRACE_FILTER,  "NICHT-repeatete Pakete + Grund (kann viele Zeilen erzeugen)" },
   { "night",    TRACE_NIGHT,    "Nightly-Flood Schedule + Scope-Auswahl" },
   { "duty",     TRACE_DUTY,     "Duty-Cycle Drops (Soft/Hard) ueber 10% TX/h" },
   { "msgstore", TRACE_MSGSTORE, "Offline-Queue Flash-Persistenz-Writes (Flash-Wear-Diagnose)" },
-  { "bt",       TRACE_BT,       "BLE-Diagnose alle 5min: heap + disconnect-counter (default off)" },
+  { "bt",       TRACE_BT,       "Bluetooth-Diagnose alle 5min: heap + disconnect-counter (default off)" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
@@ -9889,7 +9889,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "messages", "logging", "unscoped-channelmessages", "clear",
     "contact", "backup", "save", "discover",
     "ch.hops",
-    "admin", "bluetooth", "bt", "filter",
+    "admin", "bluetooth", "filter",
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -10430,10 +10430,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Admin: alle lokalen CLI-Befehle.");
         return;
       }
-      if (topic_prefix_match(topic, "bluetooth")
-          || topic_prefix_match(topic, "bt")) {
+      if (topic_prefix_match(topic, "bluetooth")) {
         pushCompanionMessage(
-          "bluetooth: BLE-Power-Mode + Cycle.\n"
+          "bluetooth: Bluetooth-Power Mode + Cycle.\n"
           "  bluetooth                Status anzeigen\n"
           "  bluetooth power <cycle|always-on>  (persist)");
         pushCompanionMessage(
@@ -10445,7 +10444,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  180s sleep + 30s wait Listening-Window.");
         pushCompanionMessage(
           "Wake-on-LoRa: eingehende DM oder admin-cmd\n"
-          "  weckt BLE fuer 5min HOT_START.\n"
+          "  weckt Bluetooth fuer 5min HOT_START.\n"
           "Display-Menue 5 (long-press) toggled tmp.");
         return;
       }
@@ -12752,7 +12751,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // 'bluetooth on'                        force ON (persistent: power=always-on)
   // 'bluetooth off'                       persistent power=off
   // 'bluetooth tmp-off'                   runtime off (nicht persistent)
-  if (starts_with_word(cmd, "bluetooth") || starts_with_word(cmd, "bt")) {
+  if (starts_with_word(cmd, "bluetooth")) {
     const char* p = strchr(cmd, ' ');
     if (!p) {
       const char* m = "?";
