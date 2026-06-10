@@ -19,3 +19,4 @@ venv/
 platformio.local.ini
 .dl9sau-cache/
 generated/
+compile.sh
