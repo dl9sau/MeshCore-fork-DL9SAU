@@ -463,14 +463,17 @@ struct NodePrefs {  // persisted to file
   uint8_t        filter_sender_drop_count;
   FilterEntry    filter_text_drop[16];
   uint8_t        filter_text_drop_count;
-  // Wunschliste 46 Phase 2 (2026-06-10): per-Filter-Typ Channel-Skopus.
+  // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
+  // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].
   // on_channel_mask: nur diese Channels (falls != 0).
   // exempt_mask:     ueberall ausser diese (falls != 0).
   // Default beide = 0 = global (alle lokal konfigurierten Channels).
   // CLI-seitig mutual exclusive: Setzen einer Mask loescht die andere.
-  // Skopus gilt nur fuer Channel-Match -- DM (Sender-Filter) ignoriert
-  // Skopus und wird stets gegen das Pattern getestet.
+  // channel-filter gilt nur fuer Channel-Match -- DM (Sender-Filter)
+  // ignoriert die Masks und wird stets gegen das Pattern getestet.
+  // ACHTUNG nicht mit MeshCore-'scope' (TransportKey-Tags wie #de,
+  // #regional) verwechseln -- das ist eine andere Achse (Wunschliste 5).
   uint64_t       filter_sender_drop_on_channel_mask;
   uint64_t       filter_sender_drop_exempt_mask;
   uint64_t       filter_text_drop_on_channel_mask;

@@ -1113,15 +1113,16 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   return false;
 }
 
-// Phase 2 (2026-06-10): channel_idx = -1 -> DM (kein Channel-Skopus,
-// Filter wirkt immer wenn Pattern matched).
-// channel_idx >= 0 -> Index in channels[]. Skopus-Masks im _prefs
-// werden konsultiert: on_mask != 0 -> nur diese Channels; sonst:
-// exempt_mask != 0 -> diese Channels ausgenommen; sonst global.
-static inline bool filterChannelSkopusAllows(int channel_idx,
-                                             uint64_t on_mask,
-                                             uint64_t exempt_mask) {
-  if (channel_idx < 0) return true;          // DM-Pfad: Skopus ignoriert
+// channel-filter (Wunschliste 46 Phase 2, 2026-06-10):
+// channel_idx = -1 -> DM (Filter ohne Channel-Bezug, immer geprueft).
+// channel_idx >= 0 -> Index in channels[]. Masks im _prefs werden
+// konsultiert: on_mask != 0 -> nur diese Channels; sonst exempt_mask
+// != 0 -> alle ausser diese; sonst global.
+// ACHTUNG: nicht mit MeshCore-'scope' (TransportKey-Tags) verwechseln.
+static inline bool filterAppliesToChannel(int channel_idx,
+                                          uint64_t on_mask,
+                                          uint64_t exempt_mask) {
+  if (channel_idx < 0) return true;          // DM: kein Channel-Bezug
   if (channel_idx >= 64) return true;        // out of mask range -> allow
   uint64_t bit = (uint64_t)1 << channel_idx;
   if (on_mask != 0) return (on_mask & bit) != 0;
@@ -1131,7 +1132,7 @@ static inline bool filterChannelSkopusAllows(int channel_idx,
 
 bool MyMesh::filterSenderDropMatch(const char* sender_name, int channel_idx) const {
   if (!sender_name || !*sender_name) return false;
-  if (!filterChannelSkopusAllows(channel_idx,
+  if (!filterAppliesToChannel(channel_idx,
                                  _prefs.filter_sender_drop_on_channel_mask,
                                  _prefs.filter_sender_drop_exempt_mask)) {
     return false;
@@ -1145,7 +1146,7 @@ bool MyMesh::filterSenderDropMatch(const char* sender_name, int channel_idx) con
 
 bool MyMesh::filterTextDropMatch(const char* text, int channel_idx) const {
   if (!text || !*text) return false;
-  if (!filterChannelSkopusAllows(channel_idx,
+  if (!filterAppliesToChannel(channel_idx,
                                  _prefs.filter_text_drop_on_channel_mask,
                                  _prefs.filter_text_drop_exempt_mask)) {
     return false;
@@ -4107,7 +4108,7 @@ void MyMesh::begin(bool has_display) {
   _prefs.interference_threshold = 14;
   _prefs.agc_reset_interval = 0;
 
-  // Wunschliste 46 Phase 2 (2026-06-10): per-Filter Channel-Skopus
+  // Wunschliste 46 Phase 2 (2026-06-10): channel-filter Masks
   // Pre-Init: alle Masks = 0 -> global (alle Channels).
   _prefs.filter_sender_drop_on_channel_mask = 0;
   _prefs.filter_sender_drop_exempt_mask = 0;
@@ -9237,13 +9238,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  filter TYPE drop list\n"
           "  filter TYPE drop clear");
         pushCompanionMessage(
-          "Channel-Skopus (Phase 2):\n"
+          "channel-filter (wo wirkt Filter):\n"
           "  filter TYPE on-channel Public,test\n"
           "  filter TYPE exempt-channel #ping");
         pushCompanionMessage(
-          "  filter TYPE on-channel list\n"
-          "  filter TYPE on-channel clear\n"
-          "  (analog exempt-channel)");
+          "  filter TYPE on-channel list|clear\n"
+          "  (analog exempt-channel)\n"
+          "Default: global (alle Channels).");
         pushCompanionMessage(
           "on-channel = nur diese\n"
           "exempt-channel = alle ausser\n"
@@ -11691,9 +11692,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     while (*p == ' ' || *p == '\t') p++;
 
-    // Phase 2 (2026-06-10): on-channel / exempt-channel Skopus-Befehle.
-    // Komma-Liste lokal konfigurierter Channel-Namen. Set ueberschreibt
-    // bestehende Mask + loescht die jeweils andere Mask (mutual excl).
+    // channel-filter (Wunschliste 46 Phase 2, 2026-06-10):
+    // on-channel / exempt-channel Befehle. Komma-Liste lokal
+    // konfigurierter Channel-Namen. Set ueberschreibt bestehende Mask
+    // + loescht die jeweils andere Mask (mutual excl).
     bool is_on_chan = (strncmp(p, "on-channel", 10) == 0
                        && (p[10] == ' ' || p[10] == '\t' || p[10] == 0));
     bool is_ex_chan = (strncmp(p, "exempt-channel", 14) == 0

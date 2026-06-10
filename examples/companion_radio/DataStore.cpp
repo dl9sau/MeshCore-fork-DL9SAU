@@ -320,7 +320,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.interference_threshold));
     file.read((uint8_t *)&_prefs.agc_reset_interval,
               sizeof(_prefs.agc_reset_interval));
-    // Wunschliste 46 Phase 2 (2026-06-10): per-Filter Channel-Skopus.
+    // Wunschliste 46 Phase 2 (2026-06-10): channel-filter Masks.
     file.read((uint8_t *)&_prefs.filter_sender_drop_on_channel_mask,
               sizeof(_prefs.filter_sender_drop_on_channel_mask));
     file.read((uint8_t *)&_prefs.filter_sender_drop_exempt_mask,
@@ -433,7 +433,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.interference_threshold));
     file.write((uint8_t *)&_prefs.agc_reset_interval,
                sizeof(_prefs.agc_reset_interval));
-    // Wunschliste 46 Phase 2 (2026-06-10): per-Filter Channel-Skopus.
+    // Wunschliste 46 Phase 2 (2026-06-10): channel-filter Masks.
     file.write((uint8_t *)&_prefs.filter_sender_drop_on_channel_mask,
                sizeof(_prefs.filter_sender_drop_on_channel_mask));
     file.write((uint8_t *)&_prefs.filter_sender_drop_exempt_mask,
