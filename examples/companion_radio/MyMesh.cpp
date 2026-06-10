@@ -9311,6 +9311,32 @@ void MyMesh::setBleEnabled(bool en) {
 
 void MyMesh::manageBlePower() {
   if (!_serial) return;
+  // External-Toggle-Detection (Wunschliste 43, User 2026-06-10):
+  // UITask-Menue (Heltec Wireless Tracker Display + Button, Menupunkt 5
+  // 'Bluetooth' mit long-press) ruft _serial->enable()/disable() direkt -- ohne
+  // unsere State-Machine zu konsultieren. Wenn der tatsaechliche
+  // BLE-Status von dem abweicht was der State annimmt, ist das ein
+  // externer Toggle. State synchron ziehen damit wir nicht im naechsten
+  // Tick alles wieder zurueckdrehen.
+  bool ble_real = _serial->isEnabled();
+  bool state_expects_on =
+    (_ble_pwr_state == BLE_PWR_BOOT)
+    || (_ble_pwr_state == BLE_PWR_AWAKE)
+    || (_ble_pwr_state == BLE_PWR_HOT_START)
+    || (_ble_pwr_state == BLE_PWR_WAIT);
+  if (ble_real != state_expects_on) {
+    if (ble_real) {
+      // externes ON -> HOT_START (5min an, dann zurueck in Cycle)
+      _ble_pwr_state = BLE_PWR_HOT_START;
+      _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
+      pushDebugLog("[ble] external toggle on -> hot-start\n");
+    } else {
+      // externes OFF -> TMP_OFF (runtime aus, nicht persistent)
+      _ble_pwr_state = BLE_PWR_TMP_OFF;
+      _ble_pwr_state_until = 0;
+      pushDebugLog("[ble] external toggle off -> tmp-off\n");
+    }
+  }
   // Pref-States haben Vorrang
   uint8_t mode = _prefs.bluetooth_power_mode;
   if (mode == 1) {
