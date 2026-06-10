@@ -692,6 +692,14 @@ private:
   bool        _ble_was_connected = false; // edge-detection
   void manageBlePower();
   void setBleEnabled(bool en);
+  // Wake-on-LoRa Hook: bei eingehender DM oder admin-cmd in den
+  // Cycle-Phasen (SLEEP/WAIT) erweckt BLE fuer einen HOT_START-
+  // Window (5 min). Wirkt nicht auf AWAKE/BOOT (eh an), nicht
+  // auf TMP_OFF/OFF (User-Wunsch zu schlafen wird respektiert).
+  void bleWakeOnLora(const char* reason);
+  // Hardware-Button Toggle Hook -- UITask-Menue ruft das beim
+  // Long-Press auf der Bluetooth-Seite. Nicht persistent.
+  void bleManualToggleFromMenu();
 
   // Wunschliste 52 (2026-06-10): Remote-Admin Client-Pfad.
   // pending_admin_pubkey[4]: Match-Suffix fuer onContactResponse, analog

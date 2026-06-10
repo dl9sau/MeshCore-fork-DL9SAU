@@ -2389,6 +2389,8 @@ void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t 
                            const char *text) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
   queueMessage(from, TXT_TYPE_PLAIN, pkt, sender_timestamp, NULL, 0, text);
+  // Wunschliste 43: Wake-on-LoRa fuer eingehende DM.
+  bleWakeOnLora("DM");
 }
 
 void MyMesh::onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
@@ -3079,6 +3081,8 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
       pushDebugLog("[admin] cmd rejected: contact lacks admin flag\n");
       return 0;
     }
+    // Wunschliste 43: Wake-on-LoRa fuer admin-cmd.
+    bleWakeOnLora("admin-cmd");
     if (len < 2) return 0;
     char cmd_buf[160];
     size_t cmd_len = len - 1;
@@ -8026,6 +8030,9 @@ void MyMesh::backupSaveToSerial() {
   kv_float("lat",                  sensors.node_lat, 6);
   kv_float("lon",                  sensors.node_lon, 6);
 
+  // Wunschliste 43 BLE-Power-Mode.
+  kv_uint("bluetooth_power_mode", _prefs.bluetooth_power_mode);
+
   // Wunschliste 46 Filter (Phase 1-5, 2026-06-10):
   // Filter-Listen + channel-masks + Repeat-Achse exportieren.
   kv_uint("filter_unknown_channel_repeat", _prefs.filter_unknown_channel_repeat);
@@ -8726,6 +8733,12 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       _br_applied++;
       return;
     }
+    // Wunschliste 43 BLE-Power-Mode.
+    if (val_type == 'n' && strcmp(key, "bluetooth_power_mode") == 0) {
+      _prefs.bluetooth_power_mode = (uint8_t)as_uint();
+      _br_applied++;
+      return;
+    }
     // Wunschliste 46 Filter Restore (2026-06-10).
     if (val_type == 'n' && strcmp(key, "filter_unknown_channel_repeat") == 0) {
       _prefs.filter_unknown_channel_repeat = (uint8_t)as_uint();
@@ -9399,6 +9412,43 @@ void MyMesh::manageBlePower() {
     // bleibt aus bis explizit aufgeweckt (CLI 'bluetooth on' /
     // 'bluetooth power always-on' / 'bluetooth power cycle')
     return;
+  }
+}
+
+void MyMesh::bleWakeOnLora(const char* reason) {
+  // Nur in Cycle-Phasen wachen.
+  if (_ble_pwr_state != BLE_PWR_SLEEP && _ble_pwr_state != BLE_PWR_WAIT) return;
+  // Pref-States respektieren -- bei manuellem off/tmp-off nicht wachen.
+  if (_prefs.bluetooth_power_mode == 2) return;
+  pushDebugLog("[ble] wake-on-lora (%s)\n", reason ? reason : "?");
+  _ble_pwr_state = BLE_PWR_HOT_START;
+  _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
+  setBleEnabled(true);
+}
+
+void MyMesh::bleManualToggleFromMenu() {
+  // Hardware-Button auf Display-Menue 'Bluetooth'-Seite (long-press).
+  // Symmetrischer Toggle, non-persistent.
+  bool now_on = _serial && _serial->isConnected();
+  // Effektive 'ist aktuell an'-Detection: state != SLEEP/TMP_OFF/OFF
+  bool ble_currently_on =
+    (_ble_pwr_state == BLE_PWR_AWAKE)
+    || (_ble_pwr_state == BLE_PWR_HOT_START)
+    || (_ble_pwr_state == BLE_PWR_WAIT)
+    || (_ble_pwr_state == BLE_PWR_BOOT);
+  if (ble_currently_on && !now_on) {
+    // Toggle off (runtime)
+    _ble_pwr_state = BLE_PWR_TMP_OFF;
+    _ble_pwr_state_until = 0;
+    setBleEnabled(false);
+    pushDebugLog("[ble] menu toggle -> tmp-off\n");
+  } else {
+    // Toggle on (runtime, HOT_START so dass cycle wieder regulaer
+    // einsetzt nach 5 min wenn niemand verbindet).
+    _ble_pwr_state = BLE_PWR_HOT_START;
+    _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
+    setBleEnabled(true);
+    pushDebugLog("[ble] menu toggle -> hot-start\n");
   }
 }
 
@@ -11816,6 +11866,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memset(_prefs.filter_scope_keep_chan_on, 0, sizeof(_prefs.filter_scope_keep_chan_on));
       memset(_prefs.filter_scope_keep_chan_ex, 0, sizeof(_prefs.filter_scope_keep_chan_ex));
       _prefs.filter_unknown_channel_repeat = 1;  // filter-unscoped Default
+      _prefs.bluetooth_power_mode = 0;           // cycle Default
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
       pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.\n"
@@ -12079,6 +12130,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (lf != 0) non_default_count++;
     }
 
+    // Wunschliste 43 BLE-Power-Mode.
+    if (show_all || _prefs.bluetooth_power_mode != 0) {
+      const char* m = (_prefs.bluetooth_power_mode == 1) ? "always-on"
+                     : (_prefs.bluetooth_power_mode == 2) ? "off"
+                     : "cycle";
+      snprintf(tmp, sizeof(tmp),
+               "  bluetooth_power_mode = %s%s",
+               m, _prefs.bluetooth_power_mode == 0 ? " [default]"
+                                                     : " (default: cycle)");
+      add_line(tmp);
+      if (_prefs.bluetooth_power_mode != 0) non_default_count++;
+    }
     // Wunschliste 45 (LBT-Stub): interference_threshold + agc_reset_interval.
     if (show_all || _prefs.interference_threshold != 14) {
       snprintf(tmp, sizeof(tmp),
