@@ -3011,11 +3011,21 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
   }
 }
 
-// Wunschliste 52: Guest-Permission-Filter. Read-only Befehle erlaubt.
-// Liste pragmatisch -- decken Diagnostik + Read-Befehle ab, ohne Write.
+// Wunschliste 52: Guest-Permission-Filter. ABSICHTLICH MINIMAL --
+// nur klar lesende Befehle die kein Geheimnis preisgeben und keine
+// Wire-Aktion ausloesen. NICHT in Whitelist (Sicherheits-Gruende):
+//   get      -- koennte 'get passwd_admin/guest' Passwoerter leaken
+//   prefs    -- enthielt passwd-Status (set/empty)
+//   advert   -- triggert TX (Wire-Aktion, kein read-only)
+//   messages -- kann DMs anderer User enthalten
+//   discover -- Wire-TX
+//   scope    -- 'scope' Sub-Befehle koennen schreiben (write-Subbefehle
+//                gehen auch ueber 'scope <name> off')
+//   set      -- offensichtlich Write
+//   trace    -- kann Debug-Daten mit sensiblen Inhalten zeigen
+// Wer das aufweichen will: explizit ergaenzen + Sicherheits-Review.
 bool MyMesh::isAdminCmdAllowedForGuest(const char* cmd) const {
   if (!cmd) return false;
-  // Erstes Wort extrahieren
   char tok[32];
   size_t i = 0;
   while (cmd[i] && cmd[i] != ' ' && i < sizeof(tok) - 1) {
@@ -3026,14 +3036,7 @@ bool MyMesh::isAdminCmdAllowedForGuest(const char* cmd) const {
   static const char* const ALLOW[] = {
     "stats", "status", "uptime",
     "clock", "date", "time",
-    "get", "ls",
-    "prefs", "show",
-    "discover", "scope",   // 'scope' Read-Pfade; Write geht trotzdem via 'set'
-    "trace",               // Anzeige + flags lesen
     "version", "help", "?",
-    "channel", "ch.hops",  // Read-Pfade
-    "advert",              // Status-Anzeige
-    "messages",
     NULL
   };
   for (int k = 0; ALLOW[k]; k++) {
