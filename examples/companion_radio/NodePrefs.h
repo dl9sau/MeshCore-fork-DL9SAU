@@ -484,6 +484,36 @@ struct NodePrefs {  // persisted to file
   uint64_t       filter_text_drop_chan_ex[16];
   uint64_t       filter_text_keep_chan_on[16];
   uint64_t       filter_text_keep_chan_ex[16];
+
+  // Wunschliste 46 Phase 5 (2026-06-10): scope-Filter.
+  // Eigene Achse: filter wirkt anhand scope-Tag im Wire-Header (also
+  // unabhaengig von Sender-Name oder Text-Inhalt). User-Wunsch z.B.
+  // 'filter scope drop add #europe,#de,unscoped on-channel Public'.
+  // Reserved Pseudo-Token 'unscoped' (case-insens) -- Pakete ohne
+  // scope-Tag. profile-Achse pro Entry: bit 0-1 (0=for-us / 1=repeat
+  // / 2=complete; 3 reserviert). NICHT mit MeshCore-'scope'-Welt
+  // (TransportKey) selbst verwechseln -- Filter referenziert sie nur.
+  struct FilterScopeEntry {
+    char scope_name[31];
+    uint8_t flags;  // bit 0-1: profile, bit 2-7: reserved
+  };
+  FilterScopeEntry filter_scope_drop[16];
+  uint8_t          filter_scope_drop_count;
+  uint64_t         filter_scope_drop_chan_on[16];
+  uint64_t         filter_scope_drop_chan_ex[16];
+  FilterScopeEntry filter_scope_keep[16];
+  uint8_t          filter_scope_keep_count;
+  uint64_t         filter_scope_keep_chan_on[16];
+  uint64_t         filter_scope_keep_chan_ex[16];
+
+  // Wunschliste 46 Repeat-Achse (2026-06-10): unbekannte Channels.
+  // Repeater sieht Pakete fuer Channels die er nicht selbst konfiguriert
+  // hat (kein Klartext, aber Channel-Hash + scope-Tag sichtbar).
+  // mode: 0 = yes (alle weiterleiten, heutiges Default-Verhalten)
+  //       1 = scoped only (gescopte weiterleiten, unscoped droppen)
+  //       2 = unscoped only (umgekehrt, selten)
+  //       3 = no (gar nicht weiterleiten)
+  uint8_t filter_unknown_channel_repeat;
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
   // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].

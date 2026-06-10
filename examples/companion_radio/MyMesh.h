@@ -679,6 +679,10 @@ private:
   // sonst Index in channels[].
   bool filterSenderDropMatch(const char* sender_name, int channel_idx = -1) const;
   bool filterTextDropMatch(const char* text, int channel_idx = -1) const;
+  // Wunschliste 46 Phase 5: scope-Filter. scope_name = NULL fuer unscoped.
+  // for_repeat: true im Repeat-Pfad, false im Display-Pfad.
+  bool filterScopeMatch(const char* scope_name, int channel_idx,
+                        bool for_repeat) const;
   bool getEffectiveLatLon(double& lat, double& lon) const;
   // Profile-aware Bbox-Quelle (Reise-Fix 2026-06-08):
   //   profile=normal    -> nur fixed location (sensors.node_lat/lon)

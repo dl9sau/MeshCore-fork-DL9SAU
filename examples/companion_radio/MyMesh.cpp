@@ -1170,6 +1170,51 @@ bool MyMesh::filterTextDropMatch(const char* text, int channel_idx) const {
   return false;
 }
 
+// Wunschliste 46 Phase 5: scope-Filter.
+// scope_name = aktueller scope des Pakets ('europe', 'de', 'de-be', ...)
+// oder NULL bei unscoped (-> Match gegen Pseudo-Token 'unscoped').
+// for_repeat = true: nur Entries mit profile=repeat oder complete pruefen
+// for_repeat = false: nur Entries mit profile=for-us oder complete.
+// channel_idx: -1 = ignoriert (z.B. wenn fuer Repeat-Pfad ohne lokalen
+// Channel-Index), sonst pro-Pattern channel-filter.
+// Returns true = DROP (Paket weg).
+bool MyMesh::filterScopeMatch(const char* scope_name, int channel_idx,
+                              bool for_repeat) const {
+  auto profile_matches = [&](uint8_t flags) {
+    uint8_t profile = flags & 0x03;
+    if (profile == 2) return true;         // complete -> beide
+    if (for_repeat) return profile == 1;   // repeat-only
+    return profile == 0;                   // for-us
+  };
+  auto name_matches = [&](const char* stored) -> bool {
+    if (!stored || !stored[0]) return false;
+    // Akzeptiere mit/ohne '#' Prefix. 'unscoped' (reserved) vs scope_name == NULL.
+    const char* a = (stored[0] == '#') ? stored + 1 : stored;
+    if (strcasecmp(a, "unscoped") == 0) return (scope_name == NULL);
+    if (!scope_name) return false;
+    const char* b = (scope_name[0] == '#') ? scope_name + 1 : scope_name;
+    return strcasecmp(a, b) == 0;
+  };
+  // keep vor drop. Pro-Pattern channel-filter + profile-filter.
+  for (uint8_t i = 0; i < _prefs.filter_scope_keep_count
+       && i < sizeof(_prefs.filter_scope_keep)/sizeof(_prefs.filter_scope_keep[0]); i++) {
+    if (!profile_matches(_prefs.filter_scope_keep[i].flags)) continue;
+    if (!filterAppliesToChannel(channel_idx,
+                                _prefs.filter_scope_keep_chan_on[i],
+                                _prefs.filter_scope_keep_chan_ex[i])) continue;
+    if (name_matches(_prefs.filter_scope_keep[i].scope_name)) return false;
+  }
+  for (uint8_t i = 0; i < _prefs.filter_scope_drop_count
+       && i < sizeof(_prefs.filter_scope_drop)/sizeof(_prefs.filter_scope_drop[0]); i++) {
+    if (!profile_matches(_prefs.filter_scope_drop[i].flags)) continue;
+    if (!filterAppliesToChannel(channel_idx,
+                                _prefs.filter_scope_drop_chan_on[i],
+                                _prefs.filter_scope_drop_chan_ex[i])) continue;
+    if (name_matches(_prefs.filter_scope_drop[i].scope_name)) return true;
+  }
+  return false;
+}
+
 bool MyMesh::isLocallyHeard(uint8_t hash) const {
   uint32_t now = getRTCClock()->getCurrentTime();
   for (int i = 0; i < CR_HEARD_TABLE_SIZE; i++) {
@@ -2519,6 +2564,18 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     }
     if (filterTextDropMatch(text_only, ch_idx)) {
       traceCompanion(TRACE_FILTER, "[filter] GRP dropped: text-match");
+      return;
+    }
+    // Wunschliste 46 Phase 5: scope-Filter (Display-Pfad).
+    // scope_name = NULL bei unscoped (oder bei scoped mit unbekanntem
+    // Region-Code; in beiden Faellen matched 'unscoped' im Filter).
+    const char* sc_name = NULL;
+    if (pkt->hasTransportCodes()) {
+      sc_name = lookupRegionByTransportCode(pkt);
+    }
+    if (filterScopeMatch(sc_name, ch_idx, /*for_repeat=*/false)) {
+      traceCompanion(TRACE_FILTER, "[filter] GRP dropped: scope='%s'",
+                     sc_name ? sc_name : "unscoped");
       return;
     }
   }
@@ -4142,6 +4199,18 @@ void MyMesh::begin(bool has_display) {
   memset(_prefs.filter_text_drop_chan_ex, 0, sizeof(_prefs.filter_text_drop_chan_ex));
   memset(_prefs.filter_text_keep_chan_on, 0, sizeof(_prefs.filter_text_keep_chan_on));
   memset(_prefs.filter_text_keep_chan_ex, 0, sizeof(_prefs.filter_text_keep_chan_ex));
+
+  // Wunschliste 46 Phase 5 (2026-06-10): scope-Filter Pre-Init.
+  _prefs.filter_scope_drop_count = 0;
+  memset(_prefs.filter_scope_drop, 0, sizeof(_prefs.filter_scope_drop));
+  memset(_prefs.filter_scope_drop_chan_on, 0, sizeof(_prefs.filter_scope_drop_chan_on));
+  memset(_prefs.filter_scope_drop_chan_ex, 0, sizeof(_prefs.filter_scope_drop_chan_ex));
+  _prefs.filter_scope_keep_count = 0;
+  memset(_prefs.filter_scope_keep, 0, sizeof(_prefs.filter_scope_keep));
+  memset(_prefs.filter_scope_keep_chan_on, 0, sizeof(_prefs.filter_scope_keep_chan_on));
+  memset(_prefs.filter_scope_keep_chan_ex, 0, sizeof(_prefs.filter_scope_keep_chan_ex));
+  // Repeat-Achse Default = 0 (yes, alles weiterleiten = heutiges Verhalten).
+  _prefs.filter_unknown_channel_repeat = 0;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -11725,13 +11794,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* p = strchr(cmd, ' ');
     if (!p) {
       pushCompanionMessage(
-        "Usage (Kurzform):\n"
-        "  filter <s|t> drop|keep add <pat> [on-channel|exempt-channel <chans>]\n"
-        "  filter <s|t> drop|keep remove <pat|idx>");
+        "Usage (TYPE = sender|text):\n"
+        "  filter TYPE drop|keep add <pat>\n"
+        "    [on-channel|exempt-channel <chans>]");
       pushCompanionMessage(
-        "  filter <s|t> drop|keep list|clear\n"
-        "  filter <s|t> on-channel|exempt-channel <chans|clear>\n"
-        "  filter list");
+        "  filter TYPE drop|keep remove <pat|idx>\n"
+        "  filter TYPE drop|keep list|clear\n"
+        "  filter TYPE on-channel|exempt-channel <chans|clear>");
+      pushCompanionMessage(
+        "  filter list  (Komplett-Uebersicht)");
+      pushCompanionMessage(
+        "  filter scope drop|keep add <scope-list>\n"
+        "    [on-channel|exempt-channel <chans>]\n"
+        "    [profile for-us|repeat|complete]");
+      pushCompanionMessage(
+        "  filter scope drop|keep remove|list|clear\n"
+        "  filter unknown-channel repeat\n"
+        "    yes|scoped|unscoped|no");
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
@@ -11807,7 +11886,486 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                 _prefs.filter_text_keep_count,
                 sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]),
                 _prefs.filter_text_keep_chan_on, _prefs.filter_text_keep_chan_ex);
+      // Scope-Filter (Phase 5).
+      auto dump_scope = [&](const char* label, NodePrefs::FilterScopeEntry* arr,
+                             uint8_t cnt, size_t max_slots,
+                             const uint64_t* c_on, const uint64_t* c_ex) {
+        char hdr[80];
+        if (cnt == 0) {
+          snprintf(hdr, sizeof(hdr), "%s (0/%u): (leer)",
+                   label, (unsigned)max_slots);
+          acc_line(hdr);
+          return;
+        }
+        snprintf(hdr, sizeof(hdr), "%s (%u/%u):", label,
+                 (unsigned)cnt, (unsigned)max_slots);
+        acc_line(hdr);
+        for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
+          uint8_t profile = arr[i].flags & 0x03;
+          const char* prof_s = (profile == 1) ? " p:rep"
+                              : (profile == 2) ? " p:cpl"
+                              : "";
+          char line[120];
+          size_t lp = snprintf(line, sizeof(line), "  %u: %s%s",
+                               (unsigned)(i+1), arr[i].scope_name, prof_s);
+          if (c_on[i] != 0 || c_ex[i] != 0) {
+            uint64_t m = c_on[i] ? c_on[i] : c_ex[i];
+            int n = snprintf(line + lp, sizeof(line) - lp, "  %s:",
+                             c_on[i] ? "on" : "ex");
+            if (n > 0 && lp + n < sizeof(line)) lp += n;
+            bool first_ch = true;
+            for (int k = 0; k < MAX_GROUP_CHANNELS && k < 64; k++) {
+              if ((m & ((uint64_t)1 << k)) == 0) continue;
+              ChannelDetails cd;
+              if (!getChannel(k, cd)) continue;
+              n = snprintf(line + lp, sizeof(line) - lp, "%s%s",
+                           first_ch ? "" : ",", cd.name[0] ? cd.name : "?");
+              if (n > 0 && lp + n < sizeof(line)) lp += n;
+              first_ch = false;
+            }
+          }
+          acc_line(line);
+        }
+      };
+      dump_scope("scope drop", _prefs.filter_scope_drop,
+                 _prefs.filter_scope_drop_count,
+                 sizeof(_prefs.filter_scope_drop)/sizeof(_prefs.filter_scope_drop[0]),
+                 _prefs.filter_scope_drop_chan_on, _prefs.filter_scope_drop_chan_ex);
+      dump_scope("scope keep", _prefs.filter_scope_keep,
+                 _prefs.filter_scope_keep_count,
+                 sizeof(_prefs.filter_scope_keep)/sizeof(_prefs.filter_scope_keep[0]),
+                 _prefs.filter_scope_keep_chan_on, _prefs.filter_scope_keep_chan_ex);
+      // Plus Repeat-Achse.
+      {
+        const char* rm = "yes";
+        switch (_prefs.filter_unknown_channel_repeat) {
+          case 1: rm = "scoped"; break;
+          case 2: rm = "unscoped"; break;
+          case 3: rm = "no"; break;
+        }
+        char line[80];
+        snprintf(line, sizeof(line), "unknown-channel repeat: %s", rm);
+        acc_line(line);
+      }
       acc_flush();
+      return;
+    }
+
+    // 'filter unknown-channel repeat <mode>' (Phase 5 Repeat-Achse).
+    if (strncmp(p, "unknown-channel", 15) == 0
+        && (p[15] == ' ' || p[15] == '\t')) {
+      p += 15;
+      while (*p == ' ' || *p == '\t') p++;
+      if (strncmp(p, "repeat", 6) != 0 || (p[6] != ' ' && p[6] != '\t' && p[6] != 0)) {
+        pushCompanionMessage("Usage: filter unknown-channel repeat <yes|scoped|unscoped|no>");
+        return;
+      }
+      p += 6;
+      while (*p == ' ' || *p == '\t') p++;
+      if (!*p) {
+        const char* rm = "yes";
+        switch (_prefs.filter_unknown_channel_repeat) {
+          case 1: rm = "scoped"; break;
+          case 2: rm = "unscoped"; break;
+          case 3: rm = "no"; break;
+        }
+        char r[80];
+        snprintf(r, sizeof(r), "filter unknown-channel repeat = %s", rm);
+        pushCompanionMessage(r);
+        return;
+      }
+      uint8_t mode_val = 255;
+      if (strncasecmp(p, "yes", 3) == 0) mode_val = 0;
+      else if (strncasecmp(p, "scoped", 6) == 0) mode_val = 1;
+      else if (strncasecmp(p, "unscoped", 8) == 0) mode_val = 2;
+      else if (strncasecmp(p, "no", 2) == 0) mode_val = 3;
+      if (mode_val == 255) {
+        pushCompanionMessage("Erlaubt: yes | scoped | unscoped | no");
+        return;
+      }
+      _prefs.filter_unknown_channel_repeat = mode_val;
+      savePrefs();
+      char r[80];
+      snprintf(r, sizeof(r), "OK - filter unknown-channel repeat = %s",
+               mode_val == 0 ? "yes" :
+               mode_val == 1 ? "scoped" :
+               mode_val == 2 ? "unscoped" : "no");
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // ====================================================================
+    // scope-Filter (Phase 5)
+    // filter scope <drop|keep> add <scope-liste>
+    //   [on-channel|exempt-channel <chans>] [profile for-us|repeat|complete]
+    // filter scope <drop|keep> remove <idx|name>
+    // filter scope <drop|keep> list|clear
+    // filter scope on-channel|exempt-channel <chans|clear>  (Shortcut)
+    // ====================================================================
+    if (strncmp(p, "scope", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+      p += 5;
+      while (*p == ' ' || *p == '\t') p++;
+
+      // Lokaler Channel-Liste-Parser (Kopie -- pragmatisch, Code-Duplikation
+      // gegenueber sender/text-Block wird beim naechsten Refactor entfernt).
+      auto parse_chan_list_sc = [&](const char* lp, uint64_t* out_mask,
+                                    char* ubuf, size_t ub_size,
+                                    bool* saw_sub) -> int {
+        uint64_t new_mask = 0;
+        int unknown = 0;
+        *saw_sub = false;
+        ubuf[0] = 0;
+        const char* c = lp;
+        while (*c) {
+          while (*c == ' ' || *c == '\t' || *c == ',') c++;
+          if (!*c) break;
+          const char* st = c;
+          while (*c && *c != ',' && *c != ' ' && *c != '\t') c++;
+          size_t nl = (size_t)(c - st);
+          if (nl == 0) continue;
+          char nm[33];
+          if (nl >= sizeof(nm)) nl = sizeof(nm) - 1;
+          memcpy(nm, st, nl); nm[nl] = 0;
+          if (strcasecmp(nm, "drop") == 0 || strcasecmp(nm, "keep") == 0
+              || strcasecmp(nm, "add") == 0 || strcasecmp(nm, "remove") == 0
+              || strcasecmp(nm, "list") == 0 || strcasecmp(nm, "clear") == 0
+              || strcasecmp(nm, "profile") == 0) {
+            *saw_sub = true;
+          }
+          int idx = -1;
+          for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
+            ChannelDetails cd;
+            if (!getChannel(i, cd)) continue;
+            if (cd.name[0] == 0) continue;
+            if (strcasecmp(cd.name, nm) == 0) { idx = i; break; }
+          }
+          if (idx < 0) {
+            if (strlen(ubuf) + nl + 2 < ub_size) {
+              if (ubuf[0]) strcat(ubuf, ", ");
+              strcat(ubuf, nm);
+            }
+            unknown++;
+            continue;
+          }
+          new_mask |= ((uint64_t)1 << idx);
+        }
+        *out_mask = new_mask;
+        return unknown;
+      };
+
+      // Shortcut: filter scope on-channel|exempt-channel <chans|clear>
+      bool sc_on = (strncmp(p, "on-channel", 10) == 0
+                    && (p[10] == ' ' || p[10] == '\t' || p[10] == 0));
+      bool sc_ex = (strncmp(p, "exempt-channel", 14) == 0
+                    && (p[14] == ' ' || p[14] == '\t' || p[14] == 0));
+      if (sc_on || sc_ex) {
+        p += sc_on ? 10 : 14;
+        while (*p == ' ' || *p == '\t') p++;
+        const char* mode = sc_on ? "on-channel" : "exempt-channel";
+        uint8_t drop_cnt = _prefs.filter_scope_drop_count;
+        uint8_t keep_cnt = _prefs.filter_scope_keep_count;
+        if (drop_cnt == 0 && keep_cnt == 0) {
+          pushCompanionMessage("Keine scope-Patterns vorhanden.");
+          return;
+        }
+        if (strncmp(p, "clear", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
+          for (uint8_t i = 0; i < drop_cnt; i++) {
+            _prefs.filter_scope_drop_chan_on[i] = 0;
+            _prefs.filter_scope_drop_chan_ex[i] = 0;
+          }
+          for (uint8_t i = 0; i < keep_cnt; i++) {
+            _prefs.filter_scope_keep_chan_on[i] = 0;
+            _prefs.filter_scope_keep_chan_ex[i] = 0;
+          }
+          savePrefs();
+          pushCompanionMessage("OK - filter scope: channel-filter aller Patterns gecleared.");
+          return;
+        }
+        if (!*p) {
+          pushCompanionMessage(
+            "Usage: filter scope on-channel|exempt-channel <liste>\n"
+            "(Setzt fuer ALLE scope-Patterns.)");
+          return;
+        }
+        uint64_t nm = 0; char ub[80]; bool ss = false;
+        int uc = parse_chan_list_sc(p, &nm, ub, sizeof(ub), &ss);
+        if (uc > 0) {
+          char r[160];
+          snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s", ub);
+          pushCompanionMessage(r);
+          return;
+        }
+        if (nm == 0) {
+          pushCompanionMessage("Leere Channel-Liste. Nutze 'clear' zum Loeschen.");
+          return;
+        }
+        for (uint8_t i = 0; i < drop_cnt; i++) {
+          if (sc_on) { _prefs.filter_scope_drop_chan_on[i] = nm; _prefs.filter_scope_drop_chan_ex[i] = 0; }
+          else       { _prefs.filter_scope_drop_chan_ex[i] = nm; _prefs.filter_scope_drop_chan_on[i] = 0; }
+        }
+        for (uint8_t i = 0; i < keep_cnt; i++) {
+          if (sc_on) { _prefs.filter_scope_keep_chan_on[i] = nm; _prefs.filter_scope_keep_chan_ex[i] = 0; }
+          else       { _prefs.filter_scope_keep_chan_ex[i] = nm; _prefs.filter_scope_keep_chan_on[i] = 0; }
+        }
+        savePrefs();
+        char r[80];
+        snprintf(r, sizeof(r), "OK - filter scope %s (alle %u Patterns) gesetzt.",
+                 mode, (unsigned)(drop_cnt + keep_cnt));
+        pushCompanionMessage(r);
+        return;
+      }
+
+      // Verb: drop oder keep
+      bool sc_drop = false, sc_keep = false;
+      if (strncmp(p, "drop", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
+        sc_drop = true; p += 4;
+      } else if (strncmp(p, "keep", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
+        sc_keep = true; p += 4;
+      } else {
+        pushCompanionMessage("Erwartet: drop|keep|on-channel|exempt-channel");
+        return;
+      }
+      while (*p == ' ' || *p == '\t') p++;
+
+      NodePrefs::FilterScopeEntry* sarr = sc_drop ? _prefs.filter_scope_drop : _prefs.filter_scope_keep;
+      uint8_t* sp_cnt = sc_drop ? &_prefs.filter_scope_drop_count : &_prefs.filter_scope_keep_count;
+      uint8_t& sc_cnt = *sp_cnt;
+      size_t SC_MAX = sc_drop
+          ? sizeof(_prefs.filter_scope_drop)/sizeof(_prefs.filter_scope_drop[0])
+          : sizeof(_prefs.filter_scope_keep)/sizeof(_prefs.filter_scope_keep[0]);
+      uint64_t* sc_on_arr = sc_drop ? _prefs.filter_scope_drop_chan_on : _prefs.filter_scope_keep_chan_on;
+      uint64_t* sc_ex_arr = sc_drop ? _prefs.filter_scope_drop_chan_ex : _prefs.filter_scope_keep_chan_ex;
+      const char* sc_verb = sc_drop ? "drop" : "keep";
+
+      // list / clear
+      if (!*p || strncmp(p, "list", 4) == 0) {
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "filter scope %s (%u/%u):",
+                 sc_verb, (unsigned)sc_cnt, (unsigned)SC_MAX);
+        pushCompanionMessage(hdr);
+        if (sc_cnt == 0) { pushCompanionMessage("  (leer)"); return; }
+        for (uint8_t i = 0; i < sc_cnt && i < SC_MAX; i++) {
+          uint8_t profile = sarr[i].flags & 0x03;
+          const char* prof_s = (profile == 1) ? " p:rep"
+                              : (profile == 2) ? " p:cpl" : "";
+          char line[120];
+          size_t lp = snprintf(line, sizeof(line), "  %u: %s%s",
+                               (unsigned)(i+1), sarr[i].scope_name, prof_s);
+          if (sc_on_arr[i] != 0 || sc_ex_arr[i] != 0) {
+            uint64_t m = sc_on_arr[i] ? sc_on_arr[i] : sc_ex_arr[i];
+            int n = snprintf(line + lp, sizeof(line) - lp, "  %s:",
+                             sc_on_arr[i] ? "on" : "ex");
+            if (n > 0 && lp + n < sizeof(line)) lp += n;
+            bool first_ch = true;
+            for (int k = 0; k < MAX_GROUP_CHANNELS && k < 64; k++) {
+              if ((m & ((uint64_t)1 << k)) == 0) continue;
+              ChannelDetails cd;
+              if (!getChannel(k, cd)) continue;
+              n = snprintf(line + lp, sizeof(line) - lp, "%s%s",
+                           first_ch ? "" : ",", cd.name[0] ? cd.name : "?");
+              if (n > 0 && lp + n < sizeof(line)) lp += n;
+              first_ch = false;
+            }
+          }
+          pushCompanionMessage(line);
+        }
+        return;
+      }
+      if (strncmp(p, "clear", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
+        memset(sarr, 0, SC_MAX * sizeof(sarr[0]));
+        memset(sc_on_arr, 0, SC_MAX * sizeof(sc_on_arr[0]));
+        memset(sc_ex_arr, 0, SC_MAX * sizeof(sc_ex_arr[0]));
+        sc_cnt = 0;
+        savePrefs();
+        char r[60];
+        snprintf(r, sizeof(r), "OK - filter scope %s cleared.", sc_verb);
+        pushCompanionMessage(r);
+        return;
+      }
+      // remove <idx|name>
+      if (strncmp(p, "remove", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+        p += 6;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) {
+          pushCompanionMessage("Usage: filter scope <drop|keep> remove <idx|name>");
+          return;
+        }
+        char* endp = NULL;
+        long idx = strtol(p, &endp, 10);
+        bool looks_like_index = (endp && endp != p
+                                 && (*endp == 0 || *endp == ' ' || *endp == '\t'));
+        int remove_idx = -1;
+        if (looks_like_index) {
+          if (idx < 1 || (uint32_t)idx > sc_cnt) {
+            char r[80];
+            snprintf(r, sizeof(r), "Index %ld ungueltig (1..%u erlaubt).",
+                     idx, (unsigned)sc_cnt);
+            pushCompanionMessage(r);
+            return;
+          }
+          remove_idx = (int)(idx - 1);
+        } else {
+          // by name (case-insens, mit/ohne '#')
+          const char* a = (p[0] == '#') ? p + 1 : p;
+          // trailing whitespace strip
+          size_t alen = 0;
+          while (a[alen] && a[alen] != ' ' && a[alen] != '\t') alen++;
+          for (uint8_t i = 0; i < sc_cnt; i++) {
+            const char* b = (sarr[i].scope_name[0] == '#') ? sarr[i].scope_name + 1 : sarr[i].scope_name;
+            if (strncasecmp(a, b, alen) == 0 && b[alen] == 0) {
+              remove_idx = i; break;
+            }
+          }
+          if (remove_idx < 0) {
+            pushCompanionMessage("Scope-Name nicht in Liste.");
+            return;
+          }
+        }
+        for (uint8_t j = (uint8_t)remove_idx; j + 1 < sc_cnt; j++) {
+          sarr[j] = sarr[j+1];
+          sc_on_arr[j] = sc_on_arr[j+1];
+          sc_ex_arr[j] = sc_ex_arr[j+1];
+        }
+        memset(&sarr[sc_cnt-1], 0, sizeof(sarr[sc_cnt-1]));
+        sc_on_arr[sc_cnt-1] = 0;
+        sc_ex_arr[sc_cnt-1] = 0;
+        sc_cnt--;
+        savePrefs();
+        char r[80];
+        snprintf(r, sizeof(r), "OK - filter scope %s removed (%u verbleibend)",
+                 sc_verb, (unsigned)sc_cnt);
+        pushCompanionMessage(r);
+        return;
+      }
+      // add <scope-list> [on-channel|exempt-channel <chans>] [profile <p>]
+      if (strncmp(p, "add", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
+        p += 3;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) {
+          pushCompanionMessage("Usage: filter scope <drop|keep> add <scope-list> [on-channel|exempt-channel <chans>] [profile <p>]");
+          return;
+        }
+        // Parse scope-list bis Whitespace, dann optional Modifier.
+        const char* scope_list_start = p;
+        const char* w = p;
+        while (*w && *w != ' ' && *w != '\t') w++;
+        size_t sllen = (size_t)(w - scope_list_start);
+        const char* after = w;
+        while (*after == ' ' || *after == '\t') after++;
+        // optional on-channel/exempt-channel + optional profile
+        uint64_t add_on = 0, add_ex = 0;
+        uint8_t add_profile = 0;  // for-us default
+        while (*after) {
+          bool ap_on = (strncmp(after, "on-channel", 10) == 0
+                        && (after[10] == ' ' || after[10] == '\t'));
+          bool ap_ex = (strncmp(after, "exempt-channel", 14) == 0
+                        && (after[14] == ' ' || after[14] == '\t'));
+          bool ap_pf = (strncmp(after, "profile", 7) == 0
+                        && (after[7] == ' ' || after[7] == '\t'));
+          if (ap_on || ap_ex) {
+            after += ap_on ? 10 : 14;
+            while (*after == ' ' || *after == '\t') after++;
+            // parse channel list bis nächstes profile-Keyword oder Ende
+            const char* chan_end = after;
+            while (*chan_end) {
+              if ((strncmp(chan_end, "profile", 7) == 0)
+                  && (chan_end[7] == ' ' || chan_end[7] == '\t')) break;
+              chan_end++;
+            }
+            size_t clen = (size_t)(chan_end - after);
+            char chbuf[160];
+            if (clen >= sizeof(chbuf)) clen = sizeof(chbuf) - 1;
+            memcpy(chbuf, after, clen); chbuf[clen] = 0;
+            uint64_t cm = 0; char ub[80]; bool ss = false;
+            int uc = parse_chan_list_sc(chbuf, &cm, ub, sizeof(ub), &ss);
+            if (uc > 0) {
+              char r[160];
+              snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s", ub);
+              pushCompanionMessage(r);
+              return;
+            }
+            if (cm == 0) {
+              pushCompanionMessage("Leere Channel-Liste nach on/exempt-channel.");
+              return;
+            }
+            if (ap_on) add_on = cm; else add_ex = cm;
+            after = chan_end;
+            while (*after == ' ' || *after == '\t') after++;
+          } else if (ap_pf) {
+            after += 7;
+            while (*after == ' ' || *after == '\t') after++;
+            if (strncasecmp(after, "for-us", 6) == 0) add_profile = 0;
+            else if (strncasecmp(after, "repeat", 6) == 0) add_profile = 1;
+            else if (strncasecmp(after, "complete", 8) == 0) add_profile = 2;
+            else {
+              pushCompanionMessage("profile: erlaubt for-us|repeat|complete");
+              return;
+            }
+            // skip profile-Wert
+            while (*after && *after != ' ' && *after != '\t') after++;
+            while (*after == ' ' || *after == '\t') after++;
+          } else {
+            pushCompanionMessage("Erwartet: on-channel|exempt-channel|profile");
+            return;
+          }
+        }
+        // scope-list expand: Komma-getrennt, je ein neuer Slot
+        const char* sc_cur = scope_list_start;
+        const char* sc_end = scope_list_start + sllen;
+        int added = 0, skipped_dup = 0, skipped_full = 0;
+        char last_added[40] = "";
+        while (sc_cur < sc_end) {
+          while (sc_cur < sc_end && (*sc_cur == ',' || *sc_cur == ' ' || *sc_cur == '\t')) sc_cur++;
+          if (sc_cur >= sc_end) break;
+          const char* tok_st = sc_cur;
+          while (sc_cur < sc_end && *sc_cur != ',' && *sc_cur != ' ' && *sc_cur != '\t') sc_cur++;
+          size_t tlen = (size_t)(sc_cur - tok_st);
+          if (tlen == 0) continue;
+          if (tlen >= sizeof(sarr[0].scope_name)) {
+            char r[80];
+            snprintf(r, sizeof(r), "Scope-Name zu lang (max %u).",
+                     (unsigned)(sizeof(sarr[0].scope_name) - 1));
+            pushCompanionMessage(r);
+            return;
+          }
+          char nm[32];
+          memcpy(nm, tok_st, tlen); nm[tlen] = 0;
+          // Dedup: gleicher name (mit/ohne '#') + gleiche flags
+          const char* nm_canon = (nm[0] == '#') ? nm + 1 : nm;
+          bool dup = false;
+          for (uint8_t i = 0; i < sc_cnt; i++) {
+            const char* st = (sarr[i].scope_name[0] == '#') ? sarr[i].scope_name + 1 : sarr[i].scope_name;
+            if (strcasecmp(st, nm_canon) == 0
+                && (sarr[i].flags & 0x03) == add_profile) {
+              dup = true; break;
+            }
+          }
+          if (dup) { skipped_dup++; continue; }
+          if (sc_cnt >= SC_MAX) { skipped_full++; continue; }
+          memset(&sarr[sc_cnt], 0, sizeof(sarr[sc_cnt]));
+          memcpy(sarr[sc_cnt].scope_name, nm, tlen);
+          sarr[sc_cnt].scope_name[tlen] = 0;
+          sarr[sc_cnt].flags = add_profile & 0x03;
+          sc_on_arr[sc_cnt] = add_on;
+          sc_ex_arr[sc_cnt] = add_ex;
+          strncpy(last_added, nm, sizeof(last_added)-1);
+          last_added[sizeof(last_added)-1] = 0;
+          sc_cnt++;
+          added++;
+        }
+        if (added == 0 && skipped_dup == 0 && skipped_full == 0) {
+          pushCompanionMessage("Leere scope-Liste.");
+          return;
+        }
+        savePrefs();
+        char r[140];
+        snprintf(r, sizeof(r), "OK - filter scope %s add: %d neu, %d dup, %d uebersprungen (Liste voll). %u/%u",
+                 sc_verb, added, skipped_dup, skipped_full,
+                 (unsigned)sc_cnt, (unsigned)SC_MAX);
+        pushCompanionMessage(r);
+        return;
+      }
+      pushCompanionMessage("Erwartet: add|remove|list|clear");
       return;
     }
 
@@ -11917,7 +12475,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (!*p) {
         pushCompanionMessage(
-          "Usage: filter <s|t> on-channel <liste>\n"
+          "Usage: filter <sender|text> on-channel <liste>\n"
           "  Setzt Skopus fuer ALLE Patterns des Typs.\n"
           "Fuer pro-Pattern: 'drop add <pat> on-channel <liste>'");
         return;

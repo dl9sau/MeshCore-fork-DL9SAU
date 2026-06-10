@@ -355,6 +355,25 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.filter_text_keep_chan_on));
     file.read((uint8_t *)_prefs.filter_text_keep_chan_ex,
               sizeof(_prefs.filter_text_keep_chan_ex));
+    // Wunschliste 46 Phase 5 (2026-06-10): scope-Filter + Repeat-Achse.
+    file.read((uint8_t *)&_prefs.filter_scope_drop_count,
+              sizeof(_prefs.filter_scope_drop_count));
+    file.read((uint8_t *)_prefs.filter_scope_drop,
+              sizeof(_prefs.filter_scope_drop));
+    file.read((uint8_t *)_prefs.filter_scope_drop_chan_on,
+              sizeof(_prefs.filter_scope_drop_chan_on));
+    file.read((uint8_t *)_prefs.filter_scope_drop_chan_ex,
+              sizeof(_prefs.filter_scope_drop_chan_ex));
+    file.read((uint8_t *)&_prefs.filter_scope_keep_count,
+              sizeof(_prefs.filter_scope_keep_count));
+    file.read((uint8_t *)_prefs.filter_scope_keep,
+              sizeof(_prefs.filter_scope_keep));
+    file.read((uint8_t *)_prefs.filter_scope_keep_chan_on,
+              sizeof(_prefs.filter_scope_keep_chan_on));
+    file.read((uint8_t *)_prefs.filter_scope_keep_chan_ex,
+              sizeof(_prefs.filter_scope_keep_chan_ex));
+    file.read((uint8_t *)&_prefs.filter_unknown_channel_repeat,
+              sizeof(_prefs.filter_unknown_channel_repeat));
 
     file.close();
   }
@@ -494,6 +513,25 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.filter_text_keep_chan_on));
     file.write((uint8_t *)_prefs.filter_text_keep_chan_ex,
                sizeof(_prefs.filter_text_keep_chan_ex));
+    // Wunschliste 46 Phase 5 (2026-06-10): scope-Filter + Repeat-Achse.
+    file.write((uint8_t *)&_prefs.filter_scope_drop_count,
+               sizeof(_prefs.filter_scope_drop_count));
+    file.write((uint8_t *)_prefs.filter_scope_drop,
+               sizeof(_prefs.filter_scope_drop));
+    file.write((uint8_t *)_prefs.filter_scope_drop_chan_on,
+               sizeof(_prefs.filter_scope_drop_chan_on));
+    file.write((uint8_t *)_prefs.filter_scope_drop_chan_ex,
+               sizeof(_prefs.filter_scope_drop_chan_ex));
+    file.write((uint8_t *)&_prefs.filter_scope_keep_count,
+               sizeof(_prefs.filter_scope_keep_count));
+    file.write((uint8_t *)_prefs.filter_scope_keep,
+               sizeof(_prefs.filter_scope_keep));
+    file.write((uint8_t *)_prefs.filter_scope_keep_chan_on,
+               sizeof(_prefs.filter_scope_keep_chan_on));
+    file.write((uint8_t *)_prefs.filter_scope_keep_chan_ex,
+               sizeof(_prefs.filter_scope_keep_chan_ex));
+    file.write((uint8_t *)&_prefs.filter_unknown_channel_repeat,
+               sizeof(_prefs.filter_unknown_channel_repeat));
 
     file.close();
   }
