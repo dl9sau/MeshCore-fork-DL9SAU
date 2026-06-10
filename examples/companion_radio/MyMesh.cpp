@@ -9431,6 +9431,29 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Channel-Sender (Prefix vor ': ').\n"
           "text-Filter: Channel-Text-Teil.\n"
           "Je 16 Slots, persistent.");
+        pushCompanionMessage(
+          "scope-Filter (eigene Achse):\n"
+          "  matched scope-Tag im Wire-Header,\n"
+          "  unabhaengig von Sender/Text.\n"
+          "  Pseudo-Token 'unscoped' fuer no-tag.");
+        pushCompanionMessage(
+          "scope-Achse 1 -- channel-filter:\n"
+          "  add <list> on-channel <chans>\n"
+          "  add <list> exempt-channel <chans>");
+        pushCompanionMessage(
+          "scope-Achse 2 -- profile (wo wirkt):\n"
+          "  Default: complete (Display+Repeat)\n"
+          "  profile for-us   nur Display\n"
+          "  profile repeat   nur Repeater");
+        pushCompanionMessage(
+          "Achsen unabhaengig kombinierbar:\n"
+          "  add #de on-channel Public profile for-us\n"
+          "list-Anzeige: 'p:dpy'/'p:rep' (kein\n"
+          " Suffix = Default complete).");
+        pushCompanionMessage(
+          "filter unknown-channel repeat:\n"
+          "  Repeat-Policy fuer nicht selbst\n"
+          "  konfigurierte Channels.");
         return;
       }
       if (topic_prefix_match(topic, "ch.hops")) {
@@ -11858,11 +11881,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(
         "  filter list  (Komplett-Uebersicht)");
       pushCompanionMessage(
-        "  filter scope drop|keep add <scope-list>\n"
-        "    [on-channel|exempt-channel <chans>]\n"
-        "    [profile for-us|repeat|complete]");
+        "scope-Filter (drei Achsen pro Pattern):\n"
+        "  filter scope drop|keep add <scope-list>");
+      pushCompanionMessage(
+        "  -- wo: [on-channel|exempt-channel <chans>]\n"
+        "  -- wirkung: [profile for-us|repeat|complete]\n"
+        "  Default: alle Channels, complete (beide).");
       pushCompanionMessage(
         "  filter scope drop|keep remove|list|clear\n"
+        "  filter scope on-channel|exempt-channel\n"
+        "    <chans|clear>  (Shortcut alle Patterns)");
+      pushCompanionMessage(
         "  filter unknown-channel repeat\n"
         "    yes|scoped|unscoped|no");
       return;
@@ -11956,8 +11985,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         acc_line(hdr);
         for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
           uint8_t profile = arr[i].flags & 0x03;
-          const char* prof_s = (profile == 1) ? " p:rep"
-                              : (profile == 2) ? " p:cpl"
+          // Default = complete (no suffix). Sonderwerte explizit.
+          const char* prof_s = (profile == 0) ? " p:dpy"
+                              : (profile == 1) ? " p:rep"
                               : "";
           char line[120];
           size_t lp = snprintf(line, sizeof(line), "  %u: %s%s",
@@ -12176,7 +12206,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       } else if (strncmp(p, "keep", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
         sc_keep = true; p += 4;
       } else {
-        pushCompanionMessage("Erwartet: drop|keep|on-channel|exempt-channel");
+        if (strncmp(p, "profile", 7) == 0) {
+          pushCompanionMessage(
+            "profile ist pro Pattern (Modifier nach 'add'),\n"
+            "kein eigener Befehl. Aktiv-Anzeige:\n"
+            "  filter scope drop list  (Suffix p:rep / p:cpl)");
+        } else {
+          pushCompanionMessage("Erwartet: drop|keep|on-channel|exempt-channel");
+        }
         return;
       }
       while (*p == ' ' || *p == '\t') p++;
@@ -12307,8 +12344,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         const char* after = w;
         while (*after == ' ' || *after == '\t') after++;
         // optional on-channel/exempt-channel + optional profile
+        // Default profile = complete (User-Wunsch 2026-06-10):
+        // wenn man einen scope-Filter setzt, will man das Paket normalerweise
+        // GANZ loswerden -- nicht sehen UND nicht weiterleiten. Sonderfaelle
+        // wie 'nur Display' bzw 'nur Repeat' kosten ein explizites
+        // 'profile for-us' bzw 'profile repeat' Suffix.
         uint64_t add_on = 0, add_ex = 0;
-        uint8_t add_profile = 0;  // for-us default
+        uint8_t add_profile = 2;  // complete default
         while (*after) {
           bool ap_on = (strncmp(after, "on-channel", 10) == 0
                         && (after[10] == ' ' || after[10] == '\t'));
