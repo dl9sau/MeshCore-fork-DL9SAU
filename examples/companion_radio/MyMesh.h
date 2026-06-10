@@ -88,12 +88,31 @@
 #define REQ_TYPE_GET_TELEMETRY_DATA     0x03
 #define REQ_TYPE_GET_NEIGHBOURS         0x06
 #define REQ_TYPE_GET_OWNER_INFO         0x07  // FIRMWARE_VER_LEVEL >= 2
+// Wunschliste 52 (2026-06-10): Remote-Administration ueber RPC-Strings.
+// Payload: [1]REQ_TYPE_ADMIN_CMD [4]sender_timestamp [N]command_text (ASCII)
+// Reply:   [4]reply_timestamp [M]response_text (ASCII).
+// Permission-Marker: ContactInfo.flags & CONTACT_FLAG_ADMIN_OK (gesetzt
+// nach erfolgreichem ANON_REQ_TYPE_LOGIN).
+#define REQ_TYPE_ADMIN_CMD              0x08
 
 // Wunschliste 7 Phase 3: Anonymous-Request-Typen (Discovery-Queries).
 // Werden in onAnonDataRecv anhand der effektiven Role gegated.
 #define ANON_REQ_TYPE_REGIONS    0x01
 #define ANON_REQ_TYPE_OWNER      0x02
 #define ANON_REQ_TYPE_BASIC      0x03  // just remote clock + features
+// Wunschliste 52: Login (ANON-Pfad, kein vorab-Contact noetig).
+// Payload: [1]ANON_REQ_TYPE_LOGIN [4]sender_timestamp [N]password (ASCII,
+//          unterminiert, max 31 byte).
+#define ANON_REQ_TYPE_LOGIN      0x04
+
+// Contact-Flags-Bit fuer 'darf REQ_TYPE_ADMIN_CMD ausfuehren'.
+// Wird nach erfolgreichem ANON_REQ_TYPE_LOGIN gesetzt.
+#define CONTACT_FLAG_ADMIN_OK    0x40    // gewaehlt damit kein Konflikt
+                                          // mit etablierten Lower-Bits
+                                          // (favourite/blocked/sharing).
+// Zusatz-Marker: 'reduced (guest) permissions' -- gesetzt wenn Login
+// via passwd_guest erfolgte. Bei guest werden write-Befehle gefiltert.
+#define CONTACT_FLAG_GUEST_ONLY  0x80
 
 // Wunschliste 6b: Loop-Detection-Modi (analog CommonCLI).
 #define LOOP_DETECT_OFF          0
@@ -650,6 +669,21 @@ private:
   // Parst und führt einen vom User über den Companion-Channel gesendeten
   // Befehl aus. Antwort wird via pushCompanionMessage() zurückgegeben.
   void handleCompanionCommand(const char* cmd);
+
+  // Wunschliste 52 (2026-06-10): Remote-Admin Capture.
+  // Wenn _admin_capture_active gesetzt, redirected pushCompanionMessage()
+  // in _admin_reply_buf statt in die App-Push-Queue. So koennen wir den
+  // bestehenden handleCompanionCommand-Pfad fuer REQ_TYPE_ADMIN_CMD
+  // wiederverwenden. _admin_reply_buf zeigt auf einen vom Caller
+  // gestellten Reply-Buffer (typisch 155 byte).
+  char*  _admin_reply_buf = NULL;
+  size_t _admin_reply_max = 0;
+  size_t _admin_reply_used = 0;
+  bool   _admin_capture_active = false;
+  bool   _admin_capture_truncated = false;
+  // Guest-Mode: read-only Befehle erlaubt. Lese-Whitelist als Liste
+  // von Prefix-Tokens; wird beim REQ_TYPE_ADMIN_CMD-Handler konsultiert.
+  bool isAdminCmdAllowedForGuest(const char* cmd) const;
   // Pusht eine Trace-Message in den Companion-Channel — aber nur wenn das
   // entsprechende Flag in _trace_flags gesetzt ist. No-op sonst.
   void traceCompanion(uint16_t flag, const char* fmt, ...) __attribute__((format(printf, 3, 4)));

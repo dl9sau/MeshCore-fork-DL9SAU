@@ -2942,6 +2942,51 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
     reply_data[8] = 0;  // keine Bridge-Features im Companion
     if (_prefs.client_repeat == 0) reply_data[8] |= 0x80;  // 'disabled' = nicht-repeating
     reply_len = 9;
+  } else if (req_type == ANON_REQ_TYPE_LOGIN && role == ADV_TYPE_REPEATER) {
+    // Wunschliste 52 (2026-06-10): Login via Password.
+    // Payload nach data[5]: ASCII-Password (max 31 byte, evtl. ohne NUL).
+    // Setzt CONTACT_FLAG_ADMIN_OK bit auf existierenden Contact (Sender
+    // muss als Contact bekannt sein -- add via Advert + manual add).
+    // Reply: [4]ts_echo [4]now [1]RESP_SERVER_LOGIN_OK [1]perm (1=admin,
+    //        2=guest).
+    if (_prefs.passwd_admin[0] == 0 && _prefs.passwd_guest[0] == 0) return;
+    if (len <= 5) return;
+    size_t pw_max = len - 5;
+    if (pw_max > 31) pw_max = 31;
+    char pw_buf[32];
+    memcpy(pw_buf, &data[5], pw_max);
+    pw_buf[pw_max] = 0;
+    // Trim trailing zero-bytes oder whitespace (Client kann unterminiert
+    // schicken).
+    while (pw_max > 0 && (pw_buf[pw_max-1] == 0
+                          || pw_buf[pw_max-1] == ' '
+                          || pw_buf[pw_max-1] == '\r'
+                          || pw_buf[pw_max-1] == '\n')) {
+      pw_buf[--pw_max] = 0;
+    }
+    bool admin_match = (_prefs.passwd_admin[0] != 0
+                        && strcmp(pw_buf, _prefs.passwd_admin) == 0);
+    bool guest_match = (!admin_match
+                        && _prefs.passwd_guest[0] != 0
+                        && strcmp(pw_buf, _prefs.passwd_guest) == 0);
+    if (!admin_match && !guest_match) {
+      pushDebugLog("[admin] login: wrong password\n");
+      return;
+    }
+    ContactInfo* c = lookupContactByPubKey(sender.pub_key, PUB_KEY_SIZE);
+    if (!c) {
+      pushDebugLog("[admin] login: sender not in contacts\n");
+      return;
+    }
+    c->flags |= CONTACT_FLAG_ADMIN_OK;
+    if (guest_match) c->flags |= CONTACT_FLAG_GUEST_ONLY;
+    else             c->flags &= (uint8_t)~CONTACT_FLAG_GUEST_ONLY;
+    dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+    pushDebugLog("[admin] login OK perm=%s for %s\n",
+                 admin_match ? "admin" : "guest", c->name);
+    reply_data[8] = RESP_SERVER_LOGIN_OK;
+    reply_data[9] = admin_match ? 1 : 2;
+    reply_len = 10;
   } else {
     return;  // unbekannt oder per role gegated
   }
@@ -2966,9 +3011,103 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
   }
 }
 
+// Wunschliste 52: Guest-Permission-Filter. Read-only Befehle erlaubt.
+// Liste pragmatisch -- decken Diagnostik + Read-Befehle ab, ohne Write.
+bool MyMesh::isAdminCmdAllowedForGuest(const char* cmd) const {
+  if (!cmd) return false;
+  // Erstes Wort extrahieren
+  char tok[32];
+  size_t i = 0;
+  while (cmd[i] && cmd[i] != ' ' && i < sizeof(tok) - 1) {
+    tok[i] = cmd[i]; i++;
+  }
+  tok[i] = 0;
+  if (i == 0) return false;
+  static const char* const ALLOW[] = {
+    "stats", "status", "uptime",
+    "clock", "date", "time",
+    "get", "ls",
+    "prefs", "show",
+    "discover", "scope",   // 'scope' Read-Pfade; Write geht trotzdem via 'set'
+    "trace",               // Anzeige + flags lesen
+    "version", "help", "?",
+    "channel", "ch.hops",  // Read-Pfade
+    "advert",              // Status-Anzeige
+    "messages",
+    NULL
+  };
+  for (int k = 0; ALLOW[k]; k++) {
+    if (strcasecmp(tok, ALLOW[k]) == 0) return true;
+  }
+  return false;
+}
+
 uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                                  uint8_t len, uint8_t *reply) {
   uint8_t role = effectiveAdvertRole();
+
+  // Wunschliste 52 (2026-06-10): Remote-Admin RPC ueber REQ_TYPE_ADMIN_CMD.
+  // Wire-Payload (nach den 4 byte sender_timestamp): [1]REQ_TYPE_ADMIN_CMD
+  // [N]command_text (ASCII, unterminiert oder NUL-terminiert).
+  // Reply: [4]ts_echo [M]response_text (ASCII).
+  // Voraussetzungen:
+  //   - effective Role == REPEATER (defensive: nicht in Chat-Mode aktiv)
+  //   - Contact hat CONTACT_FLAG_ADMIN_OK (gesetzt nach Login)
+  // Guest-Mode (CONTACT_FLAG_GUEST_ONLY): nur read-only Befehle.
+  if (data[0] == REQ_TYPE_ADMIN_CMD && role == ADV_TYPE_REPEATER) {
+    if ((contact.flags & CONTACT_FLAG_ADMIN_OK) == 0) {
+      pushDebugLog("[admin] cmd rejected: contact lacks admin flag\n");
+      return 0;
+    }
+    if (len < 2) return 0;
+    char cmd_buf[160];
+    size_t cmd_len = len - 1;
+    if (cmd_len >= sizeof(cmd_buf)) cmd_len = sizeof(cmd_buf) - 1;
+    memcpy(cmd_buf, &data[1], cmd_len);
+    cmd_buf[cmd_len] = 0;
+    // Trim trailing whitespace/control
+    while (cmd_len > 0 && (cmd_buf[cmd_len-1] == ' '
+                            || cmd_buf[cmd_len-1] == '\r'
+                            || cmd_buf[cmd_len-1] == '\n'
+                            || cmd_buf[cmd_len-1] == 0)) {
+      cmd_buf[--cmd_len] = 0;
+    }
+    if (cmd_len == 0) return 0;
+    if ((contact.flags & CONTACT_FLAG_GUEST_ONLY)
+        && !isAdminCmdAllowedForGuest(cmd_buf)) {
+      pushDebugLog("[admin] cmd rejected: guest not allowed: %s\n", cmd_buf);
+      memcpy(reply, &sender_timestamp, 4);
+      const char* msg = "ERR: guest-permission";
+      size_t ml = strlen(msg);
+      memcpy(&reply[4], msg, ml);
+      return 4 + ml;
+    }
+    // Capture-Mode setzen, Befehl ausfuehren, Buffer als Reply.
+    char capture[155];
+    capture[0] = 0;
+    _admin_reply_buf = capture;
+    _admin_reply_max = sizeof(capture);
+    _admin_reply_used = 0;
+    _admin_capture_active = true;
+    _admin_capture_truncated = false;
+    pushDebugLog("[admin] cmd from %s: %s\n", contact.name, cmd_buf);
+    handleCompanionCommand(cmd_buf);
+    _admin_capture_active = false;
+    _admin_reply_buf = NULL;
+    _admin_reply_max = 0;
+    size_t out_len = strlen(capture);
+    if (out_len == 0) {
+      // Leerer Reply: schreib OK damit Client weiss dass cmd akzeptiert.
+      const char* ok = "(OK, no reply)";
+      out_len = strlen(ok);
+      memcpy(capture, ok, out_len);
+      capture[out_len] = 0;
+    }
+    if (out_len > 155) out_len = 155;
+    memcpy(reply, &sender_timestamp, 4);
+    memcpy(&reply[4], capture, out_len);
+    return (uint8_t)(4 + out_len);
+  }
 
   // Wunschliste 7 Phase 4: REQ_TYPE_GET_STATUS (RepeaterStats).
   // Nur fuer Role == REPEATER. Wire-Layout 1:1 wie simple_repeater.
@@ -9038,8 +9177,35 @@ void MyMesh::clearStats() {
 }
 
 void MyMesh::pushCompanionMessage(const char* text) {
-  if (_companion_channel_idx == 0xFF) return;
   if (text == NULL || text[0] == 0) return;
+  // Wunschliste 52: Admin-Capture-Mode. Statt App-Push: in Reply-Buffer
+  // konkatenieren (newline-getrennt). Wird im REQ_TYPE_ADMIN_CMD-Handler
+  // aktiviert + nachher gelesen.
+  if (_admin_capture_active && _admin_reply_buf && _admin_reply_max > 1) {
+    size_t tl = strlen(text);
+    if (_admin_capture_truncated) return;
+    size_t need = tl + (_admin_reply_used > 0 ? 1 : 0);
+    if (_admin_reply_used + need + 1 > _admin_reply_max) {
+      // overflow -- truncate (Buffer zu klein)
+      _admin_capture_truncated = true;
+      const char* trunc = "[...]";
+      size_t avail = (_admin_reply_max > _admin_reply_used + 1)
+                     ? (_admin_reply_max - _admin_reply_used - 1) : 0;
+      if (avail >= 6) {
+        if (_admin_reply_used > 0) _admin_reply_buf[_admin_reply_used++] = '\n';
+        memcpy(_admin_reply_buf + _admin_reply_used, trunc, 5);
+        _admin_reply_used += 5;
+      }
+      _admin_reply_buf[_admin_reply_used] = 0;
+      return;
+    }
+    if (_admin_reply_used > 0) _admin_reply_buf[_admin_reply_used++] = '\n';
+    memcpy(_admin_reply_buf + _admin_reply_used, text, tl);
+    _admin_reply_used += tl;
+    _admin_reply_buf[_admin_reply_used] = 0;
+    return;
+  }
+  if (_companion_channel_idx == 0xFF) return;
 
   // Frame analog zu onChannelMessageRecv() bauen, aber Sender = Plattform-
   // Name (z.B. "Heltec V3") und path_len=0 (zero-hop / lokal).
