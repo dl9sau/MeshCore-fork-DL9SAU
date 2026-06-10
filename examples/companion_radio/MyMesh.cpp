@@ -4263,8 +4263,11 @@ void MyMesh::begin(bool has_display) {
   memset(_prefs.filter_scope_keep, 0, sizeof(_prefs.filter_scope_keep));
   memset(_prefs.filter_scope_keep_chan_on, 0, sizeof(_prefs.filter_scope_keep_chan_on));
   memset(_prefs.filter_scope_keep_chan_ex, 0, sizeof(_prefs.filter_scope_keep_chan_ex));
-  // Repeat-Achse Default = 0 (yes, alles weiterleiten = heutiges Verhalten).
-  _prefs.filter_unknown_channel_repeat = 0;
+  // Repeat-Achse Default = 1 (scoped). User-Wunsch 2026-06-10:
+  // unscoped-Channelmessages auf unbekannten Channels sollen per
+  // Default NICHT weitergeleitet werden (Spam-Schutz). Wer das
+  // alte Verhalten will, setzt explizit 'all'.
+  _prefs.filter_unknown_channel_repeat = 1;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -9452,9 +9455,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "list-Anzeige: 'p:dpy'/'p:rep' (kein\n"
           " Suffix = Default complete).");
         pushCompanionMessage(
-          "filter unknown-channel repeat:\n"
-          "  Repeat-Policy fuer nicht selbst\n"
-          "  konfigurierte Channels.");
+          "filter unknown-channel:\n"
+          "  Repeat-Policy fuer Channels die\n"
+          "  nicht selbst konfiguriert sind.\n"
+          "  Default: filter-unscoped.");
         return;
       }
       if (topic_prefix_match(topic, "ch.hops")) {
@@ -11895,8 +11899,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "  filter scope on-channel|exempt-channel\n"
         "    <chans|clear>  (Shortcut alle Patterns)");
       pushCompanionMessage(
-        "  filter unknown-channel repeat\n"
-        "    yes|scoped|unscoped|no");
+        "  filter unknown-channel\n"
+        "    filter-none|filter-unscoped|\n"
+        "    filter-scoped|filter-all\n"
+        "  Default: filter-unscoped");
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
@@ -11989,8 +11995,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
           uint8_t profile = arr[i].flags & 0x03;
           // Default = complete (no suffix). Sonderwerte explizit.
-          const char* prof_s = (profile == 0) ? " p:dpy"
-                              : (profile == 1) ? " p:rep"
+          const char* prof_s = (profile == 0) ? " profile:display"
+                              : (profile == 1) ? " profile:repeat"
                               : "";
           char line[120];
           size_t lp = snprintf(line, sizeof(line), "  %u: %s%s",
@@ -12024,14 +12030,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  _prefs.filter_scope_keep_chan_on, _prefs.filter_scope_keep_chan_ex);
       // Plus Repeat-Achse.
       {
-        const char* rm = "yes";
+        const char* rm = "filter-none";
         switch (_prefs.filter_unknown_channel_repeat) {
-          case 1: rm = "scoped"; break;
-          case 2: rm = "unscoped"; break;
-          case 3: rm = "no"; break;
+          case 1: rm = "filter-unscoped"; break;
+          case 2: rm = "filter-scoped"; break;
+          case 3: rm = "filter-all"; break;
         }
         char line[80];
-        snprintf(line, sizeof(line), "unknown-channel repeat: %s", rm);
+        snprintf(line, sizeof(line), "unknown-channel: %s", rm);
         acc_line(line);
       }
       acc_flush();
@@ -12043,40 +12049,48 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         && (p[15] == ' ' || p[15] == '\t')) {
       p += 15;
       while (*p == ' ' || *p == '\t') p++;
-      if (strncmp(p, "repeat", 6) != 0 || (p[6] != ' ' && p[6] != '\t' && p[6] != 0)) {
-        pushCompanionMessage("Usage: filter unknown-channel repeat <yes|scoped|unscoped|no>");
-        return;
-      }
-      p += 6;
-      while (*p == ' ' || *p == '\t') p++;
+      // Wert beschreibt WAS GEFILTERT (= weg-gedroppt) wird, nicht was
+      // durchgeht. Vermeidet doppelte Verneinung im Begriff (User-Wunsch
+      // 2026-06-10):
+      //   filter-none     = filtert nichts (alles durch)
+      //   filter-unscoped = filtert unscoped weg (Default)
+      //   filter-scoped   = filtert scoped weg (selten)
+      //   filter-all      = filtert alles weg (kein Paket durch)
       if (!*p) {
-        const char* rm = "yes";
+        const char* rm = "filter-none";
         switch (_prefs.filter_unknown_channel_repeat) {
-          case 1: rm = "scoped"; break;
-          case 2: rm = "unscoped"; break;
-          case 3: rm = "no"; break;
+          case 1: rm = "filter-unscoped"; break;
+          case 2: rm = "filter-scoped"; break;
+          case 3: rm = "filter-all"; break;
         }
-        char r[80];
-        snprintf(r, sizeof(r), "filter unknown-channel repeat = %s", rm);
+        char r[120];
+        snprintf(r, sizeof(r),
+                 "filter unknown-channel = %s\n"
+                 "(welche Pakete fuer unbekannte\n"
+                 " Channels weg-gefiltert werden\n"
+                 " im Repeater-Pfad)", rm);
         pushCompanionMessage(r);
         return;
       }
       uint8_t mode_val = 255;
-      if (strncasecmp(p, "yes", 3) == 0) mode_val = 0;
-      else if (strncasecmp(p, "scoped", 6) == 0) mode_val = 1;
-      else if (strncasecmp(p, "unscoped", 8) == 0) mode_val = 2;
-      else if (strncasecmp(p, "no", 2) == 0) mode_val = 3;
+      if (strncasecmp(p, "filter-none", 11) == 0) mode_val = 0;
+      else if (strncasecmp(p, "filter-unscoped", 15) == 0) mode_val = 1;
+      else if (strncasecmp(p, "filter-scoped", 13) == 0) mode_val = 2;
+      else if (strncasecmp(p, "filter-all", 10) == 0) mode_val = 3;
       if (mode_val == 255) {
-        pushCompanionMessage("Erlaubt: yes | scoped | unscoped | no");
+        pushCompanionMessage(
+          "Erlaubt: filter-none | filter-unscoped\n"
+          "       | filter-scoped | filter-all\n"
+          "(Wert = was wird weg-gefiltert)");
         return;
       }
       _prefs.filter_unknown_channel_repeat = mode_val;
       savePrefs();
       char r[80];
-      snprintf(r, sizeof(r), "OK - filter unknown-channel repeat = %s",
-               mode_val == 0 ? "yes" :
-               mode_val == 1 ? "scoped" :
-               mode_val == 2 ? "unscoped" : "no");
+      snprintf(r, sizeof(r), "OK - filter unknown-channel = %s",
+               mode_val == 0 ? "filter-none" :
+               mode_val == 1 ? "filter-unscoped" :
+               mode_val == 2 ? "filter-scoped" : "filter-all");
       pushCompanionMessage(r);
       return;
     }
