@@ -9273,6 +9273,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Wirkt 'for-us' (App-Push only),\n"
           "Repeat-Funktion bleibt aktiv.");
         pushCompanionMessage(
+          "  filter list  (Komplett-Uebersicht)");
+        pushCompanionMessage(
           "Befehle (TYPE = sender oder text):\n"
           "  filter TYPE drop add <pat>\n"
           "  filter TYPE drop remove <pat|idx>");
@@ -9612,11 +9614,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (topic_prefix_match(topic, "repeater")) {
+#ifdef REPEATER_DEFENSIVE_FORCE
         pushCompanionMessage(
           "repeater [on [force] | off]:\n"
           "  schaltet Repeating ein/aus. Verhalten\n"
           "  gemaess profile (defensive | normal).\n"
           "  Ohne Arg -> Status.");
+#else
+        pushCompanionMessage(
+          "repeater [on | off]:\n"
+          "  schaltet Repeating ein/aus. Verhalten\n"
+          "  gemaess profile (defensive | normal).\n"
+          "  Ohne Arg -> Status.");
+#endif
         pushCompanionMessage(
           "profile=defensive (Default; = 'client_repeat'):\n"
           "  PATH nur fuer lokale Endpoints,\n"
@@ -11727,6 +11737,78 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
+
+    // Globaler Uebersichts-Befehl 'filter list' -- alle Filter-Typen
+    // in einem Rutsch anzeigen (User-Wunsch 2026-06-10).
+    if (strncmp(p, "list", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
+      auto dump_list = [&](const char* label, NodePrefs::FilterEntry* arr,
+                           uint8_t cnt, size_t max_slots) {
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "%s (%u/%u):", label,
+                 (unsigned)cnt, (unsigned)max_slots);
+        pushCompanionMessage(hdr);
+        if (cnt == 0) { pushCompanionMessage("  (leer)"); return; }
+        char buf[140]; size_t bu = 0; buf[0] = 0;
+        auto flush = [&]() {
+          if (bu > 0) { pushCompanionMessage(buf); bu = 0; buf[0] = 0; }
+        };
+        for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
+          const char* pfx = (arr[i].flags & 0x01) ? "^" : "";
+          const char* sfx = (arr[i].flags & 0x02) ? "$" : "";
+          char line[60];
+          snprintf(line, sizeof(line), "  %u: %s%s%s",
+                   (unsigned)(i+1), pfx, arr[i].pattern, sfx);
+          size_t ll = strlen(line);
+          if (bu + ll + 2 >= sizeof(buf)) flush();
+          if (bu > 0) buf[bu++] = '\n';
+          memcpy(buf + bu, line, ll); bu += ll; buf[bu] = 0;
+        }
+        flush();
+      };
+      auto dump_chan = [&](const char* label, uint64_t on_mask, uint64_t ex_mask) {
+        if (on_mask == 0 && ex_mask == 0) {
+          char r[80];
+          snprintf(r, sizeof(r), "%s: global (alle Channels)", label);
+          pushCompanionMessage(r);
+          return;
+        }
+        bool is_on = (on_mask != 0);
+        uint64_t m = is_on ? on_mask : ex_mask;
+        char buf[140];
+        size_t pos = snprintf(buf, sizeof(buf), "%s: %s ", label,
+                              is_on ? "on-channel" : "exempt-channel");
+        bool first = true;
+        for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
+          if ((m & ((uint64_t)1 << i)) == 0) continue;
+          ChannelDetails cd;
+          if (!getChannel(i, cd)) continue;
+          const char* nm = cd.name[0] ? cd.name : "?";
+          int n = snprintf(buf + pos, sizeof(buf) - pos, "%s%s", first ? "" : ",", nm);
+          if (n > 0 && pos + n < sizeof(buf)) pos += n;
+          first = false;
+        }
+        pushCompanionMessage(buf);
+      };
+      pushCompanionMessage("--- Filter-Uebersicht ---");
+      dump_list("sender drop", _prefs.filter_sender_drop,
+                _prefs.filter_sender_drop_count,
+                sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]));
+      dump_list("sender keep", _prefs.filter_sender_keep,
+                _prefs.filter_sender_keep_count,
+                sizeof(_prefs.filter_sender_keep)/sizeof(_prefs.filter_sender_keep[0]));
+      dump_chan("sender chan", _prefs.filter_sender_drop_on_channel_mask,
+                _prefs.filter_sender_drop_exempt_mask);
+      dump_list("text drop", _prefs.filter_text_drop,
+                _prefs.filter_text_drop_count,
+                sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]));
+      dump_list("text keep", _prefs.filter_text_keep,
+                _prefs.filter_text_keep_count,
+                sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]));
+      dump_chan("text chan", _prefs.filter_text_drop_on_channel_mask,
+                _prefs.filter_text_drop_exempt_mask);
+      return;
+    }
+
     bool is_sender = false;
     if (strncmp(p, "sender", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
       is_sender = true; p += 6;
@@ -16468,15 +16550,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       const char* pv = strchr(arg, ' ');
       if (pv) { while (*pv == ' ') pv++; }
       if (!pv || *pv == 0) {
-        char r[200];
-        snprintf(r, sizeof(r),
-          "repeater profile = %s\n"
-          "  defensive: PATH nur fuer lokale Endpoints, Repeats mit\n"
-          "             reduzierter Power + CR5 (= client-Repeater).\n"
-          "  normal:    ALLE PATH-Pakete weiterleiten, volle Power +\n"
-          "             konfigurierte CR (= wie echter Repeater).",
-          _prefs.repeater_profile == 1 ? "normal" : "defensive");
+        char r[100];
+        snprintf(r, sizeof(r), "repeater profile = %s",
+                 _prefs.repeater_profile == 1 ? "normal" : "defensive");
         pushCompanionMessage(r);
+        pushCompanionMessage(
+          "  defensive: PATH nur fuer lokale Endpoints,\n"
+          "    Repeats mit reduzierter Power + CR5\n"
+          "    (= client-Repeater).");
+        pushCompanionMessage(
+          "  normal: ALLE PATH-Pakete weiterleiten,\n"
+          "    volle Power + konfigurierte CR\n"
+          "    (= wie echter Repeater).");
         return;
       }
       static const CompanionChoice prof_ch[] = {
@@ -16492,16 +16577,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       recomputeRepeatingAllowed("profile change");
       // Reise-Fix 2026-06-08: Profile-Wechsel => Bbox-Quelle aendert sich.
       reevaluateRepeaterBbox();
-      char r[160];
-      snprintf(r, sizeof(r),
-        "OK - repeater profile = %s.\n"
-        "  PATH-Filter: %s\n"
-        "  Power/CR-Reduktion bei Repeats: %s",
-        pm == 1 ? "normal" : "defensive",
-        pm == 1 ? "AUS (alle PATH weiterleiten)"
-                : "AN (nur lokale Endpoints)",
-        pm == 1 ? "AUS (volle Power + konfigurierte CR)"
-                : "AN (reduziert + CR5)");
+      char r[100];
+      snprintf(r, sizeof(r), "OK - repeater profile = %s",
+               pm == 1 ? "normal" : "defensive");
+      pushCompanionMessage(r);
+      snprintf(r, sizeof(r), "  PATH-Filter: %s",
+               pm == 1 ? "AUS (alle PATH weiterleiten)"
+                       : "AN (nur lokale Endpoints)");
+      pushCompanionMessage(r);
+      snprintf(r, sizeof(r), "  Power/CR-Reduktion: %s",
+               pm == 1 ? "AUS (volle Power + CR)"
+                       : "AN (reduziert + CR5)");
       pushCompanionMessage(r);
       return;
     }
