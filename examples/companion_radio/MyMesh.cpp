@@ -4507,6 +4507,9 @@ void MyMesh::begin(bool has_display) {
   // Default NICHT weitergeleitet werden (Spam-Schutz). Wer das
   // alte Verhalten will, setzt explizit 'all'.
   _prefs.filter_unknown_channel_repeat = 1;
+  // Wunschliste 43 BLE-Power-Mode: Default cycle (= 0). Aktiviert
+  // sleep nach Boot-Grace / Disconnect-Hot-Start.
+  _prefs.bluetooth_power_mode = 0;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -6509,6 +6512,9 @@ void MyMesh::loop() {
   updateDutyWindow();
 
   BaseChatMesh::loop();
+
+  // Wunschliste 43 (2026-06-10): BLE-Power-Cycle State Machine
+  manageBlePower();
 
   // Wunschliste 27: discover-Listen-Window check
   discoverLoop();
@@ -9274,6 +9280,123 @@ void MyMesh::clearStats() {
   // 'clear stats' wieder volle 10%/h verfuegbar (was auch unfair sein
   // koennte gegenueber dem Mesh, aber explizite User-Aktion).
   memset(_duty_air_ms_per_minute, 0, sizeof(_duty_air_ms_per_minute));
+}
+
+// Wunschliste 43 BLE-Power-Cycle (2026-06-10).
+// State-Machine in loop() getickt. Timings hartcodiert:
+//   BOOT_GRACE  = 30 min nach Boot (kein Connect je)
+//   HOT_START   = 5 min nach erstem Disconnect (verhindert Frust bei
+//                 App-Background/Lockscreen)
+//   SLEEP       = 180 s aus
+//   WAIT        = 30 s an (Listening fuer Connect)
+//   AWAKE       = solange connected
+void MyMesh::setBleEnabled(bool en) {
+  if (!_serial) return;
+  if (en) _serial->enable();
+  else    _serial->disable();
+}
+
+void MyMesh::manageBlePower() {
+  if (!_serial) return;
+  // Pref-States haben Vorrang
+  uint8_t mode = _prefs.bluetooth_power_mode;
+  if (mode == 1) {
+    // always-on: zwinge AWAKE wenn nicht schon
+    if (_ble_pwr_state != BLE_PWR_AWAKE && _ble_pwr_state != BLE_PWR_BOOT) {
+      _ble_pwr_state = BLE_PWR_AWAKE;
+      _ble_pwr_state_until = 0;
+      setBleEnabled(true);
+    }
+    return;
+  }
+  if (mode == 2 && _ble_pwr_state != BLE_PWR_TMP_OFF) {
+    // off (persistent): nur Boot-Phase noch akzeptiert, sonst aus
+    if (_ble_pwr_state != BLE_PWR_OFF) {
+      _ble_pwr_state = BLE_PWR_OFF;
+      _ble_pwr_state_until = 0;
+      setBleEnabled(false);
+    }
+    return;
+  }
+  uint32_t now = millis();
+  bool connected = _serial->isConnected();
+  // Edge: Connect (any state with BLE on)
+  if (connected && !_ble_was_connected) {
+    _ble_pwr_state = BLE_PWR_AWAKE;
+    _ble_pwr_state_until = 0;
+  }
+  // Edge: Disconnect (war AWAKE)
+  if (!connected && _ble_was_connected) {
+    _ble_pwr_state = BLE_PWR_HOT_START;
+    _ble_pwr_state_until = now + 5UL * 60 * 1000;
+  }
+  _ble_was_connected = connected;
+
+  // Initial-Boot: wenn noch nie connected war, bleibt 30 min an
+  if (_ble_pwr_state == BLE_PWR_BOOT) {
+    if (_ble_pwr_state_until == 0) {
+      _ble_pwr_state_until = now + 30UL * 60 * 1000;
+      setBleEnabled(true);
+    }
+    if (connected) {
+      _ble_pwr_state = BLE_PWR_AWAKE;
+      _ble_pwr_state_until = 0;
+    } else if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
+      // Boot-Grace abgelaufen, in Cycle.
+      _ble_pwr_state = BLE_PWR_SLEEP;
+      _ble_pwr_state_until = now + 180UL * 1000;
+      setBleEnabled(false);
+    }
+    return;
+  }
+  if (_ble_pwr_state == BLE_PWR_AWAKE) {
+    // bleibt an solange connected
+    setBleEnabled(true);
+    return;
+  }
+  if (_ble_pwr_state == BLE_PWR_HOT_START) {
+    setBleEnabled(true);
+    if (connected) {
+      _ble_pwr_state = BLE_PWR_AWAKE;
+      _ble_pwr_state_until = 0;
+      return;
+    }
+    if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
+      _ble_pwr_state = BLE_PWR_SLEEP;
+      _ble_pwr_state_until = now + 180UL * 1000;
+      setBleEnabled(false);
+    }
+    return;
+  }
+  if (_ble_pwr_state == BLE_PWR_SLEEP) {
+    setBleEnabled(false);
+    if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
+      _ble_pwr_state = BLE_PWR_WAIT;
+      _ble_pwr_state_until = now + 30UL * 1000;
+      setBleEnabled(true);
+    }
+    return;
+  }
+  if (_ble_pwr_state == BLE_PWR_WAIT) {
+    setBleEnabled(true);
+    if (connected) {
+      _ble_pwr_state = BLE_PWR_AWAKE;
+      _ble_pwr_state_until = 0;
+      return;
+    }
+    if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
+      _ble_pwr_state = BLE_PWR_SLEEP;
+      _ble_pwr_state_until = now + 180UL * 1000;
+      setBleEnabled(false);
+    }
+    return;
+  }
+  if (_ble_pwr_state == BLE_PWR_TMP_OFF) {
+    setBleEnabled(false);
+    // bleibt aus bis explizit aufgeweckt (CLI 'bluetooth on' /
+    // 'bluetooth power always-on' / 'bluetooth power cycle')
+    return;
+  }
 }
 
 void MyMesh::pushCompanionMessage(const char* text) {
@@ -12434,6 +12557,97 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Phase 1: nur drop-Listen, kein allow/exempt, kein per-Channel,
   // kein 'filter region'/'filter advert'. Filter wirkt 'for-us' --
   // App-Push wird unterdrueckt, Repeat bleibt unbeeinflusst.
+  // Wunschliste 43 (2026-06-10): BLE-Power-Cycle CLI.
+  // 'bluetooth power cycle|always-on'    persistent mode
+  // 'bluetooth on'                        force ON (persistent: power=always-on)
+  // 'bluetooth off'                       persistent power=off
+  // 'bluetooth tmp-off'                   runtime off (nicht persistent)
+  if (starts_with_word(cmd, "bluetooth") || starts_with_word(cmd, "bt")) {
+    const char* p = strchr(cmd, ' ');
+    if (!p) {
+      const char* m = "?";
+      switch (_prefs.bluetooth_power_mode) {
+        case 0: m = "cycle"; break;
+        case 1: m = "always-on"; break;
+        case 2: m = "off"; break;
+      }
+      const char* s = "?";
+      switch (_ble_pwr_state) {
+        case BLE_PWR_BOOT:      s = "BOOT (Grace)"; break;
+        case BLE_PWR_AWAKE:     s = "AWAKE (connected/just)"; break;
+        case BLE_PWR_HOT_START: s = "HOT-START (5min)"; break;
+        case BLE_PWR_SLEEP:     s = "SLEEP"; break;
+        case BLE_PWR_WAIT:      s = "WAIT"; break;
+        case BLE_PWR_TMP_OFF:   s = "TMP-OFF"; break;
+        case BLE_PWR_OFF:       s = "OFF (persist)"; break;
+      }
+      char r[140];
+      snprintf(r, sizeof(r),
+               "bluetooth: pref=%s state=%s\n"
+               "  power cycle|always-on (persist)\n"
+               "  on|off (persist) | tmp-off (runtime)",
+               m, s);
+      pushCompanionMessage(r);
+      return;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "power", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+      p += 5;
+      while (*p == ' ' || *p == '\t') p++;
+      if (strncmp(p, "cycle", 5) == 0) {
+        _prefs.bluetooth_power_mode = 0;
+        // wenn aktuell OFF/TMP_OFF: BOOT-Phase neu (BLE an, dann cycle)
+        if (_ble_pwr_state == BLE_PWR_OFF || _ble_pwr_state == BLE_PWR_TMP_OFF) {
+          _ble_pwr_state = BLE_PWR_HOT_START;
+          _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
+        }
+        savePrefs();
+        pushCompanionMessage("OK - bluetooth power=cycle (persist)");
+        return;
+      }
+      if (strncmp(p, "always-on", 9) == 0) {
+        _prefs.bluetooth_power_mode = 1;
+        _ble_pwr_state = BLE_PWR_AWAKE;
+        _ble_pwr_state_until = 0;
+        setBleEnabled(true);
+        savePrefs();
+        pushCompanionMessage("OK - bluetooth power=always-on (persist)");
+        return;
+      }
+      pushCompanionMessage("Erwartet: bluetooth power <cycle|always-on>");
+      return;
+    }
+    if (strncmp(p, "on", 2) == 0 && (p[2] == 0 || p[2] == ' ')) {
+      _prefs.bluetooth_power_mode = 1;
+      _ble_pwr_state = BLE_PWR_AWAKE;
+      _ble_pwr_state_until = 0;
+      setBleEnabled(true);
+      savePrefs();
+      pushCompanionMessage("OK - bluetooth on (= power always-on, persist)");
+      return;
+    }
+    if (strncmp(p, "off", 3) == 0 && (p[3] == 0 || p[3] == ' ')) {
+      _prefs.bluetooth_power_mode = 2;
+      _ble_pwr_state = BLE_PWR_OFF;
+      _ble_pwr_state_until = 0;
+      setBleEnabled(false);
+      savePrefs();
+      pushCompanionMessage(
+        "OK - bluetooth off (persist).\n"
+        "Recovery: USB-Serial, Hardware-Button");
+      return;
+    }
+    if (strncmp(p, "tmp-off", 7) == 0) {
+      _ble_pwr_state = BLE_PWR_TMP_OFF;
+      _ble_pwr_state_until = 0;
+      setBleEnabled(false);
+      pushCompanionMessage("OK - bluetooth tmp-off (runtime only)");
+      return;
+    }
+    pushCompanionMessage("Erwartet: power cycle|always-on | on | off | tmp-off");
+    return;
+  }
+
   // Wunschliste 52 (2026-06-10): Remote-Admin Client.
   // 'admin login <contact-name> <password>' -- sendAnonReq + ANON_REQ_TYPE_LOGIN
   // 'admin <contact-name> <cmd-text>'       -- sendRequest + REQ_TYPE_ADMIN_CMD

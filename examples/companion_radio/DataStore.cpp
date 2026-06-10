@@ -374,6 +374,9 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.filter_scope_keep_chan_ex));
     file.read((uint8_t *)&_prefs.filter_unknown_channel_repeat,
               sizeof(_prefs.filter_unknown_channel_repeat));
+    // Wunschliste 43 (2026-06-10): BLE-Power-Mode
+    file.read((uint8_t *)&_prefs.bluetooth_power_mode,
+              sizeof(_prefs.bluetooth_power_mode));
 
     file.close();
   }
@@ -532,6 +535,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.filter_scope_keep_chan_ex));
     file.write((uint8_t *)&_prefs.filter_unknown_channel_repeat,
                sizeof(_prefs.filter_unknown_channel_repeat));
+    // Wunschliste 43 (2026-06-10): BLE-Power-Mode
+    file.write((uint8_t *)&_prefs.bluetooth_power_mode,
+               sizeof(_prefs.bluetooth_power_mode));
 
     file.close();
   }

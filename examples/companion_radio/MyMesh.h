@@ -670,6 +670,29 @@ private:
   // Befehl aus. Antwort wird via pushCompanionMessage() zurückgegeben.
   void handleCompanionCommand(const char* cmd);
 
+  // Wunschliste 43 (2026-06-10): BLE-Power-Cycle State Machine.
+  //   BLE_PWR_BOOT      = Boot-Grace (30 min, BLE an, wartet auf ersten Connect)
+  //   BLE_PWR_AWAKE     = App connected ODER nach Connect-Hot-Start (5 min)
+  //   BLE_PWR_HOT_START = 5 min nach Disconnect, BLE noch an
+  //   BLE_PWR_SLEEP     = Cycle: 180s aus
+  //   BLE_PWR_WAIT      = Cycle: 30s an, wartet ob jemand connectet
+  //   BLE_PWR_TMP_OFF   = runtime off (Pref nicht persistiert), Wake nur Button
+  //   BLE_PWR_OFF       = Pref-persistent off
+  enum BlePwrState : uint8_t {
+    BLE_PWR_BOOT = 0,
+    BLE_PWR_AWAKE,
+    BLE_PWR_HOT_START,
+    BLE_PWR_SLEEP,
+    BLE_PWR_WAIT,
+    BLE_PWR_TMP_OFF,
+    BLE_PWR_OFF,
+  };
+  BlePwrState _ble_pwr_state = BLE_PWR_BOOT;
+  uint32_t    _ble_pwr_state_until = 0;   // millis() Ziel fuer Phase-Ende
+  bool        _ble_was_connected = false; // edge-detection
+  void manageBlePower();
+  void setBleEnabled(bool en);
+
   // Wunschliste 52 (2026-06-10): Remote-Admin Client-Pfad.
   // pending_admin_pubkey[4]: Match-Suffix fuer onContactResponse, analog
   // pending_login/status. Wenn != 0: kommende Response wird als Admin-CMD

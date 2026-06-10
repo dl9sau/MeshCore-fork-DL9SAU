@@ -514,6 +514,16 @@ struct NodePrefs {  // persisted to file
   //       2 = unscoped only (umgekehrt, selten)
   //       3 = no (gar nicht weiterleiten)
   uint8_t filter_unknown_channel_repeat;
+
+  // Wunschliste 43 BLE-Power-Cycle (2026-06-10):
+  //   0 = cycle (Default; Sleep 180s + Wait 30s nach Disconnect-Phase)
+  //   1 = always-on
+  //   2 = off (persistent off, runtime-Wake nur per Button)
+  // Plus runtime-Override 'tmp-off' = nicht-persistent (RAM-only).
+  // Timings sind aktuell hartcodiert in MyMesh.cpp manageBlePower():
+  //   BOOT-Phase: 30min wenn nie connect, sonst 5min Hot-Start nach
+  //   erstem Disconnect, dann Cycle 180s sleep / 30s wait.
+  uint8_t bluetooth_power_mode;
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
   // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].
