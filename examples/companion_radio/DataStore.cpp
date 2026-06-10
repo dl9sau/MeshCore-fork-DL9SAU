@@ -338,6 +338,23 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.filter_text_keep_count));
     file.read((uint8_t *)_prefs.filter_text_keep,
               sizeof(_prefs.filter_text_keep));
+    // Wunschliste 46 Phase 2 v2 (2026-06-10): pro-Pattern channel-filter.
+    file.read((uint8_t *)_prefs.filter_sender_drop_chan_on,
+              sizeof(_prefs.filter_sender_drop_chan_on));
+    file.read((uint8_t *)_prefs.filter_sender_drop_chan_ex,
+              sizeof(_prefs.filter_sender_drop_chan_ex));
+    file.read((uint8_t *)_prefs.filter_sender_keep_chan_on,
+              sizeof(_prefs.filter_sender_keep_chan_on));
+    file.read((uint8_t *)_prefs.filter_sender_keep_chan_ex,
+              sizeof(_prefs.filter_sender_keep_chan_ex));
+    file.read((uint8_t *)_prefs.filter_text_drop_chan_on,
+              sizeof(_prefs.filter_text_drop_chan_on));
+    file.read((uint8_t *)_prefs.filter_text_drop_chan_ex,
+              sizeof(_prefs.filter_text_drop_chan_ex));
+    file.read((uint8_t *)_prefs.filter_text_keep_chan_on,
+              sizeof(_prefs.filter_text_keep_chan_on));
+    file.read((uint8_t *)_prefs.filter_text_keep_chan_ex,
+              sizeof(_prefs.filter_text_keep_chan_ex));
 
     file.close();
   }
@@ -460,6 +477,23 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.filter_text_keep_count));
     file.write((uint8_t *)_prefs.filter_text_keep,
                sizeof(_prefs.filter_text_keep));
+    // Wunschliste 46 Phase 2 v2 (2026-06-10): pro-Pattern channel-filter.
+    file.write((uint8_t *)_prefs.filter_sender_drop_chan_on,
+               sizeof(_prefs.filter_sender_drop_chan_on));
+    file.write((uint8_t *)_prefs.filter_sender_drop_chan_ex,
+               sizeof(_prefs.filter_sender_drop_chan_ex));
+    file.write((uint8_t *)_prefs.filter_sender_keep_chan_on,
+               sizeof(_prefs.filter_sender_keep_chan_on));
+    file.write((uint8_t *)_prefs.filter_sender_keep_chan_ex,
+               sizeof(_prefs.filter_sender_keep_chan_ex));
+    file.write((uint8_t *)_prefs.filter_text_drop_chan_on,
+               sizeof(_prefs.filter_text_drop_chan_on));
+    file.write((uint8_t *)_prefs.filter_text_drop_chan_ex,
+               sizeof(_prefs.filter_text_drop_chan_ex));
+    file.write((uint8_t *)_prefs.filter_text_keep_chan_on,
+               sizeof(_prefs.filter_text_keep_chan_on));
+    file.write((uint8_t *)_prefs.filter_text_keep_chan_ex,
+               sizeof(_prefs.filter_text_keep_chan_ex));
 
     file.close();
   }

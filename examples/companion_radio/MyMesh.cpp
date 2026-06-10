@@ -1129,21 +1129,23 @@ static inline bool filterAppliesToChannel(int channel_idx,
   return true;                               // global
 }
 
+// Phase 2 v2 (2026-06-10): pro-Pattern channel-filter. Pro Pattern
+// werden seine on/exempt-Masken konsultiert. Beide 0 = global.
 bool MyMesh::filterSenderDropMatch(const char* sender_name, int channel_idx) const {
   if (!sender_name || !*sender_name) return false;
-  if (!filterAppliesToChannel(channel_idx,
-                                 _prefs.filter_sender_drop_on_channel_mask,
-                                 _prefs.filter_sender_drop_exempt_mask)) {
-    return false;
-  }
-  // Phase 3: keep gewinnt vor drop. Keep-Liste wird vor drop geprueft;
-  // wenn ein keep-Pattern matched, kein Drop.
+  // keep gewinnt vor drop. Pro-Pattern Skopus pruefen.
   for (uint8_t i = 0; i < _prefs.filter_sender_keep_count
        && i < sizeof(_prefs.filter_sender_keep)/sizeof(_prefs.filter_sender_keep[0]); i++) {
+    if (!filterAppliesToChannel(channel_idx,
+                                _prefs.filter_sender_keep_chan_on[i],
+                                _prefs.filter_sender_keep_chan_ex[i])) continue;
     if (filterPatternMatch(_prefs.filter_sender_keep[i], sender_name)) return false;
   }
   for (uint8_t i = 0; i < _prefs.filter_sender_drop_count
        && i < sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]); i++) {
+    if (!filterAppliesToChannel(channel_idx,
+                                _prefs.filter_sender_drop_chan_on[i],
+                                _prefs.filter_sender_drop_chan_ex[i])) continue;
     if (filterPatternMatch(_prefs.filter_sender_drop[i], sender_name)) return true;
   }
   return false;
@@ -1151,18 +1153,18 @@ bool MyMesh::filterSenderDropMatch(const char* sender_name, int channel_idx) con
 
 bool MyMesh::filterTextDropMatch(const char* text, int channel_idx) const {
   if (!text || !*text) return false;
-  if (!filterAppliesToChannel(channel_idx,
-                                 _prefs.filter_text_drop_on_channel_mask,
-                                 _prefs.filter_text_drop_exempt_mask)) {
-    return false;
-  }
-  // Phase 3: keep-Vorrang.
   for (uint8_t i = 0; i < _prefs.filter_text_keep_count
        && i < sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]); i++) {
+    if (!filterAppliesToChannel(channel_idx,
+                                _prefs.filter_text_keep_chan_on[i],
+                                _prefs.filter_text_keep_chan_ex[i])) continue;
     if (filterPatternMatch(_prefs.filter_text_keep[i], text)) return false;
   }
   for (uint8_t i = 0; i < _prefs.filter_text_drop_count
        && i < sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]); i++) {
+    if (!filterAppliesToChannel(channel_idx,
+                                _prefs.filter_text_drop_chan_on[i],
+                                _prefs.filter_text_drop_chan_ex[i])) continue;
     if (filterPatternMatch(_prefs.filter_text_drop[i], text)) return true;
   }
   return false;
@@ -4130,6 +4132,16 @@ void MyMesh::begin(bool has_display) {
   memset(_prefs.filter_sender_keep, 0, sizeof(_prefs.filter_sender_keep));
   _prefs.filter_text_keep_count = 0;
   memset(_prefs.filter_text_keep, 0, sizeof(_prefs.filter_text_keep));
+  // Wunschliste 46 Phase 2 v2 (2026-06-10): pro-Pattern channel-filter
+  // Pre-Init alle Slot-Masks = 0 (= global / alle Channels).
+  memset(_prefs.filter_sender_drop_chan_on, 0, sizeof(_prefs.filter_sender_drop_chan_on));
+  memset(_prefs.filter_sender_drop_chan_ex, 0, sizeof(_prefs.filter_sender_drop_chan_ex));
+  memset(_prefs.filter_sender_keep_chan_on, 0, sizeof(_prefs.filter_sender_keep_chan_on));
+  memset(_prefs.filter_sender_keep_chan_ex, 0, sizeof(_prefs.filter_sender_keep_chan_ex));
+  memset(_prefs.filter_text_drop_chan_on, 0, sizeof(_prefs.filter_text_drop_chan_on));
+  memset(_prefs.filter_text_drop_chan_ex, 0, sizeof(_prefs.filter_text_drop_chan_ex));
+  memset(_prefs.filter_text_keep_chan_on, 0, sizeof(_prefs.filter_text_keep_chan_on));
+  memset(_prefs.filter_text_keep_chan_ex, 0, sizeof(_prefs.filter_text_keep_chan_ex));
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -9260,17 +9272,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  drop * + keep ping = Whitelist\n"
           "  (nur ping durch).");
         pushCompanionMessage(
-          "channel-filter (global pro Typ):\n"
-          "  filter TYPE on-channel Public,test\n"
-          "  filter TYPE exempt-channel ping");
+          "channel-filter pro Pattern:\n"
+          "  drop add <pat> on-channel <liste>\n"
+          "  drop add <pat> exempt-channel <liste>");
         pushCompanionMessage(
-          "  filter TYPE on-channel list|clear\n"
-          "  (analog exempt-channel)\n"
-          "Gilt fuer ALLE drop+keep des Typs.");
+          "Shortcut fuer alle Pattern des Typs:\n"
+          "  filter TYPE on-channel <liste>\n"
+          "  filter TYPE exempt-channel <liste>");
         pushCompanionMessage(
-          "on-channel = nur diese Channels\n"
-          "exempt-channel = alle ausser diese\n"
-          "Default: global (alle Channels).");
+          "  filter TYPE on-channel clear\n"
+          "Default: global (alle Channels).\n"
+          "Nur bekannte Channels erlaubt.");
         pushCompanionMessage(
           "Pattern (literal, case-insens.):\n"
           "  foo   = exakt Wort 'foo'\n"
@@ -11734,7 +11746,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       };
 
       auto dump_list = [&](const char* label, NodePrefs::FilterEntry* arr,
-                           uint8_t cnt, size_t max_slots) {
+                           uint8_t cnt, size_t max_slots,
+                           const uint64_t* c_on, const uint64_t* c_ex) {
         char hdr[80];
         if (cnt == 0) {
           snprintf(hdr, sizeof(hdr), "%s (0/%u): (leer)",
@@ -11748,52 +11761,44 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
           const char* pfx = (arr[i].flags & 0x01) ? "^" : "";
           const char* sfx = (arr[i].flags & 0x02) ? "$" : "";
-          char line[60];
-          snprintf(line, sizeof(line), "  %u: %s%s%s",
-                   (unsigned)(i+1), pfx, arr[i].pattern, sfx);
+          char line[120];
+          size_t lp = snprintf(line, sizeof(line), "  %u: %s%s%s",
+                               (unsigned)(i+1), pfx, arr[i].pattern, sfx);
+          if (c_on[i] != 0 || c_ex[i] != 0) {
+            uint64_t m = c_on[i] ? c_on[i] : c_ex[i];
+            int n = snprintf(line + lp, sizeof(line) - lp, "  %s:",
+                             c_on[i] ? "on" : "ex");
+            if (n > 0 && lp + n < sizeof(line)) lp += n;
+            bool first_ch = true;
+            for (int k = 0; k < MAX_GROUP_CHANNELS && k < 64; k++) {
+              if ((m & ((uint64_t)1 << k)) == 0) continue;
+              ChannelDetails cd;
+              if (!getChannel(k, cd)) continue;
+              n = snprintf(line + lp, sizeof(line) - lp, "%s%s",
+                           first_ch ? "" : ",", cd.name[0] ? cd.name : "?");
+              if (n > 0 && lp + n < sizeof(line)) lp += n;
+              first_ch = false;
+            }
+          }
           acc_line(line);
         }
       };
-      auto dump_chan = [&](const char* label, uint64_t on_mask, uint64_t ex_mask) {
-        if (on_mask == 0 && ex_mask == 0) {
-          char r[80];
-          snprintf(r, sizeof(r), "%s: global (alle Channels)", label);
-          acc_line(r);
-          return;
-        }
-        bool is_on = (on_mask != 0);
-        uint64_t m = is_on ? on_mask : ex_mask;
-        char buf[140];
-        size_t pos = snprintf(buf, sizeof(buf), "%s: %s ", label,
-                              is_on ? "on-channel" : "exempt-channel");
-        bool first = true;
-        for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
-          if ((m & ((uint64_t)1 << i)) == 0) continue;
-          ChannelDetails cd;
-          if (!getChannel(i, cd)) continue;
-          const char* nm = cd.name[0] ? cd.name : "?";
-          int n = snprintf(buf + pos, sizeof(buf) - pos, "%s%s", first ? "" : ",", nm);
-          if (n > 0 && pos + n < sizeof(buf)) pos += n;
-          first = false;
-        }
-        acc_line(buf);
-      };
       dump_list("sender drop", _prefs.filter_sender_drop,
                 _prefs.filter_sender_drop_count,
-                sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]));
+                sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]),
+                _prefs.filter_sender_drop_chan_on, _prefs.filter_sender_drop_chan_ex);
       dump_list("sender keep", _prefs.filter_sender_keep,
                 _prefs.filter_sender_keep_count,
-                sizeof(_prefs.filter_sender_keep)/sizeof(_prefs.filter_sender_keep[0]));
-      dump_chan("sender chan", _prefs.filter_sender_drop_on_channel_mask,
-                _prefs.filter_sender_drop_exempt_mask);
+                sizeof(_prefs.filter_sender_keep)/sizeof(_prefs.filter_sender_keep[0]),
+                _prefs.filter_sender_keep_chan_on, _prefs.filter_sender_keep_chan_ex);
       dump_list("text drop", _prefs.filter_text_drop,
                 _prefs.filter_text_drop_count,
-                sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]));
+                sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]),
+                _prefs.filter_text_drop_chan_on, _prefs.filter_text_drop_chan_ex);
       dump_list("text keep", _prefs.filter_text_keep,
                 _prefs.filter_text_keep_count,
-                sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]));
-      dump_chan("text chan", _prefs.filter_text_drop_on_channel_mask,
-                _prefs.filter_text_drop_exempt_mask);
+                sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]),
+                _prefs.filter_text_keep_chan_on, _prefs.filter_text_keep_chan_ex);
       acc_flush();
       return;
     }
@@ -11809,74 +11814,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     while (*p == ' ' || *p == '\t') p++;
 
-    // channel-filter (Wunschliste 46 Phase 2, 2026-06-10):
-    // on-channel / exempt-channel Befehle. Komma-Liste lokal
-    // konfigurierter Channel-Namen. Set ueberschreibt bestehende Mask
-    // + loescht die jeweils andere Mask (mutual excl).
-    bool is_on_chan = (strncmp(p, "on-channel", 10) == 0
-                       && (p[10] == ' ' || p[10] == '\t' || p[10] == 0));
-    bool is_ex_chan = (strncmp(p, "exempt-channel", 14) == 0
-                       && (p[14] == ' ' || p[14] == '\t' || p[14] == 0));
-    if (is_on_chan || is_ex_chan) {
-      p += is_on_chan ? 10 : 14;
-      while (*p == ' ' || *p == '\t') p++;
-      uint64_t& on_mask  = is_sender ? _prefs.filter_sender_drop_on_channel_mask
-                                      : _prefs.filter_text_drop_on_channel_mask;
-      uint64_t& ex_mask  = is_sender ? _prefs.filter_sender_drop_exempt_mask
-                                      : _prefs.filter_text_drop_exempt_mask;
-      const char* kind = is_sender ? "sender" : "text";
-      const char* mode = is_on_chan ? "on-channel" : "exempt-channel";
-      uint64_t& this_mask  = is_on_chan ? on_mask : ex_mask;
-      uint64_t& other_mask = is_on_chan ? ex_mask : on_mask;
-
-      if (!*p || strncmp(p, "list", 4) == 0) {
-        char hdr[100];
-        snprintf(hdr, sizeof(hdr), "filter %s %s:", kind, mode);
-        pushCompanionMessage(hdr);
-        if (this_mask == 0) {
-          pushCompanionMessage(is_on_chan
-            ? "  (leer -- Filter global aktiv)"
-            : "  (leer -- keine Ausnahme)");
-          if (other_mask != 0) {
-            char hint[80];
-            snprintf(hint, sizeof(hint), "  Anderer Modus aktiv: '%s'",
-                     is_on_chan ? "exempt-channel" : "on-channel");
-            pushCompanionMessage(hint);
-          }
-          return;
-        }
-        char buf[160]; size_t bu = 0; buf[0] = 0;
-        auto flushb2 = [&]() {
-          if (bu > 0) { pushCompanionMessage(buf); bu = 0; buf[0] = 0; }
-        };
-        for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
-          if ((this_mask & ((uint64_t)1 << i)) == 0) continue;
-          ChannelDetails cd;
-          if (!getChannel(i, cd)) continue;
-          char line[40];
-          snprintf(line, sizeof(line), "  %s", cd.name[0] ? cd.name : "(empty)");
-          size_t ll = strlen(line);
-          if (bu + ll + 2 >= sizeof(buf)) flushb2();
-          if (bu > 0) buf[bu++] = '\n';
-          memcpy(buf + bu, line, ll); bu += ll; buf[bu] = 0;
-        }
-        flushb2();
-        return;
-      }
-      if (strncmp(p, "clear", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
-        this_mask = 0;
-        savePrefs();
-        char r[80];
-        snprintf(r, sizeof(r), "OK - filter %s %s cleared.", kind, mode);
-        pushCompanionMessage(r);
-        return;
-      }
-      // Komma-Liste parsen, channel-Namen aufloesen, Mask bauen.
+    // Helper: Parse Komma-Liste von Channel-Namen, liefert mask.
+    auto parse_channel_list = [&](const char* lp, uint64_t* out_mask,
+                                  char* unknown_buf, size_t ub_size,
+                                  bool* saw_subcmd) -> int {
       uint64_t new_mask = 0;
-      uint8_t unknown_count = 0;
-      bool saw_subcmd = false;   // 'drop'/'keep'/'add'/etc als chan-name -> User-Hint
-      char unknown_buf[80]; unknown_buf[0] = 0;
-      const char* cursor = p;
+      int unknown_count = 0;
+      *saw_subcmd = false;
+      unknown_buf[0] = 0;
+      const char* cursor = lp;
       while (*cursor) {
         while (*cursor == ' ' || *cursor == '\t' || *cursor == ',') cursor++;
         if (!*cursor) break;
@@ -11887,14 +11833,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         char name[33];
         if (nl >= sizeof(name)) nl = sizeof(name) - 1;
         memcpy(name, start, nl); name[nl] = 0;
-        // Falls User Sub-Befehl reinmixt ('drop', 'add' etc.):
-        // Hint setzen damit Error-Message klarer wird.
         if (strcasecmp(name, "drop") == 0 || strcasecmp(name, "keep") == 0
             || strcasecmp(name, "add") == 0 || strcasecmp(name, "remove") == 0
-            || strcasecmp(name, "list") == 0 || strcasecmp(name, "clear") == 0) {
-          saw_subcmd = true;
+            || strcasecmp(name, "list") == 0 || strcasecmp(name, "clear") == 0
+            || strcasecmp(name, "chan") == 0) {
+          *saw_subcmd = true;
         }
-        // Suche Channel-Name. case-insensitive Match.
         int idx = -1;
         for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
           ChannelDetails cd;
@@ -11903,7 +11847,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           if (strcasecmp(cd.name, name) == 0) { idx = i; break; }
         }
         if (idx < 0) {
-          if (strlen(unknown_buf) + nl + 2 < sizeof(unknown_buf)) {
+          if (strlen(unknown_buf) + nl + 2 < ub_size) {
             if (unknown_buf[0]) strcat(unknown_buf, ", ");
             strcat(unknown_buf, name);
           }
@@ -11912,17 +11856,77 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         new_mask |= ((uint64_t)1 << idx);
       }
+      *out_mask = new_mask;
+      return unknown_count;
+    };
+
+    // channel-filter Shortcuts (Phase 2 v2, 2026-06-10):
+    // 'filter <type> on-channel <liste>' setzt fuer ALLE aktiven
+    // drop+keep-Patterns des Typs den gleichen Skopus. Convenience.
+    // Fuer pro-Pattern: 'add <pat> on-channel <liste>' beim Anlegen.
+    bool is_on_chan = (strncmp(p, "on-channel", 10) == 0
+                       && (p[10] == ' ' || p[10] == '\t' || p[10] == 0));
+    bool is_ex_chan = (strncmp(p, "exempt-channel", 14) == 0
+                       && (p[14] == ' ' || p[14] == '\t' || p[14] == 0));
+    if (is_on_chan || is_ex_chan) {
+      p += is_on_chan ? 10 : 14;
+      while (*p == ' ' || *p == '\t') p++;
+      const char* kind = is_sender ? "sender" : "text";
+      const char* mode = is_on_chan ? "on-channel" : "exempt-channel";
+      NodePrefs::FilterEntry* drop_arr = is_sender ? _prefs.filter_sender_drop
+                                                    : _prefs.filter_text_drop;
+      uint8_t drop_cnt = is_sender ? _prefs.filter_sender_drop_count
+                                    : _prefs.filter_text_drop_count;
+      NodePrefs::FilterEntry* keep_arr = is_sender ? _prefs.filter_sender_keep
+                                                    : _prefs.filter_text_keep;
+      uint8_t keep_cnt = is_sender ? _prefs.filter_sender_keep_count
+                                    : _prefs.filter_text_keep_count;
+      uint64_t* drop_on = is_sender ? _prefs.filter_sender_drop_chan_on
+                                     : _prefs.filter_text_drop_chan_on;
+      uint64_t* drop_ex = is_sender ? _prefs.filter_sender_drop_chan_ex
+                                     : _prefs.filter_text_drop_chan_ex;
+      uint64_t* keep_on = is_sender ? _prefs.filter_sender_keep_chan_on
+                                     : _prefs.filter_text_keep_chan_on;
+      uint64_t* keep_ex = is_sender ? _prefs.filter_sender_keep_chan_ex
+                                     : _prefs.filter_text_keep_chan_ex;
+      (void)drop_arr; (void)keep_arr;
+
+      if (drop_cnt == 0 && keep_cnt == 0) {
+        pushCompanionMessage("Keine Filter-Patterns vorhanden -- nichts zu setzen.");
+        return;
+      }
+
+      if (strncmp(p, "clear", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
+        for (uint8_t i = 0; i < drop_cnt; i++) { drop_on[i] = 0; drop_ex[i] = 0; }
+        for (uint8_t i = 0; i < keep_cnt; i++) { keep_on[i] = 0; keep_ex[i] = 0; }
+        savePrefs();
+        char r[100];
+        snprintf(r, sizeof(r),
+                 "OK - filter %s: channel-filter aller Patterns gecleared.",
+                 kind);
+        pushCompanionMessage(r);
+        return;
+      }
+      if (!*p) {
+        pushCompanionMessage(
+          "Usage: filter <s|t> on-channel <liste>\n"
+          "  Setzt Skopus fuer ALLE Patterns des Typs.\n"
+          "Fuer pro-Pattern: 'drop add <pat> on-channel <liste>'");
+        return;
+      }
+      uint64_t new_mask = 0;
+      char unknown_buf[80];
+      bool saw_subcmd = false;
+      int unknown_count = parse_channel_list(p, &new_mask, unknown_buf,
+                                              sizeof(unknown_buf), &saw_subcmd);
       if (unknown_count > 0) {
         char r[160];
-        snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s",
-                 unknown_buf);
+        snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s", unknown_buf);
         pushCompanionMessage(r);
         if (saw_subcmd) {
           pushCompanionMessage(
-            "Tipp: 'on-channel/exempt-channel' nimmt NUR\n"
-            "eine Komma-Liste von Channel-Namen (global\n"
-            "fuer alle drop+keep des Typs). Nicht mit\n"
-            "'drop'/'keep'/'add' kombinieren.");
+            "Tipp: on-channel nimmt nur Channel-Namen.\n"
+            "Fuer pro-Pattern: 'drop add <pat> on-channel ...'");
         }
         return;
       }
@@ -11930,12 +11934,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("Leere Channel-Liste. Nutze 'clear' zum Loeschen.");
         return;
       }
-      this_mask = new_mask;
-      other_mask = 0;   // mutual exclusive
+      // Anwenden auf alle drop+keep Patterns. on/exempt mutual excl.
+      for (uint8_t i = 0; i < drop_cnt; i++) {
+        if (is_on_chan) { drop_on[i] = new_mask; drop_ex[i] = 0; }
+        else            { drop_ex[i] = new_mask; drop_on[i] = 0; }
+      }
+      for (uint8_t i = 0; i < keep_cnt; i++) {
+        if (is_on_chan) { keep_on[i] = new_mask; keep_ex[i] = 0; }
+        else            { keep_ex[i] = new_mask; keep_on[i] = 0; }
+      }
       savePrefs();
-      // Bestaetigung mit den gesetzten Channels.
       char r[160];
-      size_t rp = snprintf(r, sizeof(r), "OK - filter %s %s: ", kind, mode);
+      size_t rp = snprintf(r, sizeof(r), "OK - filter %s %s (alle %u Patterns): ",
+                           kind, mode, (unsigned)(drop_cnt + keep_cnt));
       bool first_ch = true;
       for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
         if ((new_mask & ((uint64_t)1 << i)) == 0) continue;
@@ -11965,22 +11976,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     NodePrefs::FilterEntry* arr;
     uint8_t* p_cnt;
     size_t MAX_SLOTS;
+    uint64_t* chan_on;   // pro-Pattern channel-filter (Phase 2 v2)
+    uint64_t* chan_ex;
     if (is_sender && is_drop_verb) {
       arr = _prefs.filter_sender_drop;
       p_cnt = &_prefs.filter_sender_drop_count;
       MAX_SLOTS = sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]);
+      chan_on = _prefs.filter_sender_drop_chan_on;
+      chan_ex = _prefs.filter_sender_drop_chan_ex;
     } else if (is_sender && is_keep_verb) {
       arr = _prefs.filter_sender_keep;
       p_cnt = &_prefs.filter_sender_keep_count;
       MAX_SLOTS = sizeof(_prefs.filter_sender_keep)/sizeof(_prefs.filter_sender_keep[0]);
+      chan_on = _prefs.filter_sender_keep_chan_on;
+      chan_ex = _prefs.filter_sender_keep_chan_ex;
     } else if (!is_sender && is_drop_verb) {
       arr = _prefs.filter_text_drop;
       p_cnt = &_prefs.filter_text_drop_count;
       MAX_SLOTS = sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]);
+      chan_on = _prefs.filter_text_drop_chan_on;
+      chan_ex = _prefs.filter_text_drop_chan_ex;
     } else {
       arr = _prefs.filter_text_keep;
       p_cnt = &_prefs.filter_text_keep_count;
       MAX_SLOTS = sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]);
+      chan_on = _prefs.filter_text_keep_chan_on;
+      chan_ex = _prefs.filter_text_keep_chan_ex;
     }
     uint8_t& cnt = *p_cnt;
     const char* kind = is_sender ? "sender" : "text";
@@ -12001,7 +12022,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (bu > 0) { pushCompanionMessage(buf); bu = 0; buf[0] = 0; }
       };
       for (uint8_t i = 0; i < cnt && i < MAX_SLOTS; i++) {
-        char line[60];
+        char line[120];
         const char* prefix = "";
         const char* suffix = "";
         bool a_start = (arr[i].flags & 0x01) != 0;
@@ -12009,11 +12030,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (a_start && a_end) { prefix = "^"; suffix = "$"; }
         else if (a_start)     { prefix = "^"; }
         else if (a_end)       { suffix = "$"; }
-        // Index 1-basiert anzeigen (User-Wunsch 2026-06-09: 'normale
-        // Menschen zaehlen ab 1'). remove akzeptiert den 1-basierten
-        // Index ebenfalls.
-        snprintf(line, sizeof(line), "  %u: %s%s%s",
-                 (unsigned)(i + 1), prefix, arr[i].pattern, suffix);
+        size_t lp = snprintf(line, sizeof(line), "  %u: %s%s%s",
+                             (unsigned)(i + 1), prefix, arr[i].pattern, suffix);
+        // Pro-Pattern channel-filter anhaengen falls gesetzt.
+        if (chan_on[i] != 0 || chan_ex[i] != 0) {
+          uint64_t m = chan_on[i] ? chan_on[i] : chan_ex[i];
+          int n = snprintf(line + lp, sizeof(line) - lp, "  %s:",
+                           chan_on[i] ? "on" : "ex");
+          if (n > 0 && lp + n < sizeof(line)) lp += n;
+          bool first_ch = true;
+          for (int k = 0; k < MAX_GROUP_CHANNELS && k < 64; k++) {
+            if ((m & ((uint64_t)1 << k)) == 0) continue;
+            ChannelDetails cd;
+            if (!getChannel(k, cd)) continue;
+            n = snprintf(line + lp, sizeof(line) - lp, "%s%s",
+                         first_ch ? "" : ",", cd.name[0] ? cd.name : "?");
+            if (n > 0 && lp + n < sizeof(line)) lp += n;
+            first_ch = false;
+          }
+        }
         size_t ll = strlen(line);
         if (bu + ll + 2 >= sizeof(buf)) flushb();
         if (bu > 0) buf[bu++] = '\n';
@@ -12033,15 +12068,29 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (strncmp(p, "add", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
       p += 3;
       while (*p == ' ' || *p == '\t') p++;
-      if (!*p) { pushCompanionMessage("Usage: filter ... <drop|keep> add <pattern>"); return; }
-      // Pattern aus raw_cmd holen (case-preserving). cmd ist die
-      // lowercase-Kopie -- wuerden wir 'pat = p' nehmen, landet
-      // 'FooBar' als 'foobar' in der Liste. Offset relativ zum
-      // cmd-Anfang ist mit raw_cmd-Offset identisch (gleiche Laenge).
-      const char* pat = raw_cmd + (p - cmd);
-      size_t plen = strlen(pat);
-      if (plen >= 2 && pat[0] == '"' && pat[plen-1] == '"') {
-        pat++; plen -= 2;
+      if (!*p) { pushCompanionMessage("Usage: filter ... <drop|keep> add <pattern> [on-channel|exempt-channel <liste>]"); return; }
+      // Pattern aus raw_cmd holen (case-preserving). Plus: Pattern
+      // wird hier explizit terminiert (vorher: strlen, das schloss
+      // trailing modifier mit ein). Pattern endet entweder am
+      // schliessenden Quote (wenn quoted) oder am ersten Whitespace.
+      const char* pat;
+      size_t plen;
+      const char* after_pat;
+      if (*p == '"') {
+        const char* eq = strchr(p + 1, '"');
+        if (!eq) {
+          pushCompanionMessage("Pattern: schliessendes Quote fehlt.");
+          return;
+        }
+        pat = raw_cmd + ((p + 1) - cmd);
+        plen = (size_t)(eq - (p + 1));
+        after_pat = eq + 1;
+      } else {
+        const char* w = p;
+        while (*w && *w != ' ' && *w != '\t') w++;
+        pat = raw_cmd + (p - cmd);
+        plen = (size_t)(w - p);
+        after_pat = w;
       }
       // Anchor-Bytes detektieren
       uint8_t flags = 0;
@@ -12057,6 +12106,36 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned)(sizeof(arr[0].pattern) - 1));
         pushCompanionMessage(r);
         return;
+      }
+      // Optional trailing 'on-channel <liste>' / 'exempt-channel <liste>'.
+      while (*after_pat == ' ' || *after_pat == '\t') after_pat++;
+      uint64_t add_on_mask = 0, add_ex_mask = 0;
+      if (*after_pat) {
+        bool ap_on = (strncmp(after_pat, "on-channel", 10) == 0
+                      && (after_pat[10] == ' ' || after_pat[10] == '\t'));
+        bool ap_ex = (strncmp(after_pat, "exempt-channel", 14) == 0
+                      && (after_pat[14] == ' ' || after_pat[14] == '\t'));
+        if (!ap_on && !ap_ex) {
+          pushCompanionMessage(
+            "Nach Pattern nur 'on-channel' oder 'exempt-channel' erlaubt.");
+          return;
+        }
+        after_pat += ap_on ? 10 : 14;
+        while (*after_pat == ' ' || *after_pat == '\t') after_pat++;
+        uint64_t nm = 0;
+        char ub[80]; bool sc = false;
+        int uc = parse_channel_list(after_pat, &nm, ub, sizeof(ub), &sc);
+        if (uc > 0) {
+          char r[160];
+          snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s", ub);
+          pushCompanionMessage(r);
+          return;
+        }
+        if (nm == 0) {
+          pushCompanionMessage("Leere Channel-Liste nach on/exempt-channel.");
+          return;
+        }
+        if (ap_on) add_on_mask = nm; else add_ex_mask = nm;
       }
       if (cnt >= MAX_SLOTS) {
         char r[80];
@@ -12078,13 +12157,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memcpy(arr[cnt].pattern, pat, plen);
       arr[cnt].pattern[plen] = 0;
       arr[cnt].flags = flags;
+      chan_on[cnt] = add_on_mask;
+      chan_ex[cnt] = add_ex_mask;
       cnt++;
       savePrefs();
-      char r[100];
+      char r[140];
       const char* pfx = (flags & 0x01) ? "^" : "";
       const char* sfx = (flags & 0x02) ? "$" : "";
-      snprintf(r, sizeof(r), "OK - filter %s %s add %s%.*s%s (%u/%u)",
-               kind, verb, pfx, (int)plen, pat, sfx, (unsigned)cnt, (unsigned)MAX_SLOTS);
+      size_t rp = snprintf(r, sizeof(r), "OK - filter %s %s add %s%.*s%s (%u/%u)",
+                           kind, verb, pfx, (int)plen, pat, sfx,
+                           (unsigned)cnt, (unsigned)MAX_SLOTS);
+      if ((add_on_mask | add_ex_mask) != 0) {
+        uint64_t m = add_on_mask | add_ex_mask;
+        size_t rn = snprintf(r + rp, sizeof(r) - rp,
+                             "  %s:", add_on_mask ? "on" : "ex");
+        if (rn > 0 && rp + rn < sizeof(r)) rp += rn;
+        bool first_ch2 = true;
+        for (int i = 0; i < MAX_GROUP_CHANNELS && i < 64; i++) {
+          if ((m & ((uint64_t)1 << i)) == 0) continue;
+          ChannelDetails cd;
+          if (!getChannel(i, cd)) continue;
+          int n = snprintf(r + rp, sizeof(r) - rp, "%s%s",
+                           first_ch2 ? "" : ",", cd.name[0] ? cd.name : "?");
+          if (n > 0 && rp + n < sizeof(r)) rp += n;
+          first_ch2 = false;
+        }
+      }
       pushCompanionMessage(r);
       return;
     }
@@ -12111,8 +12209,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         uint8_t i = (uint8_t)(idx - 1);
         for (uint8_t j = i; j + 1 < cnt; j++) {
           arr[j] = arr[j+1];
+          chan_on[j] = chan_on[j+1];
+          chan_ex[j] = chan_ex[j+1];
         }
         memset(&arr[cnt-1], 0, sizeof(arr[cnt-1]));
+        chan_on[cnt-1] = 0;
+        chan_ex[cnt-1] = 0;
         cnt--;
         savePrefs();
         char r[80];
@@ -12141,8 +12243,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (arr[i].flags == flags
             && strncasecmp(arr[i].pattern, pat, plen) == 0
             && arr[i].pattern[plen] == 0) {
-          for (uint8_t j = i; j + 1 < cnt; j++) arr[j] = arr[j+1];
+          for (uint8_t j = i; j + 1 < cnt; j++) {
+            arr[j] = arr[j+1];
+            chan_on[j] = chan_on[j+1];
+            chan_ex[j] = chan_ex[j+1];
+          }
           memset(&arr[cnt-1], 0, sizeof(arr[cnt-1]));
+          chan_on[cnt-1] = 0;
+          chan_ex[cnt-1] = 0;
           cnt--;
           savePrefs();
           char r[80];

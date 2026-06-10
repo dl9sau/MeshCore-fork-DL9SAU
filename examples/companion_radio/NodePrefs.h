@@ -471,6 +471,19 @@ struct NodePrefs {  // persisted to file
   uint8_t        filter_sender_keep_count;
   FilterEntry    filter_text_keep[16];
   uint8_t        filter_text_keep_count;
+
+  // Wunschliste 46 Phase 2 v2 (2026-06-10): channel-filter pro Pattern.
+  // Pro Pattern eigene on/exempt-Maske. Bit_i gesetzt -> Channel i.
+  // Beide 0 = global (alle Channels). on/exempt mutual exclusive
+  // (in CLI durchgesetzt). Ersetzt die fruehere Global-pro-Typ-Mask.
+  uint64_t       filter_sender_drop_chan_on[16];
+  uint64_t       filter_sender_drop_chan_ex[16];
+  uint64_t       filter_sender_keep_chan_on[16];
+  uint64_t       filter_sender_keep_chan_ex[16];
+  uint64_t       filter_text_drop_chan_on[16];
+  uint64_t       filter_text_drop_chan_ex[16];
+  uint64_t       filter_text_keep_chan_on[16];
+  uint64_t       filter_text_keep_chan_ex[16];
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
   // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].
