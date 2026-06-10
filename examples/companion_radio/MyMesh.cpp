@@ -2997,11 +2997,21 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
 
   // Reply zurueck. Wenn Request flood war: createPathReturn (analog
   // simple_repeater). Wenn direct + path bekannt: sendDirect; sonst
-  // sendFlood.
+  // sendFlood. Reply uebernimmt scope (transport_codes) vom Request
+  // damit Antwort gleiche Reichweite/Region hat (User-Wunsch 2026-06-10).
+  uint16_t reply_codes[2] = {0, 0};
+  bool reply_scoped = packet->hasTransportCodes();
+  if (reply_scoped) {
+    reply_codes[0] = packet->transport_codes[0];
+    reply_codes[1] = packet->transport_codes[1];
+  }
   if (packet->isRouteFlood()) {
     mesh::Packet* path = createPathReturn(sender, secret, packet->path, packet->path_len,
                                           PAYLOAD_TYPE_RESPONSE, reply_data, reply_len);
-    if (path) sendFlood(path, 300 /* ms reply-delay */);
+    if (path) {
+      if (reply_scoped) sendFlood(path, reply_codes, 300);
+      else              sendFlood(path, 300);
+    }
   } else {
     mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, secret,
                                           reply_data, reply_len);
@@ -3010,7 +3020,8 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
       uint8_t path_meta = ((hash_size - 1) << 6) | (reply_path_len & 63);
       sendDirect(reply, (uint8_t*)reply_path, path_meta, 300 /* ms reply-delay */);
     } else {
-      sendFlood(reply, 300 /* ms reply-delay */);
+      if (reply_scoped) sendFlood(reply, reply_codes, 300);
+      else              sendFlood(reply, 300);
     }
   }
 }
