@@ -463,6 +463,14 @@ struct NodePrefs {  // persisted to file
   uint8_t        filter_sender_drop_count;
   FilterEntry    filter_text_drop[16];
   uint8_t        filter_text_drop_count;
+  // Wunschliste 46 Phase 3 (2026-06-10): keep-Listen (Positiv-Liste).
+  // Match-Reihenfolge: channel-filter -> keep -> drop. Keep-Match gewinnt
+  // (laesst Paket durch, ueberspringt drop). 'drop *' + 'keep <pat>'
+  // ergibt einen Whitelist-Modus ohne separaten Strict/Lenient-Schalter.
+  FilterEntry    filter_sender_keep[16];
+  uint8_t        filter_sender_keep_count;
+  FilterEntry    filter_text_keep[16];
+  uint8_t        filter_text_keep_count;
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
   // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].

@@ -1137,6 +1137,12 @@ bool MyMesh::filterSenderDropMatch(const char* sender_name, int channel_idx) con
                                  _prefs.filter_sender_drop_exempt_mask)) {
     return false;
   }
+  // Phase 3: keep gewinnt vor drop. Keep-Liste wird vor drop geprueft;
+  // wenn ein keep-Pattern matched, kein Drop.
+  for (uint8_t i = 0; i < _prefs.filter_sender_keep_count
+       && i < sizeof(_prefs.filter_sender_keep)/sizeof(_prefs.filter_sender_keep[0]); i++) {
+    if (filterPatternMatch(_prefs.filter_sender_keep[i], sender_name)) return false;
+  }
   for (uint8_t i = 0; i < _prefs.filter_sender_drop_count
        && i < sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]); i++) {
     if (filterPatternMatch(_prefs.filter_sender_drop[i], sender_name)) return true;
@@ -1150,6 +1156,11 @@ bool MyMesh::filterTextDropMatch(const char* text, int channel_idx) const {
                                  _prefs.filter_text_drop_on_channel_mask,
                                  _prefs.filter_text_drop_exempt_mask)) {
     return false;
+  }
+  // Phase 3: keep-Vorrang.
+  for (uint8_t i = 0; i < _prefs.filter_text_keep_count
+       && i < sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]); i++) {
+    if (filterPatternMatch(_prefs.filter_text_keep[i], text)) return false;
   }
   for (uint8_t i = 0; i < _prefs.filter_text_drop_count
        && i < sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]); i++) {
@@ -4114,6 +4125,12 @@ void MyMesh::begin(bool has_display) {
   _prefs.filter_sender_drop_exempt_mask = 0;
   _prefs.filter_text_drop_on_channel_mask = 0;
   _prefs.filter_text_drop_exempt_mask = 0;
+  // Wunschliste 46 Phase 3 (2026-06-10): keep-Listen
+  // Pre-Init leer; loadPrefs ueberschreibt falls vorhanden.
+  _prefs.filter_sender_keep_count = 0;
+  memset(_prefs.filter_sender_keep, 0, sizeof(_prefs.filter_sender_keep));
+  _prefs.filter_text_keep_count = 0;
+  memset(_prefs.filter_text_keep, 0, sizeof(_prefs.filter_text_keep));
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -9235,8 +9252,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  filter TYPE drop add <pat>\n"
           "  filter TYPE drop remove <pat|idx>");
         pushCompanionMessage(
-          "  filter TYPE drop list\n"
-          "  filter TYPE drop clear");
+          "  filter TYPE drop list|clear\n"
+          "  filter TYPE keep add/remove/list/clear");
+        pushCompanionMessage(
+          "keep gewinnt vor drop:\n"
+          "  drop * + keep ping = Whitelist\n"
+          "  (nur ping durch).");
         pushCompanionMessage(
           "channel-filter (wo wirkt Filter):\n"
           "  filter TYPE on-channel Public,test\n"
@@ -11677,7 +11698,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* p = strchr(cmd, ' ');
     if (!p) {
       pushCompanionMessage(
-        "filter <sender|text> drop <add|remove|list|clear> [<pattern>]");
+        "filter <sender|text> <drop|keep|on-channel|exempt-channel> ...");
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
@@ -11687,7 +11708,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     } else if (strncmp(p, "text", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
       is_sender = false; p += 4;
     } else {
-      pushCompanionMessage("Usage: filter <sender|text> drop ...");
+      pushCompanionMessage("Usage: filter <sender|text> <drop|keep|on-channel|exempt-channel> ...");
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
@@ -11808,25 +11829,46 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    if (strncmp(p, "drop", 4) != 0 || (p[4] && p[4] != ' ' && p[4] != '\t')) {
-      pushCompanionMessage("Usage: filter <sender|text> <drop|on-channel|exempt-channel> ...");
+    // Verb: drop oder keep (Phase 3, 2026-06-10).
+    bool is_keep_verb = false;
+    bool is_drop_verb = false;
+    if (strncmp(p, "drop", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
+      is_drop_verb = true; p += 4;
+    } else if (strncmp(p, "keep", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
+      is_keep_verb = true; p += 4;
+    } else {
+      pushCompanionMessage("Usage: filter <sender|text> <drop|keep|on-channel|exempt-channel> ...");
       return;
     }
-    p += 4;
     while (*p == ' ' || *p == '\t') p++;
-    NodePrefs::FilterEntry* arr = is_sender ? _prefs.filter_sender_drop
-                                              : _prefs.filter_text_drop;
-    uint8_t& cnt = is_sender ? _prefs.filter_sender_drop_count
-                              : _prefs.filter_text_drop_count;
-    const size_t MAX_SLOTS = is_sender
-        ? sizeof(_prefs.filter_sender_drop) / sizeof(_prefs.filter_sender_drop[0])
-        : sizeof(_prefs.filter_text_drop) / sizeof(_prefs.filter_text_drop[0]);
+    NodePrefs::FilterEntry* arr;
+    uint8_t* p_cnt;
+    size_t MAX_SLOTS;
+    if (is_sender && is_drop_verb) {
+      arr = _prefs.filter_sender_drop;
+      p_cnt = &_prefs.filter_sender_drop_count;
+      MAX_SLOTS = sizeof(_prefs.filter_sender_drop)/sizeof(_prefs.filter_sender_drop[0]);
+    } else if (is_sender && is_keep_verb) {
+      arr = _prefs.filter_sender_keep;
+      p_cnt = &_prefs.filter_sender_keep_count;
+      MAX_SLOTS = sizeof(_prefs.filter_sender_keep)/sizeof(_prefs.filter_sender_keep[0]);
+    } else if (!is_sender && is_drop_verb) {
+      arr = _prefs.filter_text_drop;
+      p_cnt = &_prefs.filter_text_drop_count;
+      MAX_SLOTS = sizeof(_prefs.filter_text_drop)/sizeof(_prefs.filter_text_drop[0]);
+    } else {
+      arr = _prefs.filter_text_keep;
+      p_cnt = &_prefs.filter_text_keep_count;
+      MAX_SLOTS = sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]);
+    }
+    uint8_t& cnt = *p_cnt;
     const char* kind = is_sender ? "sender" : "text";
+    const char* verb = is_drop_verb ? "drop" : "keep";
 
     // 'list' / 'clear' / 'add <pattern>' / 'remove <pattern>'
     if (!*p || strncmp(p, "list", 4) == 0) {
       char hdr[80];
-      snprintf(hdr, sizeof(hdr), "filter %s drop (%u/%u):", kind,
+      snprintf(hdr, sizeof(hdr), "filter %s %s (%u/%u):", kind, verb,
                (unsigned)cnt, (unsigned)MAX_SLOTS);
       pushCompanionMessage(hdr);
       if (cnt == 0) {
@@ -11863,14 +11905,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memset(arr, 0, MAX_SLOTS * sizeof(arr[0]));
       cnt = 0;
       savePrefs();
-      char r[60]; snprintf(r, sizeof(r), "OK - filter %s drop cleared.", kind);
+      char r[60]; snprintf(r, sizeof(r), "OK - filter %s %s cleared.", kind, verb);
       pushCompanionMessage(r);
       return;
     }
     if (strncmp(p, "add", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
       p += 3;
       while (*p == ' ' || *p == '\t') p++;
-      if (!*p) { pushCompanionMessage("Usage: filter ... drop add <pattern>"); return; }
+      if (!*p) { pushCompanionMessage("Usage: filter ... <drop|keep> add <pattern>"); return; }
       // Pattern aus raw_cmd holen (case-preserving). cmd ist die
       // lowercase-Kopie -- wuerden wir 'pat = p' nehmen, landet
       // 'FooBar' als 'foobar' in der Liste. Offset relativ zum
@@ -11920,8 +11962,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char r[100];
       const char* pfx = (flags & 0x01) ? "^" : "";
       const char* sfx = (flags & 0x02) ? "$" : "";
-      snprintf(r, sizeof(r), "OK - filter %s drop add %s%.*s%s (%u/%u)",
-               kind, pfx, (int)plen, pat, sfx, (unsigned)cnt, (unsigned)MAX_SLOTS);
+      snprintf(r, sizeof(r), "OK - filter %s %s add %s%.*s%s (%u/%u)",
+               kind, verb, pfx, (int)plen, pat, sfx, (unsigned)cnt, (unsigned)MAX_SLOTS);
       pushCompanionMessage(r);
       return;
     }
@@ -11953,8 +11995,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         cnt--;
         savePrefs();
         char r[80];
-        snprintf(r, sizeof(r), "OK - filter %s drop removed idx %ld (%u verbleibend)",
-                 kind, idx, (unsigned)cnt);
+        snprintf(r, sizeof(r), "OK - filter %s %s removed idx %ld (%u verbleibend)",
+                 kind, verb, idx, (unsigned)cnt);
         pushCompanionMessage(r);
         return;
       }
@@ -11983,8 +12025,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           cnt--;
           savePrefs();
           char r[80];
-          snprintf(r, sizeof(r), "OK - filter %s drop removed (%u verbleibend)",
-                   kind, (unsigned)cnt);
+          snprintf(r, sizeof(r), "OK - filter %s %s removed (%u verbleibend)",
+                   kind, verb, (unsigned)cnt);
           pushCompanionMessage(r);
           return;
         }

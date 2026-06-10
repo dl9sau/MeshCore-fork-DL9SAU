@@ -329,6 +329,15 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.filter_text_drop_on_channel_mask));
     file.read((uint8_t *)&_prefs.filter_text_drop_exempt_mask,
               sizeof(_prefs.filter_text_drop_exempt_mask));
+    // Wunschliste 46 Phase 3 (2026-06-10): keep-Listen.
+    file.read((uint8_t *)&_prefs.filter_sender_keep_count,
+              sizeof(_prefs.filter_sender_keep_count));
+    file.read((uint8_t *)_prefs.filter_sender_keep,
+              sizeof(_prefs.filter_sender_keep));
+    file.read((uint8_t *)&_prefs.filter_text_keep_count,
+              sizeof(_prefs.filter_text_keep_count));
+    file.read((uint8_t *)_prefs.filter_text_keep,
+              sizeof(_prefs.filter_text_keep));
 
     file.close();
   }
@@ -442,6 +451,15 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.filter_text_drop_on_channel_mask));
     file.write((uint8_t *)&_prefs.filter_text_drop_exempt_mask,
                sizeof(_prefs.filter_text_drop_exempt_mask));
+    // Wunschliste 46 Phase 3 (2026-06-10): keep-Listen.
+    file.write((uint8_t *)&_prefs.filter_sender_keep_count,
+               sizeof(_prefs.filter_sender_keep_count));
+    file.write((uint8_t *)_prefs.filter_sender_keep,
+               sizeof(_prefs.filter_sender_keep));
+    file.write((uint8_t *)&_prefs.filter_text_keep_count,
+               sizeof(_prefs.filter_text_keep_count));
+    file.write((uint8_t *)_prefs.filter_text_keep,
+               sizeof(_prefs.filter_text_keep));
 
     file.close();
   }
