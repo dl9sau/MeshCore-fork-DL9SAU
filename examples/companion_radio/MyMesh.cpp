@@ -9312,15 +9312,26 @@ void MyMesh::setBleEnabled(bool en) {
 void MyMesh::manageBlePower() {
   if (!_serial) return;
   // Deferred-disable check: wenn 'bluetooth off'-CLI gerade gesetzt
-  // wurde, lassen wir BLE noch 3s laufen damit App den OK-Frame ueber
-  // BLE empfangen kann. Erst wenn das Pending-Fenster abgelaufen ist,
-  // wenden wir den Pref-off-Effekt an.
+  // wurde, lassen wir BLE noch 5s laufen damit App den OK-Frame ueber
+  // BLE empfangen kann. Plus periodisch tickle (PUSH_CODE_MSG_WAITING)
+  // alle 1s damit App-Sync nicht verpasst wird (User-Beobachtung
+  // 2026-06-10: 3s ohne re-tickle reichten nicht).
   if (_pending_ble_off_at != 0) {
     if ((long)(millis() - _pending_ble_off_at) >= 0) {
       _pending_ble_off_at = 0;
+      _pending_ble_off_next_tickle_at = 0;
       _ble_pwr_state = BLE_PWR_OFF;
       _ble_pwr_state_until = 0;
       setBleEnabled(false);
+      return;
+    }
+    // periodischer Tickle solange connected
+    if (_serial->isConnected()
+        && _pending_ble_off_next_tickle_at != 0
+        && (long)(millis() - _pending_ble_off_next_tickle_at) >= 0) {
+      uint8_t frame[1] = { 0x83 /* PUSH_CODE_MSG_WAITING */ };
+      _serial->writeFrame(frame, 1);
+      _pending_ble_off_next_tickle_at = millis() + 1000;
     }
     // waehrend Pending: keine State-Aenderung, BLE bleibt an
     return;
@@ -12771,12 +12782,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "OK - bluetooth off (persist).\n"
         "Recovery: USB-Serial oder\n"
         "Hardware-Button (Geraete mit Display).");
-      // Deferred-disable analog Reboot-Pattern: 3s Zeit damit App den
-      // OK-Frame ueber BLE empfaengt bevor wir Chip abschalten. Sonst
-      // landet die OK-Message in der offline-Queue und User sieht sie
-      // erst beim naechsten Connect (verwirrend).
-      _pending_ble_off_at = millis() + 3000;
+      // Deferred-disable analog Reboot-Pattern: 5s Zeit damit App den
+      // OK-Frame ueber BLE empfaengt bevor wir Chip abschalten. 3s
+      // reichten in der Praxis nicht (User-Test 2026-06-10) -- App-
+      // Sync-Round-Trip braucht laenger. Plus periodischer Tickle-
+      // Resender alle 1s (manageBlePower) damit App nicht verpasst.
+      _pending_ble_off_at = millis() + 5000;
       if (_pending_ble_off_at == 0) _pending_ble_off_at = 1;
+      _pending_ble_off_next_tickle_at = millis() + 1000;
       return;
     }
     if (strncmp(p, "tmp-off", 7) == 0) {

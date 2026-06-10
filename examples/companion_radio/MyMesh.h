@@ -691,9 +691,11 @@ private:
   uint32_t    _ble_pwr_state_until = 0;   // millis() Ziel fuer Phase-Ende
   bool        _ble_was_connected = false; // edge-detection
   // Deferred-disable analog _pending_reboot_at: bei 'bluetooth off'-CLI
-  // bekommt die App noch 3s Zeit den OK-Frame ueber BLE zu empfangen
-  // bevor wir den Chip abschalten.
+  // bekommt die App noch 5s Zeit den OK-Frame ueber BLE zu empfangen
+  // bevor wir den Chip abschalten. Plus periodisch tickle nach unten
+  // damit App-Sync nicht verpasst wird.
   uint32_t    _pending_ble_off_at = 0;
+  uint32_t    _pending_ble_off_next_tickle_at = 0;
   void manageBlePower();
   void setBleEnabled(bool en);
   // Wake-on-LoRa Hook: bei eingehender DM oder admin-cmd in den
