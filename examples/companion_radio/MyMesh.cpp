@@ -896,18 +896,33 @@ void MyMesh::markHeardDirect(uint8_t hash) {
 // wird nur an Whitespace getrennt -- darin sind '*'-Sterne die einzige
 // Sonder-Syntax.
 
-static inline bool isFilterWordSep(unsigned char c) {
-  // Trennt Tokens im Text. Bytes >=128 (UTF-8 lead/cont) als word-char.
+// Hard token separator: Whitespace + Control-Chars.
+// '/' und '\' bleiben Teil eines Tokens (URLs, Pfade, Bot-Namen wie
+// "BBX Bot/OBS"). Satzzeichen werden nicht hier getrennt sondern
+// nachher am Token-Rand getrimmt -- siehe isFilterEdgePunct.
+static inline bool isFilterHardSep(unsigned char c) {
   if (c < 32) return true;
+  return c == ' ' || c == 0x7F;
+}
+
+// Punctuation am Token-Rand: vor Vergleich abschneiden.
+// "ping!" -> "ping", "(Hallo)" -> "Hallo", "Bot/OBS" bleibt
+// unveraendert (kein edge-trim auf '/'). UTF-8 Multi-byte
+// (Umlaut-Anfuehrungszeichen, „...") bleibt im Token.
+static inline bool isFilterEdgePunct(unsigned char c) {
   switch (c) {
-    case ' ': case ',': case '.': case '!': case '?': case ':':
+    case ',': case '.': case '!': case '?': case ':':
     case ';': case '(': case ')': case '[': case ']': case '{':
-    case '}': case '"': case '\'': case '<': case '>': case '/':
-    case '\\':
+    case '}': case '"': case '\'': case '<': case '>':
       return true;
     default:
       return false;
   }
+}
+
+static inline void trimTokenEdges(const char* s, size_t& st, size_t& en) {
+  while (st < en && isFilterEdgePunct((unsigned char)s[st])) st++;
+  while (en > st && isFilterEdgePunct((unsigned char)s[en-1])) en--;
 }
 
 // UTF-8 codepoint decode. Returns codepoint, writes consumed bytes.
@@ -1052,8 +1067,10 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   bool anchor_start = (e.flags & 0x01) != 0;
   bool anchor_end   = (e.flags & 0x02) != 0;
 
-  // Tokenize Pattern (split by whitespace only -- '*' und Satzzeichen
-  // bleiben Teil eines Tokens, da Anwender sie evtl. literal meint).
+  // Tokenize Pattern (split by Hard-Sep, dann edge-punct-Trim).
+  // '*' bleibt Teil des Tokens (Wildcards), '/' bleibt drin (URL-/
+  // Bot-Namen). User-Pattern "ping!" -> getrimmt "ping" -- damit
+  // matched es symmetrisch zur Text-Tokenisierung.
   const uint8_t MAX_PAT_TOKENS = 8;
   uint16_t pat_off[MAX_PAT_TOKENS];
   uint16_t pat_len[MAX_PAT_TOKENS];
@@ -1061,18 +1078,22 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   {
     size_t i = 0;
     while (i < pl && pat_count < MAX_PAT_TOKENS) {
-      while (i < pl && (e.pattern[i] == ' ' || e.pattern[i] == '\t')) i++;
+      while (i < pl && isFilterHardSep((unsigned char)e.pattern[i])) i++;
       if (i >= pl) break;
       size_t st = i;
-      while (i < pl && e.pattern[i] != ' ' && e.pattern[i] != '\t') i++;
-      pat_off[pat_count] = (uint16_t)st;
-      pat_len[pat_count] = (uint16_t)(i - st);
-      pat_count++;
+      while (i < pl && !isFilterHardSep((unsigned char)e.pattern[i])) i++;
+      size_t en = i;
+      trimTokenEdges(e.pattern, st, en);
+      if (en > st) {
+        pat_off[pat_count] = (uint16_t)st;
+        pat_len[pat_count] = (uint16_t)(en - st);
+        pat_count++;
+      }
     }
   }
   if (pat_count == 0) return false;
 
-  // Tokenize Text (split by whitespace + ASCII punctuation).
+  // Tokenize Text (Hard-Sep + edge-punct-Trim).
   const uint8_t MAX_TXT_TOKENS = 64;
   uint16_t txt_off[MAX_TXT_TOKENS];
   uint16_t txt_len[MAX_TXT_TOKENS];
@@ -1080,13 +1101,17 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   {
     size_t i = 0;
     while (i < sl && txt_count < MAX_TXT_TOKENS) {
-      while (i < sl && isFilterWordSep((unsigned char)s[i])) i++;
+      while (i < sl && isFilterHardSep((unsigned char)s[i])) i++;
       if (i >= sl) break;
       size_t st = i;
-      while (i < sl && !isFilterWordSep((unsigned char)s[i])) i++;
-      txt_off[txt_count] = (uint16_t)st;
-      txt_len[txt_count] = (uint16_t)(i - st);
-      txt_count++;
+      while (i < sl && !isFilterHardSep((unsigned char)s[i])) i++;
+      size_t en = i;
+      trimTokenEdges(s, st, en);
+      if (en > st) {
+        txt_off[txt_count] = (uint16_t)st;
+        txt_len[txt_count] = (uint16_t)(en - st);
+        txt_count++;
+      }
     }
   }
   if (txt_count == 0 || txt_count < pat_count) return false;
@@ -16515,8 +16540,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(line);
         return;
       }
-      // Sicherheitsgate 2: freq erlaubt client-rep? (mit ifdef: force-Bypass)
-      if (!force && !isValidClientRepeatFreq(f_khz)) {
+      // Sicherheitsgate 2: nur in profile=defensive. Im profile=normal
+      // (echter Repeater) darf der User alle Frequenzen ohne Check
+      // nutzen -- Admin-Verantwortung. Mit REPEATER_DEFENSIVE_FORCE-Build
+      // zusaetzlich force-Bypass im defensive-Mode.
+      bool defensive_mode = (_prefs.repeater_profile == 0);
+      if (defensive_mode && !force && !isValidClientRepeatFreq(f_khz)) {
         char line[160];
 #ifdef REPEATER_DEFENSIVE_FORCE
         snprintf(line, sizeof(line),
