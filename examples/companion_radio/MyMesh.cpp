@@ -9381,8 +9381,11 @@ void MyMesh::manageBlePower() {
   // Pref-States haben Vorrang
   uint8_t mode = _prefs.bluetooth_power_mode;
   if (mode == 1) {
-    // always-on: zwinge AWAKE wenn nicht schon
-    if (_ble_pwr_state != BLE_PWR_AWAKE && _ble_pwr_state != BLE_PWR_BOOT) {
+    // always-on: zwinge AWAKE wenn nicht schon. BOOT zaehlt auch
+    // nicht als always-on (sonst stehender state=BOOT-Verwirrung
+    // bei User-Diagnose -- 2026-06-11).
+    if (_ble_pwr_state != BLE_PWR_AWAKE) {
+      logBleTransition(BLE_PWR_AWAKE, "mode-on");
       _ble_pwr_state = BLE_PWR_AWAKE;
       _ble_pwr_state_until = 0;
       setBleEnabled(true);
