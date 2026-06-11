@@ -9410,12 +9410,14 @@ void MyMesh::manageBlePower() {
   // Edge: Connect (any state with BLE on)
   if (connected && !_ble_was_connected) {
     logBleTransition(BLE_PWR_AWAKE, "connect");
+    pushDebugLog("[ble] connect -> AWAKE\n");
     _ble_pwr_state = BLE_PWR_AWAKE;
     _ble_pwr_state_until = 0;
   }
   // Edge: Disconnect (war AWAKE)
   if (!connected && _ble_was_connected) {
     logBleTransition(BLE_PWR_HOT_START, "disconn");
+    pushDebugLog("[ble] disconnect -> HOT_START 5min\n");
     _ble_pwr_state = BLE_PWR_HOT_START;
     _ble_pwr_state_until = now + 5UL * 60 * 1000;
   }
@@ -9466,11 +9468,13 @@ void MyMesh::manageBlePower() {
       // off-Pref), sonst Cycle SLEEP.
       if (mode == 2) {
         logBleTransition(BLE_PWR_OFF, "hot-off");
+        pushDebugLog("[ble] HOT expired (pref=off) -> OFF\n");
         _ble_pwr_state = BLE_PWR_OFF;
         _ble_pwr_state_until = 0;
         setBleEnabled(false);
       } else {
         logBleTransition(BLE_PWR_SLEEP, "hot-exp");
+        pushDebugLog("[ble] HOT expired -> SLEEP\n");
         _ble_pwr_state = BLE_PWR_SLEEP;
         _ble_pwr_state_until = now + 180UL * 1000;
         setBleEnabled(false);
@@ -9482,6 +9486,7 @@ void MyMesh::manageBlePower() {
     setBleEnabled(false);
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
       logBleTransition(BLE_PWR_WAIT, "sleep-exp");
+      pushDebugLog("[ble] SLEEP -> WAIT 30s\n");
       _ble_pwr_state = BLE_PWR_WAIT;
       _ble_pwr_state_until = now + 30UL * 1000;
       setBleEnabled(true);
@@ -9492,12 +9497,14 @@ void MyMesh::manageBlePower() {
     setBleEnabled(true);
     if (connected) {
       logBleTransition(BLE_PWR_AWAKE, "wait-conn");
+      pushDebugLog("[ble] WAIT -> AWAKE (connect)\n");
       _ble_pwr_state = BLE_PWR_AWAKE;
       _ble_pwr_state_until = 0;
       return;
     }
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
       logBleTransition(BLE_PWR_SLEEP, "wait-exp");
+      pushDebugLog("[ble] WAIT expired -> SLEEP 180s\n");
       _ble_pwr_state = BLE_PWR_SLEEP;
       _ble_pwr_state_until = now + 180UL * 1000;
       setBleEnabled(false);
