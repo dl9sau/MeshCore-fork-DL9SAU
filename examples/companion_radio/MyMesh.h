@@ -690,6 +690,23 @@ private:
   BlePwrState _ble_pwr_state = BLE_PWR_BOOT;
   uint32_t    _ble_pwr_state_until = 0;   // millis() Ziel fuer Phase-Ende
   bool        _ble_was_connected = false; // edge-detection
+  // Ring-Buffer letzte 8 State-Transitions. Wird in 'bluetooth'-Status
+  // mit ausgegeben damit User-Diagnose moeglich ist ohne live-BLE-
+  // Verbindung haben zu muessen (User-Hinweis 2026-06-11: 'BLE-Debug
+  // ueber BLE ist absurd wenn man gerade BLE abschaltet').
+  // Bis Wunschliste 51 (USB-BREAK-CLI) ist das die einzige Diagnose-
+  // Quelle ueber langere Zeitraueme.
+  struct BleLogEntry {
+    uint32_t   t_ms;        // millis() bei Transition
+    BlePwrState from_state;
+    BlePwrState to_state;
+    char       reason[12];  // kurzer Reason-Tag
+  };
+  static const uint8_t BLE_LOG_SIZE = 8;
+  BleLogEntry _ble_log[BLE_LOG_SIZE] = {};
+  uint8_t     _ble_log_head = 0;
+  uint8_t     _ble_log_count = 0;
+  void logBleTransition(BlePwrState to_state, const char* reason);
   // Deferred-disable analog _pending_reboot_at: bei 'bluetooth off'-CLI
   // bekommt die App noch 5s Zeit den OK-Frame ueber BLE zu empfangen
   // bevor wir den Chip abschalten. Plus periodisch tickle nach unten

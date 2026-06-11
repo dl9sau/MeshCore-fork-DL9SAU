@@ -9352,11 +9352,13 @@ void MyMesh::manageBlePower() {
   if (ble_real != state_expects_on) {
     if (ble_real) {
       // externes ON -> HOT_START (5min an, dann zurueck in Cycle)
+      logBleTransition(BLE_PWR_HOT_START, "ext-on");
       _ble_pwr_state = BLE_PWR_HOT_START;
       _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
       pushDebugLog("[ble] external toggle on -> hot-start\n");
     } else {
       // externes OFF -> TMP_OFF (runtime aus, nicht persistent)
+      logBleTransition(BLE_PWR_TMP_OFF, "ext-off");
       _ble_pwr_state = BLE_PWR_TMP_OFF;
       _ble_pwr_state_until = 0;
       pushDebugLog("[ble] external toggle off -> tmp-off\n");
@@ -9407,11 +9409,13 @@ void MyMesh::manageBlePower() {
   bool connected = _serial->isConnected();
   // Edge: Connect (any state with BLE on)
   if (connected && !_ble_was_connected) {
+    logBleTransition(BLE_PWR_AWAKE, "connect");
     _ble_pwr_state = BLE_PWR_AWAKE;
     _ble_pwr_state_until = 0;
   }
   // Edge: Disconnect (war AWAKE)
   if (!connected && _ble_was_connected) {
+    logBleTransition(BLE_PWR_HOT_START, "disconn");
     _ble_pwr_state = BLE_PWR_HOT_START;
     _ble_pwr_state_until = now + 5UL * 60 * 1000;
   }
@@ -9429,11 +9433,13 @@ void MyMesh::manageBlePower() {
                    (unsigned long)_ble_pwr_state_until);
     }
     if (connected) {
+      logBleTransition(BLE_PWR_AWAKE, "boot-conn");
       _ble_pwr_state = BLE_PWR_AWAKE;
       _ble_pwr_state_until = 0;
       pushDebugLog("[ble] BOOT -> AWAKE (connected)\n");
     } else if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
       // Boot-Grace abgelaufen, in Cycle.
+      logBleTransition(BLE_PWR_SLEEP, "boot-exp");
       _ble_pwr_state = BLE_PWR_SLEEP;
       _ble_pwr_state_until = now + 180UL * 1000;
       setBleEnabled(false);
@@ -9449,6 +9455,7 @@ void MyMesh::manageBlePower() {
   if (_ble_pwr_state == BLE_PWR_HOT_START) {
     setBleEnabled(true);
     if (connected) {
+      logBleTransition(BLE_PWR_AWAKE, "hot-conn");
       _ble_pwr_state = BLE_PWR_AWAKE;
       _ble_pwr_state_until = 0;
       return;
@@ -9458,10 +9465,12 @@ void MyMesh::manageBlePower() {
       // bei Pref=off zurueck nach OFF (kein Cycle bei persistenter
       // off-Pref), sonst Cycle SLEEP.
       if (mode == 2) {
+        logBleTransition(BLE_PWR_OFF, "hot-off");
         _ble_pwr_state = BLE_PWR_OFF;
         _ble_pwr_state_until = 0;
         setBleEnabled(false);
       } else {
+        logBleTransition(BLE_PWR_SLEEP, "hot-exp");
         _ble_pwr_state = BLE_PWR_SLEEP;
         _ble_pwr_state_until = now + 180UL * 1000;
         setBleEnabled(false);
@@ -9472,6 +9481,7 @@ void MyMesh::manageBlePower() {
   if (_ble_pwr_state == BLE_PWR_SLEEP) {
     setBleEnabled(false);
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
+      logBleTransition(BLE_PWR_WAIT, "sleep-exp");
       _ble_pwr_state = BLE_PWR_WAIT;
       _ble_pwr_state_until = now + 30UL * 1000;
       setBleEnabled(true);
@@ -9481,11 +9491,13 @@ void MyMesh::manageBlePower() {
   if (_ble_pwr_state == BLE_PWR_WAIT) {
     setBleEnabled(true);
     if (connected) {
+      logBleTransition(BLE_PWR_AWAKE, "wait-conn");
       _ble_pwr_state = BLE_PWR_AWAKE;
       _ble_pwr_state_until = 0;
       return;
     }
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
+      logBleTransition(BLE_PWR_SLEEP, "wait-exp");
       _ble_pwr_state = BLE_PWR_SLEEP;
       _ble_pwr_state_until = now + 180UL * 1000;
       setBleEnabled(false);
@@ -9498,6 +9510,24 @@ void MyMesh::manageBlePower() {
     // 'bluetooth power always-on' / 'bluetooth power cycle')
     return;
   }
+}
+
+void MyMesh::logBleTransition(BlePwrState to_state, const char* reason) {
+  if (_ble_pwr_state == to_state) return;  // kein wechsel
+  BleLogEntry& e = _ble_log[_ble_log_head];
+  e.t_ms = millis();
+  e.from_state = _ble_pwr_state;
+  e.to_state = to_state;
+  if (reason) {
+    size_t n = strlen(reason);
+    if (n >= sizeof(e.reason)) n = sizeof(e.reason) - 1;
+    memcpy(e.reason, reason, n);
+    e.reason[n] = 0;
+  } else {
+    e.reason[0] = 0;
+  }
+  _ble_log_head = (_ble_log_head + 1) % BLE_LOG_SIZE;
+  if (_ble_log_count < BLE_LOG_SIZE) _ble_log_count++;
 }
 
 void MyMesh::bleWakeOnLora(const char* reason) {
@@ -12779,16 +12809,45 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char r[200];
       snprintf(r, sizeof(r),
                "bluetooth: pref=%s state=%s\n"
-               "  ble=%s, state_until=%lu, now=%lu\n"
-               "  rem=%ld ms (%ld s)\n"
-               "  power <cycle|always-on>  (persist)\n"
-               "  <on|off>  (persist)\n"
-               "  tmp-off  (runtime)",
+               "  ble=%s now=%lu until=%lu rem=%lds",
                m, s,
                _serial && _serial->isEnabled() ? "on" : "off",
-               (unsigned long)_ble_pwr_state_until, (unsigned long)now_ms,
-               (long)rem_ms, (long)(rem_ms / 1000));
+               (unsigned long)now_ms,
+               (unsigned long)_ble_pwr_state_until,
+               (long)(rem_ms / 1000));
       pushCompanionMessage(r);
+      // Transition-Log (Ring-Buffer letzte 8 Wechsel).
+      if (_ble_log_count > 0) {
+        pushCompanionMessage("Letzte Bluetooth-Transitions:");
+        // Iteriere alt -> neu
+        uint8_t start = (_ble_log_count == BLE_LOG_SIZE)
+                        ? _ble_log_head : 0;
+        for (uint8_t k = 0; k < _ble_log_count; k++) {
+          const BleLogEntry& e = _ble_log[(start + k) % BLE_LOG_SIZE];
+          auto state_name = [](BlePwrState st) -> const char* {
+            switch (st) {
+              case BLE_PWR_BOOT: return "BOOT";
+              case BLE_PWR_AWAKE: return "AWAKE";
+              case BLE_PWR_HOT_START: return "HOT";
+              case BLE_PWR_SLEEP: return "SLEEP";
+              case BLE_PWR_WAIT: return "WAIT";
+              case BLE_PWR_TMP_OFF: return "TMP_OFF";
+              case BLE_PWR_OFF: return "OFF";
+              default: return "?";
+            }
+          };
+          uint32_t age_s = (millis() - e.t_ms) / 1000;
+          char line[80];
+          snprintf(line, sizeof(line), "  -%lus: %s -> %s (%s)",
+                   (unsigned long)age_s,
+                   state_name(e.from_state),
+                   state_name(e.to_state),
+                   e.reason[0] ? e.reason : "?");
+          pushCompanionMessage(line);
+        }
+      } else {
+        pushCompanionMessage("(noch keine Transitions geloggt)");
+      }
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
