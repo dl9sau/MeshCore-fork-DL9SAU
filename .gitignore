@@ -20,3 +20,12 @@ platformio.local.ini
 .dl9sau-cache/
 generated/
 compile.sh
+
+# Persoenliche Session-Notizen DL9SAU (Recherchen, Tagestagebuch).
+# Bewusst aus dem Repository ausgeschlossen -- nur lokal.
+README-*.txt
+README--*.txt
+tmp-*.txt
+tmp/
+git-upstream-check.sh
+*.patch
