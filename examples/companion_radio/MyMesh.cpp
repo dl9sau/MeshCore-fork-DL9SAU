@@ -9523,13 +9523,27 @@ void MyMesh::manageBlePower() {
       return;
     }
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
-      // Hot-Start abgelaufen. Naechster State haengt vom Pref ab:
-      // bei Pref=off zurueck nach OFF (kein Cycle bei persistenter
-      // off-Pref), sonst Cycle SLEEP.
+      // Hot-Start abgelaufen. Naechster State haengt von Profil+Pref ab:
+      //   active=0 (off):           OFF (persistent)
+      //   profile=normal (Repeater): TMP_OFF (permanent, kein Cycle --
+      //                              ein Repeater steht fest, niemand
+      //                              connectet sich; Wake nur via
+      //                              admin-cmd oder Button)
+      //   sonst (cycle profile):    SLEEP (Cycle 180s/30s)
+      // Permanent-aus (OFF/TMP_OFF) hat until=0 und vermeidet damit
+      // den uint32-millis-Wrap nach 49.7d (User-Punkt 2026-06-11:
+      // 'nicht nach 43 Tagen wieder an gehen').
       if (mode == 2) {
         logBleTransition(BLE_PWR_OFF, "hot-off");
         pushDebugLog("[ble] HOT expired (pref=off) -> OFF\n");
         _ble_pwr_state = BLE_PWR_OFF;
+        _ble_pwr_state_until = 0;
+        setBleEnabled(false);
+      } else if (_prefs.repeater_profile == 1) {
+        // profile=normal: kein Cycle, permanent aus mit Wake-Triggern.
+        logBleTransition(BLE_PWR_TMP_OFF, "hot-perm");
+        pushDebugLog("[ble] HOT expired (profile=normal) -> TMP_OFF (perm)\n");
+        _ble_pwr_state = BLE_PWR_TMP_OFF;
         _ble_pwr_state_until = 0;
         setBleEnabled(false);
       } else {
@@ -9598,10 +9612,13 @@ void MyMesh::logBleTransition(BlePwrState to_state, const char* reason) {
 }
 
 void MyMesh::bleWakeOnLora(const char* reason) {
-  // Nur in Cycle-Phasen wachen.
-  if (_ble_pwr_state != BLE_PWR_SLEEP && _ble_pwr_state != BLE_PWR_WAIT) return;
-  // Pref-States respektieren -- bei manuellem off/tmp-off nicht wachen.
+  // Aus Cycle-Phasen UND aus TMP_OFF (profile=normal perm-sleep) aufwecken.
+  // Bei explizitem User-OFF (Pref active=0) NICHT wachen -- User-Wunsch
+  // zu schlafen wird respektiert.
   if (_prefs.bluetooth_active == 0) return;
+  if (_ble_pwr_state != BLE_PWR_SLEEP
+      && _ble_pwr_state != BLE_PWR_WAIT
+      && _ble_pwr_state != BLE_PWR_TMP_OFF) return;
   pushDebugLog("[ble] wake-on-lora (%s)\n", reason ? reason : "?");
   _ble_pwr_state = BLE_PWR_HOT_START;
   _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
