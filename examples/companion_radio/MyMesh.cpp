@@ -9425,15 +9425,19 @@ void MyMesh::manageBlePower() {
     if (_ble_pwr_state_until == 0) {
       _ble_pwr_state_until = now + 10UL * 60 * 1000;
       setBleEnabled(true);
+      pushDebugLog("[ble] BOOT grace start, until=%lu\n",
+                   (unsigned long)_ble_pwr_state_until);
     }
     if (connected) {
       _ble_pwr_state = BLE_PWR_AWAKE;
       _ble_pwr_state_until = 0;
+      pushDebugLog("[ble] BOOT -> AWAKE (connected)\n");
     } else if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
       // Boot-Grace abgelaufen, in Cycle.
       _ble_pwr_state = BLE_PWR_SLEEP;
       _ble_pwr_state_until = now + 180UL * 1000;
       setBleEnabled(false);
+      pushDebugLog("[ble] BOOT grace expired -> SLEEP\n");
     }
     return;
   }
@@ -12770,13 +12774,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         case BLE_PWR_TMP_OFF:   s = "TMP-OFF"; break;
         case BLE_PWR_OFF:       s = "OFF (persist)"; break;
       }
-      char r[140];
+      uint32_t now_ms = millis();
+      int32_t  rem_ms = (int32_t)(_ble_pwr_state_until - now_ms);
+      char r[200];
       snprintf(r, sizeof(r),
                "bluetooth: pref=%s state=%s\n"
+               "  ble=%s, state_until=%lu, now=%lu\n"
+               "  rem=%ld ms (%ld s)\n"
                "  power <cycle|always-on>  (persist)\n"
                "  <on|off>  (persist)\n"
                "  tmp-off  (runtime)",
-               m, s);
+               m, s,
+               _serial && _serial->isEnabled() ? "on" : "off",
+               (unsigned long)_ble_pwr_state_until, (unsigned long)now_ms,
+               (long)rem_ms, (long)(rem_ms / 1000));
       pushCompanionMessage(r);
       return;
     }
