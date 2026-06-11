@@ -374,9 +374,14 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.filter_scope_keep_chan_ex));
     file.read((uint8_t *)&_prefs.filter_unknown_channel_repeat,
               sizeof(_prefs.filter_unknown_channel_repeat));
-    // Wunschliste 43 (2026-06-10): BLE-Power-Mode
-    file.read((uint8_t *)&_prefs.bluetooth_power_mode,
-              sizeof(_prefs.bluetooth_power_mode));
+    // Wunschliste 43 (2026-06-10, refactored 2026-06-11): BLE-Power
+    // profile + active. Legacy: 1 byte power_mode wird hier in profile
+    // gelesen; active liest EOF (= 0xFF sentinel) wenn alte Datei.
+    // Migration in MyMesh::begin() POST-load.
+    file.read((uint8_t *)&_prefs.bluetooth_profile,
+              sizeof(_prefs.bluetooth_profile));
+    file.read((uint8_t *)&_prefs.bluetooth_active,
+              sizeof(_prefs.bluetooth_active));
 
     file.close();
   }
@@ -535,9 +540,11 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.filter_scope_keep_chan_ex));
     file.write((uint8_t *)&_prefs.filter_unknown_channel_repeat,
                sizeof(_prefs.filter_unknown_channel_repeat));
-    // Wunschliste 43 (2026-06-10): BLE-Power-Mode
-    file.write((uint8_t *)&_prefs.bluetooth_power_mode,
-               sizeof(_prefs.bluetooth_power_mode));
+    // Wunschliste 43 (refactored 2026-06-11): BLE-Power profile + active
+    file.write((uint8_t *)&_prefs.bluetooth_profile,
+               sizeof(_prefs.bluetooth_profile));
+    file.write((uint8_t *)&_prefs.bluetooth_active,
+               sizeof(_prefs.bluetooth_active));
 
     file.close();
   }

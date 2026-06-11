@@ -4511,9 +4511,13 @@ void MyMesh::begin(bool has_display) {
   // Default NICHT weitergeleitet werden (Spam-Schutz). Wer das
   // alte Verhalten will, setzt explizit 'all'.
   _prefs.filter_unknown_channel_repeat = 1;
-  // Wunschliste 43 BLE-Power-Mode: Default cycle (= 0). Aktiviert
-  // sleep nach Boot-Grace / Disconnect-Hot-Start.
-  _prefs.bluetooth_power_mode = 0;
+  // Wunschliste 43 (refactored 2026-06-11): Pre-Init mit Sentinels.
+  //   profile 0xFF = "never persisted" -> Migration setzt 0x01
+  //   active  0xFF = "never persisted" -> Migration setzt 0x01
+  // Plus Legacy-Werte {0,1,2} im profile-Byte werden gemappt
+  // (alte bluetooth_power_mode-Datei).
+  _prefs.bluetooth_profile = 0xFF;
+  _prefs.bluetooth_active = 0xFF;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -4532,6 +4536,32 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.auto_advert_enabled == 1) {
     _prefs.auto_advert_enabled = AUTO_ADV_ALL;
     _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  }
+
+  // Wunschliste 43 Migration (2026-06-11): altes bluetooth_power_mode-Byte
+  // war 1-Wert-Enum (0=cycle, 1=always-on, 2=off). Neu sind zwei Bytes:
+  // profile (Bit-Mask 0x01/0x20) + active (Kopie eines profile-Bits oder 0).
+  // Erkennen anhand der Sentinel-Werte 0xFF (Pre-Init -> EOF):
+  //   profile == 0xFF -> noch nie persistiert -> Default cycle-on
+  //   profile in {0, 1, 2} -> Legacy-Wert aus altem Layout, migrieren
+  //   sonst (profile in {0x01, 0x20, kombination}): bereits neues Layout
+  {
+    if (_prefs.bluetooth_profile == 0xFF) {
+      _prefs.bluetooth_profile = 0x01;
+      _prefs.bluetooth_active  = 0x01;
+    } else if (_prefs.bluetooth_profile == 0) {
+      _prefs.bluetooth_profile = 0x01;
+      _prefs.bluetooth_active  = (_prefs.bluetooth_active == 0xFF) ? 0x01 : 0;
+    } else if (_prefs.bluetooth_profile == 1) {
+      _prefs.bluetooth_profile = 0x20;
+      _prefs.bluetooth_active  = (_prefs.bluetooth_active == 0xFF) ? 0x20 : 0;
+    } else if (_prefs.bluetooth_profile == 2) {
+      _prefs.bluetooth_profile = 0x01;  // default profile cycle
+      _prefs.bluetooth_active  = 0;
+    } else if (_prefs.bluetooth_active == 0xFF) {
+      // Profile gueltig neu, active sentinel: nehme profile als active
+      _prefs.bluetooth_active = _prefs.bluetooth_profile;
+    }
   }
 
   // Snapshot the persisted position before GPS updates start overwriting
@@ -8031,7 +8061,8 @@ void MyMesh::backupSaveToSerial() {
   kv_float("lon",                  sensors.node_lon, 6);
 
   // Wunschliste 43 BLE-Power-Mode.
-  kv_uint("bluetooth_power_mode", _prefs.bluetooth_power_mode);
+  kv_uint("bluetooth_profile", _prefs.bluetooth_profile);
+  kv_uint("bluetooth_active",  _prefs.bluetooth_active);
 
   // Wunschliste 46 Filter (Phase 1-5, 2026-06-10):
   // Filter-Listen + channel-masks + Repeat-Achse exportieren.
@@ -8734,8 +8765,13 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       return;
     }
     // Wunschliste 43 BLE-Power-Mode.
-    if (val_type == 'n' && strcmp(key, "bluetooth_power_mode") == 0) {
-      _prefs.bluetooth_power_mode = (uint8_t)as_uint();
+    if (val_type == 'n' && strcmp(key, "bluetooth_profile") == 0) {
+      _prefs.bluetooth_profile = (uint8_t)as_uint();
+      _br_applied++;
+      return;
+    }
+    if (val_type == 'n' && strcmp(key, "bluetooth_active") == 0) {
+      _prefs.bluetooth_active = (uint8_t)as_uint();
       _br_applied++;
       return;
     }
@@ -9378,8 +9414,15 @@ void MyMesh::manageBlePower() {
       pushDebugLog("[ble] external toggle off -> tmp-off\n");
     }
   }
-  // Pref-States haben Vorrang
-  uint8_t mode = _prefs.bluetooth_power_mode;
+  // Pref-States haben Vorrang. Mapping aus active-Byte:
+  //   active == 0          -> mode 2 (off)
+  //   active & 0x20        -> mode 1 (always-on)
+  //   active & 0x01        -> mode 0 (cycle)
+  //   sonst: cycle (fallback fuer unbekannte Bits)
+  uint8_t mode;
+  if (_prefs.bluetooth_active == 0) mode = 2;
+  else if (_prefs.bluetooth_active & 0x20) mode = 1;
+  else mode = 0;
   if (mode == 1) {
     // always-on: zwinge AWAKE wenn nicht schon. BOOT zaehlt auch
     // nicht als always-on (sonst stehender state=BOOT-Verwirrung
@@ -9558,7 +9601,7 @@ void MyMesh::bleWakeOnLora(const char* reason) {
   // Nur in Cycle-Phasen wachen.
   if (_ble_pwr_state != BLE_PWR_SLEEP && _ble_pwr_state != BLE_PWR_WAIT) return;
   // Pref-States respektieren -- bei manuellem off/tmp-off nicht wachen.
-  if (_prefs.bluetooth_power_mode == 2) return;
+  if (_prefs.bluetooth_active == 0) return;
   pushDebugLog("[ble] wake-on-lora (%s)\n", reason ? reason : "?");
   _ble_pwr_state = BLE_PWR_HOT_START;
   _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
@@ -12047,7 +12090,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memset(_prefs.filter_scope_keep_chan_on, 0, sizeof(_prefs.filter_scope_keep_chan_on));
       memset(_prefs.filter_scope_keep_chan_ex, 0, sizeof(_prefs.filter_scope_keep_chan_ex));
       _prefs.filter_unknown_channel_repeat = 1;  // filter-unscoped Default
-      _prefs.bluetooth_power_mode = 0;           // cycle Default
+      _prefs.bluetooth_profile = 0x01;           // cycle Default
+      _prefs.bluetooth_active  = 0x01;           // on (cycle)
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
       pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.\n"
@@ -12312,16 +12356,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // Wunschliste 43 BLE-Power-Mode.
-    if (show_all || _prefs.bluetooth_power_mode != 0) {
-      const char* m = (_prefs.bluetooth_power_mode == 1) ? "always-on"
-                     : (_prefs.bluetooth_power_mode == 2) ? "off"
-                     : "cycle";
-      snprintf(tmp, sizeof(tmp),
-               "  bluetooth_power_mode = %s%s",
-               m, _prefs.bluetooth_power_mode == 0 ? " [default]"
-                                                     : " (default: cycle)");
-      add_line(tmp);
-      if (_prefs.bluetooth_power_mode != 0) non_default_count++;
+    {
+      const char* prof = (_prefs.bluetooth_profile & 0x20) ? "always-on"
+                        : (_prefs.bluetooth_profile & 0x01) ? "cycle"
+                        : "?";
+      const char* act  = (_prefs.bluetooth_active == 0) ? "off"
+                       : (_prefs.bluetooth_active & 0x20) ? "always-on"
+                       : (_prefs.bluetooth_active & 0x01) ? "cycle"
+                       : "?";
+      bool nondefault = (_prefs.bluetooth_profile != 0x01)
+                       || (_prefs.bluetooth_active  != 0x01);
+      if (show_all || nondefault) {
+        snprintf(tmp, sizeof(tmp),
+                 "  bluetooth_profile = %s\n  bluetooth_active = %s%s",
+                 prof, act,
+                 nondefault ? " (default: profile=cycle active=cycle)"
+                            : " [default]");
+        add_line(tmp);
+        if (nondefault) non_default_count++;
+      }
     }
     // Wunschliste 45 (LBT-Stub): interference_threshold + agc_reset_interval.
     if (show_all || _prefs.interference_threshold != 14) {
@@ -12812,12 +12865,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   if (starts_with_word(cmd, "bluetooth")) {
     const char* p = strchr(cmd, ' ');
     if (!p) {
-      const char* m = "?";
-      switch (_prefs.bluetooth_power_mode) {
-        case 0: m = "cycle"; break;
-        case 1: m = "always-on"; break;
-        case 2: m = "off"; break;
-      }
+      const char* prof = (_prefs.bluetooth_profile & 0x20) ? "always-on"
+                       : (_prefs.bluetooth_profile & 0x01) ? "cycle" : "?";
+      const char* act  = (_prefs.bluetooth_active == 0) ? "off"
+                       : (_prefs.bluetooth_active & 0x20) ? "always-on"
+                       : (_prefs.bluetooth_active & 0x01) ? "cycle" : "?";
       const char* s = "?";
       switch (_ble_pwr_state) {
         case BLE_PWR_BOOT:      s = "BOOT (Grace)"; break;
@@ -12832,9 +12884,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       int32_t  rem_ms = (int32_t)(_ble_pwr_state_until - now_ms);
       char r[200];
       snprintf(r, sizeof(r),
-               "bluetooth: pref=%s state=%s\n"
+               "bluetooth: profile=%s active=%s state=%s\n"
                "  ble=%s now=%lu until=%lu rem=%lds",
-               m, s,
+               prof, act, s,
                _serial && _serial->isEnabled() ? "on" : "off",
                (unsigned long)now_ms,
                (unsigned long)_ble_pwr_state_until,
@@ -12879,9 +12931,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       p += 5;
       while (*p == ' ' || *p == '\t') p++;
       if (strncmp(p, "cycle", 5) == 0) {
-        _prefs.bluetooth_power_mode = 0;
-        // wenn aktuell OFF/TMP_OFF: BOOT-Phase neu (BLE an, dann cycle)
-        if (_ble_pwr_state == BLE_PWR_OFF || _ble_pwr_state == BLE_PWR_TMP_OFF) {
+        _prefs.bluetooth_profile = 0x01;
+        // Wenn aktuell aktiv: active auf neue Profile-Bits aktualisieren.
+        if (_prefs.bluetooth_active != 0) {
+          _prefs.bluetooth_active = 0x01;
+        }
+        // wenn State OFF/TMP_OFF und User aktiv: Hot-Start
+        if (_prefs.bluetooth_active != 0
+            && (_ble_pwr_state == BLE_PWR_OFF || _ble_pwr_state == BLE_PWR_TMP_OFF)) {
           _ble_pwr_state = BLE_PWR_HOT_START;
           _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
         }
@@ -12890,10 +12947,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (strncmp(p, "always-on", 9) == 0) {
-        _prefs.bluetooth_power_mode = 1;
-        _ble_pwr_state = BLE_PWR_AWAKE;
-        _ble_pwr_state_until = 0;
-        setBleEnabled(true);
+        _prefs.bluetooth_profile = 0x20;
+        if (_prefs.bluetooth_active != 0) {
+          _prefs.bluetooth_active = 0x20;
+          _ble_pwr_state = BLE_PWR_AWAKE;
+          _ble_pwr_state_until = 0;
+          setBleEnabled(true);
+        }
         savePrefs();
         pushCompanionMessage("OK - bluetooth power=always-on (persist)");
         return;
@@ -12903,16 +12963,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     if (strncmp(p, "on", 2) == 0 && (p[2] == 0 || p[2] == ' ')) {
-      _prefs.bluetooth_power_mode = 1;
-      _ble_pwr_state = BLE_PWR_AWAKE;
-      _ble_pwr_state_until = 0;
+      // User-Semantik 2026-06-11: active = profile (kopiert das
+      // konfigurierte Profil-Bit). Plus State-Machine-Triggern:
+      // always-on -> AWAKE, cycle -> HOT_START (5min Window).
+      _prefs.bluetooth_active = _prefs.bluetooth_profile;
+      if (_prefs.bluetooth_active & 0x20) {
+        _ble_pwr_state = BLE_PWR_AWAKE;
+        _ble_pwr_state_until = 0;
+      } else {
+        _ble_pwr_state = BLE_PWR_HOT_START;
+        _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
+      }
       setBleEnabled(true);
       savePrefs();
-      pushCompanionMessage("OK - bluetooth on (= power always-on, persist)");
+      const char* mode_s = (_prefs.bluetooth_active & 0x20) ? "always-on" : "cycle";
+      char r[100];
+      snprintf(r, sizeof(r), "OK - bluetooth on (profile=%s, persist)", mode_s);
+      pushCompanionMessage(r);
       return;
     }
     if (strncmp(p, "off", 3) == 0 && (p[3] == 0 || p[3] == ' ')) {
-      _prefs.bluetooth_power_mode = 2;
+      _prefs.bluetooth_active = 0;  // profile unchanged
       savePrefs();
       pushCompanionMessage(
         "OK - bluetooth off (persist).\n"

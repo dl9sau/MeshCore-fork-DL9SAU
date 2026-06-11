@@ -515,15 +515,32 @@ struct NodePrefs {  // persisted to file
   //       3 = no (gar nicht weiterleiten)
   uint8_t filter_unknown_channel_repeat;
 
-  // Wunschliste 43 BLE-Power-Cycle (2026-06-10):
-  //   0 = cycle (Default; Sleep 180s + Wait 30s nach Disconnect-Phase)
-  //   1 = always-on
-  //   2 = off (persistent off, runtime-Wake nur per Button)
-  // Plus runtime-Override 'tmp-off' = nicht-persistent (RAM-only).
-  // Timings sind aktuell hartcodiert in MyMesh.cpp manageBlePower():
-  //   BOOT-Phase: 30min wenn nie connect, sonst 5min Hot-Start nach
-  //   erstem Disconnect, dann Cycle 180s sleep / 30s wait.
-  uint8_t bluetooth_power_mode;
+  // Wunschliste 43 BLE-Power-Cycle (2026-06-10, refactored 2026-06-11):
+  // Klare Trennung Profil vs On/Off-Zustand:
+  //   bluetooth_profile  -- Bit-Mask, welcher Modus konfiguriert ist
+  //                          0x01 = cycle
+  //                          0x20 = always-on
+  //                          (Default 0x01)
+  //   bluetooth_active   -- aktueller Modus (Kopie eines profile-Bits)
+  //                          0    = off (Chip wirklich aus)
+  //                          0x01 = on im cycle-Modus
+  //                          0x20 = on im always-on-Modus
+  //                          (Default 0x01)
+  // CLI:
+  //   bluetooth off                  -> active = 0 (off persistent)
+  //   bluetooth on                   -> active = profile (zurueck zum
+  //                                       konfigurierten Modus)
+  //   bluetooth power cycle          -> profile |= 0x01; if active != 0:
+  //                                       active = profile
+  //   bluetooth power always-on      -> profile |= 0x20; analog
+  //   bluetooth tmp-off              -> runtime override (RAM-only,
+  //                                       Pref bleibt unangetastet)
+  // Legacy: vorheriges Layout hatte bluetooth_power_mode (0=cycle,
+  // 1=always-on, 2=off). Migration in MyMesh::begin() POST-load:
+  //   alte Werte {0,1,2} im profile-Byte werden auf Bit-Form
+  //   gemappt; 0xFF im active = EOF/sentinel -> default uebernommen.
+  uint8_t bluetooth_profile;
+  uint8_t bluetooth_active;
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
   // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].
