@@ -9310,6 +9310,20 @@ void MyMesh::setBleEnabled(bool en) {
 }
 
 void MyMesh::manageBlePower() {
+  // Heartbeat-Trace (Wunschliste 43 Diagnose, User-Beobachtung
+  // 2026-06-11: 'nichts passiert nach Boot-Grace'). Alle 30s ein
+  // pushDebugLog mit aktuellem State -- damit wir sicher wissen
+  // dass manageBlePower laeuft.
+  static uint32_t s_last_heartbeat_at = 0;
+  uint32_t hb_now = millis();
+  if (hb_now - s_last_heartbeat_at >= 30000UL) {
+    s_last_heartbeat_at = hb_now;
+    pushDebugLog("[ble] tick state=%u until=%lu ble=%d serial=%d\n",
+                 (unsigned)_ble_pwr_state,
+                 (unsigned long)_ble_pwr_state_until,
+                 _serial ? (_serial->isEnabled() ? 1 : 0) : -1,
+                 _serial ? 1 : 0);
+  }
   if (!_serial) return;
   // Deferred-disable check: wenn 'bluetooth off'-CLI gerade gesetzt
   // wurde, lassen wir BLE noch 5s laufen damit App den OK-Frame ueber
