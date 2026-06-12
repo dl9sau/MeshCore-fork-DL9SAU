@@ -626,7 +626,14 @@ Quelle: User-Anregung in dieser Session, 2026-05-28.
 10. USB-Serial Plain-Text CLI (Terminal-Mode)
 --------------------------------------------------------------------------------
 
-Ist-Zustand:
+Status: IMPLEMENTIERT 2026-06-11. Persistent toggle via Pref
+  'serial_cli_persist_on'. Runtime-Override via 'serial-cli on-temp'
+  (Reboot verwirft). Prompt + buffered line-edit (200 byte) +
+  Ctrl-D exit. Trace-Output umlenkbar via 'logging usb off'.
+  Code: MyMesh.h:691 serialCliLoop(), MyMesh.cpp dispatchToken-
+  Helper fuer Wortlaengen-Prefix-Befehle.
+
+Ist-Zustand (vor 2026-06-11):
   Companion-CLI-Befehle (scope/prefs/get/set/repeater/...) sind nur
   ueber den Companion-Channel erreichbar — die App muss eine TXT-
   Message auf den Channel "companion" senden, handleCompanionCommand()
@@ -1282,7 +1289,23 @@ Aufwand-Effektiv:
  - Phase C:    ~350 LoC (NodePrefs + CLI + Flash + Boot-Load + Trace +
                Help-Texte + Doku).
 
+Phase D 2026-06-13 (Save-on-Pop, User-Bug-Report):
+  Bug: nach App-Sync + Reboot zeigte App die schon syncten Messages
+  erneut (selbe Uhrzeit). Ursache: getFromOfflineQueue setzte zwar
+  best_slot->seq_no = 0 im RAM (korrekt), aber das Flash-Bucket-File
+  wurde nicht aktualisiert. loadBucketsFromFlash beim naechsten Boot
+  las die Eintraege wieder in den RAM zurueck.
+  Fix: nach jedem Pop saveBucketToFlash(best_bucket) aufrufen wenn
+  der Bucket Flash-Persistenz hat. Save-pro-Pop ist akzeptabel weil
+  Sync nur bei App-Connect passiert (selten), Volumen klein, Flash-
+  Wear vertretbar (kein write-delay noetig). Code: MyMesh.cpp:624.
+  Offen: wenn Dupes auch OHNE Reboot zwischen Connect-Sessions
+  auftreten -> zweiter Bug; muesste in Receive-Pfaden untersucht
+  werden (mesh-dedup, channel-dup, meta-Frame). User testet nach
+  Flash der neuen Firmware und meldet zurueck.
+
 Quelle: User-Spezifikation 2026-05-30 als Folge des Meshtastic-Vergleichs.
+        Phase D: User-Bug-Report 2026-06-13.
 
 ================================================================================
 20. stats-Subkategorien (MeshCore-Docs-Konvention) -- ERLEDIGT
@@ -2782,8 +2805,20 @@ Quelle: User-Anfrage 2026-06-06 ("ob das andere feature im repeater
 46. Filter-System fuer eingehende Pakete (Spam-Schutz)
 --------------------------------------------------------------------------------
 
-Status: Idee, mittlere Prio. App kann nicht filtern (closed source),
-        Firmware bietet das. Vier-Phasen-Plan.
+Status: Phase 1+2+3+4 IMPLEMENTIERT (Stand 2026-06-11).
+  Phase 1: sender/text drop+keep (Channel-Scope), Pattern-Match.
+  Phase 2: channel-mask (pro-Channel Wirkungsbereich) +
+           Persistence (DataStore prefs).
+  Phase 3: scope-drop/keep (scope-Tag basiert).
+  Phase 4: pubkey-Hardblock fuer Adverts (NodePrefs::
+           FilterPubkeyEntry, 8 Slots a 16 Byte Prefix) +
+           Sender-Pubkey-Block (DM/REQ/RESP post-decrypt) +
+           Advert-Name Soft-Drop (display-only). Persistence
+           in DataStore.cpp loadPrefs/savePrefs.
+  Code: NodePrefs.h FilterPubkeyEntry struct,
+        MyMesh.cpp pubkeyFilterMatch() + onAdvertRecv Hardblock,
+        DataStore.cpp loadPrefsInt/savePrefs Sentinel-Migration.
+  Offen: Wunschliste 47 (scope-UX) und 48 (scope-Suffix).
 
 Hintergrund:
   Beobachtung User 2026-06-07/08 auf Reise: viele Spam-Channels,
@@ -3485,8 +3520,17 @@ Quelle: User-Frage 2026-06-08 ('was ist TXT_TYPE_SIGNED_PLAIN?').
 50. TZ-Override via CLI / GPS-basierte TZ-Bestimmung
 --------------------------------------------------------------------------------
 
-Status: Future-Feature, niedrige Prio. Aktueller Stand reicht
-        fuer 99% der User (stationaer in EU).
+Status: Phase 1 IMPLEMENTIERT 2026-06-11. Phase 2 (GPS-basiert) offen.
+  Phase 1: tz_mode (0=auto-eu, 1=fixed, 2=utc) + tz_offset_min (-720..+840)
+           als NodePrefs. localTzOffsetSecs(utc) refactored auf Pref-
+           gesteuert; Default tz_mode=auto-eu, tz_offset_min=60 (CET).
+           Persistence in DataStore.cpp Sentinel-Migration.
+  Code: NodePrefs.h tz_mode + tz_offset_min,
+        MyMesh.cpp localTzOffsetSecs() refactored.
+  Offen Phase 2: GPS-basierte automatische TZ-Bestimmung
+                 (longitude/15 + EU-DST), Set-via-CLI Aliases.
+
+Alter Status (vor 2026-06-11): Future-Feature, niedrige Prio.
 
 Ist-Zustand:
   RTC im Tracker laeuft UTC (Unix-Epoch, MeshCore-Konvention).
@@ -3891,6 +3935,133 @@ Cave-Block:
 
 Quelle: User-Beobachtung 2026-06-10 bei prefs/Backup/Restore-
   Erweiterung fuer Filter (Wunschliste 46 Persistence).
+
+
+--------------------------------------------------------------------------------
+56. Upstream-CLI-Vollstaendigkeitspruefung (meshcore.io/cli_commands)
+--------------------------------------------------------------------------------
+
+Status: TODO (User-Wunsch 2026-06-13, vor crash diskutiert + nach
+        crash erinnert).
+
+Hintergrund:
+  DL9SAU-Fork ist Companion-Build mit vielen uebernommenen Repeater-
+  Funktionen (Punkt 26 Stats-Refactor, Punkt 19 Offline-Queue, Punkt 32
+  ch.hops, Punkt 31 RTC-Sync, etc.). Upstream-MeshCore dokumentiert
+  unter https://docs.meshcore.io/cli_commands/ eine Soll-Liste von
+  Repeater- und Room-Server-CLI-Befehlen. Vergleich noetig: welche
+  klassischen Repeater-CLI-Befehle fehlen noch im Companion-Build, und
+  welche davon machen Sinn nachzuruesten (vs. App-Aequivalent via
+  Frame-Protokoll bereits vorhanden).
+
+Motivation (User-Statement 2026-06-13):
+  Die Trennung 'reines companion' vs 'reiner repeater' mit zwei
+  separaten Firmware-Builds und Re-Flashen zum Rollenwechsel ist
+  unbeliebt. Ziel ist ein vereinheitlichter Companion-Build, der
+  alle klassischen Repeater-CLI-Befehle bietet, sodass der User
+  zwischen Companion- und Repeater-Modus per Pref/CLI umschalten
+  kann (vgl. Wunschliste 54: REPEATER_DEFENSIVE_FORCE als compile-
+  time Gating fuer sensiblere Features, NICHT als Rollen-Switch).
+  -> CLI-Vollstaendigkeit ist Voraussetzung dafuer, dass der
+     Companion-Build in der Praxis als Repeater-Ersatz durchgeht.
+
+Soll-Liste (Auszug, prioritaer Operational + Info + Stats):
+
+  Sicher fehlt im Top-Level-Companion-CLI (User pruefen):
+    - ver / version           -- Firmware-Version. App hat CMD_GET_VER,
+                                 aber Serial-CLI braucht 'ver' direkt.
+    - board                   -- Hardware-Name (Heltec V3 etc).
+    - poweroff / shutdown     -- ESP32 hat Deep-Sleep, NRF52 hat off.
+    - clkreboot               -- Combo aus Clock-Reset + Reboot.
+    - start ota               -- OTA-Trigger.
+    - erase                   -- Factory-Reset (DESTRUCTIVE).
+    - log start/stop/erase    -- separate Repeater-Log-Funktion (wir
+                                 haben 'logging' fuer USB-Trace, ist
+                                 was anderes).
+    - password / setperm      -- Admin-Permissions. Wir HABEN bereits
+                                 passwd_admin/passwd_guest via 'set/get'
+                                 (Wunschliste 52 Remote-Admin). Praktisch
+                                 leistungsfaehiger als der Upstream-
+                                 'password'-Befehl, aber Naming-Kompat
+                                 fehlt. -> Alias 'password <pw>' = 'set
+                                 passwd_admin <pw>' nachruesten fuer
+                                 Upstream-Kompatibilitaet.
+    - powersaving             -- Repeater Power-Save Toggle (wir haben
+                                 Companion-Deep-Sleep Wunschliste 44).
+    - region load/save/...    -- Wir haben scope-Verwaltung, aber
+                                 region-Subkommandos koennten Wrapper
+                                 sein, falls App-Kompatibilitaet wichtig.
+
+  Vorhanden (Stand 2026-06-13):
+    reboot, advert, advert.zerohop, clock, time, neighbors,
+    neighbor.remove, discover.neighbors, stats-*, tempradio,
+    set/get *, trace/logging, chatname (== name), scope, gps,
+    repeater, ch.hops, filter, bluetooth, serial-cli.
+
+  Vermutlich nicht im Companion-Build noetig (Repeater-only Concepts,
+  die im Companion-Context keinen Sinn machen):
+    - multi.acks  (wir setzen ACK-Verhalten anders)
+    - bridge.*    (ESPNow-Bridge Hardware-Build)
+    - sensor list/get/set  (eigene Companion-Sensoren via 'sensor'-
+                            Frame-Protokoll, nicht CLI)
+
+Plan:
+  1) Vollstaendige Soll-Liste aus meshcore.io/cli_commands/ extrahieren.
+  2) Pro Befehl: 'vorhanden' / 'fehlt + Prio' / 'irrelevant fuer
+     Companion' kategorisieren.
+  3) Hohe-Prio-Fehlende implementieren (insb. ver, board, password).
+  4) Aliase ergaenzen wo Upstream-Befehl Synonym zu DL9SAU-Befehl
+     ist (z.B. 'name' als Alias fuer 'chatname' falls noch nicht).
+  5) Dokumentation: Companion-Hilfe-Texte um Upstream-Namen erweitern
+     wo wir bisher nur DL9SAU-Naming benutzen.
+
+Caveats:
+  - 'ver' und 'board' sind low-effort (1 push pro Befehl), aber
+     muessen ueberall greifen wo Befehl-Eingabe passiert: Companion-
+     Channel + Serial-CLI (Wunschliste 10) + Remote-Admin
+     (Wunschliste 52) -- via gemeinsamen Dispatcher hoffentlich
+     automatisch.
+  - Wunschliste 54 (REPEATER_DEFENSIVE_FORCE #ifdef) impliziert,
+     dass nicht alle Repeater-Befehle im publizierten Build sichtbar
+     sein sollen. Reihenfolge: erst Vergleich, dann Klassifikation in
+     'always visible' / 'gated by REPEATER_DEFENSIVE_FORCE'.
+
+Quelle: User-Erinnerung 2026-06-13 ('Wir wollten noch die Befehle aus
+  dem repeater-Code pruefen ob vollstaendig eingebaut').
+
+
+--------------------------------------------------------------------------------
+57. neighbors deg-Filter + AND-Semantik -- ERLEDIGT (2026-06-13)
+--------------------------------------------------------------------------------
+
+Status: Implementiert 2026-06-13 nach mac-Crash und Wiederaufnahme der
+        Diskussion.
+
+Was:
+  neighbors-Befehl erweitert um Peil-Sektor-Filter und Semantik-Wechsel:
+
+    neighbors [<role>...] [hops <N>] [km <D>] [deg <X>|<FROM>-<TO>]
+
+  - deg <X>              -> Peilung X +/- 1.5 Grad (Tolerance hartcodiert,
+                            ggf. spaeter Pref)
+  - deg <FROM>-<TO>      -> Peil-Sektor, darf 0/360 wrappen
+                            (z.B. 340-005 = 340..360 ODER 0..5)
+  - Filter UND-verknuepft: alle angegebenen Bedingungen muessen passen.
+    Vorher war's OR ('5km ODER 2hops'), was praktisch keinen Sinn ergab.
+  - Rolle-Token jetzt voll ausgeschrieben + Prefix-abkuerzbar:
+    'repeater'/'companion'/'chat'/'sensor'/'room', mit Ambiguitaets-
+    Schutz ('r' allein -> Fehler 'rep+room mehrdeutig').
+  - Discover-Augmentation: 'unknown'-Eintraege (ohne GPS) werden bei
+    aktivem km/deg uebersprungen, konsistent zur AND-Semantik.
+
+Code: examples/companion_radio/MyMesh.cpp neighbors-Handler
+      (~12215..) + help neighbors topic-Handler (~10780..).
+
+Memory-Eintraege ergaenzt: feedback_filter_combination_and_not_or,
+  feedback_keyword_prefix_abbreviation.
+
+Quelle: User-Wunsch 2026-06-13 (peilbasierte Filterung beim mobilen
+  Tracker-Use, Beispiel-Use-Case 'wer ist in Richtung Jever?').
 
 
 
