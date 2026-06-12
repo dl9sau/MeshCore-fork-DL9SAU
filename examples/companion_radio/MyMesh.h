@@ -133,6 +133,13 @@ struct RuntimeNeighbour {
   uint32_t heard_millis;     // millis() zum Zeitpunkt des heard
   int8_t   snr;              // x 4 wie simple_repeater
   uint8_t  adv_type;         // ADV_TYPE_*
+  // Scope-Annotation (User-Wunsch 2026-06-11: in neighbors-Output zeigen
+  // welcher Repeater einen default-scope gesetzt hat).
+  //   leerer string: advert war unscoped
+  //   "?"          : scoped, aber transport_code unbekannt (nicht in
+  //                   unserer region-Tabelle)
+  //   "de-be" usw.: scope-Name (aufgeloest via lookupRegionByTransportCode)
+  char     scope_name[16];
 };
 
 // Wire-Layout fuer REQ_TYPE_GET_STATUS Antwort (Wunschliste 7 Phase 4).
@@ -425,7 +432,8 @@ protected:
   // updaten. LRU-Verdraengung wenn voll. Wird aus onAdvertRecv gerufen
   // wenn packet->path_len == 0 (= zero-hop, direkt gehoert).
   void putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_timestamp,
-                           int8_t snr_q4, uint8_t adv_type);
+                           int8_t snr_q4, uint8_t adv_type,
+                           const char* scope_name);
   void onControlDataRecv(mesh::Packet *packet) override;
   void onRawDataRecv(mesh::Packet *packet) override;
   void onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
@@ -533,6 +541,11 @@ private:
   // Protokoll-Refresher (simple_repeater MyMesh.cpp:772-826):
   //   REQ-Payload:  [type|prefix_only][filter][tag×4][since×4] = 10 byte
   //   RESP-Payload: [type|adv_type][snr][tag×4][pub_key×32 oder ×8] = 14/38 byte
+  // Wann unser aktueller Discover-Lauf gestartet ist (RTC). DiscoverEntries
+  // mit recv_at_rtc < diesem Wert stammen aus dem 15-min-Cache, NICHT
+  // aus einer frischen Antwort. Trennung im Output (User-Wunsch 2026-06-12:
+  // "1 Antworten" suggerierte fresh, war aber Cache-Treffer).
+  uint32_t _discover_round_started_rtc = 0;
   struct DiscoverEntry {
     uint8_t pub_key[32];     // 32 byte voll oder 8 byte prefix + Rest 0
     uint8_t adv_type;        // ADV_TYPE_*
@@ -581,6 +594,9 @@ private:
     uint8_t  pubkey[32];        // voller pubkey -- bei chain-mode brauchen
                                 // wir den fuer den Legenden-Lookup
     bool     from_chain;        // true=chain-buffered, false=manual immediate-push
+    uint8_t  req_type;          // ANON_REQ_TYPE_REGIONS/OWNER/BASIC -- bestimmt
+                                // Output-Format im Response-Handler. Default
+                                // REGIONS (=1) fuer Back-Compat.
   };
   // Limit 16 fuer Paritaet mit MAX_DISCOVER_ENTRIES (alle drei Strukturen
   // -- CTL-Antworten, in-flight Tags, gebufferte ANON-RESPs -- sind im
@@ -601,6 +617,11 @@ private:
   // erwartet pro REPEATER-RESP einen automatischen ANON_REQ_TYPE_REGIONS.
   bool          _discover_regions_chained;
   unsigned long _regions_chain_finalize_at;  // millis() Zeitpunkt fuer Aggregat
+  // Wunschliste 27 + Anon-Erweiterung 2026-06-11: parametrierbar.
+  // req_type = ANON_REQ_TYPE_REGIONS (Default) | _OWNER | _BASIC.
+  bool sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_name,
+                            uint8_t req_type);
+  // Legacy-Convenience -- ruft sendAnonQueryZeroHop mit REGIONS.
   bool sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name);
   void finalizeRegionsChain();
   // Einheitlicher Legend-Entry fuer 'discover' (CTL-only) UND
@@ -670,6 +691,43 @@ private:
   // Befehl aus. Antwort wird via pushCompanionMessage() zurückgegeben.
   void handleCompanionCommand(const char* cmd);
 
+  // Wunschliste 10 (2026-06-11): USB-Serial Plain-Text CLI.
+  // Auf BLE-Builds ist die USB-Serial-Schiene fuer User-Use frei (App
+  // connectet via BLE). Plain-Text-Terminal: User tippt Befehle wie
+  // im Companion-Channel; pushCompanionMessage-Output wird waehrend
+  // der Dispatch-Phase nach Serial.println umgeleitet (statt BLE-Frame).
+  // Aktivierung: erstes Enter macht Prompt sichtbar. Exit: Ctrl-D.
+  // Trace-Output kann mit 'logging usb off' unterdrueckt werden falls
+  // er die Anzeige stoert.
+  // _serial_cli_active: TRUE waehrend pushCompanionMessage-Output zu
+  // Serial umgeleitet wird (waehrend Dispatch eines per Serial-CLI
+  // eingegangenen Befehls).
+  bool     _serial_cli_active = false;
+  // _serial_cli_temp_on: Runtime-Override 'serial-cli on-temp'. Reboot
+  // verwirft -- Persistenz liegt in _prefs.serial_cli_persist_on.
+  bool     _serial_cli_temp_on = false;
+  // Prompt-Pending: erkennt wenn BR-Restore oder CLI-Rescue Serial
+  // uebernommen hat; emittiert "> " erst wenn sie wieder fertig sind.
+  bool     _serial_cli_prompt_pending = false;
+  char     _serial_cli_buf[200];
+  uint16_t _serial_cli_pos = 0;
+  void serialCliLoop();
+  // Effektiver CLI-on-Status: persist || temp.
+  bool serialCliEffectiveOn() const {
+    return (_prefs.serial_cli_persist_on != 0) || _serial_cli_temp_on;
+  }
+
+  // Wortlaengen-Prefix Dispatch fuer CLI-Tokens (User-Wunsch 2026-06-11:
+  // 'fi sen dr nam remove foo' = 'filter sender drop name remove foo').
+  // Skippt fuehrendes Whitespace, ruft match_choice, gibt bei
+  // Mehrdeutig/Fehlend/Unbekannt eine Companion-Message aus und liefert
+  // -1 zurueck. Bei Erfolg: schiebt p past matched token + ws, liefert
+  // den Index. Konsolidiert die ehemals dupliziterten strncmp+laengen-
+  // checks der Sub-Sub-Befehle (User-Konsolidierungs-Wunsch 2026-06-11).
+  int dispatchToken(const char*& p,
+                    const struct CompanionChoice* choices, int nchoices,
+                    const char* expected_label);
+
   // Wunschliste 43 (2026-06-10): BLE-Power-Cycle State Machine.
   //   BLE_PWR_BOOT      = Boot-Grace (30 min, BLE an, wartet auf ersten Connect)
   //   BLE_PWR_AWAKE     = App connected ODER nach Connect-Hot-Start (5 min)
@@ -690,6 +748,10 @@ private:
   BlePwrState _ble_pwr_state = BLE_PWR_BOOT;
   uint32_t    _ble_pwr_state_until = 0;   // millis() Ziel fuer Phase-Ende
   bool        _ble_was_connected = false; // edge-detection
+  // Disconnect-Recency: 10min nach BT-Disconnect verkuerzter Cycle (30/30
+  // statt 60/30), weil Reconnect-Wahrscheinlichkeit direkt nach App-Use
+  // hoch ist (User-Wunsch 2026-06-11). 0 = inaktiv / abgelaufen.
+  uint32_t    _ble_disconnect_at = 0;
   // Ring-Buffer letzte 8 State-Transitions. Wird in 'bluetooth'-Status
   // mit ausgegeben damit User-Diagnose moeglich ist ohne live-BLE-
   // Verbindung haben zu muessen (User-Hinweis 2026-06-11: 'BLE-Debug
@@ -770,6 +832,11 @@ private:
   // pattern + flags (bit0=anchor start, bit1=anchor end, both=exact,
   // none=substring). Returnt true wenn s das Pattern matched.
   static bool filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s);
+  // Wunschliste 46 Phase 4 (2026-06-11): Pubkey-Prefix-Match.
+  // Returns true wenn key gegen einen der ersten cnt Eintraege matched.
+  static bool pubkeyFilterMatch(const uint8_t* key,
+                                const NodePrefs::FilterPubkeyEntry* arr,
+                                uint8_t cnt);
   // Beide Helper: true wenn DROP greift (= mind. ein Filter matched).
   // Wunschliste 46 Phase 2: channel_idx = -1 fuer DM (Skopus ignoriert),
   // sonst Index in channels[].

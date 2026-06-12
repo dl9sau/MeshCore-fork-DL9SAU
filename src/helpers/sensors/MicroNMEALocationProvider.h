@@ -185,9 +185,17 @@ public :
                         // machen. Geht nur ueber Serial (kein pushDebugLog
                         // verfuegbar in dieser Layer), ohne millis-Prefix
                         // anders als die MyMesh-Logs.
+                        // gps_ts/rtc als unsigned drucken -- getTimestamp()
+                        // liefert uint32 unix-secs; bei GPS-Week-Rollover-
+                        // Bug oder Frankenframe rutscht der Wert ueber 2^31
+                        // und wird sonst als negative %ld dargestellt
+                        // (User-Bug 2026-06-12: gps_ts=-1981000019). Delta
+                        // bleibt signed weil tatsaechlich Differenz.
                         Serial.printf(
-                            "[+%lums] [NMEA] sync REJECTED: gps_ts=%ld vs rtc=%ld (delta %lds)\r\n",
-                            (unsigned long)millis(), ts, cur, ts - cur);
+                            "[+%lums] [NMEA] sync REJECTED: gps_ts=%lu vs rtc=%lu (delta %+lds)\r\n",
+                            (unsigned long)millis(),
+                            (unsigned long)ts, (unsigned long)cur,
+                            (long)((int32_t)ts - (int32_t)cur));
                     }
                     _time_sync_needed = false;
                     _last_time_sync = millis();

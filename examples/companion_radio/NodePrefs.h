@@ -541,6 +541,52 @@ struct NodePrefs {  // persisted to file
   //   gemappt; 0xFF im active = EOF/sentinel -> default uebernommen.
   uint8_t bluetooth_profile;
   uint8_t bluetooth_active;
+
+  // Wunschliste 50 Phase 1 (2026-06-11): TZ-Override.
+  // tz_mode = 0  -> auto-eu (regelbasiert DST, Default fuer EU-User)
+  // tz_mode = 1  -> fixed offset (kein DST)
+  // tz_mode = 2  -> utc (0, kein offset)
+  // tz_offset_min: Offset in Minuten von UTC (-720..+840 = -12h..+14h).
+  //                bei auto-eu: Basis-Offset (Winter), DST addiert 60min.
+  //                bei fixed:  effektiver Offset.
+  // Defaults: tz_mode=0 (auto-eu), tz_offset_min=60 (CET-Basis = +1h).
+  // 0xFF im tz_mode = Sentinel (Pre-Init/EOF) -> Migration zu defaults.
+  uint8_t tz_mode;
+  int16_t tz_offset_min;
+
+  // Wunschliste 46 Phase 4 (2026-06-11): Advert- und Pubkey-basierte Filter.
+  //
+  //   filter_advert_drop_name[]:    display-soft Match auf Sender-Klartextname
+  //     (heard_list bleibt unberuehrt; nur App-Push + UI gedrosselt).
+  //   filter_advert_drop_pubkey[]:  wire-hardblock im Advert-Recv-Pfad,
+  //     kein heard_list-Eintrag, kein contact-add (pubkey-Prefix-Match
+  //     auf die Identity im Advert).
+  //   filter_sender_drop_pubkey[]:  post-decrypt-Block fuer DM/REQ/RESP an
+  //     uns; matched die ECDH-MAC-verifizierte Sender-pubkey-Prefix. App-
+  //     Push wird unterdrueckt, ACK wird nicht zurueckgesendet. (GRP_TXT/
+  //     Advert/etc. tragen keine eindeutige Sender-pubkey -- dafuer
+  //     bestehen die Name- und Wire-Filter.)
+  //
+  // Storage je Pubkey-Slot: 16 Byte Key-Prefix + 1 Byte len (1..16). 8 Slots
+  // pro Filter -- (16+1)*8 = 136 Byte. Drei Filter zusammen ~408 Byte.
+  struct FilterPubkeyEntry {
+    uint8_t key[16];
+    uint8_t len;  // gueltige Prefix-Laenge in Bytes (1..16)
+  };
+  FilterEntry        filter_advert_drop_name[16];
+  uint8_t            filter_advert_drop_name_count;
+  FilterPubkeyEntry  filter_advert_drop_pubkey[8];
+  uint8_t            filter_advert_drop_pubkey_count;
+  FilterPubkeyEntry  filter_sender_drop_pubkey[8];
+  uint8_t            filter_sender_drop_pubkey_count;
+
+  // Wunschliste 10 (2026-06-11): USB-Serial Plain-Text CLI Persistent-State.
+  //   0 = off (Default fuer USB-frame-Builds: Frame-Protokoll bleibt aktiv)
+  //   1 = on  (Default fuer BLE/WiFi-Builds: USB ist frei fuer User-CLI)
+  // 0xFF im File = Sentinel (Legacy/EOF) -> Default je nach Build.
+  // Runtime-Toggle 'serial-cli on-temp' liegt im RAM und wird beim Reboot
+  // verworfen (revertiert zum Persist-Wert).
+  uint8_t serial_cli_persist_on;
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
   // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].

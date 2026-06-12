@@ -323,41 +323,38 @@ static int dst_dayOfWeek(int y, int m, int d) {
 }
 
 int32_t MyMesh::localTzOffsetSecs(uint32_t utc) const {
-  int32_t base = (int32_t)LOCAL_TZ_OFFSET_SECS;
-#if LOCAL_TZ_DST_EU
-  // EU-DST: last-Sunday-of-March 01:00 UTC bis last-Sunday-of-October 01:00 UTC.
+  // Wunschliste 50 Phase 1 (2026-06-11): Runtime-Konfiguration statt
+  // hardcoded compile-Flag. Pref tz_mode entscheidet ueber Verhalten;
+  // tz_offset_min ist Basis-Offset (auto-eu) oder effektiver Offset
+  // (fixed).
+  if (_prefs.tz_mode == 2) return 0;  // utc
+  int32_t base = (int32_t)_prefs.tz_offset_min * 60;
+  if (_prefs.tz_mode == 1) return base;  // fixed, kein DST
+  // tz_mode == 0 (auto-eu): EU-DST rules.
   if (utc < 1500000000UL) return base;  // RTC unset -- nichts annehmen
   time_t t = (time_t)utc;
   struct tm tm_utc;
   gmtime_r(&t, &tm_utc);
   int year = tm_utc.tm_year + 1900;
-  // March 31 weekday -> wieviele Tage zurueck zum letzten Sonntag.
-  int mar31_dow = dst_dayOfWeek(year, 3, 31);  // 0=Sunday
+  int mar31_dow = dst_dayOfWeek(year, 3, 31);
   int mar_sun = 31 - mar31_dow;
   int oct31_dow = dst_dayOfWeek(year, 10, 31);
   int oct_sun = 31 - oct31_dow;
-
   int mon = tm_utc.tm_mon + 1;
   int day = tm_utc.tm_mday;
   int hour = tm_utc.tm_hour;
-  // Vor Maerz oder nach Oktober -> sicher Winterzeit
   if (mon < 3 || mon > 10) return base;
-  // April..September -> sicher Sommerzeit
   if (mon > 3 && mon < 10) return base + 3600;
-  // Maerz: ab last-Sunday 01:00 UTC -> CEST
   if (mon == 3) {
     if (day < mar_sun) return base;
     if (day > mar_sun) return base + 3600;
-    // genau am Umstellungs-Sonntag
     return (hour >= 1) ? (base + 3600) : base;
   }
-  // Oktober: bis last-Sunday 01:00 UTC -> CEST
   if (mon == 10) {
     if (day < oct_sun) return base + 3600;
     if (day > oct_sun) return base;
     return (hour < 1) ? (base + 3600) : base;
   }
-#endif
   return base;
 }
 
@@ -630,6 +627,7 @@ int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
   // unabhaengig davon in welchem Bucket der Frame liegt.
   Frame* best_slot = NULL;
   uint32_t best_seq = UINT32_MAX;
+  MsgBucket best_bucket = (MsgBucket)0;
   for (int b = 0; b < BUCKET_COUNT; b++) {
     Frame* arr = NULL;
     int cap = 0;
@@ -638,6 +636,7 @@ int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
       if (arr[i].seq_no != 0 && arr[i].seq_no < best_seq) {
         best_seq  = arr[i].seq_no;
         best_slot = &arr[i];
+        best_bucket = (MsgBucket)b;
       }
     }
   }
@@ -645,6 +644,15 @@ int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
   int len = best_slot->len;
   memcpy(frame, best_slot->buf, len);
   best_slot->seq_no = 0;   // Slot freigeben
+  // Persistierten Bucket nachziehen (User-Bug 2026-06-13: nach App-Sync +
+  // Reboot zeigte App die schon synced Messages erneut -- weil der Pop
+  // nur RAM cleared aber das Flash-File die Eintraege noch hatte. Beim
+  // Boot lud loadBucketsFromFlash sie zurueck in RAM, naechster Sync
+  // duplizierte sie). Save-pro-Pop ist akzeptabel: Sync passiert nur
+  // bei App-Connect, Volumen ist gering, Flash-Wear bleibt im Rahmen.
+  if (getBucketFlash(best_bucket)) {
+    saveBucketToFlash(best_bucket);
+  }
   return len;
 }
 
@@ -1042,6 +1050,18 @@ static bool tokenGlobMatch(const char* pat, size_t pl,
   return ciUtf8Equal(pat + ps, plen, tok, tl);
 }
 
+bool MyMesh::pubkeyFilterMatch(const uint8_t* key,
+                               const NodePrefs::FilterPubkeyEntry* arr,
+                               uint8_t cnt) {
+  if (!key || cnt == 0) return false;
+  for (uint8_t i = 0; i < cnt; i++) {
+    uint8_t l = arr[i].len;
+    if (l == 0 || l > 16) continue;
+    if (memcmp(key, arr[i].key, l) == 0) return true;
+  }
+  return false;
+}
+
 bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) {
   size_t pl = strlen(e.pattern);
   if (pl == 0 || !s) return false;
@@ -1235,6 +1255,15 @@ bool MyMesh::isLocallyHeard(uint8_t hash) const {
 
 void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                           uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) {
+  // Wunschliste 46 Phase 4 (2026-06-11): Advert-Pubkey Wire-Hardblock.
+  // Greift VOR BaseChatMesh::onAdvertRecv -- damit landet der Sender
+  // weder in heard_list noch in contact-list. Keine Stats, kein App-Push.
+  // Bewusst destruktiver Hardblock (User-Konvention 2026-06-11).
+  if (pubkeyFilterMatch(id.pub_key,
+                        _prefs.filter_advert_drop_pubkey,
+                        _prefs.filter_advert_drop_pubkey_count)) {
+    return;
+  }
   // SNR vom Paket fuer die nachfolgende Quality-Klassifikation in
   // onDiscoveredContact() merken (Q4-Format, wie ueblich in MeshCore).
   _last_advert_snr_q4 = (packet != NULL) ? packet->_snr : 0;
@@ -1253,7 +1282,16 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
       && app_data != NULL && app_data_len > 0) {
     AdvertDataParser parser(app_data, app_data_len);
     if (parser.isValid()) {
-      putRuntimeNeighbour(id, timestamp, _last_advert_snr_q4, parser.getType());
+      // Scope-Annotation aus dem Wire-Header: bei scoped advert via
+      // transport_codes[0] in unsere region-Tabelle lookuppen. Unbekannte
+      // scopes bekommen "?" -- der User sieht dann '(#?)' und weiss
+      // 'scoped, aber nicht in unserer Liste'.
+      const char* nb_scope = "";
+      if (packet != NULL && packet->hasTransportCodes()) {
+        const char* rn = lookupRegionByTransportCode(packet);
+        nb_scope = rn ? rn : "?";
+      }
+      putRuntimeNeighbour(id, timestamp, _last_advert_snr_q4, parser.getType(), nb_scope);
       // Wunschliste 31: Advert-basierte RTC-Sync. NUR zero-hop
       // (filterstaerke: Adversary muss in Funkreichweite sein).
       maybeAdvertTimeSync(id, timestamp, parser.getType());
@@ -1515,7 +1553,8 @@ void MyMesh::timeSyncFinalizeLazyCollection() {
 }
 
 void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_timestamp,
-                                 int8_t snr_q4, uint8_t adv_type) {
+                                 int8_t snr_q4, uint8_t adv_type,
+                                 const char* scope_name) {
   // 1) Bereits bekannt? -> Eintrag updaten.
   for (int i = 0; i < _neighbours_count; i++) {
     if (memcmp(_neighbours[i].pub_key, id.pub_key, 32) == 0) {
@@ -1524,6 +1563,12 @@ void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_times
       _neighbours[i].heard_millis     = millis();
       _neighbours[i].snr              = snr_q4;
       _neighbours[i].adv_type         = adv_type;
+      if (scope_name) {
+        StrHelper::strzcpy(_neighbours[i].scope_name, scope_name,
+                           sizeof(_neighbours[i].scope_name));
+      } else {
+        _neighbours[i].scope_name[0] = 0;
+      }
       return;
     }
   }
@@ -1550,6 +1595,12 @@ void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_times
   _neighbours[target_idx].heard_millis     = millis();
   _neighbours[target_idx].snr              = snr_q4;
   _neighbours[target_idx].adv_type         = adv_type;
+  if (scope_name) {
+    StrHelper::strzcpy(_neighbours[target_idx].scope_name, scope_name,
+                       sizeof(_neighbours[target_idx].scope_name));
+  } else {
+    _neighbours[target_idx].scope_name[0] = 0;
+  }
 }
 
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
@@ -1588,7 +1639,19 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
     }
   }
 
-  if (_serial->isConnected()) {
+  // Wunschliste 46 Phase 4 (2026-06-11): Advert-Name Display-Soft-Drop.
+  // Match auf contact.name; bei Treffer wird der App-Push unterdrueckt.
+  // Heard-List + Stats + contact-Eintrag bleiben unberuehrt -- User kann
+  // den Knoten weiter via 'heard list' nachschlagen und manuell als
+  // Kontakt anlegen.
+  bool name_soft_drop = false;
+  for (uint8_t i = 0; i < _prefs.filter_advert_drop_name_count; i++) {
+    if (filterPatternMatch(_prefs.filter_advert_drop_name[i], contact.name)) {
+      name_soft_drop = true;
+      break;
+    }
+  }
+  if (_serial->isConnected() && !name_soft_drop) {
     if (is_new) {
       writeContactRespFrame(PUSH_CODE_NEW_ADVERT, contact);
     } else {
@@ -1596,7 +1659,7 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
       memcpy(&out_frame[1], contact.id.pub_key, PUB_KEY_SIZE);
       _serial->writeFrame(out_frame, 1 + PUB_KEY_SIZE);
     }
-  } else {
+  } else if (!_serial->isConnected()) {
 #ifdef DISPLAY_CLASS
     if (_ui) _ui->notify(UIEventType::newContactMessage);
 #endif
@@ -2387,6 +2450,15 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
 
 void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const char *text) {
+  // Wunschliste 46 Phase 4 (2026-06-11): Sender-Pubkey Post-Decrypt-Block
+  // fuer DMs. Greift NACH MAC-Verifikation (ECDH) -- der Sender ist
+  // kryptografisch authentifiziert. App-Push wird unterdrueckt; ACK
+  // wurde von BaseChatMesh evtl. schon gesendet (kein wire-level Block).
+  if (pubkeyFilterMatch(from.id.pub_key,
+                        _prefs.filter_sender_drop_pubkey,
+                        _prefs.filter_sender_drop_pubkey_count)) {
+    return;
+  }
   markConnectionActive(from); // in case this is from a server, and we have a connection
   queueMessage(from, TXT_TYPE_PLAIN, pkt, sender_timestamp, NULL, 0, text);
   // Wunschliste 43: Wake-on-LoRa fuer eingehende DM.
@@ -2395,12 +2467,22 @@ void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t 
 
 void MyMesh::onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                                const char *text) {
+  if (pubkeyFilterMatch(from.id.pub_key,
+                        _prefs.filter_sender_drop_pubkey,
+                        _prefs.filter_sender_drop_pubkey_count)) {
+    return;
+  }
   markConnectionActive(from); // in case this is from a server, and we have a connection
   queueMessage(from, TXT_TYPE_CLI_DATA, pkt, sender_timestamp, NULL, 0, text);
 }
 
 void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                                  const uint8_t *sender_prefix, const char *text) {
+  if (pubkeyFilterMatch(from.id.pub_key,
+                        _prefs.filter_sender_drop_pubkey,
+                        _prefs.filter_sender_drop_pubkey_count)) {
+    return;
+  }
   markConnectionActive(from);
   // from.sync_since change needs to be persisted
   dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
@@ -2870,10 +2952,19 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
   uint8_t req_type = data[4];
 
   uint8_t role = effectiveAdvertRole();
+  // BASIC + OWNER: generisch genug fuer alle Service-Rollen. Upstream
+  // simple_sensor unterstuetzt diese ANON-Types nicht (TODO-Kommentar
+  // in SensorMesh.cpp), unsere Fork oeffnet sie auch fuer SENSOR/ROOM
+  // (User-Wunsch 2026-06-11: ein Sensor will Owner + Clock abfragbar
+  // sein, auch ohne Login).
   bool allow_basic   = (role == ADV_TYPE_CHAT)
                     || (role == ADV_TYPE_REPEATER)
+                    || (role == ADV_TYPE_ROOM)
                     || (role == ADV_TYPE_SENSOR);
-  bool allow_owner   = (role == ADV_TYPE_REPEATER);
+  bool allow_owner   = (role == ADV_TYPE_REPEATER)
+                    || (role == ADV_TYPE_ROOM)
+                    || (role == ADV_TYPE_SENSOR);
+  // REGIONS = repeat-Scope-Liste -- nur fuer Forwarder (REPEATER) sinnvoll.
   bool allow_regions = (role == ADV_TYPE_REPEATER);
 
   // Reply-Path aus dem Request extrahieren (analog simple_repeater).
@@ -3430,12 +3521,12 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
         const char* perm_s = (data[9] == 1) ? "admin"
                             : (data[9] == 2) ? "guest" : "unknown";
         char r[120];
-        snprintf(r, sizeof(r), "[admin] Login OK bei %s (perm=%s)",
+        snprintf(r, sizeof(r), "[remote] Login OK bei %s (perm=%s)",
                  contact.name, perm_s);
         pushCompanionMessage(r);
       } else {
         char r[100];
-        snprintf(r, sizeof(r), "[admin] Login failed bei %s", contact.name);
+        snprintf(r, sizeof(r), "[remote] Login failed bei %s", contact.name);
         pushCompanionMessage(r);
       }
       return;
@@ -3443,7 +3534,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     // CMD-Antwort: [4]ts_echo [N]response_text
     if (len > 4) {
       char r[200];
-      size_t pre_len = snprintf(r, sizeof(r), "[admin %s]\n", contact.name);
+      size_t pre_len = snprintf(r, sizeof(r), "[remote %s]\n", contact.name);
       size_t avail = (sizeof(r) > pre_len + 1) ? (sizeof(r) - pre_len - 1) : 0;
       size_t txt_len = (size_t)(len - 4);
       if (txt_len > avail) txt_len = avail;
@@ -3452,7 +3543,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       pushCompanionMessage(r);
     } else {
       char r[100];
-      snprintf(r, sizeof(r), "[admin %s] (leere Antwort)", contact.name);
+      snprintf(r, sizeof(r), "[remote %s] (leere Antwort)", contact.name);
       pushCompanionMessage(r);
     }
     return;
@@ -3533,21 +3624,50 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
           ce.csv[csv_len] = 0;
         }
       } else {
-        // Manueller 'discover regions <name>': sofort pushen wie bisher.
-        if (len > 8) {
-          char id_str[40];
-          if (_regions_pending[i].name[0]) {
-            StrHelper::strzcpy(id_str, _regions_pending[i].name, sizeof(id_str));
-          } else {
-            for (int j = 0; j < 8; j++) snprintf(id_str + j*2, 3, "%02x", _regions_pending[i].pubkey[j]);
-            id_str[16] = 0;
-          }
-          char buf[200];
+        // Manuelle 'discover <regions|owner|basic> <name>' Antwort:
+        // sofort pushen mit Type-spezifischem Format.
+        uint8_t rt = _regions_pending[i].req_type;
+        char id_str[40];
+        if (_regions_pending[i].name[0]) {
+          StrHelper::strzcpy(id_str, _regions_pending[i].name, sizeof(id_str));
+        } else {
+          for (int j = 0; j < 8; j++) snprintf(id_str + j*2, 3, "%02x", _regions_pending[i].pubkey[j]);
+          id_str[16] = 0;
+        }
+        char buf[220];
+        if (rt == ANON_REQ_TYPE_REGIONS && len > 8) {
           size_t csv_len = len - 8;
           if (csv_len > sizeof(buf) - 80) csv_len = sizeof(buf) - 80;
           snprintf(buf, sizeof(buf),
                    "discover regions @%s:\n  %.*s",
                    id_str, (int)csv_len, (const char*)&data[8]);
+          pushCompanionMessage(buf);
+        } else if (rt == ANON_REQ_TYPE_OWNER && len > 8) {
+          // Payload: "name\nowner_info" (kann leer sein nach \n).
+          size_t txt_len = len - 8;
+          if (txt_len > sizeof(buf) - 80) txt_len = sizeof(buf) - 80;
+          // \n im Payload bleibt als Zeilenumbruch -- pushCompanionMessage
+          // expandiert \n -> \r\n auf USB-Serial.
+          snprintf(buf, sizeof(buf),
+                   "discover owner @%s:\n%.*s",
+                   id_str, (int)txt_len, (const char*)&data[8]);
+          pushCompanionMessage(buf);
+        } else if (rt == ANON_REQ_TYPE_BASIC && len >= 9) {
+          uint8_t features = data[8];
+          // 4-Byte RTC im Reply (Bytes 4-7) ist die Remote-Clock.
+          uint32_t remote_clk;
+          memcpy(&remote_clk, &data[4], 4);
+          int32_t skew = (int32_t)remote_clk - (int32_t)getRTCClock()->getCurrentTime();
+          snprintf(buf, sizeof(buf),
+                   "discover basic @%s:\n"
+                   "  features=0x%02X%s%s\n"
+                   "  clock=%lu (skew %+lds)",
+                   id_str,
+                   (unsigned)features,
+                   (features & 0x80) ? " disabled" : "",
+                   (features & 0x03) ? " bridge" : "",
+                   (unsigned long)remote_clk,
+                   (long)skew);
           pushCompanionMessage(buf);
         }
       }
@@ -3746,6 +3866,7 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
   if (!keep_cache) _discover_count = 0;
   _discover_expiry_ms = futureMillis(30000);
   _discover_next_allowed_ms = futureMillis(60000);  // 60 s bis naechster discover
+  _discover_round_started_rtc = now_rtc;  // fuer cached/fresh-Trennung
 
   char r[120];
   const char* what =
@@ -3813,6 +3934,33 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   e.our_rssi_dbm = (int8_t)radio_driver.getLastRSSI();
   e.recv_at_rtc = now_rtc;
 
+  // Diskover-Antwort kommt per Definition zero-hop (CTL_DISCOVER_RESP wird
+  // vom Responder per sendZeroHop verschickt -- siehe simple_repeater).
+  // Daher: auch in _neighbours[] anlegen damit die 'neighbors'-Liste
+  // sofort den frisch direkt-gehoerten Knoten zeigt (User-Bug 2026-06-12:
+  // DL7DO direkt via discover gehoert, tauchte aber nicht in 'neighbors'
+  // auf -- weil _neighbours nur in onAdvertRecv befuellt wurde).
+  //
+  // Plus: Kontaktliste updaten (lastmod + out_path=direct), wenn der
+  // Knoten als Kontakt bekannt ist. Beweis-Logik: CTL_DISCOVER_RESP zero-
+  // hop heisst beide Richtungen in 1 Funkstrecke (sonst haette unser
+  // REQ den Responder nicht erreicht). Also out_path_len=0 sicher.
+  // App-Backup-Format bleibt kompatibel (kein neues Flag noetig,
+  // User-Entscheidung 2026-06-12 'a' ohne Lock-Mechanismus).
+  if (e.full_pubkey) {
+    mesh::Identity nb_id(e.pub_key);
+    putRuntimeNeighbour(nb_id, now_rtc, e.our_snr_q4, e.adv_type, "");
+    ContactInfo* cp = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
+    if (cp != NULL) {
+      cp->lastmod = now_rtc;
+      if (cp->out_path_len != 0) {
+        cp->out_path_len = 0;        // = direct (kein Pfad)
+        memset(cp->out_path, 0, sizeof(cp->out_path));
+        dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+      }
+    }
+  }
+
   // Chain-Modus: 'discover regions' (no args) hat den CTL-REQ getriggert.
   // Pro REPEATER-RESP sofort eine zero-hop ANON_REQ_TYPE_REGIONS abfeuern.
   // Sensors koennen REGIONS-Antworten nicht handhaben -- skip.
@@ -3823,13 +3971,17 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
 }
 
 bool MyMesh::sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name) {
+  return sendAnonQueryZeroHop(pubkey32, display_name, ANON_REQ_TYPE_REGIONS);
+}
+
+bool MyMesh::sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_name,
+                                  uint8_t req_type) {
   if (_regions_pending_count >= MAX_PENDING_REGIONS) return false;
-  // Reise-Fix 2026-06-08: Dedup gegen bereits offene REGIONS-Queries.
-  // Wichtig wenn Pre-Discover-Phase (_neighbours-Iteration) und CTL-
-  // Discover-Response unabhaengig denselben Repeater treffen -- ohne
-  // diesen Check wuerden wir 2x denselben ANON_REQ senden.
+  // Dedup nur fuer denselben req_type -- ein OWNER + ein REGIONS auf
+  // denselben Repeater duerfen koexistieren.
   for (uint8_t i = 0; i < _regions_pending_count; i++) {
-    if (memcmp(_regions_pending[i].pubkey, pubkey32, PUB_KEY_SIZE) == 0) {
+    if (_regions_pending[i].req_type == req_type
+        && memcmp(_regions_pending[i].pubkey, pubkey32, PUB_KEY_SIZE) == 0) {
       return false;  // already pending
     }
   }
@@ -3845,13 +3997,14 @@ bool MyMesh::sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* displa
   uint8_t req_data[6];
   uint32_t ts = getRTCClock()->getCurrentTime();
   memcpy(req_data, &ts, 4);
-  req_data[4] = ANON_REQ_TYPE_REGIONS;
+  req_data[4] = req_type;
   req_data[5] = 0x00;
   uint32_t tag, est_timeout;
   int result = sendAnonReq(tmp, req_data, sizeof(req_data), tag, est_timeout);
   if (result == MSG_SEND_FAILED) return false;
   PendingRegionsEntry& e = _regions_pending[_regions_pending_count++];
   e.tag = tag;
+  e.req_type = req_type;
   StrHelper::strzcpy(e.name, display_name ? display_name : "", sizeof(e.name));
   memcpy(e.pubkey, pubkey32, PUB_KEY_SIZE);
   e.from_chain = _discover_regions_chained;
@@ -4018,7 +4171,7 @@ void MyMesh::finalizeRegionsChain() {
   char hdr[140];
   snprintf(hdr, sizeof(hdr),
            "discover regions: %u REPEATER,\n"
-           "  %u mit Region-Antworten.",
+           "  %u lieferten Scopes.",
            (unsigned)_discover_count,
            (unsigned)_regions_completed_count);
   pushCompanionMessage(hdr);
@@ -4125,8 +4278,22 @@ void MyMesh::discoverFinishAndPrint() {
   _discover_last_at_rtc = getRTCClock()->getCurrentTime();
   // Tabelle via gemeinsamem Legend-Helper (gleiche Format wie chain-
   // Modus). Keine Region-CSV in diesem Pfad, daher 2. Arg = NULL.
-  char header[80];
-  snprintf(header, sizeof(header), "discover: %u Antworten:", (unsigned)_discover_count);
+  // Cache vs frisch trennen -- entries vor diesem Discover-Round-Start
+  // sind aus dem 15-min-Cache, nicht aus aktueller Antwort.
+  uint8_t n_fresh = 0, n_cached = 0;
+  for (uint8_t i = 0; i < _discover_count; i++) {
+    if (_discover_entries[i].recv_at_rtc >= _discover_round_started_rtc) n_fresh++;
+    else n_cached++;
+  }
+  char header[120];
+  if (n_cached > 0) {
+    snprintf(header, sizeof(header),
+             "discover: %u frische Antworten + %u aus Cache:",
+             (unsigned)n_fresh, (unsigned)n_cached);
+  } else {
+    snprintf(header, sizeof(header),
+             "discover: %u Antworten:", (unsigned)n_fresh);
+  }
   pushCompanionMessage(header);
   for (uint8_t i = 0; i < _discover_count; i++) {
     printRepeaterLegendEntry(_discover_entries[i], NULL, /*verbose=*/true);
@@ -4518,6 +4685,15 @@ void MyMesh::begin(bool has_display) {
   // (alte bluetooth_power_mode-Datei).
   _prefs.bluetooth_profile = 0xFF;
   _prefs.bluetooth_active = 0xFF;
+  // Wunschliste 50 (2026-06-11): TZ-Override Sentinels.
+  _prefs.tz_mode = 0xFF;            // EOF marker -> migrate to auto-eu
+  _prefs.tz_offset_min = INT16_MAX; // EOF marker -> migrate to 60
+  // Wunschliste 46 Phase 4 Sentinels: 0xFF im count = Legacy-File (Feld
+  // fehlt) -> Migration setzt count auf 0 + arr-memset.
+  _prefs.filter_advert_drop_name_count    = 0xFF;
+  _prefs.filter_advert_drop_pubkey_count  = 0xFF;
+  _prefs.filter_sender_drop_pubkey_count  = 0xFF;
+  _prefs.serial_cli_persist_on            = 0xFF;
 
   // Wunschliste 31: time-sync Pre-Init analog. Default = 1 (lazy).
   // VOR loadPrefs() setzen, dann ueberschreibt der persistierte Wert (falls
@@ -4538,30 +4714,81 @@ void MyMesh::begin(bool has_display) {
     _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
 
-  // Wunschliste 43 Migration (2026-06-11): altes bluetooth_power_mode-Byte
-  // war 1-Wert-Enum (0=cycle, 1=always-on, 2=off). Neu sind zwei Bytes:
-  // profile (Bit-Mask 0x01/0x20) + active (Kopie eines profile-Bits oder 0).
-  // Erkennen anhand der Sentinel-Werte 0xFF (Pre-Init -> EOF):
-  //   profile == 0xFF -> noch nie persistiert -> Default cycle-on
-  //   profile in {0, 1, 2} -> Legacy-Wert aus altem Layout, migrieren
-  //   sonst (profile in {0x01, 0x20, kombination}): bereits neues Layout
+  // Wunschliste 43 Migration (2026-06-11, FIX 2026-06-11):
+  // altes bluetooth_power_mode-Byte war 1-Wert-Enum (0=off, 1=always-on,
+  // 2=cycle). Neu sind zwei Bytes: profile (Bit-Mask 0x01/0x20) + active.
+  // Diskriminator: bluetooth_active == 0xFF (EOF / Pre-Init Sentinel) heisst
+  // "kein active-Byte im File" -> entweder Legacy oder Fresh-Install.
+  // Sobald active gueltig geschrieben wurde (in {0, 0x01, 0x20}), ist die
+  // Migration durch und darf NIE wieder triggern -- sonst kollidiert
+  // profile==1 (neues cycle=0x01) mit Legacy 'always-on=1' und kippt das
+  // Profil falsch auf 0x20 (User-Bug 2026-06-11: 'power cycle. reboot ->
+  // alwaysOn,off').
   {
-    if (_prefs.bluetooth_profile == 0xFF) {
+    if (_prefs.bluetooth_active != 0xFF) {
+      // Neues Layout: beide Bytes valide. Nichts zu tun.
+    } else if (_prefs.bluetooth_profile == 0xFF) {
+      // Fresh install: weder profile noch active je geschrieben.
       _prefs.bluetooth_profile = 0x01;
       _prefs.bluetooth_active  = 0x01;
-    } else if (_prefs.bluetooth_profile == 0) {
-      _prefs.bluetooth_profile = 0x01;
-      _prefs.bluetooth_active  = (_prefs.bluetooth_active == 0xFF) ? 0x01 : 0;
-    } else if (_prefs.bluetooth_profile == 1) {
-      _prefs.bluetooth_profile = 0x20;
-      _prefs.bluetooth_active  = (_prefs.bluetooth_active == 0xFF) ? 0x20 : 0;
-    } else if (_prefs.bluetooth_profile == 2) {
-      _prefs.bluetooth_profile = 0x01;  // default profile cycle
-      _prefs.bluetooth_active  = 0;
-    } else if (_prefs.bluetooth_active == 0xFF) {
-      // Profile gueltig neu, active sentinel: nehme profile als active
-      _prefs.bluetooth_active = _prefs.bluetooth_profile;
+    } else {
+      // Legacy-File: profile-Byte traegt alten power_mode-Wert.
+      uint8_t old = _prefs.bluetooth_profile;
+      if (old == 0) {                 // alt: off
+        _prefs.bluetooth_profile = 0x01;  // Profile cycle (Default)
+        _prefs.bluetooth_active  = 0;     // explizit aus
+      } else if (old == 1) {          // alt: always-on
+        _prefs.bluetooth_profile = 0x20;
+        _prefs.bluetooth_active  = 0x20;
+      } else if (old == 2) {          // alt: cycle
+        _prefs.bluetooth_profile = 0x01;
+        _prefs.bluetooth_active  = 0x01;
+      } else {
+        // Unbekannt -> Default cycle on
+        _prefs.bluetooth_profile = 0x01;
+        _prefs.bluetooth_active  = 0x01;
+      }
     }
+  }
+
+  // Wunschliste 50 Phase 1 (2026-06-11): TZ-Migration.
+  // tz_mode=0xFF (Sentinel) -> auto-eu Default + offset=60 (CET).
+  if (_prefs.tz_mode == 0xFF) {
+    _prefs.tz_mode = 0;
+    _prefs.tz_offset_min = 60;
+  } else if (_prefs.tz_offset_min == INT16_MAX) {
+    // mode valid neu, offset sentinel -> defaults
+    _prefs.tz_offset_min = (_prefs.tz_mode == 0) ? 60 : 0;
+  }
+
+  // Wunschliste 46 Phase 4 Migration (2026-06-11): Legacy-File hat die
+  // neuen Felder nicht -> count steht auf 0xFF. Zuruecksetzen + arr clear.
+  if (_prefs.filter_advert_drop_name_count == 0xFF) {
+    _prefs.filter_advert_drop_name_count = 0;
+    memset(_prefs.filter_advert_drop_name, 0,
+           sizeof(_prefs.filter_advert_drop_name));
+  }
+  if (_prefs.filter_advert_drop_pubkey_count == 0xFF) {
+    _prefs.filter_advert_drop_pubkey_count = 0;
+    memset(_prefs.filter_advert_drop_pubkey, 0,
+           sizeof(_prefs.filter_advert_drop_pubkey));
+  }
+  if (_prefs.filter_sender_drop_pubkey_count == 0xFF) {
+    _prefs.filter_sender_drop_pubkey_count = 0;
+    memset(_prefs.filter_sender_drop_pubkey, 0,
+           sizeof(_prefs.filter_sender_drop_pubkey));
+  }
+
+  // Wunschliste 10 (2026-06-11): Serial-CLI Persistent Migration.
+  // BLE/WiFi-Builds: Default on (USB ist freie Console).
+  // USB-frame-Builds: Default off (Serial ist Frame-Protokoll, CLI per
+  // App-Befehl explizit aktivierbar).
+  if (_prefs.serial_cli_persist_on == 0xFF) {
+#if defined(BLE_PIN_CODE) || defined(WIFI_SSID)
+    _prefs.serial_cli_persist_on = 1;
+#else
+    _prefs.serial_cli_persist_on = 0;
+#endif
   }
 
   // Snapshot the persisted position before GPS updates start overwriting
@@ -6571,11 +6798,22 @@ void MyMesh::loop() {
   if (_br_state != BR_IDLE) {
     backupRestoreLoop();
   }
+  // Wunschliste 10 (2026-06-11): Serial-CLI Coexistenz.
+  // BLE/WiFi-Builds: checkSerialInterface liest BLE/TCP -- USB-Serial
+  // ist eine getrennte Schiene, CLI laeuft parallel.
+  // USB-frame-Builds: checkSerialInterface UND serialCliLoop teilen sich
+  // Serial. Wenn CLI on -> Frame-Parser skip (CLI hat Vorrang).
+  bool cli_on = serialCliEffectiveOn();
   if (_cli_rescue) {
     checkCLIRescueCmd();
   } else {
+#if defined(BLE_PIN_CODE) || defined(WIFI_SSID)
     checkSerialInterface();
+#else
+    if (!cli_on) checkSerialInterface();
+#endif
   }
+  if (cli_on) serialCliLoop();
 
   // is there are pending dirty contacts write needed?
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
@@ -8064,6 +8302,10 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("bluetooth_profile", _prefs.bluetooth_profile);
   kv_uint("bluetooth_active",  _prefs.bluetooth_active);
 
+  // Wunschliste 50 Phase 1 (2026-06-11): Timezone-Override.
+  kv_uint("tz_mode",         _prefs.tz_mode);
+  kv_int ("tz_offset_min",   _prefs.tz_offset_min);
+
   // Wunschliste 46 Filter (Phase 1-5, 2026-06-10):
   // Filter-Listen + channel-masks + Repeat-Achse exportieren.
   kv_uint("filter_unknown_channel_repeat", _prefs.filter_unknown_channel_repeat);
@@ -8775,6 +9017,22 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       _br_applied++;
       return;
     }
+    // Wunschliste 50 Phase 1 (2026-06-11): Timezone-Override Restore.
+    if (val_type == 'n' && strcmp(key, "tz_mode") == 0) {
+      uint8_t v = (uint8_t)as_uint();
+      if (v > 2) v = 0;  // invalid -> auto-eu
+      _prefs.tz_mode = v;
+      _br_applied++;
+      return;
+    }
+    if (val_type == 'n' && strcmp(key, "tz_offset_min") == 0) {
+      int32_t v = as_int();
+      if (v < -720) v = -720;
+      if (v >  840) v =  840;
+      _prefs.tz_offset_min = (int16_t)v;
+      _br_applied++;
+      return;
+    }
     // Wunschliste 46 Filter Restore (2026-06-10).
     if (val_type == 'n' && strcmp(key, "filter_unknown_channel_repeat") == 0) {
       _prefs.filter_unknown_channel_repeat = (uint8_t)as_uint();
@@ -9354,11 +9612,19 @@ void MyMesh::manageBlePower() {
   uint32_t hb_now = millis();
   if (hb_now - s_last_heartbeat_at >= 30000UL) {
     s_last_heartbeat_at = hb_now;
-    pushDebugLog("[ble] tick state=%u until=%lu ble=%d serial=%d\n",
+    const char* prof = (_prefs.bluetooth_profile & 0x20) ? "alwaysOn"
+                     : (_prefs.bluetooth_profile & 0x01) ? "cycle" : "?";
+    const char* act  = (_prefs.bluetooth_active == 0) ? "off"
+                     : (_prefs.bluetooth_active & 0x20) ? "alwaysOn"
+                     : (_prefs.bluetooth_active & 0x01) ? "cycle" : "?";
+    pushDebugLog("[ble] tick state=%u until=%lu ble=%d serial=%d conn=%d "
+                 "prof=%s act=%s\n",
                  (unsigned)_ble_pwr_state,
                  (unsigned long)_ble_pwr_state_until,
                  _serial ? (_serial->isEnabled() ? 1 : 0) : -1,
-                 _serial ? 1 : 0);
+                 _serial ? 1 : 0,
+                 (_serial && _serial->isConnected()) ? 1 : 0,
+                 prof, act);
   }
   if (!_serial) return;
   // Deferred-disable check: wenn 'bluetooth off'-CLI gerade gesetzt
@@ -9480,6 +9746,11 @@ void MyMesh::manageBlePower() {
     pushDebugLog("[ble] disconnect -> HOT_START 5min\n");
     _ble_pwr_state = BLE_PWR_HOT_START;
     _ble_pwr_state_until = now + 5UL * 60 * 1000;
+    // Recency-Bonus-Window 10min ab Disconnect (User-Wunsch 2026-06-11):
+    // inkludiert die HOT_START-Phase. Danach kommt ggf. ca. 5min schnellerer
+    // Cycle (SLEEP 30s statt 60s). millis()==0 ist unwahrscheinlich; bei
+    // Wrap nehmen wir 1 (0 ist Sentinel "inaktiv").
+    _ble_disconnect_at = (now == 0) ? 1 : now;
   }
   _ble_was_connected = connected;
 
@@ -9500,12 +9771,25 @@ void MyMesh::manageBlePower() {
       _ble_pwr_state_until = 0;
       pushDebugLog("[ble] BOOT -> AWAKE (connected)\n");
     } else if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
-      // Boot-Grace abgelaufen, in Cycle.
-      logBleTransition(BLE_PWR_SLEEP, "boot-exp");
-      _ble_pwr_state = BLE_PWR_SLEEP;
-      _ble_pwr_state_until = now + 180UL * 1000;
-      setBleEnabled(false);
-      pushDebugLog("[ble] BOOT grace expired -> SLEEP\n");
+      // Boot-Grace abgelaufen.
+      //   profile=normal: TMP_OFF permanent (analog HOT_START-expiry-Pfad),
+      //   sonst:          Cycle (SLEEP 180s).
+      // Konsistenz-Fix 2026-06-11: ohne diesen Sonderfall waere normal-
+      // Repeater bei "User connectet nie waehrend BOOT" im Cycle gelandet,
+      // obwohl HOT_START->TMP_OFF-Pfad permanent macht.
+      if (_prefs.repeater_profile == 1) {
+        logBleTransition(BLE_PWR_TMP_OFF, "boot-perm");
+        _ble_pwr_state = BLE_PWR_TMP_OFF;
+        _ble_pwr_state_until = 0;
+        setBleEnabled(false);
+        pushDebugLog("[ble] BOOT grace expired (profile=normal) -> TMP_OFF (perm)\n");
+      } else {
+        logBleTransition(BLE_PWR_SLEEP, "boot-exp");
+        _ble_pwr_state = BLE_PWR_SLEEP;
+        _ble_pwr_state_until = now + 180UL * 1000;
+        setBleEnabled(false);
+        pushDebugLog("[ble] BOOT grace expired -> SLEEP\n");
+      }
     }
     return;
   }
@@ -9547,10 +9831,16 @@ void MyMesh::manageBlePower() {
         _ble_pwr_state_until = 0;
         setBleEnabled(false);
       } else {
-        logBleTransition(BLE_PWR_SLEEP, "hot-exp");
-        pushDebugLog("[ble] HOT expired -> SLEEP\n");
+        // Recency-Bonus-Check: 10min nach Disconnect SLEEP 20s statt 40s.
+        bool recency = (_ble_disconnect_at != 0)
+                       && ((now - _ble_disconnect_at) < 10UL * 60 * 1000);
+        uint32_t sleep_ms = recency ? 20UL * 1000 : 40UL * 1000;
+        logBleTransition(BLE_PWR_SLEEP, recency ? "hot-exp-rec" : "hot-exp");
+        pushDebugLog("[ble] HOT expired -> SLEEP %us%s\n",
+                     (unsigned)(sleep_ms / 1000),
+                     recency ? " (recency)" : "");
         _ble_pwr_state = BLE_PWR_SLEEP;
-        _ble_pwr_state_until = now + 180UL * 1000;
+        _ble_pwr_state_until = now + sleep_ms;
         setBleEnabled(false);
       }
     }
@@ -9560,9 +9850,9 @@ void MyMesh::manageBlePower() {
     setBleEnabled(false);
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
       logBleTransition(BLE_PWR_WAIT, "sleep-exp");
-      pushDebugLog("[ble] SLEEP -> WAIT 30s\n");
+      pushDebugLog("[ble] SLEEP -> WAIT 20s\n");
       _ble_pwr_state = BLE_PWR_WAIT;
-      _ble_pwr_state_until = now + 30UL * 1000;
+      _ble_pwr_state_until = now + 20UL * 1000;
       setBleEnabled(true);
     }
     return;
@@ -9577,10 +9867,15 @@ void MyMesh::manageBlePower() {
       return;
     }
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
-      logBleTransition(BLE_PWR_SLEEP, "wait-exp");
-      pushDebugLog("[ble] WAIT expired -> SLEEP 180s\n");
+      bool recency = (_ble_disconnect_at != 0)
+                     && ((now - _ble_disconnect_at) < 10UL * 60 * 1000);
+      uint32_t sleep_ms = recency ? 20UL * 1000 : 40UL * 1000;
+      logBleTransition(BLE_PWR_SLEEP, recency ? "wait-exp-rec" : "wait-exp");
+      pushDebugLog("[ble] WAIT expired -> SLEEP %us%s\n",
+                   (unsigned)(sleep_ms / 1000),
+                   recency ? " (recency)" : "");
       _ble_pwr_state = BLE_PWR_SLEEP;
-      _ble_pwr_state_until = now + 180UL * 1000;
+      _ble_pwr_state_until = now + sleep_ms;
       setBleEnabled(false);
     }
     return;
@@ -9653,6 +9948,58 @@ void MyMesh::bleManualToggleFromMenu() {
 
 void MyMesh::pushCompanionMessage(const char* text) {
   if (text == NULL || text[0] == 0) return;
+  // Wunschliste 10 (2026-06-11): USB-Serial CLI Output-Redirect. Waehrend
+  // einer per Serial-CLI dispatchten Command-Ausfuehrung gehen alle
+  // pushCompanionMessage-Aufrufe ueber den USB-Stream statt BLE-Frame.
+  // \n -> \r\n Expansion analog pushDebugLog.
+  //
+  // Drain-Wait fuer partial-Write-Korrektheit (User-Bug 2026-06-11):
+  // Bei 115200 Baud + tx_timeout_ms=1ms kommt Serial.write() schnell mit
+  // partial Write zurueck wenn das TX-FIFO voll ist. Ohne Retry-Loop
+  // gehen die ueberzaehligen Bytes verloren (sichtbare Truncation in
+  // help admin / help filter / etc.). Bounded Retry mit 200ms gesamt
+  // damit BLE-Supervision (4s) nicht reisst auch bei 5-Frame-Help.
+  if (_serial_cli_active && Serial) {
+    char out[400];
+    int oi = 0;
+    size_t tl = strlen(text);
+    for (size_t k = 0; k < tl && oi < (int)sizeof(out) - 2; k++) {
+      if (text[k] == '\n' && (k == 0 || text[k-1] != '\r')) {
+        out[oi++] = '\r';
+      }
+      out[oi++] = text[k];
+    }
+    if (tl == 0 || (text[tl-1] != '\n' && oi < (int)sizeof(out) - 2)) {
+      out[oi++] = '\r'; out[oi++] = '\n';
+    }
+    if (oi > 0) {
+      // Progress-basierter Watchdog statt fixer Deadline (Bug-Fix 2026-06-11:
+      // bei 5+ Frames hintereinander reichte fixe 200ms Deadline nicht
+      // immer, letztes Frame wurde abgeschnitten). Wenn 250ms ohne
+      // Fortschritt -> abbruch. Bei kontinuierlichem Drain laeuft die
+      // Schleife weiter bis komplett geschrieben.
+      size_t written = 0;
+      uint32_t no_progress_until = millis() + 250;
+      while (written < (size_t)oi && Serial) {
+        if ((int32_t)(millis() - no_progress_until) >= 0) break;
+        int avail = Serial.availableForWrite();
+        if (avail <= 0) {
+          delay(1);
+          continue;
+        }
+        size_t to_write = (size_t)avail;
+        if (to_write > (size_t)oi - written) to_write = (size_t)oi - written;
+        size_t r = Serial.write((const uint8_t*)out + written, to_write);
+        if (r == 0) {
+          delay(1);
+          continue;
+        }
+        written += r;
+        no_progress_until = millis() + 250;  // reset bei Fortschritt
+      }
+    }
+    return;
+  }
   // Wunschliste 52: Admin-Capture-Mode. Statt App-Push: in Reply-Buffer
   // konkatenieren (newline-getrennt). Wird im REQ_TYPE_ADMIN_CMD-Handler
   // aktiviert + nachher gelesen.
@@ -9799,6 +10146,36 @@ static int match_choice(const char* arg,
     return -1;
   }
   return -3;
+}
+
+// Konsolidierter Token-Dispatch: skippt fuehrendes ws, ruft match_choice,
+// emittiert bei Fehlern eine Companion-Message und liefert -1. Bei Erfolg
+// schiebt p past matched token + ws und gibt den Index zurueck.
+int MyMesh::dispatchToken(const char*& p,
+                          const CompanionChoice* choices, int nchoices,
+                          const char* expected_label) {
+  while (*p == ' ' || *p == '\t') p++;
+  char ambig[100];
+  int idx = match_choice(p, choices, nchoices, ambig, sizeof(ambig));
+  if (idx == -1) {
+    char r[160]; snprintf(r, sizeof(r), "Mehrdeutig: %s", ambig);
+    pushCompanionMessage(r);
+    return -1;
+  }
+  if (idx < 0) {
+    char r[160];
+    if (expected_label && *expected_label) {
+      snprintf(r, sizeof(r), "Erwartet: %s", expected_label);
+    } else {
+      snprintf(r, sizeof(r), "Unbekannt: %s", *p ? p : "(leer)");
+    }
+    pushCompanionMessage(r);
+    return -1;
+  }
+  // Advance past matched token + ws.
+  while (*p && *p != ' ' && *p != '\t') p++;
+  while (*p == ' ' || *p == '\t') p++;
+  return idx;
 }
 
 // Wrapper ueber match_choice fuer on/off. Beibehaltene Semantik:
@@ -9995,19 +10372,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // die bekannte Top-Level-Liste gematched. Der raw_cmd-Pointer bleibt
   // unveraendert; Sub-Handler die raw-strings brauchen (chatname custom)
   // tokenisieren raw_cmd selbst.
-  static const char* const TOP_CMDS[] = {
-    "help", "?", "status",
+  // Destruktive Top-Level-Befehle muessen voll ausgeschrieben werden
+  // (no_abbrev=true). Schuetzt vor 'cl' -> 'clear', 'reb' -> 'reboot',
+  // 'neighbor.r' -> 'neighbor.remove' (User-Hinweis 2026-06-11). Prefix-
+  // match wird fuer no_abbrev-Eintraege uebersprungen; exakter Match wins
+  // immer.
+  struct TopCmd { const char* name; bool no_abbrev; };
+  static const TopCmd TOP_CMDS[] = {
+    {"help", false}, {"?", false}, {"status", false},
     // Wunschliste 20: 'stats' bleibt Sammel-Output, 'stat' als kurze Alias-
     // Form (exact in TOP_CMDS damit nicht mit den stats-*-Varianten
     // konfligiert). stats-core/-radio/-packets sind Docs-kompatible Filter.
-    "stats", "stat", "stats-core", "stats-radio", "stats-packets",
-    "uptime", "advert", "autoadv",
-    "repeater", "gps", "trace", "chatname", "reboot", "duty", "scope",
-    "prefs", "neighbors", "tempradio", "set", "get", "clock", "date", "time",
-    "messages", "logging", "unscoped-channelmessages", "clear",
-    "contact", "backup", "save", "discover",
-    "ch.hops",
-    "admin", "bluetooth", "filter",
+    {"stats", false}, {"stat", false},
+    {"stats-core", false}, {"stats-radio", false}, {"stats-packets", false},
+    {"uptime", false}, {"advert", false}, {"autoadv", false},
+    {"repeater", false}, {"gps", false}, {"trace", false},
+    {"chatname", false}, {"reboot", true}, {"duty", false}, {"scope", false},
+    {"prefs", false}, {"neighbors", false}, {"tempradio", false},
+    {"set", false}, {"get", false}, {"clock", false}, {"date", false}, {"time", false},
+    {"messages", false}, {"logging", false}, {"unscoped-channelmessages", false},
+    {"clear", true},
+    {"contact", false}, {"backup", false}, {"save", false}, {"discover", false},
+    {"ch.hops", false},
+    {"remote", false}, {"bluetooth", false}, {"filter", false}, {"serial-cli", false},
+    // Upstream-MeshCore-Kompatibilitaet (https://docs.meshcore.io/cli_commands/)
+    {"discover.neighbors", false}, {"neighbor.remove", true},
+    {"advert.zerohop", false},
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -10016,19 +10406,55 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     bool exact_found = false;
     int prefix_matches = 0;
     const char* prefix_canonical = NULL;
+    size_t shortest_match_len = 0;  // fuer Tie-Break (User-Wunsch 2026-06-11:
+                                    // bei mehreren Treffern gewinnt das kuerzere
+                                    // -- 'nei' -> 'neighbors' statt mehrdeutig
+                                    // mit 'neighbor.remove').
     for (size_t k = 0; k < TOP_N; k++) {
-      size_t cl = strlen(TOP_CMDS[k]);
-      if (cl == fw_len && strncmp(TOP_CMDS[k], cmd, fw_len) == 0) {
+      size_t cl = strlen(TOP_CMDS[k].name);
+      if (cl == fw_len && strncmp(TOP_CMDS[k].name, cmd, fw_len) == 0) {
         exact_found = true;
         break;
       }
-      if (cl > fw_len && strncmp(TOP_CMDS[k], cmd, fw_len) == 0) {
+      if (TOP_CMDS[k].no_abbrev) continue;  // destructiv -> nur exact
+      if (cl > fw_len && strncmp(TOP_CMDS[k].name, cmd, fw_len) == 0) {
         prefix_matches++;
-        prefix_canonical = TOP_CMDS[k];
+        if (prefix_canonical == NULL || cl < shortest_match_len) {
+          prefix_canonical = TOP_CMDS[k].name;
+          shortest_match_len = cl;
+        }
       }
     }
-    if (!exact_found && prefix_matches == 1) {
-      // Eindeutiger Prefix — expandiere im lower-Buffer in place.
+    if (!exact_found && prefix_matches >= 1) {
+      // 1 Match: eindeutig. >1 Matches: kuerzester gewinnt (Tie-Break-
+      // Heuristik fuer 'nei' -> neighbors). Tatsaechlich strikt mehrdeutig
+      // (zwei gleich-lange Matches) bleibt unten via Schleife erkennen.
+      // Strikte Doppel-Mehrdeutigkeit: zwei Treffer gleicher Laenge wie
+      // shortest -- dann melden.
+      int n_at_shortest = 0;
+      for (size_t k = 0; k < TOP_N; k++) {
+        size_t cl = strlen(TOP_CMDS[k].name);
+        if (TOP_CMDS[k].no_abbrev) continue;
+        if (cl == shortest_match_len && cl > fw_len
+            && strncmp(TOP_CMDS[k].name, cmd, fw_len) == 0) {
+          n_at_shortest++;
+        }
+      }
+      if (n_at_shortest > 1) {
+        char msg[160];
+        int pos = snprintf(msg, sizeof(msg), "Mehrdeutig:");
+        for (size_t k = 0; k < TOP_N; k++) {
+          size_t cl = strlen(TOP_CMDS[k].name);
+          if (TOP_CMDS[k].no_abbrev) continue;
+          if (cl == shortest_match_len && cl > fw_len
+              && strncmp(TOP_CMDS[k].name, cmd, fw_len) == 0) {
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " %s", TOP_CMDS[k].name);
+          }
+        }
+        pushCompanionMessage(msg);
+        return;
+      }
+      // Eindeutig (ggf. via shortest-wins): expandiere in place.
       size_t can_len = strlen(prefix_canonical);
       size_t rest_len = L - fw_len;
       if (can_len + rest_len < sizeof(lower)) {
@@ -10036,17 +10462,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         memcpy(lower, prefix_canonical, can_len);
         L = can_len + rest_len;
       }
-    } else if (!exact_found && prefix_matches > 1) {
-      char msg[160];
-      int pos = snprintf(msg, sizeof(msg), "Mehrdeutig:");
-      for (size_t k = 0; k < TOP_N; k++) {
-        size_t cl = strlen(TOP_CMDS[k]);
-        if (cl > fw_len && strncmp(TOP_CMDS[k], cmd, fw_len) == 0) {
-          pos += snprintf(msg + pos, sizeof(msg) - pos, " %s", TOP_CMDS[k]);
-        }
-      }
-      pushCompanionMessage(msg);
-      return;
     }
     // exact_found ODER prefix_matches == 0: cmd unveraendert, weiter unten
     // wird entweder ein Sub-Handler greifen oder die Default-Unknown-Antwort.
@@ -10234,33 +10649,38 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "filter")) {
         pushCompanionMessage(
           "filter: Spam-Filter eingehender Pakete.\n"
-          "Wirkt 'for-us' (App-Push only),\n"
+          "Wirkt 'display' (App-Display only),\n"
           "Repeat-Funktion bleibt aktiv.");
         pushCompanionMessage(
           "  filter list  (Komplett-Uebersicht)");
         pushCompanionMessage(
           "Filter-Typen: sender, text, scope.\n"
-          "(scope = eigene Syntax, s.u.)\n"
-          "Befehle TYPE=sender|text:\n"
-          "  filter TYPE drop add <pat>");
+          "sender (mit name-Achse):\n"
+          "  filter sender drop|keep name <action>\n"
+          "text (einstufig):");
         pushCompanionMessage(
-          "  filter TYPE drop list|clear\n"
-          "  filter TYPE keep add/remove/list/clear");
+          "  filter text drop|keep <action>\n"
+          "<action> = add <pat> | remove <pat|idx>\n"
+          "         | list | clear");
+        pushCompanionMessage(
+          "scope-Filter: eigene Syntax, s.u.");
         pushCompanionMessage(
           "keep gewinnt vor drop:\n"
           "  drop * + keep ping = Whitelist\n"
           "  (nur ping durch).");
         pushCompanionMessage(
           "channel-filter pro Pattern:\n"
-          "  drop add <pat> on-channel <liste>\n"
-          "  drop add <pat> exempt-channel <liste>");
+          "  sender drop name add <pat>\n"
+          "    on-channel <liste>\n"
+          "  text   drop      add <pat>\n"
+          "    exempt-channel <liste>");
         pushCompanionMessage(
           "Nachtraegliches Aendern: remove + neu add.");
         pushCompanionMessage(
-          "Shortcut fuer ALLE Pattern des Typs:\n"
-          "  filter TYPE on-channel <liste>\n"
-          "  filter TYPE exempt-channel <liste>\n"
-          "  filter TYPE on-channel clear");
+          "Shortcut: alle Pattern je Typ:\n"
+          "  filter <s|t> on-channel <liste>\n"
+          "  filter <s|t> exempt-channel <liste>\n"
+          "  filter <s|t> on-channel clear");
         pushCompanionMessage(
           "Pattern (literal, case-insens.):\n"
           "  foo   = exakt Wort 'foo'\n"
@@ -10278,9 +10698,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  exakt 'ping!' als Pattern.");
         pushCompanionMessage(
           "Mehrwort braucht Quotes:\n"
-          "  drop add \"erstes zweites\"\n"
-          "  drop add \"foo bar*\" on-channel X\n"
+          "  text drop add \"erstes zweites\"\n"
+          "  sender drop name add \"foo bar*\"\n"
           "2. Wort ohne Quote = Modifier-Versuch.");
+        pushCompanionMessage(
+          "Komma-Listen erlaubt bei:\n"
+          "  scope add: #de,#europe,unscoped\n"
+          "  channels:  #test,#ping,#bot\n"
+          "  scope set <idx>: 1,2,3");
+        pushCompanionMessage(
+          "text/sender pattern: EIN Pattern je\n"
+          "'add' (kein Komma-Split). Mehrere\n"
+          "Patterns -> mehrere 'add'-Aufrufe.");
         pushCompanionMessage("Umlaute Ae/Oe/Ue ok.");
         pushCompanionMessage(
           "sender-Filter: DM-Absender +\n"
@@ -10299,13 +10728,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "scope-Achse 2 -- profile (wo wirkt):\n"
           "  Default: complete (Display+Repeat)\n"
-          "  profile for-us   nur Display\n"
+          "  profile display  nur Display\n"
           "  profile repeat   nur Repeater");
         pushCompanionMessage(
+          "scope-Eintraege nachtraeglich aendern:\n"
+          "  filter scope drop|keep set\n"
+          "    <idx[,idx...]|scope-name>\n"
+          "    profile <display|repeat|complete>\n"
+          "    | on-channels|exempt-channels\n"
+          "      <chans|clear|leer=flip>");
+        pushCompanionMessage(
           "Achsen unabhaengig kombinierbar:\n"
-          "  add #de on-channel Public profile for-us\n"
-          "list-Anzeige: 'p:dpy'/'p:rep' (kein\n"
-          " Suffix = Default complete).");
+          "  add #de on-channels Public profile display\n"
+          "list-Anzeige: 'p:display'/'p:repeat'/'p:complete'.");
         pushCompanionMessage(
           "filter unknown-channel:\n"
           "  Repeat-Policy fuer Channels die\n"
@@ -10344,11 +10779,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "neighbors")) {
         pushCompanionMessage(
-          "neighbors [hops <N> | km <D>]:\n"
-          "  ohne Arg: nur direkt-gehoerte (out_path_len=0).");
+          "neighbors [<role>...] [hops <N>] [km <D>]\n"
+          "          [deg <X>|<FROM>-<TO>]:\n"
+          "  ohne Arg: nur direkt-gehoerte.");
         pushCompanionMessage(
-          "  hops <N>: direkt + bis zu N Hops.\n"
-          "  km <D>:   direkt + alle <= D km Distanz.");
+          "  <role>: repeater|companion|sensor|room\n"
+          "    (abkuerzbar+kombinierbar, z.B. 'rep')");
+        pushCompanionMessage(
+          "  hops <N>: <=N Hops (0=direkt).\n"
+          "  km <D>:   <=D km Distanz.\n"
+          "  deg <X>:  Peilung X +/- 1.5 Grad.");
+        pushCompanionMessage(
+          "  deg <FROM>-<TO>: Sektor,\n"
+          "    darf 0 wrappen (z.B. 340-005).");
+        pushCompanionMessage(
+          "Mehrere Filter werden UND-verknuepft.\n"
+          "Bsp: neighbors km 50 deg 340-005\n"
+          "     neighbors rep km 15 hops 2");
         pushCompanionMessage(
           "Zeigt Typ (rep/cmp/room/sns), Name, Alter,\n"
           "Distanz/Bearing wenn Positionen bekannt.\n"
@@ -10525,27 +10972,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
-      if (topic_prefix_match(topic, "admin")) {
+      if (topic_prefix_match(topic, "remote")) {
         pushCompanionMessage(
-          "admin: Remote-Administration ueber Mesh-RPC.\n"
-          "Setzt voraus: Zielgeraet hat passwd_admin gesetzt\n"
-          "+ Du bist als Contact bekannt + Role REPEATER.");
+          "remote: Remote-Mesh-RPC zum Konfigurieren\n"
+          "fremder Geraete (Repeater, Sensoren, etc.).\n"
+          "Setzt voraus: Zielgeraet hat passwd_admin\n"
+          "  und/oder passwd_guest gesetzt;\n"
+          "  Du bist als Contact bekannt.");
         pushCompanionMessage(
-          "  admin login <contact-name> <password>\n"
-          "    Login per Mesh-ANON_REQ.\n"
-          "    Antwort: '[admin] Login OK bei <name>'");
+          "  remote login <contact> <password>\n"
+          "    Mesh-ANON_REQ-Login. Server matched gegen\n"
+          "    passwd_admin ODER passwd_guest und antwortet\n"
+          "    mit Rolle: '[remote] Login OK bei <name>'\n"
+          "    (oder unknown bei Mismatch).");
         pushCompanionMessage(
-          "  admin <contact-name> <cmd-text>\n"
+          "  remote cmd <contact> <cmd-text>\n"
           "    Cmd ausfuehren auf dem Remote-Geraet.\n"
-          "    Antwort: '[admin <name>]\\n<reply>'");
+          "    Antwort: '[remote <name>]\\n<reply>'.");
         pushCompanionMessage(
           "Multi-Frame-Reply via Pagination:\n"
-          "  admin <name> <cmd> page <N>\n"
-          "Standard ist page 1; Server zeigt <page N/M>.");
+          "  remote cmd <name> <cmd> page <N>\n"
+          "Standard page 1; Server zeigt <page N/M>.");
         pushCompanionMessage(
-          "Guest-Whitelist (read-only): stats/status/uptime,\n"
-          "  clock/date/time, version/help/?, neighbors.\n"
-          "Admin: alle lokalen CLI-Befehle.");
+          "Rollen serverseitig durchgesetzt:\n"
+          "  admin: alle lokalen CLI-Befehle.\n"
+          "  guest: stats/status/uptime, clock/date/time,\n"
+          "    version/help/?, neighbors (read-only).");
         return;
       }
       if (topic_prefix_match(topic, "bluetooth")) {
@@ -10815,7 +11267,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage(
       "  messages, logging, unscoped-channelmessages,\n"
       "  contact, backup, save, discover, tempradio,\n"
-      "  filter, clear, reboot."
+      "  filter, remote, bluetooth, serial-cli,\n"
+      "  clear, reboot."
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
     // (Wunschliste 40). Sehen Kommentare bei den Handlern.
@@ -11072,6 +11525,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // wie der nightly-Job (runtime > default > geo). Triggert die jeweilige
   // doX-Funktion direkt (umgeht den auto_advert_enabled-Gate damit man
   // explizit per Befehl senden kann auch wenn die Scheduler aus sind).
+  // Upstream-Alias: 'advert.zerohop' = 'advert' (= zero-hop in unserer
+  // Firmware). Upstream-Repeater hat 'advert' als flood-Default und bietet
+  // 'advert.zerohop' fuer den 1-Hop-Modus an -- wir spiegeln den Namen
+  // damit Scripts/Anleitungen kompatibel sind. Direkt zum advert() Aufruf,
+  // ohne weitere Sub-Args.
+  if (starts_with_word(cmd, "advert.zerohop")) {
+    if (advert()) {
+      pushCompanionMessage("OK - advert (zero-hop) gesendet.");
+    } else {
+      pushCompanionMessage("Send failed (queue voll?)");
+    }
+    return;
+  }
   if (starts_with_word(cmd, "advert")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
@@ -11666,91 +12132,374 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //                     auch wenn deren Position unbekannt -- weil
   //                     direkt-gehoert per se interessant ist.
   // Immer 48h-Fenster als Stale-Cutoff.
+  // Upstream-Kompatibilitaet: 'neighbor.remove <pubkey-prefix>' loescht
+  // Eintrag(e) aus der _neighbours-Tabelle. Leeres / Space-Prefix matched
+  // ALLE (Komplettes Clear). Hex-Prefix kann beliebig kurz sein.
+  if (starts_with_word(cmd, "neighbor.remove")) {
+    const char* p = strchr(cmd, ' ');
+    if (!p) {
+      pushCompanionMessage("Usage: neighbor.remove <pubkey-prefix|*>\n"
+                           "  Leeres/Space-Prefix loescht alle.");
+      return;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    // Hex-Prefix parsen (gerade Anzahl Chars, 0..32 Byte).
+    uint8_t prefix_bytes[32];
+    uint8_t prefix_len = 0;
+    if (*p != 0 && *p != '*') {
+      const char* q = p;
+      while (*q && prefix_len < 32) {
+        if (*q == ':' || *q == ' ' || *q == '\t') { q++; continue; }
+        auto h2v = [](char ch, int& out) -> bool {
+          if (ch >= '0' && ch <= '9') { out = ch - '0'; return true; }
+          if (ch >= 'a' && ch <= 'f') { out = 10 + (ch - 'a'); return true; }
+          if (ch >= 'A' && ch <= 'F') { out = 10 + (ch - 'A'); return true; }
+          return false;
+        };
+        int hi, lo;
+        if (!h2v(*q, hi)) {
+          pushCompanionMessage("Ungueltiges Hex-Zeichen.");
+          return;
+        }
+        q++;
+        if (!*q || !h2v(*q, lo)) {
+          pushCompanionMessage("Hex-Prefix braucht gerade Anzahl Chars.");
+          return;
+        }
+        q++;
+        prefix_bytes[prefix_len++] = (uint8_t)((hi << 4) | lo);
+      }
+    }
+    // Iteriere _neighbours und loesche matches.
+    uint8_t removed_nb = 0;
+    uint8_t i = 0;
+    while (i < _neighbours_count) {
+      bool match = (prefix_len == 0)
+                   || (memcmp(_neighbours[i].pub_key, prefix_bytes, prefix_len) == 0);
+      if (match) {
+        for (uint8_t k = i; k + 1 < _neighbours_count; k++) {
+          _neighbours[k] = _neighbours[k + 1];
+        }
+        memset(&_neighbours[_neighbours_count - 1], 0, sizeof(_neighbours[0]));
+        _neighbours_count--;
+        removed_nb++;
+        continue;  // gleicher Index naechster Eintrag (shifted)
+      }
+      i++;
+    }
+    // Plus: Kontakte mit matching pubkey-Prefix entfernen. Die 'neighbors'
+    // Ausgabe listet Kontakte mit lastmod<48h -- ohne diese auch zu
+    // entfernen sieht der User keinen Effekt von neighbor.remove auf
+    // den Display (User-Bug 2026-06-11).
+    uint8_t removed_c = 0;
+    int nc = getNumContacts();
+    // Achtung: removeContact shifted das Contact-Array, also iterieren wir
+    // mit fresh getContactByIdx und Loeschen via lookupContactByPubKey ->
+    // removeContact. Schleife bis kein Match mehr gefunden wird.
+    bool any_removed;
+    do {
+      any_removed = false;
+      nc = getNumContacts();
+      for (int k = 0; k < nc; k++) {
+        ContactInfo ci;
+        if (!getContactByIdx((uint32_t)k, ci)) continue;
+        bool match = (prefix_len == 0)
+                     || (memcmp(ci.id.pub_key, prefix_bytes, prefix_len) == 0);
+        if (!match) continue;
+        ContactInfo* cp = lookupContactByPubKey(ci.id.pub_key, PUB_KEY_SIZE);
+        if (cp && removeContact(*cp)) {
+          removed_c++;
+          any_removed = true;
+          break;  // Array geshifted, neu starten
+        }
+      }
+    } while (any_removed);
+    if (removed_c > 0) saveContacts();
+    char r[140];
+    snprintf(r, sizeof(r),
+             "OK - neighbor.remove:\n"
+             "  %u runtime-neighbours entfernt (%u verbleibend)\n"
+             "  %u Kontakte entfernt",
+             removed_nb, _neighbours_count, removed_c);
+    pushCompanionMessage(r);
+    return;
+  }
   if (starts_with_word(cmd, "neighbors")) {
-    enum NbMode { NB_DIRECT, NB_HOPS, NB_KM };
-    NbMode mode = NB_DIRECT;
-    int    max_hops = 0;
-    double max_km = 0.0;
-
+    // Erweiterter Parser (User-Wunsch 2026-06-12, erweitert 2026-06-13):
+    // mehrere Modifier kombinierbar. Rolle (rep|cmp|sns|room) +
+    // km + hops + deg gleichzeitig. Semantik 2026-06-13: AND zwischen
+    // allen Filtern (vorher km/hops OR + direct-always).
+    //   neighbors rep                       -> nur Repeater, direct
+    //   neighbors rep km 15 hops 1          -> Rep <=15 km UND <=1 hops
+    //   neighbors cmp                       -> nur Companion/Chat
+    //   neighbors rep cmp                   -> Rep ODER Cmp (Rolle: OR)
+    //   neighbors km 50 deg 340-005         -> <=50 km UND Peilung
+    //                                          340..360 ODER 0..5 Grad
+    //   neighbors km 50 hops 2 deg 350-010  -> alle drei AND
+    //   neighbors deg 180                   -> Peilung 180 +/- 1.5 Grad
+    int    max_hops = 0;          // 0 = no hops-Modifier
+    double max_km   = 0.0;        // 0.0 = no km-Modifier
+    bool   has_hops = false;
+    bool   has_km   = false;
+    bool   has_deg  = false;
+    // Bearing-Filter in 1/10-Grad-Skala (ganzzahlig, Wrap-fest). Tolerance
+    // bei Single-Value: +/- 1.5 Grad (User-Spec 2026-06-13).
+    int    deg_lo_x10 = 0;        // 0..3599
+    int    deg_hi_x10 = 0;        // 0..3599
+    bool   deg_wraps  = false;    // true wenn Sektor ueber 0/360 geht
+    char   deg_arg_buf[16];       // fuer Header-Anzeige
+    deg_arg_buf[0] = 0;
+    uint8_t role_mask = 0;        // 0 = none gesetzt -> default all
+    auto consume_word = [&](const char*& p, const char* word) -> bool {
+      size_t L = strlen(word);
+      if (strncmp(p, word, L) != 0) return false;
+      char nx = p[L];
+      if (nx == 0 || nx == ' ' || nx == '\t') {
+        p += L;
+        while (*p == ' ' || *p == '\t') p++;
+        return true;
+      }
+      return false;
+    };
     const char* arg = strchr(cmd, ' ');
     if (arg) {
       while (*arg == ' ' || *arg == '\t') arg++;
-      if (*arg) {
-        if (strncmp(arg, "help", 4) == 0 || arg[0] == '?') {
+      while (*arg) {
+        if (arg[0] == '?' || consume_word(arg, "help")) {
           pushCompanionMessage(
-            "neighbors [hops <N> | km <D>]:\n"
-            "  ohne Arg: nur direkt-gehoerte (hops=0).");
+            "neighbors [<role>...] [hops <N>] [km <D>]\n"
+            "          [deg <X> | <FROM>-<TO>]:");
           pushCompanionMessage(
-            "  hops <N>: direkt + bis zu N Hops.\n"
-            "  km <D>:   direkt + alle <= D km Distanz\n"
-            "            (Position noetig fuer km-Filter).");
+            "  <role>: repeater|companion|sensor|room\n"
+            "    (abkuerzbar+kombinierbar, z.B. 'rep')");
+          pushCompanionMessage(
+            "  hops <N>: <=N Hops (0=direkt).\n"
+            "  km <D>:   <=D km Distanz (braucht GPS).");
+          pushCompanionMessage(
+            "  deg <X>:  Peilung X +/- 1.5 Grad.\n"
+            "  deg <FROM>-<TO>: Peil-Sektor,\n"
+            "    darf 0 wrappen (z.B. 340-005).");
+          pushCompanionMessage(
+            "  Mehrere Filter = UND-Verknuepfung.\n"
+            "  ohne Filter -> nur direct-gehoerte.\n"
+            "  Bsp: neighbors km 50 deg 340-005");
           return;
         }
-        if (strncmp(arg, "hops", 4) == 0
-            && (arg[4] == ' ' || arg[4] == '\t')) {
-          const char* nstart = arg + 4;
-          while (*nstart == ' ' || *nstart == '\t') nstart++;
-          max_hops = atoi(nstart);
-          if (max_hops <= 0 || max_hops > 63) {
-            pushCompanionMessage("Usage: neighbors hops <1..63>");
+        // Rollen-Token: exakt ODER unambig-Prefix. So tippt der User
+        // 'compa' statt 'cmp', 'sens' statt 'sns'. Ambig-Schutz: 'r'
+        // wuerde rep+room treffen (verschiedene Rollen) -> Mehrdeutig-
+        // Fehler. Aber 'rep' (exakt) und 'repe' (prefix von 'repeater')
+        // sind ok, weil beide auf REPEATER zeigen.
+        {
+          static const struct { const char* name; uint8_t adv_type; }
+              role_kw[] = {
+            {"rep",       ADV_TYPE_REPEATER},
+            {"repeater",  ADV_TYPE_REPEATER},
+            {"cmp",       ADV_TYPE_CHAT},
+            {"chat",      ADV_TYPE_CHAT},
+            {"companion", ADV_TYPE_CHAT},
+            {"sns",       ADV_TYPE_SENSOR},
+            {"sensor",    ADV_TYPE_SENSOR},
+            {"room",      ADV_TYPE_ROOM},
+          };
+          static const size_t role_kw_n =
+              sizeof(role_kw) / sizeof(role_kw[0]);
+          // Token-Laenge bestimmen ohne arg vorzuruecken.
+          size_t tlen = 0;
+          while (arg[tlen] && arg[tlen] != ' ' && arg[tlen] != '\t') tlen++;
+          if (tlen > 0) {
+            int exact_idx = -1;
+            int prefix_type = -1;       // gewinnender adv_type bei Prefix
+            int prefix_hits = 0;        // wie viele Keywords matchen
+            bool ambig = false;
+            for (size_t k = 0; k < role_kw_n; k++) {
+              size_t kl = strlen(role_kw[k].name);
+              if (kl < tlen) continue;
+              if (strncmp(arg, role_kw[k].name, tlen) != 0) continue;
+              if (kl == tlen) { exact_idx = (int)k; break; }
+              // Prefix-Treffer
+              prefix_hits++;
+              if (prefix_type < 0) prefix_type = role_kw[k].adv_type;
+              else if (prefix_type != (int)role_kw[k].adv_type) ambig = true;
+            }
+            int chosen = -1;
+            if (exact_idx >= 0) {
+              chosen = role_kw[exact_idx].adv_type;
+            } else if (prefix_hits >= 1 && !ambig) {
+              chosen = prefix_type;
+            } else if (prefix_hits >= 1 && ambig) {
+              // Mehrdeutig: User-Hinweis welche Keywords kollidieren.
+              char msg[120]; int mp = 0;
+              mp += snprintf(msg + mp, sizeof(msg) - mp,
+                             "Rolle mehrdeutig:");
+              for (size_t k = 0; k < role_kw_n; k++) {
+                size_t kl = strlen(role_kw[k].name);
+                if (kl <= tlen) continue;
+                if (strncmp(arg, role_kw[k].name, tlen) != 0) continue;
+                mp += snprintf(msg + mp, sizeof(msg) - mp,
+                               " %s", role_kw[k].name);
+              }
+              pushCompanionMessage(msg);
+              return;
+            }
+            if (chosen >= 0) {
+              role_mask |= (1 << chosen);
+              arg += tlen;
+              while (*arg == ' ' || *arg == '\t') arg++;
+              continue;
+            }
+          }
+        }
+        if (consume_word(arg, "hops")) {
+          if (*arg < '0' || *arg > '9') {
+            pushCompanionMessage("Usage: ... hops <0..63>");
             return;
           }
-          mode = NB_HOPS;
-        } else if (strncmp(arg, "km", 2) == 0
-                   && (arg[2] == ' ' || arg[2] == '\t')) {
-          const char* nstart = arg + 2;
-          while (*nstart == ' ' || *nstart == '\t') nstart++;
-          max_km = atof(nstart);
+          max_hops = atoi(arg);
+          if (max_hops > 63) {
+            pushCompanionMessage("Usage: ... hops <0..63>");
+            return;
+          }
+          has_hops = true;
+          while (*arg && *arg != ' ' && *arg != '\t') arg++;
+          while (*arg == ' ' || *arg == '\t') arg++;
+          continue;
+        }
+        if (consume_word(arg, "km")) {
+          max_km = atof(arg);
           if (max_km <= 0.0 || max_km > 99999.0) {
-            pushCompanionMessage("Usage: neighbors km <distance>");
+            pushCompanionMessage("Usage: ... km <distance>");
             return;
           }
-          mode = NB_KM;
-        } else {
-          pushCompanionMessage(
-            "Usage: neighbors [hops <N> | km <D> | help]");
-          return;
+          has_km = true;
+          while (*arg && *arg != ' ' && *arg != '\t') arg++;
+          while (*arg == ' ' || *arg == '\t') arg++;
+          continue;
         }
+        if (consume_word(arg, "deg")) {
+          // Token bis Whitespace ausschneiden.
+          const char* tok = arg;
+          while (*arg && *arg != ' ' && *arg != '\t') arg++;
+          size_t tlen = (size_t)(arg - tok);
+          while (*arg == ' ' || *arg == '\t') arg++;
+          if (tlen == 0 || tlen >= sizeof(deg_arg_buf)) {
+            pushCompanionMessage(
+              "Usage: ... deg <0..359> | <FROM>-<TO>");
+            return;
+          }
+          memcpy(deg_arg_buf, tok, tlen);
+          deg_arg_buf[tlen] = 0;
+          // Range-Form mit '-': aber Vorzeichen '-' am Anfang ausschliessen.
+          const char* dash = NULL;
+          for (size_t k = 1; k < tlen; k++) {
+            if (deg_arg_buf[k] == '-') { dash = deg_arg_buf + k; break; }
+          }
+          int from_deg, to_deg;
+          if (dash) {
+            char tmp[8];
+            size_t flen = (size_t)(dash - deg_arg_buf);
+            if (flen == 0 || flen >= sizeof(tmp)) {
+              pushCompanionMessage("Usage: ... deg <FROM>-<TO>");
+              return;
+            }
+            memcpy(tmp, deg_arg_buf, flen); tmp[flen] = 0;
+            from_deg = atoi(tmp);
+            to_deg   = atoi(dash + 1);
+            if (from_deg < 0 || from_deg > 359 || to_deg < 0 || to_deg > 359) {
+              pushCompanionMessage(
+                "deg: FROM/TO muessen 0..359 sein.");
+              return;
+            }
+            deg_lo_x10 = from_deg * 10;
+            deg_hi_x10 = to_deg   * 10;
+          } else {
+            int v = atoi(deg_arg_buf);
+            if (v < 0 || v > 359) {
+              pushCompanionMessage("deg: X muss 0..359 sein.");
+              return;
+            }
+            // Tolerance +/- 1.5 Grad -> Skala x10.
+            deg_lo_x10 = v * 10 - 15;
+            deg_hi_x10 = v * 10 + 15;
+            if (deg_lo_x10 < 0)    deg_lo_x10 += 3600;
+            if (deg_hi_x10 >= 3600) deg_hi_x10 -= 3600;
+          }
+          // Wrap-Erkennung: from > to bedeutet Sektor ueber 0/360.
+          deg_wraps = (deg_lo_x10 > deg_hi_x10);
+          has_deg = true;
+          continue;
+        }
+        pushCompanionMessage(
+          "Usage: neighbors [rep|cmp|sns|room]\n"
+          "  [hops <N>] [km <D>] [deg <X|FROM-TO>]\n"
+          "  [help]");
+        return;
       }
     }
+    if (role_mask == 0) role_mask = 0xFE;  // alle valid types
 
     uint32_t now = getRTCClock()->getCurrentTime();
     int num = getNumContacts();
     int shown = 0;
 
     // Akkumulierender Buffer wie bei prefs (mehrzeilig pro push).
-    // Reise-Fix 2026-06-08: Flush-Schwelle 130 -> 100 damit ein zusaetzlicher
-    // 40-byte-Eintrag (Name+age+km+bearing) sicher unter 145-Byte-Wire-Limit
-    // bleibt. Vorher: Split mitten in UTF-8 °-Symbol -> '@359' im Folgepush.
+    // BLE-Frame-Limit: pushCompanionMessage praefixt "Heltec V3: " (~12)
+    // vor unseren Text und das gesamte combined[] hat MAX_TEXT_LEN=160.
+    // Sicher = Text unter 130 Bytes pro Push. Sonst wird mitten im UTF-8
+    // °-Symbol (0xC2 0xB0) abgeschnitten und die App zeigt einen
+    // Replacement-Char '<?>' (User-Bug 2026-06-12 unter neue Felder
+    // snr/scope -- Zeilen wurden laenger als bei der Reise 06-08).
     char buf[200];
     size_t buf_used = 0;
-    auto flush = [&](bool force) {
+    auto flush = [&](bool /*force*/) {
       if (buf_used == 0) return;
-      if (!force && buf_used < 100) return;
       buf[buf_used] = 0;
       pushCompanionMessage(buf);
       buf_used = 0;
     };
     auto add_line = [&](const char* line) {
       size_t len = strlen(line);
-      if (buf_used + len + 2 >= sizeof(buf)) flush(true);
+      // Pre-flush wenn die neue Zeile (+ \n davor) ueber 130 Total ginge.
+      if (buf_used > 0 && buf_used + 1 + len > 130) flush(true);
       if (buf_used > 0) buf[buf_used++] = '\n';
       for (size_t i = 0; i < len && buf_used < sizeof(buf) - 1; i++) {
         buf[buf_used++] = line[i];
       }
-      flush(false);
     };
 
     // Header gemaess Modus.
-    if (mode == NB_DIRECT) {
-      add_line("neighbors (direct, < 48h):");
-    } else if (mode == NB_HOPS) {
-      char h[64];
-      snprintf(h, sizeof(h), "neighbors (direct + <=%d hops, < 48h):", max_hops);
-      add_line(h);
-    } else {
-      char h[64];
-      snprintf(h, sizeof(h), "neighbors (direct + <=%.0fkm, < 48h):", max_km);
+    // Header dynamisch zusammensetzen aus aktiven Filtern.
+    {
+      char h[120]; int hp = 0;
+      hp += snprintf(h + hp, sizeof(h) - hp, "neighbors (");
+      if (role_mask != 0xFE) {
+        bool first = true;
+        auto add_r = [&](const char* nm) {
+          hp += snprintf(h + hp, sizeof(h) - hp, "%s%s", first ? "" : "+", nm);
+          first = false;
+        };
+        if (role_mask & (1 << ADV_TYPE_REPEATER)) add_r("rep");
+        if (role_mask & (1 << ADV_TYPE_CHAT))     add_r("cmp");
+        if (role_mask & (1 << ADV_TYPE_ROOM))     add_r("room");
+        if (role_mask & (1 << ADV_TYPE_SENSOR))   add_r("sns");
+        hp += snprintf(h + hp, sizeof(h) - hp, ", ");
+      }
+      // Filter-Liste: ohne Filter heisst 'direct only'; mit Filter wird
+      // AND-verkettet angezeigt (Wunschliste/User-Spec 2026-06-13).
+      bool any_filter = has_hops || has_km || has_deg;
+      if (!any_filter) {
+        hp += snprintf(h + hp, sizeof(h) - hp, "direct");
+      } else {
+        bool first = true;
+        auto sep = [&]() {
+          hp += snprintf(h + hp, sizeof(h) - hp, "%s", first ? "" : " & ");
+          first = false;
+        };
+        if (has_hops) { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "<=%d hops", max_hops); }
+        if (has_km)   { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "<=%.0fkm", max_km); }
+        if (has_deg)  { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "deg %s", deg_arg_buf); }
+      }
+      hp += snprintf(h + hp, sizeof(h) - hp, ", < 48h):");
       add_line(h);
     }
 
@@ -11763,30 +12512,52 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (now - c.lastmod > CR_HEARD_MAX_AGE_SECS) continue;
 
       // Distanz/Bearing einmal berechnen wenn beide GPS-Positionen
-      // bekannt -- wird sowohl fuer den km-Mode-Filter als auch fuer
+      // bekannt -- wird sowohl fuer km/deg-Filter als auch fuer
       // die Anzeige genutzt.
       char dist_buf[24]; dist_buf[0] = 0;
       double their_km = -1.0;
+      int    their_brg = -1;  // -1 = unbekannt
       if (have_my_gps && (c.gps_lat != 0 || c.gps_lon != 0)) {
         double their_lat = (double)c.gps_lat / 1000000.0;
         double their_lon = (double)c.gps_lon / 1000000.0;
         their_km  = dl9sau_haversine_km(sensors.node_lat, sensors.node_lon,
                                          their_lat, their_lon);
-        int brg   = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
+        their_brg = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
                                          their_lat, their_lon);
-        snprintf(dist_buf, sizeof(dist_buf), " %.1fkm @%d°", their_km, brg);
+        snprintf(dist_buf, sizeof(dist_buf), " %.1fkm @%d°",
+                 their_km, their_brg);
       }
 
-      // Filter gemaess Modus. Direkt-gehoerte werden IMMER gezeigt.
-      bool is_direct = (c.out_path_len == 0);
-      bool include = is_direct;
-      if (mode == NB_HOPS
-          && c.out_path_len != OUT_PATH_UNKNOWN
-          && c.out_path_len <= max_hops) {
+      // Role-Filter (OR-Set ueber Bit-Mask) -- immer aktiv.
+      if ((role_mask & (1 << c.type)) == 0) continue;
+      // Filter-Semantik (User-Spec 2026-06-13): ohne Filter -> nur direct;
+      // mit Filter -> AND-Verknuepfung aller angegebenen Filter (km,
+      // hops, deg). Direkte Knoten ohne GPS fallen damit unter km/deg
+      // bewusst raus, weil km/deg sich auf bekannte Position beziehen.
+      bool any_filter = has_hops || has_km || has_deg;
+      bool include;
+      if (!any_filter) {
+        include = (c.out_path_len == 0);  // direct only
+      } else {
         include = true;
-      }
-      if (mode == NB_KM && their_km >= 0 && their_km <= max_km) {
-        include = true;
+        if (has_hops) {
+          if (c.out_path_len == OUT_PATH_UNKNOWN
+              || c.out_path_len > max_hops) include = false;
+        }
+        if (include && has_km) {
+          if (their_km < 0 || their_km > max_km) include = false;
+        }
+        if (include && has_deg) {
+          if (their_brg < 0) {
+            include = false;
+          } else {
+            int brg_x10 = their_brg * 10;
+            bool deg_match = deg_wraps
+              ? (brg_x10 >= deg_lo_x10 || brg_x10 <= deg_hi_x10)
+              : (brg_x10 >= deg_lo_x10 && brg_x10 <= deg_hi_x10);
+            if (!deg_match) include = false;
+          }
+        }
       }
       if (!include) continue;
 
@@ -11826,14 +12597,38 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char idstr[64];
       snprintf(idstr, sizeof(idstr), "%s %s", prefix6, c.name);
 
-      char line[160];
-      if (mode == NB_DIRECT) {
-        // Direkt-Mode: hops-Spalte droppen (immer 0, redundant).
-        snprintf(line, sizeof(line), "  %s %-25.25s %6s%s",
-                 tname, idstr, age, dist_buf);
+      // SNR + Scope aus _neighbours[] (per-pubkey) suchen. Nur direkt-
+      // gehoert (zero-hop) liefert einen Eintrag. Bei Kontakten via Flood:
+      // '--' fuer SNR, kein Scope-Tag (User-Wunsch 2026-06-11).
+      char snr_buf[16];
+      char scope_buf[24] = "";
+      int8_t snr_q4 = INT8_MIN;
+      for (uint8_t k = 0; k < _neighbours_count && k < MAX_RUNTIME_NEIGHBOURS; k++) {
+        if (memcmp(_neighbours[k].pub_key, c.id.pub_key, 32) == 0) {
+          snr_q4 = _neighbours[k].snr;
+          // Scope-Annotation '(#name)' oder '(#?)' bei scoped+unbekannt.
+          // Unscoped: kein Tag.
+          if (_neighbours[k].scope_name[0]) {
+            snprintf(scope_buf, sizeof(scope_buf), " (#%s)",
+                     _neighbours[k].scope_name);
+          }
+          break;
+        }
+      }
+      if (snr_q4 != INT8_MIN) {
+        snprintf(snr_buf, sizeof(snr_buf), "%+6.1fdB", (double)snr_q4 / 4.0);
       } else {
-        snprintf(line, sizeof(line), "  %s %-25.25s %6s hops=%s%s",
-                 tname, idstr, age, hop, dist_buf);
+        snprintf(snr_buf, sizeof(snr_buf), "      --");
+      }
+      char line[180];
+      // Hops-Spalte nur zeigen wenn ueberhaupt hops-Filter aktiv ist
+      // (sonst direct-only = hops immer 0 = redundant).
+      if (!has_hops) {
+        snprintf(line, sizeof(line), "  %s %-25.25s %6s %s%s%s",
+                 tname, idstr, age, snr_buf, scope_buf, dist_buf);
+      } else {
+        snprintf(line, sizeof(line), "  %s %-25.25s %6s %s%s hops=%s%s",
+                 tname, idstr, age, snr_buf, scope_buf, hop, dist_buf);
       }
       add_line(line);
       shown++;
@@ -11841,16 +12636,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     // Discover-Augmentation: wenn innerhalb 48h ein 'discover' lief und
     // dabei Antworten gesammelt wurden, liste jene Knoten nach die NICHT
-    // in der Kontaktliste sind (kein Auto-Add fuer diesen Typ konfiguriert).
-    // Discover-Antworten sind protokoll-bedingt zero-hop -- daher passen
-    // sie zu allen drei Modi (direct, hops, km). Im km-Mode wird mangels
-    // GPS-Info keine Distanz angezeigt, aber Eintrag inkludiert (User-
-    // Vorgabe: direkt-gehoert ist immer interessant).
+    // in der Kontaktliste sind. Discover-Antworten sind protokoll-bedingt
+    // zero-hop -- passen also zu hops-Filter (out_path_len effektiv 0).
+    // km/deg-Filter koennen ohne GPS aber nicht entschieden werden, also
+    // bei aktivem km/deg ueberspringen (Semantik 2026-06-13: AND).
     int discover_shown = 0;
     if (_discover_last_at_rtc > 0
         && now >= _discover_last_at_rtc
         && (now - _discover_last_at_rtc) <= CR_HEARD_MAX_AGE_SECS
-        && _discover_count > 0) {
+        && _discover_count > 0
+        && !has_km && !has_deg) {
       char dage[16];
       uint32_t s = now - _discover_last_at_rtc;
       if      (s < 60)     snprintf(dage, sizeof(dage), "%us", (unsigned)s);
@@ -11867,6 +12662,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         ContactInfo* known = lookupContactByPubKey(
             (uint8_t*)e.pub_key, e.full_pubkey ? PUB_KEY_SIZE : 8);
         if (known) continue;
+        // Role-Filter auch hier respektieren.
+        if ((role_mask & (1 << e.adv_type)) == 0) continue;
 
         const char* dtname;
         switch (e.adv_type) {
@@ -11886,14 +12683,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         char did[40];
         snprintf(did, sizeof(did), "%s (unknown)", dprefix6);
 
-        char line[160];
-        if (mode == NB_DIRECT) {
-          snprintf(line, sizeof(line), "  %s %-25.25s %6s",
-                   dtname, did, dage);
+        // SNR-Anzeige fuer unknown-Knoten (User-Wunsch 2026-06-12:
+        // 'unknown'-Eintrag wie 2ea0e5 ist informativer mit SNR-Wert,
+        // damit man sieht ob weit entfernt oder neben einem stehend).
+        char dsnr[16];
+        if (e.our_snr_q4 != INT8_MIN) {
+          snprintf(dsnr, sizeof(dsnr), "%+6.1fdB", (double)e.our_snr_q4 / 4.0);
         } else {
-          // hops=0 fix (discover-Antworten sind protokoll-bedingt direct)
-          snprintf(line, sizeof(line), "  %s %-25.25s %6s hops=0",
-                   dtname, did, dage);
+          snprintf(dsnr, sizeof(dsnr), "      --");
+        }
+        char line[160];
+        if (!has_hops) {
+          snprintf(line, sizeof(line), "  %s %-25.25s %6s %s",
+                   dtname, did, dage, dsnr);
+        } else {
+          // hops=0 (discover-Antworten sind protokoll-bedingt direct)
+          snprintf(line, sizeof(line), "  %s %-25.25s %6s %s hops=0",
+                   dtname, did, dage, dsnr);
         }
         add_line(line);
         discover_shown++;
@@ -12107,8 +12913,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memset(_prefs.filter_scope_keep_chan_on, 0, sizeof(_prefs.filter_scope_keep_chan_on));
       memset(_prefs.filter_scope_keep_chan_ex, 0, sizeof(_prefs.filter_scope_keep_chan_ex));
       _prefs.filter_unknown_channel_repeat = 1;  // filter-unscoped Default
+      // Phase 4 (2026-06-11): Advert/Pubkey-Filter loeschen.
+      _prefs.filter_advert_drop_name_count = 0;
+      memset(_prefs.filter_advert_drop_name, 0,
+             sizeof(_prefs.filter_advert_drop_name));
+      _prefs.filter_advert_drop_pubkey_count = 0;
+      memset(_prefs.filter_advert_drop_pubkey, 0,
+             sizeof(_prefs.filter_advert_drop_pubkey));
+      _prefs.filter_sender_drop_pubkey_count = 0;
+      memset(_prefs.filter_sender_drop_pubkey, 0,
+             sizeof(_prefs.filter_sender_drop_pubkey));
       _prefs.bluetooth_profile = 0x01;           // cycle Default
       _prefs.bluetooth_active  = 0x01;           // on (cycle)
+      _prefs.tz_mode           = 0;              // auto-eu Default
+      _prefs.tz_offset_min     = 60;             // CET Basis
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
       pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.\n"
@@ -12389,6 +13207,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  prof, act,
                  nondefault ? " (default: profile=cycle active=cycle)"
                             : " [default]");
+        add_line(tmp);
+        if (nondefault) non_default_count++;
+      }
+    }
+    // Wunschliste 50 Phase 1 (2026-06-11): Timezone-Override.
+    {
+      bool nondefault = (_prefs.tz_mode != 0) || (_prefs.tz_offset_min != 60);
+      if (show_all || nondefault) {
+        const char* mname = (_prefs.tz_mode == 1) ? "fixed"
+                          : (_prefs.tz_mode == 2) ? "utc"
+                          : "auto-eu";
+        int off = _prefs.tz_offset_min;
+        snprintf(tmp, sizeof(tmp),
+                 "  tz_mode = %s\n  tz_offset_min = %d%s",
+                 mname, off,
+                 nondefault ? " (default: auto-eu, 60)" : " [default]");
         add_line(tmp);
         if (nondefault) non_default_count++;
       }
@@ -12878,6 +13712,63 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // 'bluetooth power cycle|always-on'    persistent mode
   // 'bluetooth on'                        force ON (persistent: power=always-on)
   // 'bluetooth off'                       persistent power=off
+  // Wunschliste 10 (2026-06-11): USB-Serial CLI on/off-Toggle.
+  //   serial-cli on         -- persistent on
+  //   serial-cli off        -- persistent off
+  //   serial-cli on-temp    -- bis Reboot oder 'serial-cli off' on
+  //                            (Persist-Wert unveraendert)
+  //
+  // Default Build-abhaengig:
+  //   BLE-/WiFi-Builds: on  (USB-Serial ist frei)
+  //   USB-Frame-Builds: off (Serial ist App-Frame-Kanal; User aktiviert
+  //                         CLI bewusst per BLE/USB-App-Befehl, dann
+  //                         schweigt der Frame-Parser)
+  if (starts_with_word(cmd, "serial-cli")) {
+    const char* p = strchr(cmd, ' ');
+    if (!p) {
+      const char* persist_s = (_prefs.serial_cli_persist_on != 0) ? "on" : "off";
+      const char* eff_s     = serialCliEffectiveOn() ? "on" : "off";
+      char r[180];
+      snprintf(r, sizeof(r),
+               "serial-cli: USB-Serial Plain-Text CLI\n"
+               "  persistent = %s\n"
+               "  temp-on    = %s\n"
+               "  effektiv   = %s\n"
+               "  serial-cli on|off|on-temp",
+               persist_s, _serial_cli_temp_on ? "yes" : "no", eff_s);
+      pushCompanionMessage(r);
+      return;
+    }
+    while (*p == ' ') p++;
+    static const CompanionChoice cli_choices[] = {
+      { "on",      true },   // 0  persistent on  (no_abbrev fuer Toggle-Safety)
+      { "off",     true },   // 1  persistent off
+      { "on-temp", true },   // 2  bis Reboot/off
+    };
+    int ci = dispatchToken(p, cli_choices, 3, "on|off|on-temp");
+    if (ci < 0) return;
+    if (ci == 0) {       // on
+      _prefs.serial_cli_persist_on = 1;
+      _serial_cli_temp_on = false;  // temp aufgehoben durch persistent on
+      savePrefs();
+      pushCompanionMessage("OK - serial-cli = on (persistent)");
+    } else if (ci == 1) { // off
+      _prefs.serial_cli_persist_on = 0;
+      _serial_cli_temp_on = false;
+      savePrefs();
+      pushCompanionMessage("OK - serial-cli = off (persistent)");
+    } else {             // on-temp
+      _serial_cli_temp_on = true;
+      char r[100];
+      snprintf(r, sizeof(r),
+               "OK - serial-cli = on-temp (Persist bleibt %s,\n"
+               "  reboot oder 'serial-cli off' beendet)",
+               _prefs.serial_cli_persist_on ? "on" : "off");
+      pushCompanionMessage(r);
+    }
+    return;
+  }
+
   // 'bluetooth tmp-off'                   runtime off (nicht persistent)
   if (starts_with_word(cmd, "bluetooth")) {
     const char* p = strchr(cmd, ' ');
@@ -12898,16 +13789,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         case BLE_PWR_OFF:       s = "OFF (persist)"; break;
       }
       uint32_t now_ms = millis();
-      int32_t  rem_ms = (int32_t)(_ble_pwr_state_until - now_ms);
+      // until=0 markiert States ohne Deadline (AWAKE/OFF/TMP_OFF) -- 'rem'
+      // ware sonst negativ und irrefuehrend (User 2026-06-11). '-' zeigen.
+      char rem_str[20];
+      if (_ble_pwr_state_until == 0) {
+        snprintf(rem_str, sizeof(rem_str), "rem=-");
+      } else {
+        int32_t rem_ms = (int32_t)(_ble_pwr_state_until - now_ms);
+        snprintf(rem_str, sizeof(rem_str), "rem=%lds", (long)(rem_ms / 1000));
+      }
       char r[200];
       snprintf(r, sizeof(r),
                "bluetooth: profile=%s active=%s state=%s\n"
-               "  ble=%s now=%lu until=%lu rem=%lds",
+               "  ble=%s now=%lu until=%lu %s",
                prof, act, s,
                _serial && _serial->isEnabled() ? "on" : "off",
                (unsigned long)now_ms,
                (unsigned long)_ble_pwr_state_until,
-               (long)(rem_ms / 1000));
+               rem_str);
       pushCompanionMessage(r);
       // Transition-Log (Ring-Buffer letzte 8 Wechsel).
       if (_ble_log_count > 0) {
@@ -12944,16 +13843,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
-    if (strncmp(p, "power", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
-      p += 5;
-      while (*p == ' ' || *p == '\t') p++;
-      if (strncmp(p, "cycle", 5) == 0) {
+    // Top-Level bluetooth-Sub: power / on / off / tmp-off. on/off/tmp-off
+    // sind state-toggles und stehen damit auf no_abbrev (User-Konvention
+    // 2026-06-11: destructive/Toggle-Befehle voll ausschreiben, damit
+    // versehentlich 'o' nicht zu 'off' wird).
+    static const CompanionChoice bt_top[] = {
+      { "power",   false },  // 0  Sub-Namespace
+      { "on",      true  },  // 1
+      { "off",     true  },  // 2  destructive
+      { "tmp-off", true  },  // 3  destructive (runtime)
+    };
+    int bt_sub = dispatchToken(p, bt_top, 4, "power|on|off|tmp-off");
+    if (bt_sub < 0) return;
+    if (bt_sub == 0) {  // power <cycle|always-on>
+      static const CompanionChoice bt_pwr[] = {
+        { "cycle",     true },  // 0  Mode-Change
+        { "always-on", true },  // 1  Mode-Change
+      };
+      int pwr_idx = dispatchToken(p, bt_pwr, 2, "cycle|always-on");
+      if (pwr_idx < 0) return;
+      if (pwr_idx == 0) {  // cycle
         _prefs.bluetooth_profile = 0x01;
-        // Wenn aktuell aktiv: active auf neue Profile-Bits aktualisieren.
         if (_prefs.bluetooth_active != 0) {
           _prefs.bluetooth_active = 0x01;
         }
-        // wenn State OFF/TMP_OFF und User aktiv: Hot-Start
         if (_prefs.bluetooth_active != 0
             && (_ble_pwr_state == BLE_PWR_OFF || _ble_pwr_state == BLE_PWR_TMP_OFF)) {
           _ble_pwr_state = BLE_PWR_HOT_START;
@@ -12961,9 +13874,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         savePrefs();
         pushCompanionMessage("OK - bluetooth power=cycle (persist)");
-        return;
-      }
-      if (strncmp(p, "always-on", 9) == 0) {
+      } else {  // always-on
         _prefs.bluetooth_profile = 0x20;
         if (_prefs.bluetooth_active != 0) {
           _prefs.bluetooth_active = 0x20;
@@ -12973,16 +13884,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         savePrefs();
         pushCompanionMessage("OK - bluetooth power=always-on (persist)");
-        return;
       }
-      pushCompanionMessage("Erwartet: bluetooth power <cycle|always-on>");
-      // (User-Konvention 2026-06-10: <a|b|c> fuer Alternativen-Set)
       return;
     }
-    if (strncmp(p, "on", 2) == 0 && (p[2] == 0 || p[2] == ' ')) {
-      // User-Semantik 2026-06-11: active = profile (kopiert das
-      // konfigurierte Profil-Bit). Plus State-Machine-Triggern:
-      // always-on -> AWAKE, cycle -> HOT_START (5min Window).
+    if (bt_sub == 1) {  // on
       _prefs.bluetooth_active = _prefs.bluetooth_profile;
       if (_prefs.bluetooth_active & 0x20) {
         _ble_pwr_state = BLE_PWR_AWAKE;
@@ -12999,75 +13904,144 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    if (strncmp(p, "off", 3) == 0 && (p[3] == 0 || p[3] == ' ')) {
-      _prefs.bluetooth_active = 0;  // profile unchanged
+    if (bt_sub == 2) {  // off
+      _prefs.bluetooth_active = 0;
       savePrefs();
       pushCompanionMessage(
         "OK - bluetooth off (persist).\n"
         "Recovery: USB-Serial oder\n"
         "Hardware-Button (Geraete mit Display).");
-      // Deferred-disable analog Reboot-Pattern: 5s Zeit damit App den
-      // OK-Frame ueber BLE empfaengt bevor wir Chip abschalten. 3s
-      // reichten in der Praxis nicht (User-Test 2026-06-10) -- App-
-      // Sync-Round-Trip braucht laenger. Plus periodischer Tickle-
-      // Resender alle 1s (manageBlePower) damit App nicht verpasst.
       _pending_ble_off_at = millis() + 5000;
       if (_pending_ble_off_at == 0) _pending_ble_off_at = 1;
       _pending_ble_off_next_tickle_at = millis() + 1000;
       return;
     }
-    if (strncmp(p, "tmp-off", 7) == 0) {
-      _ble_pwr_state = BLE_PWR_TMP_OFF;
-      _ble_pwr_state_until = 0;
-      setBleEnabled(false);
-      pushCompanionMessage("OK - bluetooth tmp-off (runtime only)");
-      return;
-    }
-    pushCompanionMessage(
-      "Erwartet:\n"
-      "  power <cycle|always-on>\n"
-      "  <on|off|tmp-off>");
+    // bt_sub == 3 -> tmp-off
+    _ble_pwr_state = BLE_PWR_TMP_OFF;
+    _ble_pwr_state_until = 0;
+    setBleEnabled(false);
+    pushCompanionMessage("OK - bluetooth tmp-off (runtime only)");
     return;
   }
 
-  // Wunschliste 52 (2026-06-10): Remote-Admin Client.
-  // 'admin login <contact-name> <password>' -- sendAnonReq + ANON_REQ_TYPE_LOGIN
-  // 'admin <contact-name> <cmd-text>'       -- sendRequest + REQ_TYPE_ADMIN_CMD
-  if (starts_with_word(cmd, "admin")) {
+  // Wunschliste 52 (2026-06-10, restructured 2026-06-11): Remote-Client.
+  //   remote <admin|guest> login <contact> <password>
+  //   remote <admin|guest> cmd   <contact> <cmd-text>
+  //
+  // admin|guest ist Client-Intent: das Wire-Protokoll selbst ist gleich
+  // (ANON_REQ_TYPE_LOGIN sendet das Passwort; Server matched gegen
+  // passwd_admin ODER passwd_guest und antwortet mit Rolle). Die explizite
+  // Wahl im CLI macht aber klar, mit welcher Rolle Du arbeiten willst
+  // und ist konsistent zur serverseitig durchgesetzten Begrenzung.
+  if (starts_with_word(cmd, "remote")) {
     const char* p = strchr(cmd, ' ');
     if (!p) {
       pushCompanionMessage(
         "Usage:\n"
-        "  admin login <contact-name> <password>\n"
-        "  admin <contact-name> <cmd-text>");
+        "  remote <admin|guest> login <contact> <password>\n"
+        "  remote <admin|guest> cmd <contact> <cmd-text>");
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
-    bool is_login = (strncmp(p, "login", 5) == 0
-                     && (p[5] == ' ' || p[5] == '\t'));
-    if (is_login) {
-      p += 5;
-      while (*p == ' ' || *p == '\t') p++;
+    // Erste Achse: admin | guest (Client-Intent)
+    static const CompanionChoice role_choices[] = {
+      { "admin", false },   // 0
+      { "guest", false },   // 1
+    };
+    int role_idx = dispatchToken(p, role_choices, 2, "admin|guest");
+    if (role_idx < 0) return;
+    // Zweite Achse: login | cmd (Aktion)
+    static const CompanionChoice remote_subs[] = {
+      { "login", false },   // 0
+      { "cmd",   false },   // 1
+    };
+    int rsub = dispatchToken(p, remote_subs, 2, "login|cmd");
+    if (rsub < 0) return;
+    bool is_login = (rsub == 0);
+    bool is_guest = (role_idx == 1);
+    (void)is_guest;  // aktuell UI-only; Server enforced die Begrenzung
+    // <contact-name> -- 3 Lookup-Pfade (User-Wunsch 2026-06-11):
+    //   (a) Quoted "Name mit Spaces" (Quotes als Trenner)
+    //   (b) Unquoted: bis erstes Whitespace
+    //   (c) Hex-Prefix: wenn keine Name-Variante matched, versucht pubkey-
+    //       Prefix-Lookup (>= 2 hex chars, gerade Anzahl).
+    // Case-insensitiv (strncasecmp), damit 'IN-Berlin' und 'in-berlin'
+    // gleich behandelt werden (User-Bug 2026-06-11).
+    const char* name_start;
+    size_t name_len;
+    const char* after_name;
+    if (*p == '"') {
+      p++;
+      name_start = raw_cmd + (p - cmd);  // Original-Case fuer Anzeige
+      const char* end = strchr(p, '"');
+      if (!end) {
+        pushCompanionMessage("Fehler: schliessendes Quote fehlt.");
+        return;
+      }
+      name_len = (size_t)(end - p);
+      after_name = end + 1;
+    } else {
+      name_start = raw_cmd + (p - cmd);
+      const char* end = p;
+      while (*end && *end != ' ' && *end != '\t') end++;
+      name_len = (size_t)(end - p);
+      after_name = end;
     }
-    // <contact-name> bis Whitespace
-    const char* name_start = p;
-    while (*p && *p != ' ' && *p != '\t') p++;
-    if (p == name_start) {
+    if (name_len == 0) {
       pushCompanionMessage("Fehler: Contact-Name fehlt.");
       return;
     }
-    size_t name_len = (size_t)(p - name_start);
-    char name_prefix[40];
-    if (name_len >= sizeof(name_prefix)) name_len = sizeof(name_prefix) - 1;
-    memcpy(name_prefix, name_start, name_len);
-    name_prefix[name_len] = 0;
-    ContactInfo* c = searchContactsByPrefix(name_prefix);
+    char name_buf[40];
+    if (name_len >= sizeof(name_buf)) name_len = sizeof(name_buf) - 1;
+    memcpy(name_buf, name_start, name_len);
+    name_buf[name_len] = 0;
+
+    // (a/b) Name-Lookup case-insensitiv (Prefix-Match wie searchContacts-
+    // ByPrefix, aber strncasecmp). Iteration via public getContactByIdx,
+    // dann lookupContactByPubKey fuer den finalen Pointer.
+    ContactInfo* c = NULL;
+    int nc = getNumContacts();
+    for (int i = 0; i < nc; i++) {
+      ContactInfo ci;
+      if (!getContactByIdx((uint32_t)i, ci)) continue;
+      if (strncasecmp(ci.name, name_buf, name_len) == 0) {
+        c = lookupContactByPubKey(ci.id.pub_key, PUB_KEY_SIZE);
+        break;
+      }
+    }
+    // (c) Fallback: Hex-Pubkey-Prefix-Lookup.
+    if (!c && name_len >= 2 && (name_len % 2) == 0) {
+      bool all_hex = true;
+      for (size_t k = 0; k < name_len; k++) {
+        char ch = name_buf[k];
+        if (!((ch >= '0' && ch <= '9')
+              || (ch >= 'a' && ch <= 'f')
+              || (ch >= 'A' && ch <= 'F'))) {
+          all_hex = false;
+          break;
+        }
+      }
+      if (all_hex) {
+        uint8_t pk[32];
+        int pk_len = 0;
+        auto h2v = [](char ch) -> uint8_t {
+          if (ch >= '0' && ch <= '9') return (uint8_t)(ch - '0');
+          if (ch >= 'a' && ch <= 'f') return (uint8_t)(10 + (ch - 'a'));
+          return (uint8_t)(10 + (ch - 'A'));
+        };
+        for (size_t k = 0; k + 1 < name_len && pk_len < 32; k += 2) {
+          pk[pk_len++] = (uint8_t)((h2v(name_buf[k]) << 4) | h2v(name_buf[k+1]));
+        }
+        c = lookupContactByPubKey(pk, pk_len);
+      }
+    }
     if (!c) {
-      char r[80];
-      snprintf(r, sizeof(r), "Contact '%s' nicht gefunden.", name_prefix);
+      char r[100];
+      snprintf(r, sizeof(r), "Contact '%s' nicht gefunden.", name_buf);
       pushCompanionMessage(r);
       return;
     }
+    p = after_name;
     while (*p == ' ' || *p == '\t') p++;
     if (!*p) {
       pushCompanionMessage(is_login
@@ -13128,15 +14102,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* p = strchr(cmd, ' ');
     if (!p) {
       pushCompanionMessage(
-        "Usage:\n"
-        "  filter <sender|text|scope> ...\n"
-        "  TYPE = sender|text (eigene Syntax fuer scope):\n"
-        "  filter TYPE drop|keep add <pat>\n"
-        "    [on-channel|exempt-channel <chans>]");
+        "Usage filter sender:\n"
+        "  filter sender drop|keep name <act>\n"
+        "  <act> = add <pat> [chan-args]\n"
+        "        | remove <pat|idx>\n"
+        "        | list | clear");
       pushCompanionMessage(
-        "  filter TYPE drop|keep remove <pat|idx>\n"
-        "  filter TYPE drop|keep list|clear\n"
-        "  filter TYPE on-channel|exempt-channel <chans|clear>");
+        "Usage filter text:\n"
+        "  filter text drop|keep <act>\n"
+        "  <act> wie bei sender");
+      pushCompanionMessage(
+        "[chan-args] = on-channel <liste>\n"
+        "            | exempt-channel <liste>");
+      pushCompanionMessage(
+        "Shortcut Skopus alle Pattern je Typ:\n"
+        "  filter <sender|text> on-channel <l>\n"
+        "  filter <sender|text> exempt-channel <l>");
       pushCompanionMessage(
         "  filter list  (Komplett-Uebersicht)");
       pushCompanionMessage(
@@ -13144,7 +14125,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "  filter scope drop|keep add <scope-list>");
       pushCompanionMessage(
         "  -- wo: [on-channel|exempt-channel <chans>]\n"
-        "  -- wirkung: [profile for-us|repeat|complete]\n"
+        "  -- wirkung: [profile display|repeat|complete]\n"
         "  Default: alle Channels, complete (beide).");
       pushCompanionMessage(
         "  filter scope drop|keep remove|list|clear\n"
@@ -13159,9 +14140,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     while (*p == ' ' || *p == '\t') p++;
 
+    // Prefix-Match Top-Level (User-Wunsch 2026-06-11): Wortlaengen-
+    // Abkuerzung an jeder Achse. 'fi sen dr nam remove foo' = voll
+    // 'filter sender drop name remove foo'.
+    static const CompanionChoice filter_top_choices[] = {
+      { "list",            false },  // 0
+      { "unknown-channel", false },  // 1
+      { "scope",           false },  // 2
+      { "sender",          false },  // 3
+      { "text",            false },  // 4
+      { "advert",          false },  // 5
+    };
+    int top_idx = dispatchToken(p, filter_top_choices, 6,
+      "filter list|unknown-channel|scope|sender|text|advert");
+    if (top_idx < 0) return;
+
     // Globaler Uebersichts-Befehl 'filter list' -- alle Filter-Typen
     // in einem Rutsch anzeigen (User-Wunsch 2026-06-10).
-    if (strncmp(p, "list", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
+    if (top_idx == 0) {
       // Akkumuliere Output in 145-Byte-Frames um App-Push-Queue
       // nicht mit 13+ Einzel-Frames zu sprengen.
       char acc[145]; size_t ap = 0; acc[0] = 0;
@@ -13192,26 +14188,34 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
           const char* pfx = (arr[i].flags & 0x01) ? "^" : "";
           const char* sfx = (arr[i].flags & 0x02) ? "$" : "";
-          char line[120];
-          size_t lp = snprintf(line, sizeof(line), "  %u: %s%s%s",
-                               (unsigned)(i+1), pfx, arr[i].pattern, sfx);
+          char hdr_l[80];
+          snprintf(hdr_l, sizeof(hdr_l), "  %u: %s%s%s",
+                   (unsigned)(i+1), pfx, arr[i].pattern, sfx);
+          acc_line(hdr_l);
           if (c_on[i] != 0 || c_ex[i] != 0) {
             uint64_t m = c_on[i] ? c_on[i] : c_ex[i];
-            int n = snprintf(line + lp, sizeof(line) - lp, "  %s:",
-                             c_on[i] ? "on" : "ex");
-            if (n > 0 && lp + n < sizeof(line)) lp += n;
+            char chans[145];
+            size_t cp = snprintf(chans, sizeof(chans), "       %s: ",
+                                 c_on[i] ? "on" : "exempt");
             bool first_ch = true;
             for (int k = 0; k < MAX_GROUP_CHANNELS && k < 64; k++) {
               if ((m & ((uint64_t)1 << k)) == 0) continue;
               ChannelDetails cd;
               if (!getChannel(k, cd)) continue;
-              n = snprintf(line + lp, sizeof(line) - lp, "%s%s",
-                           first_ch ? "" : ",", cd.name[0] ? cd.name : "?");
-              if (n > 0 && lp + n < sizeof(line)) lp += n;
+              const char* nm = cd.name[0] ? cd.name : "?";
+              size_t nl = strlen(nm) + (first_ch ? 0 : 1);
+              if (cp + nl + 4 >= sizeof(chans)) {
+                chans[cp] = 0; acc_line(chans);
+                cp = snprintf(chans, sizeof(chans), "         ");
+                first_ch = true;
+              }
+              int n = snprintf(chans + cp, sizeof(chans) - cp, "%s%s",
+                               first_ch ? "" : ",", nm);
+              if (n > 0) cp += (size_t)n;
               first_ch = false;
             }
+            if (cp > 0) { chans[cp] = 0; acc_line(chans); }
           }
-          acc_line(line);
         }
       };
       dump_list("sender drop", _prefs.filter_sender_drop,
@@ -13230,6 +14234,65 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                 _prefs.filter_text_keep_count,
                 sizeof(_prefs.filter_text_keep)/sizeof(_prefs.filter_text_keep[0]),
                 _prefs.filter_text_keep_chan_on, _prefs.filter_text_keep_chan_ex);
+      // Phase 4 (2026-06-11): Advert/Pubkey.
+      {
+        uint8_t adn = _prefs.filter_advert_drop_name_count;
+        size_t adn_max = sizeof(_prefs.filter_advert_drop_name)
+                        /sizeof(_prefs.filter_advert_drop_name[0]);
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "advert drop name (%u/%u)%s",
+                 (unsigned)adn, (unsigned)adn_max, adn == 0 ? ": (leer)" : ":");
+        acc_line(hdr);
+        for (uint8_t i = 0; i < adn && i < adn_max; i++) {
+          const char* px = (_prefs.filter_advert_drop_name[i].flags & 0x01) ? "^" : "";
+          const char* sx = (_prefs.filter_advert_drop_name[i].flags & 0x02) ? "$" : "";
+          char line[100];
+          snprintf(line, sizeof(line), "  %u: %s%s%s",
+                   (unsigned)(i+1), px,
+                   _prefs.filter_advert_drop_name[i].pattern, sx);
+          acc_line(line);
+        }
+      }
+      {
+        uint8_t adp = _prefs.filter_advert_drop_pubkey_count;
+        size_t adp_max = sizeof(_prefs.filter_advert_drop_pubkey)
+                        /sizeof(_prefs.filter_advert_drop_pubkey[0]);
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "advert drop pubkey (%u/%u)%s",
+                 (unsigned)adp, (unsigned)adp_max, adp == 0 ? ": (leer)" : ":");
+        acc_line(hdr);
+        for (uint8_t i = 0; i < adp && i < adp_max; i++) {
+          char hex[40]; size_t hp = 0;
+          for (uint8_t k = 0; k < _prefs.filter_advert_drop_pubkey[i].len
+                              && hp + 2 < sizeof(hex); k++) {
+            hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x",
+                           _prefs.filter_advert_drop_pubkey[i].key[k]);
+          }
+          char line[100];
+          snprintf(line, sizeof(line), "  %u: %s", (unsigned)(i+1), hex);
+          acc_line(line);
+        }
+      }
+      {
+        uint8_t sdp = _prefs.filter_sender_drop_pubkey_count;
+        size_t sdp_max = sizeof(_prefs.filter_sender_drop_pubkey)
+                        /sizeof(_prefs.filter_sender_drop_pubkey[0]);
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "sender drop pubkey (%u/%u)%s",
+                 (unsigned)sdp, (unsigned)sdp_max, sdp == 0 ? ": (leer)" : ":");
+        acc_line(hdr);
+        for (uint8_t i = 0; i < sdp && i < sdp_max; i++) {
+          char hex[40]; size_t hp = 0;
+          for (uint8_t k = 0; k < _prefs.filter_sender_drop_pubkey[i].len
+                              && hp + 2 < sizeof(hex); k++) {
+            hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x",
+                           _prefs.filter_sender_drop_pubkey[i].key[k]);
+          }
+          char line[100];
+          snprintf(line, sizeof(line), "  %u: %s", (unsigned)(i+1), hex);
+          acc_line(line);
+        }
+      }
       // Scope-Filter (Phase 5).
       auto dump_scope = [&](const char* label, NodePrefs::FilterScopeEntry* arr,
                              uint8_t cnt, size_t max_slots,
@@ -13246,30 +14309,45 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         acc_line(hdr);
         for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
           uint8_t profile = arr[i].flags & 0x03;
-          // Default = complete (no suffix). Sonderwerte explizit.
+          // Explizite Anzeige aller drei Profile (User-Wunsch 2026-06-11:
+          // bei profile=complete + ohne channel-filter sah man frueher
+          // nur den Scope-Namen, was unklar war).
           const char* prof_s = (profile == 0) ? " profile:display"
                               : (profile == 1) ? " profile:repeat"
-                              : "";
-          char line[120];
-          size_t lp = snprintf(line, sizeof(line), "  %u: %s%s",
-                               (unsigned)(i+1), arr[i].scope_name, prof_s);
-          if (c_on[i] != 0 || c_ex[i] != 0) {
+                              : " profile:complete";
+          // Ohne channel-filter inline " (alle channels)" anhaengen,
+          // damit Leser sieht 'wirkt ueberall'. Mit channel-filter
+          // kommt das in der naechsten Zeile.
+          bool has_chan = (c_on[i] != 0 || c_ex[i] != 0);
+          char hdr_l[80];
+          snprintf(hdr_l, sizeof(hdr_l), "  %u: %s%s%s",
+                   (unsigned)(i+1), arr[i].scope_name, prof_s,
+                   has_chan ? "" : "  (alle channels)");
+          acc_line(hdr_l);
+          if (has_chan) {
             uint64_t m = c_on[i] ? c_on[i] : c_ex[i];
-            int n = snprintf(line + lp, sizeof(line) - lp, "  %s:",
-                             c_on[i] ? "on" : "ex");
-            if (n > 0 && lp + n < sizeof(line)) lp += n;
+            char chans[145];
+            size_t cp = snprintf(chans, sizeof(chans), "       %s: ",
+                                 c_on[i] ? "on" : "exempt");
             bool first_ch = true;
             for (int k = 0; k < MAX_GROUP_CHANNELS && k < 64; k++) {
               if ((m & ((uint64_t)1 << k)) == 0) continue;
               ChannelDetails cd;
               if (!getChannel(k, cd)) continue;
-              n = snprintf(line + lp, sizeof(line) - lp, "%s%s",
-                           first_ch ? "" : ",", cd.name[0] ? cd.name : "?");
-              if (n > 0 && lp + n < sizeof(line)) lp += n;
+              const char* nm = cd.name[0] ? cd.name : "?";
+              size_t nl = strlen(nm) + (first_ch ? 0 : 1);
+              if (cp + nl + 4 >= sizeof(chans)) {
+                chans[cp] = 0; acc_line(chans);
+                cp = snprintf(chans, sizeof(chans), "         ");
+                first_ch = true;
+              }
+              int n = snprintf(chans + cp, sizeof(chans) - cp, "%s%s",
+                               first_ch ? "" : ",", nm);
+              if (n > 0) cp += (size_t)n;
               first_ch = false;
             }
+            if (cp > 0) { chans[cp] = 0; acc_line(chans); }
           }
-          acc_line(line);
         }
       };
       dump_scope("scope drop", _prefs.filter_scope_drop,
@@ -13297,10 +14375,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // 'filter unknown-channel repeat <mode>' (Phase 5 Repeat-Achse).
-    if (strncmp(p, "unknown-channel", 15) == 0
-        && (p[15] == ' ' || p[15] == '\t')) {
-      p += 15;
-      while (*p == ' ' || *p == '\t') p++;
+    if (top_idx == 1) {
       // Wert beschreibt WAS GEFILTERT (= weg-gedroppt) wird, nicht was
       // durchgeht. Vermeidet doppelte Verneinung im Begriff (User-Wunsch
       // 2026-06-10):
@@ -13355,18 +14430,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // filter scope <drop|keep> list|clear
     // filter scope on-channel|exempt-channel <chans|clear>  (Shortcut)
     // ====================================================================
-    if (strncmp(p, "scope", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
-      p += 5;
-      while (*p == ' ' || *p == '\t') p++;
+    if (top_idx == 2) {
       if (!*p) {
         pushCompanionMessage(
           "Usage: filter scope drop|keep\n"
-          "  add <list> [on-channel|exempt-channel <chans>]\n"
-          "    [profile for-us|repeat|complete]");
+          "  add <list> [on-channels|exempt-channels <chans>]\n"
+          "    [profile display|repeat|complete]");
         pushCompanionMessage(
           "  remove <idx|name>\n"
           "  list|clear\n"
-          "filter scope on-channel|exempt-channel <chans|clear>");
+          "  set <idx-liste|name>\n"
+          "    profile <display|repeat|complete>\n"
+          "    | on-channels|exempt-channels\n"
+          "      <chans|clear|leer=flip>");
+        pushCompanionMessage(
+          "filter scope on-channels|exempt-channels <chans|clear>");
         return;
       }
 
@@ -13417,14 +14495,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return unknown;
       };
 
-      // Shortcut: filter scope on-channel|exempt-channel <chans|clear>
-      bool sc_on = (strncmp(p, "on-channel", 10) == 0
-                    && (p[10] == ' ' || p[10] == '\t' || p[10] == 0));
-      bool sc_ex = (strncmp(p, "exempt-channel", 14) == 0
-                    && (p[14] == ' ' || p[14] == '\t' || p[14] == 0));
+      // Verb/Shortcut-Dispatch: drop|keep (Verb) ODER on-channels|
+      // exempt-channels (Shortcut fuer alle Patterns).
+      // Plural (User-Wunsch 2026-06-11: Argument nimmt mehrere Channels,
+      // Plural ist natuerlicher). Alte Singular-Form matched als Prefix.
+      static const CompanionChoice sc_lvl2_choices[] = {
+        { "drop",            false },  // 0
+        { "keep",            false },  // 1
+        { "on-channels",     false },  // 2
+        { "exempt-channels", false },  // 3
+        { "profile",         false },  // 4  (Hinweis-Pfad)
+      };
+      int sc_lvl2 = dispatchToken(p, sc_lvl2_choices, 5,
+                                  "drop|keep|on-channels|exempt-channels");
+      if (sc_lvl2 < 0) return;
+      if (sc_lvl2 == 4) {
+        pushCompanionMessage(
+          "profile ist pro Pattern (Modifier nach 'add'),\n"
+          "kein eigener Befehl. Aktiv-Anzeige:\n"
+          "  filter scope drop list  (Suffix p:rep / p:cpl)");
+        return;
+      }
+      bool sc_on = (sc_lvl2 == 2);
+      bool sc_ex = (sc_lvl2 == 3);
       if (sc_on || sc_ex) {
-        p += sc_on ? 10 : 14;
-        while (*p == ' ' || *p == '\t') p++;
         const char* mode = sc_on ? "on-channel" : "exempt-channel";
         uint8_t drop_cnt = _prefs.filter_scope_drop_count;
         uint8_t keep_cnt = _prefs.filter_scope_keep_count;
@@ -13479,24 +14573,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
 
-      // Verb: drop oder keep
-      bool sc_drop = false, sc_keep = false;
-      if (strncmp(p, "drop", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
-        sc_drop = true; p += 4;
-      } else if (strncmp(p, "keep", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
-        sc_keep = true; p += 4;
-      } else {
-        if (strncmp(p, "profile", 7) == 0) {
-          pushCompanionMessage(
-            "profile ist pro Pattern (Modifier nach 'add'),\n"
-            "kein eigener Befehl. Aktiv-Anzeige:\n"
-            "  filter scope drop list  (Suffix p:rep / p:cpl)");
-        } else {
-          pushCompanionMessage("Erwartet: <drop|keep|on-channel|exempt-channel>");
-        }
-        return;
-      }
-      while (*p == ' ' || *p == '\t') p++;
+      // sc_lvl2 in {0 drop, 1 keep}; p schon vorgerueckt am Dispatch.
+      bool sc_drop = (sc_lvl2 == 0);
+      bool sc_keep = (sc_lvl2 == 1);
+      (void)sc_keep;
 
       NodePrefs::FilterScopeEntry* sarr = sc_drop ? _prefs.filter_scope_drop : _prefs.filter_scope_keep;
       uint8_t* sp_cnt = sc_drop ? &_prefs.filter_scope_drop_count : &_prefs.filter_scope_keep_count;
@@ -13508,8 +14588,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       uint64_t* sc_ex_arr = sc_drop ? _prefs.filter_scope_drop_chan_ex : _prefs.filter_scope_keep_chan_ex;
       const char* sc_verb = sc_drop ? "drop" : "keep";
 
-      // list / clear
-      if (!*p || strncmp(p, "list", 4) == 0) {
+      // Action-Dispatch: add|remove|list|clear|set (clear/remove no_abbrev).
+      int sc_act;
+      if (!*p) {
+        sc_act = 2;  // empty -> list
+      } else {
+        static const CompanionChoice sc_action_choices[] = {
+          { "add",    false },  // 0
+          { "remove", true  },  // 1 destructive
+          { "list",   false },  // 2
+          { "clear",  true  },  // 3 destructive
+          { "set",    false },  // 4 modify existierende Eintraege
+        };
+        sc_act = dispatchToken(p, sc_action_choices, 5,
+                               "add|remove|list|clear|set");
+        if (sc_act < 0) return;
+      }
+      if (sc_act == 2) {  // list
         char hdr[80];
         snprintf(hdr, sizeof(hdr), "filter scope %s (%u/%u):",
                  sc_verb, (unsigned)sc_cnt, (unsigned)SC_MAX);
@@ -13517,32 +14612,51 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (sc_cnt == 0) { pushCompanionMessage("  (leer)"); return; }
         for (uint8_t i = 0; i < sc_cnt && i < SC_MAX; i++) {
           uint8_t profile = sarr[i].flags & 0x03;
-          const char* prof_s = (profile == 1) ? " p:rep"
-                              : (profile == 2) ? " p:cpl" : "";
-          char line[120];
-          size_t lp = snprintf(line, sizeof(line), "  %u: %s%s",
-                               (unsigned)(i+1), sarr[i].scope_name, prof_s);
-          if (sc_on_arr[i] != 0 || sc_ex_arr[i] != 0) {
+          const char* prof_s = (profile == 0) ? " p:display"
+                              : (profile == 1) ? " p:repeat"
+                              : " p:complete";
+          // Eintrag-Header (kurz). Channels in zweiter Zeile -- vermeidet
+          // 145-Byte-Frame-Ueberlauf bei vielen oder langen Channel-Namen
+          // (User-Hinweis 2026-06-11). Ohne channel-filter inline-Hinweis.
+          bool has_chan = (sc_on_arr[i] != 0 || sc_ex_arr[i] != 0);
+          char hdr[80];
+          snprintf(hdr, sizeof(hdr), "  %u: %s%s%s",
+                   (unsigned)(i+1), sarr[i].scope_name, prof_s,
+                   has_chan ? "" : "  (alle channels)");
+          pushCompanionMessage(hdr);
+          if (has_chan) {
             uint64_t m = sc_on_arr[i] ? sc_on_arr[i] : sc_ex_arr[i];
-            int n = snprintf(line + lp, sizeof(line) - lp, "  %s:",
-                             sc_on_arr[i] ? "on" : "ex");
-            if (n > 0 && lp + n < sizeof(line)) lp += n;
+            char chans[145];
+            size_t cp = snprintf(chans, sizeof(chans), "       %s: ",
+                                 sc_on_arr[i] ? "on" : "exempt");
             bool first_ch = true;
             for (int k = 0; k < MAX_GROUP_CHANNELS && k < 64; k++) {
               if ((m & ((uint64_t)1 << k)) == 0) continue;
               ChannelDetails cd;
               if (!getChannel(k, cd)) continue;
-              n = snprintf(line + lp, sizeof(line) - lp, "%s%s",
-                           first_ch ? "" : ",", cd.name[0] ? cd.name : "?");
-              if (n > 0 && lp + n < sizeof(line)) lp += n;
+              const char* nm = cd.name[0] ? cd.name : "?";
+              size_t nl = strlen(nm) + (first_ch ? 0 : 1);
+              if (cp + nl + 4 >= sizeof(chans)) {
+                // Continuation-Frame -- aktueller voll, neuen anlegen.
+                chans[cp] = 0;
+                pushCompanionMessage(chans);
+                cp = snprintf(chans, sizeof(chans), "         ");
+                first_ch = true;
+              }
+              int n = snprintf(chans + cp, sizeof(chans) - cp, "%s%s",
+                               first_ch ? "" : ",", nm);
+              if (n > 0) cp += (size_t)n;
               first_ch = false;
             }
+            if (cp > 0) {
+              chans[cp] = 0;
+              pushCompanionMessage(chans);
+            }
           }
-          pushCompanionMessage(line);
         }
         return;
       }
-      if (strncmp(p, "clear", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
+      if (sc_act == 3) {  // clear
         memset(sarr, 0, SC_MAX * sizeof(sarr[0]));
         memset(sc_on_arr, 0, SC_MAX * sizeof(sc_on_arr[0]));
         memset(sc_ex_arr, 0, SC_MAX * sizeof(sc_ex_arr[0]));
@@ -13553,10 +14667,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      // remove <idx|name>
-      if (strncmp(p, "remove", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
-        p += 6;
-        while (*p == ' ' || *p == '\t') p++;
+      // sc_act == 1 -> remove <idx|name>
+      if (sc_act == 1) {
         if (!*p) {
           pushCompanionMessage("Usage: filter scope <drop|keep> remove <idx|name>");
           return;
@@ -13608,12 +14720,209 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
         return;
       }
-      // add <scope-list> [on-channel|exempt-channel <chans>] [profile <p>]
-      if (strncmp(p, "add", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
-        p += 3;
-        while (*p == ' ' || *p == '\t') p++;
+      // sc_act == 4 -> set <idx-list|scope-name> <field> <value>
+      //   field = profile | on-channels | exempt-channels
+      //   on/exempt sind mutually exclusive (Setzen einer Maske loescht
+      //   die andere). Ziel-Identifikation via 1-basierten Index
+      //   (komma-sep liste erlaubt) ODER scope-name (genau ein Treffer).
+      if (sc_act == 4) {
         if (!*p) {
-          pushCompanionMessage("Usage: filter scope <drop|keep> add <scope-list> [on-channel|exempt-channel <chans>] [profile <p>]");
+          pushCompanionMessage(
+            "Usage: filter scope drop|keep set\n"
+            "  <idx[,idx...]|scope-name>\n"
+            "  <profile|on-channels|exempt-channels> <wert>");
+          return;
+        }
+        // Erstes Arg bis Whitespace lesen.
+        const char* arg_start = p;
+        const char* arg_end = p;
+        while (*arg_end && *arg_end != ' ' && *arg_end != '\t') arg_end++;
+        size_t arg_len = (size_t)(arg_end - arg_start);
+        // Ist arg_start eine reine Komma-Ziffern-Liste?
+        bool is_index_list = (arg_len > 0);
+        for (size_t k = 0; k < arg_len; k++) {
+          char ch = arg_start[k];
+          if (!((ch >= '0' && ch <= '9') || ch == ',')) {
+            is_index_list = false; break;
+          }
+        }
+        uint8_t targets[16];
+        uint8_t n_targets = 0;
+        if (is_index_list) {
+          const char* cur = arg_start;
+          while (cur < arg_end) {
+            while (cur < arg_end && (*cur == ',')) cur++;
+            if (cur >= arg_end) break;
+            char* endp = NULL;
+            long idx = strtol(cur, &endp, 10);
+            if (endp == cur || idx < 1 || (uint32_t)idx > sc_cnt) {
+              char r[80];
+              snprintf(r, sizeof(r), "Index %ld ungueltig (1..%u).",
+                       idx, (unsigned)sc_cnt);
+              pushCompanionMessage(r);
+              return;
+            }
+            if (n_targets < sizeof(targets)) targets[n_targets++] = (uint8_t)(idx - 1);
+            cur = endp;
+          }
+        } else {
+          // scope-name (case-insens, ohne fuehrendes #)
+          const char* a = (arg_start[0] == '#') ? arg_start + 1 : arg_start;
+          size_t alen = arg_len - (arg_start[0] == '#' ? 1 : 0);
+          for (uint8_t i = 0; i < sc_cnt; i++) {
+            const char* b = (sarr[i].scope_name[0] == '#')
+                            ? sarr[i].scope_name + 1
+                            : sarr[i].scope_name;
+            if (strncasecmp(a, b, alen) == 0 && b[alen] == 0) {
+              if (n_targets < sizeof(targets)) targets[n_targets++] = i;
+              break;
+            }
+          }
+          if (n_targets == 0) {
+            pushCompanionMessage("Scope-Name nicht in Liste.");
+            return;
+          }
+        }
+        if (n_targets == 0) {
+          pushCompanionMessage("Keine Ziel-Eintraege.");
+          return;
+        }
+        p = arg_end;
+        while (*p == ' ' || *p == '\t') p++;
+        // Feld dispatchen.
+        static const CompanionChoice set_field_choices[] = {
+          { "profile",         false },  // 0
+          { "on-channels",     false },  // 1
+          { "exempt-channels", false },  // 2
+        };
+        int field_idx = dispatchToken(p, set_field_choices, 3,
+                                      "profile|on-channels|exempt-channels");
+        if (field_idx < 0) return;
+        if (field_idx == 0) {
+          // profile <display|repeat|complete>. 'for-us' bleibt als
+          // Legacy-Alias gueltig (User-Wunsch 2026-06-11: 'display'
+          // sprachlich passender + die Anzeige zeigt's schon so).
+          static const CompanionChoice prof_choices[] = {
+            { "display",  false },  // 0 (canonical)
+            { "repeat",   false },  // 1
+            { "complete", false },  // 2
+            { "for-us",   false },  // 3 -> mapped to 0 (legacy alias)
+          };
+          int pi = dispatchToken(p, prof_choices, 4, "display|repeat|complete");
+          if (pi < 0) return;
+          if (pi == 3) pi = 0;  // for-us -> display
+          for (uint8_t t = 0; t < n_targets; t++) {
+            sarr[targets[t]].flags = (sarr[targets[t]].flags & ~0x03)
+                                   | ((uint8_t)pi & 0x03);
+          }
+          savePrefs();
+          static const char* names[] = {"display", "repeat", "complete"};
+          char r[120];
+          snprintf(r, sizeof(r),
+                   "OK - filter scope %s set: %u Eintraege profile=%s",
+                   sc_verb, (unsigned)n_targets, names[pi]);
+          pushCompanionMessage(r);
+          return;
+        }
+        // on-channels | exempt-channels
+        bool is_on = (field_idx == 1);
+        if (!*p) {
+          // Leerer Wert = Flip: existierende Maske von exempt nach on
+          // (oder umgekehrt) umlagern, ohne die Channel-Liste neu
+          // tippen zu muessen (User-Wunsch 2026-06-11). Wenn die
+          // Ziel-Achse bereits gesetzt ist: no-op. Wenn beide leer:
+          // Hinweis, weil nichts zu flippen.
+          uint8_t flipped = 0, noop = 0, empty = 0;
+          for (uint8_t t = 0; t < n_targets; t++) {
+            uint8_t idx = targets[t];
+            uint64_t cur_on = sc_on_arr[idx];
+            uint64_t cur_ex = sc_ex_arr[idx];
+            if (is_on) {
+              if (cur_on != 0) { noop++; continue; }
+              if (cur_ex == 0) { empty++; continue; }
+              sc_on_arr[idx] = cur_ex;
+              sc_ex_arr[idx] = 0;
+              flipped++;
+            } else {
+              if (cur_ex != 0) { noop++; continue; }
+              if (cur_on == 0) { empty++; continue; }
+              sc_ex_arr[idx] = cur_on;
+              sc_on_arr[idx] = 0;
+              flipped++;
+            }
+          }
+          if (flipped > 0) savePrefs();
+          const char* axis = is_on ? "on-channels" : "exempt-channels";
+          char r[140];
+          snprintf(r, sizeof(r),
+                   "OK - filter scope %s set %s (flip):\n"
+                   "  %u geflippt, %u no-op, %u ohne channel-filter",
+                   sc_verb, axis, flipped, noop, empty);
+          pushCompanionMessage(r);
+          if (empty > 0) {
+            char hint[140];
+            snprintf(hint, sizeof(hint),
+                     "Hinweis: Flip benoetigt channel-Eintraege um\n"
+                     "invertieren zu koennen. Eintraege ohne\n"
+                     "konkrete channels wirken ohnehin auf alle\n"
+                     "channels.");
+            pushCompanionMessage(hint);
+          }
+          return;
+        }
+        if (strncmp(p, "clear", 5) == 0
+            && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
+          for (uint8_t t = 0; t < n_targets; t++) {
+            sc_on_arr[targets[t]] = 0;
+            sc_ex_arr[targets[t]] = 0;
+          }
+          savePrefs();
+          char r[100];
+          snprintf(r, sizeof(r),
+                   "OK - filter scope %s set: %u Eintraege channel-filter geleert.",
+                   sc_verb, (unsigned)n_targets);
+          pushCompanionMessage(r);
+          return;
+        }
+        uint64_t new_mask = 0; char ub[80]; bool ss = false;
+        int unknown = parse_chan_list_sc(p, &new_mask, ub, sizeof(ub), &ss);
+        if (unknown > 0) {
+          char r[160];
+          snprintf(r, sizeof(r), "Abgelehnt: unbekannte Channels: %s", ub);
+          pushCompanionMessage(r);
+          return;
+        }
+        if (new_mask == 0) {
+          pushCompanionMessage(
+            "Leere Channel-Liste. Nutze 'clear' zum Loeschen.");
+          return;
+        }
+        for (uint8_t t = 0; t < n_targets; t++) {
+          uint8_t idx = targets[t];
+          if (is_on) {
+            sc_on_arr[idx] = new_mask;
+            sc_ex_arr[idx] = 0;
+          } else {
+            sc_ex_arr[idx] = new_mask;
+            sc_on_arr[idx] = 0;
+          }
+        }
+        savePrefs();
+        char r[120];
+        snprintf(r, sizeof(r),
+                 "OK - filter scope %s set: %u Eintraege %s gesetzt.",
+                 sc_verb, (unsigned)n_targets,
+                 is_on ? "on-channels" : "exempt-channels");
+        pushCompanionMessage(r);
+        return;
+      }
+      // sc_act == 0 -> add <scope-list> [on-channel|exempt-channel <chans>] [profile <p>]
+      if (sc_act == 0) {
+        if (!*p) {
+          pushCompanionMessage(
+            "Usage: filter scope drop|keep add <scope-list>\n"
+            "  [on-channels|exempt-channels <chans>]\n"
+            "  [profile display|repeat|complete]");
           return;
         }
         // Parse scope-list bis Whitespace, dann optional Modifier.
@@ -13631,21 +14940,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         // 'profile for-us' bzw 'profile repeat' Suffix.
         uint64_t add_on = 0, add_ex = 0;
         uint8_t add_profile = 2;  // complete default
+        // Singular ('on-channel') ODER Plural ('on-channels') akzeptieren
+        // (User-Wunsch 2026-06-11: Plural in der Erwartung, da Liste).
+        auto match_kw = [](const char* s, const char* root) -> int {
+          size_t L = strlen(root);
+          if (strncmp(s, root, L) != 0) return 0;
+          if (s[L] == 's' && (s[L+1] == ' ' || s[L+1] == '\t' || s[L+1] == 0))
+            return (int)L + 1;
+          if (s[L] == ' ' || s[L] == '\t' || s[L] == 0) return (int)L;
+          return 0;
+        };
         while (*after) {
-          bool ap_on = (strncmp(after, "on-channel", 10) == 0
-                        && (after[10] == ' ' || after[10] == '\t'));
-          bool ap_ex = (strncmp(after, "exempt-channel", 14) == 0
-                        && (after[14] == ' ' || after[14] == '\t'));
-          bool ap_pf = (strncmp(after, "profile", 7) == 0
-                        && (after[7] == ' ' || after[7] == '\t'));
+          int on_len = match_kw(after, "on-channel");
+          int ex_len = match_kw(after, "exempt-channel");
+          int pf_len = match_kw(after, "profile");
+          bool ap_on = (on_len > 0);
+          bool ap_ex = (ex_len > 0);
+          bool ap_pf = (pf_len > 0);
           if (ap_on || ap_ex) {
-            after += ap_on ? 10 : 14;
+            after += ap_on ? on_len : ex_len;
             while (*after == ' ' || *after == '\t') after++;
             // parse channel list bis nächstes profile-Keyword oder Ende
             const char* chan_end = after;
             while (*chan_end) {
-              if ((strncmp(chan_end, "profile", 7) == 0)
-                  && (chan_end[7] == ' ' || chan_end[7] == '\t')) break;
+              int pf_at = match_kw(chan_end, "profile");
+              if (pf_at > 0) break;
               chan_end++;
             }
             size_t clen = (size_t)(chan_end - after);
@@ -13668,13 +14987,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             after = chan_end;
             while (*after == ' ' || *after == '\t') after++;
           } else if (ap_pf) {
-            after += 7;
+            after += pf_len;
             while (*after == ' ' || *after == '\t') after++;
-            if (strncasecmp(after, "for-us", 6) == 0) add_profile = 0;
+            // 'display' canonical (User-Wunsch 2026-06-11), 'for-us' Legacy.
+            if (strncasecmp(after, "display", 7) == 0) add_profile = 0;
+            else if (strncasecmp(after, "for-us", 6) == 0) add_profile = 0;
             else if (strncasecmp(after, "repeat", 6) == 0) add_profile = 1;
             else if (strncasecmp(after, "complete", 8) == 0) add_profile = 2;
             else {
-              pushCompanionMessage("profile: erlaubt for-us|repeat|complete");
+              pushCompanionMessage("profile: erlaubt display|repeat|complete");
               return;
             }
             // skip profile-Wert
@@ -13768,8 +15089,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         savePrefs();
         char r[140];
-        snprintf(r, sizeof(r), "OK - filter scope %s add: %d neu, %d dup, %d uebersprungen (Liste voll). %u/%u",
-                 sc_verb, added, skipped_dup, skipped_full,
+        // "(Liste voll)" nur anhaengen wenn auch wirklich skipped > 0.
+        const char* full_note = (skipped_full > 0) ? " (Liste voll)" : "";
+        snprintf(r, sizeof(r),
+                 "OK - filter scope %s add: %d neu, %d dup, %d uebersprungen%s. %u/%u",
+                 sc_verb, added, skipped_dup, skipped_full, full_note,
                  (unsigned)sc_cnt, (unsigned)SC_MAX);
         pushCompanionMessage(r);
         return;
@@ -13778,16 +15102,268 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    bool is_sender = false;
-    if (strncmp(p, "sender", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
-      is_sender = true; p += 6;
-    } else if (strncmp(p, "text", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
-      is_sender = false; p += 4;
-    } else {
-      pushCompanionMessage("Erwartet: filter <sender|text> <drop|keep|on-channel|exempt-channel>");
+    // ====================================================================
+    // Wunschliste 46 Phase 4: filter advert drop name|pubkey + filter
+    // sender drop pubkey (Wire-/Post-Decrypt-Block).
+    // ====================================================================
+    //
+    // Hex-Prefix-Parser fuer pubkey-Argumente. Erlaubt "AB", "AB:CD",
+    // "ABCDEF12", "ab:cd:ef:12" -- case-insens, ':' optional. Liefert
+    // Byte-Array + Laenge. Mind. 1 Byte (2 hex chars), max 16 (32 chars).
+    auto parse_pubkey_hex = [](const char* hex, uint8_t* out_buf,
+                               uint8_t* out_len, char* err_buf, size_t err_size) -> bool {
+      uint8_t bytes[16];
+      uint8_t n = 0;
+      const char* q = hex;
+      while (*q && n < 16) {
+        if (*q == ':' || *q == ' ' || *q == '\t') { q++; continue; }
+        int hi = -1, lo = -1;
+        if (*q >= '0' && *q <= '9') hi = *q - '0';
+        else if (*q >= 'a' && *q <= 'f') hi = 10 + (*q - 'a');
+        else if (*q >= 'A' && *q <= 'F') hi = 10 + (*q - 'A');
+        else { snprintf(err_buf, err_size, "Ungueltiges Hex-Zeichen: %c", *q); return false; }
+        q++;
+        if (*q >= '0' && *q <= '9') lo = *q - '0';
+        else if (*q >= 'a' && *q <= 'f') lo = 10 + (*q - 'a');
+        else if (*q >= 'A' && *q <= 'F') lo = 10 + (*q - 'A');
+        else { snprintf(err_buf, err_size, "Hex-Prefix muss gerade Anzahl Zeichen haben"); return false; }
+        q++;
+        bytes[n++] = (uint8_t)((hi << 4) | lo);
+      }
+      while (*q == ':' || *q == ' ' || *q == '\t') q++;
+      if (*q) { snprintf(err_buf, err_size, "Hex-Prefix zu lang (max 16 Byte = 32 Hex-Chars)"); return false; }
+      if (n == 0) { snprintf(err_buf, err_size, "Hex-Prefix leer"); return false; }
+      memcpy(out_buf, bytes, n);
+      *out_len = n;
+      return true;
+    };
+
+    // Generischer Pubkey-Filter Action-Handler (add|remove|list|clear),
+    // wiederverwendet fuer advert.drop.pubkey UND sender.drop.pubkey.
+    auto handle_pubkey_action = [&](NodePrefs::FilterPubkeyEntry* arr,
+                                    uint8_t& cnt, size_t max_slots,
+                                    const char* label) -> void {
+      int act_idx;
+      if (!*p) {
+        act_idx = 2;  // empty -> list
+      } else {
+        static const CompanionChoice action_choices[] = {
+          { "add",    false }, { "remove", true  },
+          { "list",   false }, { "clear",  true  },
+        };
+        act_idx = dispatchToken(p, action_choices, 4,
+                                "add|remove|list|clear");
+        if (act_idx < 0) return;
+      }
+      if (act_idx == 2) {  // list
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "%s (%u/%u):",
+                 label, (unsigned)cnt, (unsigned)max_slots);
+        pushCompanionMessage(hdr);
+        if (cnt == 0) { pushCompanionMessage("  (leer)"); return; }
+        for (uint8_t i = 0; i < cnt && i < max_slots; i++) {
+          char hex[40]; size_t hp = 0;
+          for (uint8_t k = 0; k < arr[i].len && hp + 2 < sizeof(hex); k++) {
+            hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x", arr[i].key[k]);
+          }
+          char line[80];
+          snprintf(line, sizeof(line), "  %u: %s", (unsigned)(i+1), hex);
+          pushCompanionMessage(line);
+        }
+        return;
+      }
+      if (act_idx == 3) {  // clear
+        memset(arr, 0, max_slots * sizeof(arr[0]));
+        cnt = 0; savePrefs();
+        char r[60]; snprintf(r, sizeof(r), "OK - %s cleared.", label);
+        pushCompanionMessage(r); return;
+      }
+      if (act_idx == 0) {  // add <hex>
+        if (!*p) { pushCompanionMessage("Usage: ... add <hex-prefix>"); return; }
+        if (cnt >= max_slots) {
+          char r[80]; snprintf(r, sizeof(r), "Liste voll (%u/%u). Erst remove.",
+                               (unsigned)cnt, (unsigned)max_slots);
+          pushCompanionMessage(r); return;
+        }
+        uint8_t bytes[16]; uint8_t blen = 0;
+        char err[100];
+        if (!parse_pubkey_hex(p, bytes, &blen, err, sizeof(err))) {
+          pushCompanionMessage(err); return;
+        }
+        // Duplicate-Check.
+        for (uint8_t i = 0; i < cnt; i++) {
+          if (arr[i].len == blen && memcmp(arr[i].key, bytes, blen) == 0) {
+            pushCompanionMessage("Eintrag existiert bereits."); return;
+          }
+        }
+        memcpy(arr[cnt].key, bytes, blen);
+        arr[cnt].len = blen;
+        cnt++; savePrefs();
+        char r[80]; snprintf(r, sizeof(r), "OK - %s add (%u Byte).", label, (unsigned)blen);
+        pushCompanionMessage(r); return;
+      }
+      if (act_idx == 1) {  // remove <hex|idx>
+        if (!*p) { pushCompanionMessage("Usage: ... remove <hex|index>"); return; }
+        char* endp = NULL;
+        long idx = strtol(p, &endp, 10);
+        bool is_idx = (endp && endp != p && (*endp == 0 || *endp == ' '));
+        if (is_idx) {
+          if (idx < 1 || (uint32_t)idx > cnt) {
+            char r[80]; snprintf(r, sizeof(r), "Index ausserhalb 1..%u", (unsigned)cnt);
+            pushCompanionMessage(r); return;
+          }
+          uint8_t rm = (uint8_t)(idx - 1);
+          for (uint8_t i = rm; i + 1 < cnt; i++) arr[i] = arr[i+1];
+          memset(&arr[cnt-1], 0, sizeof(arr[0]));
+          cnt--; savePrefs();
+          pushCompanionMessage("OK - entfernt."); return;
+        }
+        uint8_t bytes[16]; uint8_t blen = 0;
+        char err[100];
+        if (!parse_pubkey_hex(p, bytes, &blen, err, sizeof(err))) {
+          pushCompanionMessage(err); return;
+        }
+        for (uint8_t i = 0; i < cnt; i++) {
+          if (arr[i].len == blen && memcmp(arr[i].key, bytes, blen) == 0) {
+            for (uint8_t k = i; k + 1 < cnt; k++) arr[k] = arr[k+1];
+            memset(&arr[cnt-1], 0, sizeof(arr[0]));
+            cnt--; savePrefs();
+            pushCompanionMessage("OK - entfernt."); return;
+          }
+        }
+        pushCompanionMessage("Hex-Prefix nicht in Liste."); return;
+      }
+    };
+
+    if (top_idx == 5) {
+      // filter advert ... -- nur 'drop' (kein keep)
+      static const CompanionChoice adv_verb[] = { { "drop", false } };
+      int v = dispatchToken(p, adv_verb, 1, "drop");
+      if (v < 0) return;
+      static const CompanionChoice adv_axis[] = {
+        { "name", false },   // 0 = display-soft auf Klartextname
+        { "pubkey", false }, // 1 = wire-hard auf Identity-pubkey
+      };
+      int ax = dispatchToken(p, adv_axis, 2, "name|pubkey");
+      if (ax < 0) return;
+      if (ax == 1) {
+        handle_pubkey_action(_prefs.filter_advert_drop_pubkey,
+                             _prefs.filter_advert_drop_pubkey_count,
+                             sizeof(_prefs.filter_advert_drop_pubkey)
+                               / sizeof(_prefs.filter_advert_drop_pubkey[0]),
+                             "filter advert drop pubkey");
+        return;
+      }
+      // ax == 0 -> name. Action-Block analog Sender/Text name-Filter.
+      NodePrefs::FilterEntry* arr_adv = _prefs.filter_advert_drop_name;
+      uint8_t& cnt_adv = _prefs.filter_advert_drop_name_count;
+      const size_t max_adv = sizeof(_prefs.filter_advert_drop_name)
+                             / sizeof(_prefs.filter_advert_drop_name[0]);
+      int act_idx;
+      if (!*p) {
+        act_idx = 2;
+      } else {
+        static const CompanionChoice action_choices[] = {
+          { "add", false }, { "remove", true  },
+          { "list", false }, { "clear", true  },
+        };
+        act_idx = dispatchToken(p, action_choices, 4,
+                                "add|remove|list|clear");
+        if (act_idx < 0) return;
+      }
+      if (act_idx == 2) {  // list
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "filter advert drop name (%u/%u):",
+                 (unsigned)cnt_adv, (unsigned)max_adv);
+        pushCompanionMessage(hdr);
+        if (cnt_adv == 0) { pushCompanionMessage("  (leer)"); return; }
+        for (uint8_t i = 0; i < cnt_adv && i < max_adv; i++) {
+          const char* px = (arr_adv[i].flags & 0x01) ? "^" : "";
+          const char* sx = (arr_adv[i].flags & 0x02) ? "$" : "";
+          char line[80];
+          snprintf(line, sizeof(line), "  %u: %s%s%s",
+                   (unsigned)(i+1), px, arr_adv[i].pattern, sx);
+          pushCompanionMessage(line);
+        }
+        return;
+      }
+      if (act_idx == 3) {  // clear
+        memset(arr_adv, 0, max_adv * sizeof(arr_adv[0]));
+        cnt_adv = 0; savePrefs();
+        pushCompanionMessage("OK - filter advert drop name cleared.");
+        return;
+      }
+      if (act_idx == 0) {  // add
+        if (!*p) { pushCompanionMessage("Usage: ... add <pattern>"); return; }
+        if (cnt_adv >= max_adv) {
+          pushCompanionMessage("Liste voll. Erst remove."); return;
+        }
+        // Pattern-Anchors ^/$.
+        uint8_t fl = 0;
+        const char* pat = p;
+        if (*pat == '^') { fl |= 0x01; pat++; }
+        size_t pl = 0;
+        while (pat[pl] && pat[pl] != ' ' && pat[pl] != '\t') pl++;
+        if (pl > 0 && pat[pl - 1] == '$') { fl |= 0x02; pl--; }
+        if (pl == 0 || pl >= sizeof(arr_adv[0].pattern)) {
+          pushCompanionMessage("Pattern leer oder zu lang.");
+          return;
+        }
+        // Duplicate-Check.
+        for (uint8_t i = 0; i < cnt_adv; i++) {
+          if (arr_adv[i].flags == fl
+              && strncmp(arr_adv[i].pattern, pat, pl) == 0
+              && arr_adv[i].pattern[pl] == 0) {
+            pushCompanionMessage("Eintrag existiert bereits."); return;
+          }
+        }
+        memset(&arr_adv[cnt_adv], 0, sizeof(arr_adv[0]));
+        memcpy(arr_adv[cnt_adv].pattern, pat, pl);
+        arr_adv[cnt_adv].pattern[pl] = 0;
+        arr_adv[cnt_adv].flags = fl;
+        cnt_adv++; savePrefs();
+        pushCompanionMessage("OK - filter advert drop name add.");
+        return;
+      }
+      if (act_idx == 1) {  // remove
+        if (!*p) { pushCompanionMessage("Usage: ... remove <pattern|idx>"); return; }
+        char* endp = NULL;
+        long idx = strtol(p, &endp, 10);
+        bool is_idx = (endp && endp != p && (*endp == 0 || *endp == ' '));
+        if (is_idx) {
+          if (idx < 1 || (uint32_t)idx > cnt_adv) {
+            char r[80]; snprintf(r, sizeof(r), "Index ausserhalb 1..%u", (unsigned)cnt_adv);
+            pushCompanionMessage(r); return;
+          }
+          uint8_t rm = (uint8_t)(idx - 1);
+          for (uint8_t i = rm; i + 1 < cnt_adv; i++) arr_adv[i] = arr_adv[i+1];
+          memset(&arr_adv[cnt_adv-1], 0, sizeof(arr_adv[0]));
+          cnt_adv--; savePrefs();
+          pushCompanionMessage("OK - entfernt."); return;
+        }
+        uint8_t fl = 0;
+        const char* pat = p;
+        if (*pat == '^') { fl |= 0x01; pat++; }
+        size_t pl = 0;
+        while (pat[pl] && pat[pl] != ' ' && pat[pl] != '\t') pl++;
+        if (pl > 0 && pat[pl - 1] == '$') { fl |= 0x02; pl--; }
+        for (uint8_t i = 0; i < cnt_adv; i++) {
+          if (arr_adv[i].flags == fl
+              && strncmp(arr_adv[i].pattern, pat, pl) == 0
+              && arr_adv[i].pattern[pl] == 0) {
+            for (uint8_t k = i; k + 1 < cnt_adv; k++) arr_adv[k] = arr_adv[k+1];
+            memset(&arr_adv[cnt_adv-1], 0, sizeof(arr_adv[0]));
+            cnt_adv--; savePrefs();
+            pushCompanionMessage("OK - entfernt."); return;
+          }
+        }
+        pushCompanionMessage("Pattern nicht in Liste."); return;
+      }
       return;
     }
-    while (*p == ' ' || *p == '\t') p++;
+
+    // top_idx in {3 sender, 4 text}; p schon vorgerueckt.
+    bool is_sender = (top_idx == 3);
 
     // Helper: Parse Komma-Liste von Channel-Namen, liefert mask.
     auto parse_channel_list = [&](const char* lp, uint64_t* out_mask,
@@ -13839,13 +15415,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // 'filter <type> on-channel <liste>' setzt fuer ALLE aktiven
     // drop+keep-Patterns des Typs den gleichen Skopus. Convenience.
     // Fuer pro-Pattern: 'add <pat> on-channel <liste>' beim Anlegen.
-    bool is_on_chan = (strncmp(p, "on-channel", 10) == 0
-                       && (p[10] == ' ' || p[10] == '\t' || p[10] == 0));
-    bool is_ex_chan = (strncmp(p, "exempt-channel", 14) == 0
-                       && (p[14] == ' ' || p[14] == '\t' || p[14] == 0));
+    // Prefix-Match Dispatch (drop|keep|on-channels|exempt-channels).
+    // Plural (User-Wunsch 2026-06-11). Alte Singular-Form matched als Prefix.
+    static const CompanionChoice st_lvl2_choices[] = {
+      { "drop",            false },  // 0
+      { "keep",            false },  // 1
+      { "on-channels",     false },  // 2
+      { "exempt-channels", false },  // 3
+    };
+    int st_lvl2 = dispatchToken(p, st_lvl2_choices, 4,
+                                "drop|keep|on-channels|exempt-channels");
+    if (st_lvl2 < 0) return;
+
+    bool is_on_chan = (st_lvl2 == 2);
+    bool is_ex_chan = (st_lvl2 == 3);
     if (is_on_chan || is_ex_chan) {
-      p += is_on_chan ? 10 : 14;
-      while (*p == ' ' || *p == '\t') p++;
       const char* kind = is_sender ? "sender" : "text";
       const char* mode = is_on_chan ? "on-channel" : "exempt-channel";
       NodePrefs::FilterEntry* drop_arr = is_sender ? _prefs.filter_sender_drop
@@ -13884,9 +15468,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (!*p) {
         pushCompanionMessage(
-          "Usage: filter <sender|text> on-channel <liste>\n"
-          "  Setzt Skopus fuer ALLE Patterns des Typs.\n"
-          "Fuer pro-Pattern: 'drop add <pat> on-channel <liste>'");
+          "Usage: filter <sender|text>\n"
+          "  on-channel|exempt-channel <liste|clear>\n"
+          "  (setzt Skopus fuer ALLE Patterns)");
+        pushCompanionMessage(
+          "Pro-Pattern beim add:\n"
+          "  sender: drop|keep name add <pat>\n"
+          "  text:   drop|keep      add <pat>");
+        pushCompanionMessage(
+          "  beide: on-channel <liste>\n"
+          "       | exempt-channel <liste>");
         return;
       }
       uint64_t new_mask = 0;
@@ -13936,21 +15527,42 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // Verb: drop oder keep (Phase 3, 2026-06-10).
-    bool is_keep_verb = false;
-    bool is_drop_verb = false;
-    if (strncmp(p, "drop", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
-      is_drop_verb = true; p += 4;
-    } else if (strncmp(p, "keep", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
-      is_keep_verb = true; p += 4;
-    } else {
-      pushCompanionMessage(
-        "Erwartet: <drop|keep|on-channel|exempt-channel>\n"
-        "(drop/keep nehmen ein Pattern; on/exempt-channel\n"
-        " eine Channel-Liste)");
-      return;
+    // Verb: drop oder keep. st_lvl2 wurde oben gesetzt (0=drop, 1=keep).
+    bool is_drop_verb = (st_lvl2 == 0);
+    bool is_keep_verb = (st_lvl2 == 1);
+    // (p schon vorgerueckt am gemeinsamen Dispatch)
+
+    // Wunschliste 46 Phase 4 Vorbereitung (2026-06-11): sender-Filter
+    // bekommt explizite Achse 'name' (Klartext-Name) vs spaeter 'pubkey'
+    // (Wire-Hardblock fuer Adverts + Post-Decrypt fuer DM/REQ/RESP).
+    // Phase 1-Syntax 'filter sender drop add ...' wird abgelehnt mit
+    // Hinweis -- KEIN Legacy-Alias (User-Entscheidung 2026-06-11 'c').
+    // text-Filter behaelt Single-Achse (kein pubkey-Aequivalent).
+    if (is_sender) {
+      static const CompanionChoice sender_axis_choices[] = {
+        { "name",   false },  // 0
+        { "pubkey", false },  // 1
+      };
+      int axis_idx = dispatchToken(p, sender_axis_choices, 2,
+                                   "name|pubkey");
+      if (axis_idx < 0) return;
+      if (axis_idx == 1) {  // pubkey
+        if (!is_drop_verb) {
+          pushCompanionMessage(
+            "filter sender keep pubkey: nicht implementiert.\n"
+            "Nur 'drop pubkey' (Post-Decrypt-Block).");
+          return;
+        }
+        handle_pubkey_action(_prefs.filter_sender_drop_pubkey,
+                             _prefs.filter_sender_drop_pubkey_count,
+                             sizeof(_prefs.filter_sender_drop_pubkey)
+                               / sizeof(_prefs.filter_sender_drop_pubkey[0]),
+                             "filter sender drop pubkey");
+        return;
+      }
+      // axis_idx == 0 -> name -- weiter mit add/remove/list/clear.
     }
-    while (*p == ' ' || *p == '\t') p++;
+
     NodePrefs::FilterEntry* arr;
     uint8_t* p_cnt;
     size_t MAX_SLOTS;
@@ -13986,7 +15598,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* verb = is_drop_verb ? "drop" : "keep";
 
     // 'list' / 'clear' / 'add <pattern>' / 'remove <pattern>'
-    if (!*p || strncmp(p, "list", 4) == 0) {
+    // Wortlaengen-Prefix Dispatch (User-Wunsch 2026-06-11). 'remove'/'clear'
+    // muessen voll ausgeschrieben sein (no_abbrev=true), damit man nicht aus
+    // Versehen Daten loescht. 'add'/'list' duerfen abgekuerzt werden.
+    int act_idx;
+    if (!*p) {
+      act_idx = 2;  // leer == list
+    } else {
+      static const CompanionChoice action_choices[] = {
+        { "add",    false },  // 0
+        { "remove", true  },  // 1 destructive
+        { "list",   false },  // 2
+        { "clear",  true  },  // 3 destructive
+      };
+      act_idx = dispatchToken(p, action_choices, 4,
+                              "add|remove|list|clear");
+      if (act_idx < 0) return;
+    }
+    if (act_idx == 2) {  // list
       char hdr[80];
       snprintf(hdr, sizeof(hdr), "filter %s %s (%u/%u):", kind, verb,
                (unsigned)cnt, (unsigned)MAX_SLOTS);
@@ -13995,12 +15624,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("  (leer)");
         return;
       }
-      char buf[160]; size_t bu = 0; buf[0] = 0;
+      // Frame-Akkumulator: schreibt kleine Lines zusammen in einen
+      // 130-Byte-Frame (sicher unter 145-Byte BLE-Limit). Lange
+      // Channel-Listen werden auf separate Continuation-Zeilen verteilt.
+      char buf[130]; size_t bu = 0; buf[0] = 0;
       auto flushb = [&]() {
         if (bu > 0) { pushCompanionMessage(buf); bu = 0; buf[0] = 0; }
       };
+      auto emit = [&](const char* l) {
+        size_t ll = strlen(l);
+        if (ll >= sizeof(buf) - 1) {
+          flushb();
+          pushCompanionMessage(l);   // > 130 chars -- direkt pushen
+          return;
+        }
+        if (bu + ll + 2 >= sizeof(buf)) flushb();
+        if (bu > 0) buf[bu++] = '\n';
+        memcpy(buf + bu, l, ll); bu += ll; buf[bu] = 0;
+      };
       for (uint8_t i = 0; i < cnt && i < MAX_SLOTS; i++) {
-        char line[120];
         const char* prefix = "";
         const char* suffix = "";
         bool a_start = (arr[i].flags & 0x01) != 0;
@@ -14008,34 +15650,42 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (a_start && a_end) { prefix = "^"; suffix = "$"; }
         else if (a_start)     { prefix = "^"; }
         else if (a_end)       { suffix = "$"; }
-        size_t lp = snprintf(line, sizeof(line), "  %u: %s%s%s",
-                             (unsigned)(i + 1), prefix, arr[i].pattern, suffix);
-        // Pro-Pattern channel-filter anhaengen falls gesetzt.
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "  %u: %s%s%s",
+                 (unsigned)(i + 1), prefix, arr[i].pattern, suffix);
+        emit(hdr);
+        // Pro-Pattern channel-filter in eigene Zeile (vermeidet Frame-
+        // Ueberlauf bei vielen Channels).
         if (chan_on[i] != 0 || chan_ex[i] != 0) {
           uint64_t m = chan_on[i] ? chan_on[i] : chan_ex[i];
-          int n = snprintf(line + lp, sizeof(line) - lp, "  %s:",
-                           chan_on[i] ? "on" : "ex");
-          if (n > 0 && lp + n < sizeof(line)) lp += n;
+          char chans[145];
+          size_t cp = snprintf(chans, sizeof(chans), "       %s: ",
+                               chan_on[i] ? "on" : "exempt");
           bool first_ch = true;
           for (int k = 0; k < MAX_GROUP_CHANNELS && k < 64; k++) {
             if ((m & ((uint64_t)1 << k)) == 0) continue;
             ChannelDetails cd;
             if (!getChannel(k, cd)) continue;
-            n = snprintf(line + lp, sizeof(line) - lp, "%s%s",
-                         first_ch ? "" : ",", cd.name[0] ? cd.name : "?");
-            if (n > 0 && lp + n < sizeof(line)) lp += n;
+            const char* nm = cd.name[0] ? cd.name : "?";
+            size_t nl = strlen(nm) + (first_ch ? 0 : 1);
+            if (cp + nl + 4 >= sizeof(chans)) {
+              chans[cp] = 0;
+              emit(chans);
+              cp = snprintf(chans, sizeof(chans), "         ");
+              first_ch = true;
+            }
+            int n = snprintf(chans + cp, sizeof(chans) - cp, "%s%s",
+                             first_ch ? "" : ",", nm);
+            if (n > 0) cp += (size_t)n;
             first_ch = false;
           }
+          if (cp > 0) { chans[cp] = 0; emit(chans); }
         }
-        size_t ll = strlen(line);
-        if (bu + ll + 2 >= sizeof(buf)) flushb();
-        if (bu > 0) buf[bu++] = '\n';
-        memcpy(buf + bu, line, ll); bu += ll; buf[bu] = 0;
       }
       flushb();
       return;
     }
-    if (strncmp(p, "clear", 5) == 0 && (p[5] == 0 || p[5] == ' ' || p[5] == '\t')) {
+    if (act_idx == 3) {  // clear
       memset(arr, 0, MAX_SLOTS * sizeof(arr[0]));
       cnt = 0;
       savePrefs();
@@ -14043,9 +15693,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    if (strncmp(p, "add", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
-      p += 3;
-      while (*p == ' ' || *p == '\t') p++;
+    if (act_idx == 0) {  // add
+      // (p schon past 'add' am dispatch)
       if (!*p) { pushCompanionMessage("Usage: filter ... <drop|keep> add <pattern> [on-channel|exempt-channel <liste>]"); return; }
       // Pattern aus raw_cmd holen (case-preserving). Plus: Pattern
       // wird hier explizit terminiert (vorher: strlen, das schloss
@@ -14089,16 +15738,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       while (*after_pat == ' ' || *after_pat == '\t') after_pat++;
       uint64_t add_on_mask = 0, add_ex_mask = 0;
       if (*after_pat) {
-        bool ap_on = (strncmp(after_pat, "on-channel", 10) == 0
-                      && (after_pat[10] == ' ' || after_pat[10] == '\t'));
-        bool ap_ex = (strncmp(after_pat, "exempt-channel", 14) == 0
-                      && (after_pat[14] == ' ' || after_pat[14] == '\t'));
+        // Singular oder Plural beide gueltig (User-Wunsch 2026-06-11).
+        auto kw_len = [](const char* s, const char* root) -> int {
+          size_t L = strlen(root);
+          if (strncmp(s, root, L) != 0) return 0;
+          if (s[L] == 's' && (s[L+1] == ' ' || s[L+1] == '\t' || s[L+1] == 0))
+            return (int)L + 1;
+          if (s[L] == ' ' || s[L] == '\t' || s[L] == 0) return (int)L;
+          return 0;
+        };
+        int on_len = kw_len(after_pat, "on-channel");
+        int ex_len = kw_len(after_pat, "exempt-channel");
+        bool ap_on = (on_len > 0);
+        bool ap_ex = (ex_len > 0);
         if (!ap_on && !ap_ex) {
           pushCompanionMessage(
-            "Nach Pattern nur 'on-channel' oder 'exempt-channel' erlaubt.");
+            "Nach Pattern nur 'on-channels' oder 'exempt-channels' erlaubt.");
           return;
         }
-        after_pat += ap_on ? 10 : 14;
+        after_pat += ap_on ? on_len : ex_len;
         while (*after_pat == ' ' || *after_pat == '\t') after_pat++;
         uint64_t nm = 0;
         char ub[80]; bool sc = false;
@@ -14164,9 +15822,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    if (strncmp(p, "remove", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
-      p += 6;
-      while (*p == ' ' || *p == '\t') p++;
+    if (act_idx == 1) {  // remove
+      // (p schon past 'remove' am dispatch)
       if (!*p) { pushCompanionMessage("Usage: filter ... <drop|keep> remove <pattern|index>"); return; }
       // Versuche zuerst als Index zu parsen.
       // User-Wunsch 2026-06-09: Index 1-basiert (Listen-Anzeige zaehlt
@@ -14241,7 +15898,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("Pattern nicht in Liste.");
       return;
     }
-    pushCompanionMessage("Usage: filter <sender|text> <drop|keep> <add|remove|list|clear>");
+    pushCompanionMessage(
+      "Usage:\n"
+      "  filter sender drop|keep name <action>\n"
+      "  filter text   drop|keep      <action>\n"
+      "  <action> = add|remove|list|clear");
     return;
   }
 
@@ -14252,13 +15913,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   repeater  -> filter nur REPEATER
   //   sensor    -> filter nur SENSOR
   //   all       -> beide (= Default)
+  // Upstream-MeshCore-Alias: 'discover.neighbors' = REPEATER-only Discover
+  // (https://docs.meshcore.io/cli_commands/). Liefert dieselbe Funktion wie
+  // unser 'discover repeater', deshalb hier nur ein Alias-Dispatch.
+  if (starts_with_word(cmd, "discover.neighbors")) {
+    discoverStart((1 << ADV_TYPE_REPEATER), false);
+    return;
+  }
   if (starts_with_word(cmd, "discover")) {
     // Sub-Token-Resolver mit Prefix-Match. Damit funktionieren
     // Kuerzungen: 'rep' -> repeater, 'regi' -> regions, 'p' -> prefix,
     // 's' -> sensor, 'a' -> all. Bei Mehrdeutigkeit ('re' matched
     // regions + repeater) -> Kandidaten-Liste.
     static const char* const DISC_WORDS[] = {
-      "regions", "help", "prefix", "repeater", "sensor", "all"
+      "regions", "owner", "basic",
+      "help", "prefix", "repeater", "sensor", "all"
     };
     static const int DISC_N = (int)(sizeof(DISC_WORDS) / sizeof(DISC_WORDS[0]));
     auto disc_resolve = [&](const char* tok, size_t tlen,
@@ -14306,20 +15975,43 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           pushCompanionMessage(e);
           return;
         }
-        if (canon && strcmp(canon, "regions") == 0) {
-          // Token nach "regions" extrahieren (case-sensitive Name-Prefix)
+        if (canon && (strcmp(canon, "regions") == 0
+                    || strcmp(canon, "owner")   == 0
+                    || strcmp(canon, "basic")   == 0)) {
+          // Sub-Mode: anon-Query an REPEATER ohne Login. Drei Typen:
+          //   regions -> ANON_REQ_TYPE_REGIONS (CSV)
+          //   owner   -> ANON_REQ_TYPE_OWNER   (node_name + owner_info)
+          //   basic   -> ANON_REQ_TYPE_BASIC   (features + clock)
+          uint8_t req_type = ANON_REQ_TYPE_REGIONS;
+          const char* sub_label = "regions";
+          if (strcmp(canon, "owner") == 0) {
+            req_type = ANON_REQ_TYPE_OWNER;
+            sub_label = "owner";
+          } else if (strcmp(canon, "basic") == 0) {
+            req_type = ANON_REQ_TYPE_BASIC;
+            sub_label = "basic";
+          }
+          // Token nach Sub-Befehl extrahieren (case-sensitive Name-Prefix)
           const char* rp = raw_cmd;
           while (*rp == ' ' || *rp == '\t') rp++;
           while (*rp && *rp != ' ' && *rp != '\t') rp++;          // "discover"
           while (*rp == ' ' || *rp == '\t') rp++;
-          while (*rp && *rp != ' ' && *rp != '\t') rp++;          // "regions"
+          while (*rp && *rp != ' ' && *rp != '\t') rp++;          // "regions|owner|basic"
           while (*rp == ' ' || *rp == '\t') rp++;
-          // Kein Arg = Chain-Modus: CTL-Discover REPEATER triggern,
-          // pro RESP automatisch zero-hop ANON_REQ_TYPE_REGIONS. full
-          // pubkey (kein prefix) damit wir ECDH-verschluesseln koennen.
+          // Kein Arg:
+          //   regions -> Chain-Modus (CTL-Discover REPEATER triggern, pro
+          //              RESP zero-hop ANON_REQ_TYPE_REGIONS).
+          //   owner/basic -> Pflicht-Argument <contact-name> (kein Chain).
           if (!*rp) {
-            _discover_regions_chained = true;
-            discoverStart((1 << ADV_TYPE_REPEATER), false);
+            if (req_type == ANON_REQ_TYPE_REGIONS) {
+              _discover_regions_chained = true;
+              discoverStart((1 << ADV_TYPE_REPEATER), false);
+              return;
+            }
+            char r[100];
+            snprintf(r, sizeof(r),
+                     "Usage: discover %s <repeater-contact>", sub_label);
+            pushCompanionMessage(r);
             return;
           }
           // Prefix-Match: case-INSENSITIVE, names DUERFEN Leerzeichen
@@ -14337,13 +16029,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                   || prefix_end[-1] == '\r' || prefix_end[-1] == '\n')) prefix_end--;
           size_t input_len = (size_t)(prefix_end - prefix_start);
 
+          // Role-Filter abhaengig vom sub:
+          //   regions -> nur REPEATER (Scope-Liste ist forwarder-spezifisch)
+          //   owner/basic -> REPEATER + ROOM + SENSOR (User-Wunsch 2026-06-11:
+          //     auch Sensors/Rooms duerfen Owner/Basic-Queries beantworten;
+          //     Server-Seite oeffnet die Types entsprechend, s. allow_*).
+          auto role_ok = [&](uint8_t t) -> bool {
+            if (req_type == ANON_REQ_TYPE_REGIONS) {
+              return t == ADV_TYPE_REPEATER;
+            }
+            return t == ADV_TYPE_REPEATER
+                || t == ADV_TYPE_ROOM
+                || t == ADV_TYPE_SENSOR;
+          };
+          const char* role_label = (req_type == ANON_REQ_TYPE_REGIONS)
+                                 ? "REPEATER"
+                                 : "REPEATER/SENSOR/ROOM";
+
           int n_total_matches = 0;
-          int n_repeater = 0;
-          ContactInfo cand_repeater;       // wenn n_repeater==1: das ist's
-          ContactInfo cand_exact_repeater; // exact-Name-Match (Repeater)
-          ContactInfo cand_nonrepeater;    // erster non-REPEATER match
+          int n_role_match    = 0;
+          ContactInfo cand_first;       // n_role_match==1: dieser ist's
+          ContactInfo cand_exact;       // exact-Name-Match in role-Menge
+          ContactInfo cand_off_role;    // erster Match ausserhalb role-Menge
           bool has_exact = false;
-          bool has_nonrepeater = false;
+          bool has_off_role = false;
           char ambig[180] = "";
           size_t ambig_used = 0;
 
@@ -14362,53 +16071,121 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             }
             if (!match) continue;
             n_total_matches++;
-            if (ci.type == ADV_TYPE_REPEATER) {
-              n_repeater++;
-              if (n_repeater == 1) cand_repeater = ci;
+            if (role_ok(ci.type)) {
+              n_role_match++;
+              if (n_role_match == 1) cand_first = ci;
               if (strlen(ci.name) == input_len) {
-                cand_exact_repeater = ci;
+                cand_exact = ci;
                 has_exact = true;
               }
               if (ambig_used + 35 < sizeof(ambig)) {
                 ambig_used += snprintf(ambig + ambig_used, sizeof(ambig) - ambig_used,
                                        "\n  %.30s", ci.name);
               }
-            } else if (!has_nonrepeater) {
-              cand_nonrepeater = ci;
-              has_nonrepeater = true;
+            } else if (!has_off_role) {
+              cand_off_role = ci;
+              has_off_role = true;
             }
           }
 
+          // Fallback: wenn Name-Match leer UND Input ist Hex (gerade Laenge,
+          // alles [0-9a-fA-F]) -> als pubkey-Prefix interpretieren und gegen
+          // Kontakt-pubkeys matchen (User-Wunsch 2026-06-11: aus 'neighbors'
+          // bekannt der hex-Prefix '168cef', soll als Target funktionieren).
+          if (n_total_matches == 0 && input_len >= 2 && (input_len % 2) == 0) {
+            bool all_hex = true;
+            for (size_t k = 0; k < input_len; k++) {
+              char ch = prefix_start[k];
+              if (!((ch >= '0' && ch <= '9')
+                    || (ch >= 'a' && ch <= 'f')
+                    || (ch >= 'A' && ch <= 'F'))) {
+                all_hex = false; break;
+              }
+            }
+            if (all_hex) {
+              uint8_t pk[32];
+              uint8_t pk_len = 0;
+              auto h2v = [](char ch) -> uint8_t {
+                if (ch >= '0' && ch <= '9') return (uint8_t)(ch - '0');
+                if (ch >= 'a' && ch <= 'f') return (uint8_t)(10 + (ch - 'a'));
+                return (uint8_t)(10 + (ch - 'A'));
+              };
+              for (size_t k = 0; k + 1 < input_len && pk_len < 32; k += 2) {
+                pk[pk_len++] = (uint8_t)((h2v(prefix_start[k]) << 4)
+                                       | h2v(prefix_start[k + 1]));
+              }
+              for (int i = 0; i < total; i++) {
+                ContactInfo ci;
+                if (!getContactByIdx((uint32_t)i, ci)) continue;
+                if (memcmp(ci.id.pub_key, pk, pk_len) != 0) continue;
+                if (!role_ok(ci.type)) {
+                  const char* tn = (ci.type == ADV_TYPE_CHAT)   ? "CHAT"
+                                 : (ci.type == ADV_TYPE_SENSOR) ? "SENSOR"
+                                 : (ci.type == ADV_TYPE_ROOM)   ? "ROOM"
+                                 : "?";
+                  char r[160];
+                  snprintf(r, sizeof(r),
+                           "'%.30s' (hex-match) ist kein %s (%s).",
+                           ci.name, role_label, tn);
+                  pushCompanionMessage(r);
+                  return;
+                }
+                // Match per hex -- direkt verwenden.
+                if (!sendAnonQueryZeroHop(ci.id.pub_key, ci.name, req_type)) {
+                  char r[80];
+                  snprintf(r, sizeof(r), "discover %s: send FAILED.", sub_label);
+                  pushCompanionMessage(r);
+                  return;
+                }
+                char r[160];
+                snprintf(r, sizeof(r),
+                         "discover %s @%.40s (hex %.16s):\n"
+                         "  REQ gesendet (zero-hop).\n"
+                         "  Antwort folgt im channel.",
+                         sub_label, ci.name, prefix_start);
+                pushCompanionMessage(r);
+                return;
+              }
+              // Hex-Form aber kein Kontakt-Match.
+              char r[100];
+              snprintf(r, sizeof(r),
+                       "Kein Kontakt mit pubkey-Prefix '%.32s'.",
+                       prefix_start);
+              pushCompanionMessage(r);
+              return;
+            }
+          }
           if (n_total_matches == 0) {
             char r[80];
             snprintf(r, sizeof(r), "Kein Kontakt mit Prefix '%.40s'.", prefix_start);
             pushCompanionMessage(r);
             return;
           }
-          if (n_repeater == 0) {
-            const char* tn = (cand_nonrepeater.type == ADV_TYPE_CHAT)   ? "CHAT"
-                           : (cand_nonrepeater.type == ADV_TYPE_SENSOR) ? "SENSOR"
-                           : (cand_nonrepeater.type == ADV_TYPE_ROOM)   ? "ROOM"
+          if (n_role_match == 0) {
+            const char* tn = (cand_off_role.type == ADV_TYPE_CHAT)   ? "CHAT"
+                           : (cand_off_role.type == ADV_TYPE_SENSOR) ? "SENSOR"
+                           : (cand_off_role.type == ADV_TYPE_ROOM)   ? "ROOM"
                            : "?";
-            char r[130];
+            char r[160];
             snprintf(r, sizeof(r),
-                     "'%.30s' ist kein REPEATER (%s).\n"
-                     "discover regions geht nur fuer Repeater.",
-                     cand_nonrepeater.name, tn);
+                     "'%.30s' ist kein %s (%s).\n"
+                     "discover %s geht nur fuer %s.",
+                     cand_off_role.name, role_label, tn,
+                     sub_label, role_label);
             pushCompanionMessage(r);
             return;
           }
           ContactInfo chosen;
           if (has_exact) {
-            chosen = cand_exact_repeater;
-          } else if (n_repeater == 1) {
-            chosen = cand_repeater;
+            chosen = cand_exact;
+          } else if (n_role_match == 1) {
+            chosen = cand_first;
           } else {
             char r[220];
             snprintf(r, sizeof(r),
-                     "Mehrdeutig (%d Repeater-Treffer):%s\n"
+                     "Mehrdeutig (%d %s-Treffer):%s\n"
                      "Bitte praeziser angeben.",
-                     n_repeater, ambig);
+                     n_role_match, role_label, ambig);
             pushCompanionMessage(r);
             return;
           }
@@ -14419,16 +16196,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           // unseren direkten Funkruf hoert, klaert sich dann praktisch.
           bool not_direct = (chosen.out_path_len != 0);
           bool path_unknown = (chosen.out_path_len == OUT_PATH_UNKNOWN);
-          if (!sendRegionsQueryZeroHop(chosen.id.pub_key, chosen.name)) {
-            pushCompanionMessage("discover regions: send FAILED.");
+          if (!sendAnonQueryZeroHop(chosen.id.pub_key, chosen.name, req_type)) {
+            char r[80];
+            snprintf(r, sizeof(r), "discover %s: send FAILED.", sub_label);
+            pushCompanionMessage(r);
             return;
           }
           char r[140];
           snprintf(r, sizeof(r),
-                   "discover regions @%.40s:\n"
+                   "discover %s @%.40s:\n"
                    "  REQ gesendet (zero-hop).\n"
                    "  Antwort folgt im channel.",
-                   chosen.name);
+                   sub_label, chosen.name);
           pushCompanionMessage(r);
           if (not_direct) {
             const char* reason = path_unknown
@@ -14708,6 +16487,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "set loop_detect <off|minimal|moderate|strict>:\n"
           "  Loop-Drop bei Flood-Repeat (full-rep nur).\n"
           "  Default off. Numerisch 0..3 auch erlaubt.");
+        return;
+      }
+      if (strcmp(key, "tz") == 0) {
+        pushCompanionMessage(
+          "set tz <auto-eu|utc|<offset_min>|<name>>:\n"
+          "  Lokalzeit-Offset fuer 'clock'-Anzeige.\n"
+          "  auto-eu : CET-Basis + EU-Sommerzeit (Default).\n"
+          "  utc     : Geraet zeigt UTC (offset=0).\n"
+          "  <name>  : CET CEST WET WEST EET EEST BST\n"
+          "            EST EDT CST CDT MST MDT PST PDT\n"
+          "            JST KST IST MSK AEST NZST (etc.)\n"
+          "  Zahl    : Offset in Minuten, -720..+840.\n"
+          "  Name/Zahl werden als 'fixed' gespeichert (kein DST).");
         return;
       }
       if (strcmp(key, "messages_append_scope_to_name") == 0
@@ -15228,6 +17020,89 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else
         snprintf(r, sizeof(r),
           "OK - flood_max_scope_region = %u", (unsigned)newval);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // Wunschliste 50 Phase 1 (2026-06-11): Timezone-Override.
+    //   set tz auto-eu             -- regelbasiert (CET-Basis + EU-DST)
+    //   set tz utc                 -- =0, kein Offset
+    //   set tz <name>              -- CET, CEST, EST, EDT, PST, PDT, JST, MSK, ...
+    //   set tz <offset_min>        -- z.B. 'set tz 120' (CEST fest), -300 (EST fest)
+    // Name & numerischer Offset werden als 'fixed' gespeichert (kein DST).
+    if (strcmp(key, "tz") == 0) {
+      if (value_lc[0] == 0) {
+        pushCompanionMessage(
+          "Usage: set tz <auto-eu|utc|<offset_min>|<name>>\n"
+          "  Namen: CET CEST EET EEST WET WEST UTC GMT\n"
+          "         EST EDT CST CDT MST MDT PST PDT AKST\n"
+          "         JST KST IST MSK AEST NZST");
+        return;
+      }
+      // Sonderfaelle: auto-eu, utc.
+      if (strcmp(value_lc, "auto-eu") == 0 || strcmp(value_lc, "auto") == 0) {
+        _prefs.tz_mode = 0;
+        if (_prefs.tz_offset_min == 0) _prefs.tz_offset_min = 60;  // CET Basis
+        savePrefs();
+        char r[100];
+        snprintf(r, sizeof(r),
+          "OK - tz = auto-eu (base %d min, EU-DST)", (int)_prefs.tz_offset_min);
+        pushCompanionMessage(r);
+        return;
+      }
+      if (strcmp(value_lc, "utc") == 0 || strcmp(value_lc, "gmt") == 0) {
+        _prefs.tz_mode = 2;
+        _prefs.tz_offset_min = 0;
+        savePrefs();
+        pushCompanionMessage("OK - tz = utc (offset 0)");
+        return;
+      }
+      // Name-Lookup (case-insensitive via value_lc): IANA-uebliche Abkürzungen.
+      struct TzName { const char* name; int16_t off; };
+      static const TzName tz_names[] = {
+        { "cet",   60 }, { "cest",  120 },
+        { "wet",    0 }, { "west",  60 },
+        { "eet",  120 }, { "eest", 180 },
+        { "bst",   60 },  // British Summer Time
+        { "est", -300 }, { "edt", -240 },
+        { "cst", -360 }, { "cdt", -300 },
+        { "mst", -420 }, { "mdt", -360 },
+        { "pst", -480 }, { "pdt", -420 },
+        { "akst",-540 }, { "akdt",-480 },
+        { "hst", -600 },
+        { "jst",  540 }, { "kst",  540 },
+        { "ist",  330 },  // India ST (nicht Irish/Israel — User-Hinweis)
+        { "msk",  180 },
+        { "aest", 600 }, { "aedt", 660 },
+        { "nzst", 720 }, { "nzdt", 780 },
+      };
+      int n_names = (int)(sizeof(tz_names) / sizeof(tz_names[0]));
+      int16_t off_min = INT16_MAX;
+      for (int i = 0; i < n_names; i++) {
+        if (strcmp(value_lc, tz_names[i].name) == 0) { off_min = tz_names[i].off; break; }
+      }
+      if (off_min == INT16_MAX) {
+        // Numerischer Offset.
+        char* endp = NULL;
+        long v = strtol(value_lc, &endp, 10);
+        if (endp == value_lc || *endp != 0) {
+          pushCompanionMessage("Unbekannter Wert. 'set tz' fuer Liste.");
+          return;
+        }
+        if (v < -720 || v > 840) {
+          pushCompanionMessage("Offset ausserhalb -720..+840 (Minuten).");
+          return;
+        }
+        off_min = (int16_t)v;
+      }
+      _prefs.tz_mode = 1;          // fixed
+      _prefs.tz_offset_min = off_min;
+      savePrefs();
+      char r[100];
+      int h = off_min / 60;
+      int m = abs(off_min % 60);
+      snprintf(r, sizeof(r),
+        "OK - tz = fixed %+d min (UTC%+d:%02d)", (int)off_min, h, m);
       pushCompanionMessage(r);
       return;
     }
@@ -16148,6 +18023,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {
       const char* nm = (_prefs.loop_detect == 0) ? "off" : (_prefs.loop_detect == 1) ? "minimal" : (_prefs.loop_detect == 2) ? "moderate" : "strict";
       snprintf(r, sizeof(r), "loop_detect = %s", nm);
+    }
+    else if (strcmp(key, "tz") == 0) {
+      // Effektiver Offset jetzt: ruft localTzOffsetSecs mit aktueller RTC.
+      int32_t eff = localTzOffsetSecs(getRTCClock()->getCurrentTime()) / 60;
+      const char* mname = (_prefs.tz_mode == 1) ? "fixed"
+                        : (_prefs.tz_mode == 2) ? "utc"
+                        : "auto-eu";
+      int h = (int)eff / 60;
+      int m = abs((int)eff % 60);
+      snprintf(r, sizeof(r),
+        "tz = %s, base=%d min, effective UTC%+d:%02d",
+        mname, (int)_prefs.tz_offset_min, h, m);
     }
     else if (strcmp(key, "time") == 0) {
       // get time [sync]
@@ -19034,6 +20921,110 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   pushCompanionMessage("(unbekannter Befehl - 'help' fuer Liste)");
 }
 
+// Wunschliste 10 (2026-06-11): Plain-Text USB-Serial CLI.
+// Liest USB-Bytes line-orientiert, dispatched per Enter an handle-
+// CompanionCommand (zentraler CLI-Parser); pushCompanionMessage-Output
+// wird waehrend Dispatch nach Serial umgeleitet (siehe _serial_cli_active-
+// Pfad dort). Echo + Backspace-Handling fuer Terminal-Komfort.
+//
+// Coexistenz:
+//   - Backup-Restore und CLI-Rescue haben Vorrang (eigene Serial-Loops).
+//     Wenn die aktiv sind, kein Read, kein Prompt. Bei Uebergang zu IDLE
+//     wieder Prompt emittieren (_serial_cli_prompt_pending).
+//   - USB-frame-Build: wenn CLI 'on', suspendieren wir den Frame-Parser
+//     (checkSerialInterface) global -- das macht der loop()-Switch. Hier
+//     im CLI lesen wir Serial frei.
+//
+// Tasten:
+//   Ctrl-U  -- 'kill line' (Buffer-Reset, Unix-Konvention)
+//   Ctrl-D  -- 'EOT' (CLI runtime suspendieren); via 'serial-cli on'
+//              wieder einschaltbar (BLE/WiFi-App oder Reboot je nach
+//              Persistenz-Status)
+//   Enter   -- Dispatch
+//   BS/DEL  -- Backspace
+void MyMesh::serialCliLoop() {
+  // 'if (!Serial)' = HWCDC isCDC_Connected() -- bei Heltec an reiner
+  // Powerbank ohne Host ist DTR low, Serial false, wir kommen gar nicht
+  // rein. Bei DTR high (Host claimed but doesn't read): tx-timeout 1ms
+  // pro Write (siehe setup() Serial.setTxTimeoutMs(1)) deckelt individuell.
+  // Plus Budget-Cap unten gegen Paste-Bursts (User-Hinweis 2026-06-11:
+  // 'nicht dass hier neue blocking writes entstehen').
+  if (!Serial) return;
+  // BR / Rescue uebernimmt Serial -- nicht reinpfuschen.
+  if (_br_state != BR_IDLE || _cli_rescue) {
+    _serial_cli_prompt_pending = true;
+    return;
+  }
+  // Uebergang BR/Rescue -> IDLE: Prompt nachholen.
+  if (_serial_cli_prompt_pending) {
+    Serial.write("\r\n> ");
+    _serial_cli_prompt_pending = false;
+  }
+  // Per-Loop-Budget: max 64 Bytes verarbeiten, Rest bleibt im Input-FIFO
+  // und kommt im naechsten loop()-Tick dran. Schuetzt vor Paste-Bursts
+  // wenn die TX-Schiene zaeh ist (siehe Kommentar oben).
+  int budget = 64;
+  while (Serial.available() > 0 && budget-- > 0) {
+    int b = Serial.read();
+    if (b < 0) break;
+    unsigned char c = (unsigned char)b;
+    if (c == 0x15) {  // Ctrl-U: 'kill line' (Buffer-Reset, Unix-Konv.)
+      _serial_cli_pos = 0;
+      Serial.write("\r\n> ");
+      continue;
+    }
+    if (c == 0x04) {  // Ctrl-D: CLI suspendieren (RAM, kein Persist)
+      _serial_cli_pos = 0;
+      _serial_cli_temp_on = false;
+      if (_prefs.serial_cli_persist_on != 0) {
+        // Persistent on -- temp override RAM-only abschalten reicht nicht;
+        // damit CLI wirklich aus bleibt, persistent off setzen.
+        _prefs.serial_cli_persist_on = 0;
+        savePrefs();
+        Serial.write("\r\n# CLI suspended (Ctrl-D) -- persistent off.\r\n"
+                     "  Reaktivieren: 'serial-cli on' per BLE-App.\r\n");
+      } else {
+        Serial.write("\r\n# CLI suspended (Ctrl-D).\r\n"
+                     "  Reaktivieren: 'serial-cli on' per BLE-App.\r\n");
+      }
+      return;
+    }
+    if (c == '\r' || c == '\n') {
+      Serial.write("\r\n");
+      if (_serial_cli_pos > 0) {
+        _serial_cli_buf[_serial_cli_pos] = 0;
+        _serial_cli_active = true;
+        handleCompanionCommand(_serial_cli_buf);
+        _serial_cli_active = false;
+        _serial_cli_pos = 0;
+      }
+      // Wenn der Befehl Backup-Restore oder CLI-Rescue gestartet hat,
+      // unterdruecken wir den Prompt -- nicht zwischen "paste deine
+      // Backup-Daten" und User reinquatschen. Wird beim Uebergang
+      // zurueck zu IDLE oben nachgeholt.
+      if (_br_state != BR_IDLE || _cli_rescue) {
+        _serial_cli_prompt_pending = true;
+      } else {
+        Serial.write("> ");
+      }
+      continue;
+    }
+    if (c == 0x08 || c == 0x7F) {  // Backspace / DEL
+      if (_serial_cli_pos > 0) {
+        _serial_cli_pos--;
+        Serial.write("\b \b");
+      }
+      continue;
+    }
+    if (c >= 0x20 && c < 0x7F
+        && _serial_cli_pos + 1 < sizeof(_serial_cli_buf)) {
+      _serial_cli_buf[_serial_cli_pos++] = (char)c;
+      Serial.write(c);  // echo
+    }
+    // alles andere (Steuerzeichen, Non-ASCII) wird ignoriert
+  }
+}
+
 void MyMesh::pushDebugLog(const char* fmt, ...) {
   // millis()-Prefix vor jedem Log-Eintrag -- erlaubt Korrelation und
   // Reihenfolge-Validierung auf der seriellen Konsole (User-Wunsch
@@ -19060,10 +21051,14 @@ void MyMesh::pushDebugLog(const char* fmt, ...) {
   // Timeout reissen (User-Report 2026-06-02). Bei 'if (!Serial)' wird der
   // ganze Log-Ausgabe-Pfad ohne Risiko geskipped.
   // CRLF-Uebersetzung wie zuvor (LF -> CRLF, multiline-aware).
+  // Anti-Interleaving (User-Bug 2026-06-11): waehrend einer aktiven
+  // Serial-CLI-Dispatch wuerde Trace-Output sich mit unserem CLI-Text
+  // im selben Serial-Stream vermengen. Skip Serial-Trace solange
+  // _serial_cli_active gesetzt ist; BLE-Frame-Trace bleibt erhalten.
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
-  if ((_prefs.log_flags & 0x01) && Serial) {
+  if ((_prefs.log_flags & 0x01) && Serial && !_serial_cli_active) {
 #else
-  if (_prefs.log_flags & 0x01) {
+  if ((_prefs.log_flags & 0x01) && !_serial_cli_active) {
 #endif
     // CRLF-Expansion in lokalen Buffer, dann EIN einzelner Serial.write
     // statt zeichenweise. Hintergrund (User-Erkenntnis 2026-06-02):

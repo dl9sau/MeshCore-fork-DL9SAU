@@ -382,6 +382,29 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.bluetooth_profile));
     file.read((uint8_t *)&_prefs.bluetooth_active,
               sizeof(_prefs.bluetooth_active));
+    // Wunschliste 50 Phase 1 (2026-06-11): TZ-Override
+    file.read((uint8_t *)&_prefs.tz_mode,
+              sizeof(_prefs.tz_mode));
+    file.read((uint8_t *)&_prefs.tz_offset_min,
+              sizeof(_prefs.tz_offset_min));
+
+    // Wunschliste 46 Phase 4 (2026-06-11): Advert/Pubkey Filter.
+    file.read((uint8_t *)&_prefs.filter_advert_drop_name,
+              sizeof(_prefs.filter_advert_drop_name));
+    file.read((uint8_t *)&_prefs.filter_advert_drop_name_count,
+              sizeof(_prefs.filter_advert_drop_name_count));
+    file.read((uint8_t *)&_prefs.filter_advert_drop_pubkey,
+              sizeof(_prefs.filter_advert_drop_pubkey));
+    file.read((uint8_t *)&_prefs.filter_advert_drop_pubkey_count,
+              sizeof(_prefs.filter_advert_drop_pubkey_count));
+    file.read((uint8_t *)&_prefs.filter_sender_drop_pubkey,
+              sizeof(_prefs.filter_sender_drop_pubkey));
+    file.read((uint8_t *)&_prefs.filter_sender_drop_pubkey_count,
+              sizeof(_prefs.filter_sender_drop_pubkey_count));
+
+    // Wunschliste 10 (2026-06-11): Serial-CLI Persistent.
+    file.read((uint8_t *)&_prefs.serial_cli_persist_on,
+              sizeof(_prefs.serial_cli_persist_on));
 
     file.close();
   }
@@ -545,6 +568,29 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.bluetooth_profile));
     file.write((uint8_t *)&_prefs.bluetooth_active,
                sizeof(_prefs.bluetooth_active));
+    // Wunschliste 50 Phase 1 (2026-06-11): TZ-Override
+    file.write((uint8_t *)&_prefs.tz_mode,
+               sizeof(_prefs.tz_mode));
+    file.write((uint8_t *)&_prefs.tz_offset_min,
+               sizeof(_prefs.tz_offset_min));
+
+    // Wunschliste 46 Phase 4 (2026-06-11): Advert/Pubkey Filter.
+    file.write((uint8_t *)&_prefs.filter_advert_drop_name,
+               sizeof(_prefs.filter_advert_drop_name));
+    file.write((uint8_t *)&_prefs.filter_advert_drop_name_count,
+               sizeof(_prefs.filter_advert_drop_name_count));
+    file.write((uint8_t *)&_prefs.filter_advert_drop_pubkey,
+               sizeof(_prefs.filter_advert_drop_pubkey));
+    file.write((uint8_t *)&_prefs.filter_advert_drop_pubkey_count,
+               sizeof(_prefs.filter_advert_drop_pubkey_count));
+    file.write((uint8_t *)&_prefs.filter_sender_drop_pubkey,
+               sizeof(_prefs.filter_sender_drop_pubkey));
+    file.write((uint8_t *)&_prefs.filter_sender_drop_pubkey_count,
+               sizeof(_prefs.filter_sender_drop_pubkey_count));
+
+    // Wunschliste 10 (2026-06-11): Serial-CLI Persistent.
+    file.write((uint8_t *)&_prefs.serial_cli_persist_on,
+               sizeof(_prefs.serial_cli_persist_on));
 
     file.close();
   }
