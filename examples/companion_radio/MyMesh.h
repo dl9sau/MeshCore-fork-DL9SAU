@@ -1148,7 +1148,13 @@ private:
   // gewinnt).
   uint32_t      _rtc_persist_last_saved = 0;        // zuletzt persistierter RTC-Wert
   uint32_t      _rtc_persist_check_ms = 0;          // millis() der letzten Loop-Pruefung
-  static const uint32_t RTC_PERSIST_MIN_DELTA = 60; // sec; spart Flash-Wear
+  uint32_t      _rtc_persist_last_write_ms = 0;     // millis() des letzten echten Flash-Writes
+  // RTC-Progress-Grenze: kleinere Bumps zaehlen als 'kein Fortschritt'.
+  static const uint32_t RTC_PERSIST_MIN_DELTA = 60; // sec
+  // Min-Abstand zwischen tatsaechlichen Flash-Writes -- schuetzt vor
+  // bug-haftem Adverter der alle 3min adverten wuerde (User-Sorge
+  // 2026-06-14). 10 min -> max ~144 Writes/Tag, plus 30-min Periodic.
+  static const uint32_t RTC_PERSIST_MIN_WRITE_INTERVAL_MS = 10UL*60UL*1000UL;
   static const uint32_t RTC_PERSIST_CHECK_INTERVAL_MS = 30UL*60UL*1000UL;  // 30 min
   void          saveRtcPersist(uint32_t rtc);
   uint32_t      loadRtcPersist();

@@ -524,6 +524,16 @@ void MyMesh::saveRtcPersist(uint32_t rtc) {
   if (rtc < 1500000000UL) return;   // < 2017-07: ungueltig
   if (rtc <= _rtc_persist_last_saved) return;
   if (rtc - _rtc_persist_last_saved < RTC_PERSIST_MIN_DELTA) return;
+  // Write-Interval-Guard (User-Sorge 2026-06-14: Flash-Wear bei
+  // pathologisch haeufigen Adverts). Min 10 min Pause zwischen
+  // Writes; das schluckt 'taube' Sync-Bursts (z.B. Adverter alle 3
+  // min). Beim allerersten Write (last_write_ms == 0) sofort
+  // erlauben damit App-First-Connect direkt persistiert wird.
+  uint32_t now_ms = millis();
+  if (_rtc_persist_last_write_ms != 0
+      && now_ms - _rtc_persist_last_write_ms < RTC_PERSIST_MIN_WRITE_INTERVAL_MS) {
+    return;
+  }
   File f = _store->openWriteFile("/rtc_persist");
   if (!f) return;
   uint8_t magic = 0xAB;
@@ -532,6 +542,10 @@ void MyMesh::saveRtcPersist(uint32_t rtc) {
   f.write((const uint8_t*)&rtc, 4);
   f.close();
   _rtc_persist_last_saved = rtc;
+  _rtc_persist_last_write_ms = (now_ms == 0 ? 1 : now_ms);  // 0 ist Sentinel
+  // Sichtbarkeit im 'trace on' / 'trace rtc on' (User-Wunsch 2026-06-14:
+  // im normalen RTC-Trace-Pfad statt nur in pushDebugLog).
+  traceCompanion(TRACE_RTC, "[rtc-persist] saved %lu", (unsigned long)rtc);
 }
 
 uint32_t MyMesh::loadRtcPersist() {
@@ -4072,19 +4086,41 @@ bool MyMesh::sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_n
   return true;
 }
 
-// UTF-8-sichere In-Place-Truncation auf max. max_bytes Bytes.
-// Wenn s[max_bytes] mitten in einer UTF-8-Multibyte-Sequenz landet, gehen
-// wir rueckwaerts zum Start-Byte und schneiden VOR dem Codepoint. So
-// vermeiden wir den 'Replacement Character'-Tile in der App-Anzeige
-// (User-Bug 2026-06-14 'LOS_Schoeneiche3<?>').
-//   Continuation-Byte:  10xxxxxx -> (b & 0xC0) == 0x80
-//   Start- oder ASCII:  alles andere
-static void neighbors_utf8_safe_truncate(char* s, size_t max_bytes) {
-  size_t l = strlen(s);
-  if (l <= max_bytes) return;
-  size_t i = max_bytes;
-  while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80) i--;
-  s[i] = 0;
+// Anzahl visueller Codepoints (Zeichen) in s. UTF-8: Start- + ASCII-Bytes
+// (alles wo (b & 0xC0) != 0x80) zaehlen je 1; Continuation-Bytes 0.
+// Naeherung: 1 Codepoint == 1 visueller Char. Fuer CJK / Emoji im
+// Companion-Channel-Use ausreichend genau (kein Wide-Char-Display).
+static size_t neighbors_utf8_visual_count(const char* s) {
+  size_t n = 0;
+  while (*s) {
+    if (((unsigned char)*s & 0xC0) != 0x80) n++;
+    s++;
+  }
+  return n;
+}
+
+// UTF-8-sichere In-Place-Truncation auf max_visual visuelle Zeichen
+// (Codepoints), nicht Bytes. Schuetzt vor mid-Sequence-Cut + ist
+// Spalten-genau (User-Bug 2026-06-14 -- nach erstem Fix war noch
+// 1-Char-Drift in der age-Spalte, weil das vorige byte-basierte
+// truncate+%-25s die Multi-Byte-Codepoints im Padding miszaehlt hat).
+static void neighbors_utf8_truncate_to_visual(char* s, size_t max_visual) {
+  size_t bytes = 0;
+  size_t visual = 0;
+  while (s[bytes]) {
+    unsigned char c = (unsigned char)s[bytes];
+    if ((c & 0xC0) == 0x80) {        // Continuation -- mit-konsumieren
+      bytes++;
+      continue;
+    }
+    if (visual >= max_visual) {
+      s[bytes] = 0;
+      return;
+    }
+    bytes++;
+    visual++;
+  }
+  // s war kuerzer als max_visual -- nichts zu schneiden.
 }
 
 // Haversine-Distanz in km zwischen zwei lat/lon-Paaren (in degrees).
@@ -5126,14 +5162,19 @@ void MyMesh::begin(bool has_display) {
       const uint32_t ONE_YEAR_SECS = 365UL * 86400UL;
       if (persisted + 1 > cur && persisted < cur + ONE_YEAR_SECS) {
         getRTCClock()->setCurrentTime(persisted + 1);
-        pushDebugLog("[RTC-PERSIST] geladen %lu, RTC %lu -> %lu\n",
-                     (unsigned long)persisted,
-                     (unsigned long)cur,
-                     (unsigned long)(persisted + 1));
+        // User-Wunsch 2026-06-14: in TRACE_RTC sichtbar machen (statt
+        // nur in pushDebugLog -- letzteres geht im normalen 'trace on'
+        // unter).
+        traceCompanion(TRACE_RTC,
+                       "[rtc-persist] geladen %lu, RTC %lu -> %lu",
+                       (unsigned long)persisted,
+                       (unsigned long)cur,
+                       (unsigned long)(persisted + 1));
         _rtc_persist_last_saved = persisted;
       } else if (persisted >= cur + ONE_YEAR_SECS) {
-        pushDebugLog("[RTC-PERSIST] SKIPPED: persisted %lu > cur %lu + 1 year\n",
-                     (unsigned long)persisted, (unsigned long)cur);
+        traceCompanion(TRACE_RTC,
+                       "[rtc-persist] SKIPPED: persisted %lu > cur %lu + 1 year",
+                       (unsigned long)persisted, (unsigned long)cur);
       }
     }
   }
@@ -12758,12 +12799,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       prefix6[6] = 0;
       char idstr[64];
       snprintf(idstr, sizeof(idstr), "%s %s", prefix6, c.name);
-      // UTF-8-sichere Truncation auf 25 Bytes (User-Bug 2026-06-14:
-      // mid-Sequence-Cut produzierte schwarzes Fragezeichen-Tile, weil
-      // %-25.25s rein byte-basiert abschneidet -- 'LOS_Schoeneiche3'
-      // verlor das halbe oe-UTF8-Pair). Lieber max. 25 Byte aber an
-      // Codepoint-Grenze; Spalten-Drift max ~1 Char.
-      neighbors_utf8_safe_truncate(idstr, 25);
+      // UTF-8 visuell trunkieren auf 25 Codepoints (User-Bug 2026-06-14
+      // v2: byte-basiert trunkieren + %-25s padden = 1-Char-Drift pro
+      // Multi-Byte-Codepoint im Namen, sichtbar bei 'LOS_Schoeneiche3').
+      // Loesung: erst auf visuelle 25 Chars trunkieren, dann Pad-Differenz
+      // explizit als Spaces im Format-String.
+      neighbors_utf8_truncate_to_visual(idstr, 25);
+      size_t idstr_vis = neighbors_utf8_visual_count(idstr);
+      int    idstr_pad = (idstr_vis >= 25) ? 0 : (int)(25 - idstr_vis);
 
       // SNR/RSSI + Scope aus _neighbours[] (per-pubkey) suchen. Nur direkt-
       // gehoert (zero-hop) liefert einen Eintrag. Bei Kontakten via Flood:
@@ -12802,14 +12845,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char line[180];
       // Hops-Spalte nur zeigen wenn ueberhaupt hops-Filter aktiv ist
       // (sonst direct-only = hops immer 0 = redundant).
-      // %-25s (ohne .25-Precision) -- Truncation haben wir oben UTF-8-sicher
-      // gemacht; %-25s padded nur noch falls kuerzer.
+      // Manual-Padding mit '%*s' / "" -- printf-Width zaehlt Bytes,
+      // wir wollen Codepoints; daher idstr_pad oben getrennt berechnet.
       if (!has_hops) {
-        snprintf(line, sizeof(line), "  %s %-25s %6s %s%s%s",
-                 tname, idstr, age, snr_buf, scope_buf, dist_buf);
+        snprintf(line, sizeof(line), "  %s %s%*s %6s %s%s%s",
+                 tname, idstr, idstr_pad, "", age, snr_buf, scope_buf, dist_buf);
       } else {
-        snprintf(line, sizeof(line), "  %s %-25s %6s %s%s hops=%s%s",
-                 tname, idstr, age, snr_buf, scope_buf, hop, dist_buf);
+        snprintf(line, sizeof(line), "  %s %s%*s %6s %s%s hops=%s%s",
+                 tname, idstr, idstr_pad, "", age, snr_buf, scope_buf, hop, dist_buf);
       }
       add_line(line);
       shown++;
