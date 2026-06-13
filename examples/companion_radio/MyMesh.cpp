@@ -500,6 +500,11 @@ void MyMesh::loadBucketsFromFlash() {
       getRTCClock()->setCurrentTime(max_ts + 1);
       pushDebugLog("[MSGSTORE] RTC bumped %lu -> %lu (max stored ts)\n",
                    (unsigned long)cur, (unsigned long)(max_ts + 1));
+      // User-Wunsch 2026-06-14: granularer clock-Source-Marker.
+      //   0xFCFCFC = Boot-Bootstrap aus Bucket-Frame-Timestamp.
+      _time_sync_last_at_rtc = max_ts + 1;
+      _time_sync_done_since_boot = true;
+      memset(_time_sync_last_pubkey, 0xFC, sizeof(_time_sync_last_pubkey));
     } else if (max_ts >= cur + ONE_YEAR_SECS) {
       pushDebugLog("[MSGSTORE] RTC bump SKIPPED: max stored ts %lu > cur %lu + 1 year\n",
                    (unsigned long)max_ts, (unsigned long)cur);
@@ -4766,6 +4771,9 @@ void MyMesh::begin(bool has_display) {
   // benutzen" (Build-spezifisch, auf ESP32-S3 = 240 MHz). Wird in
   // main.cpp setup() nach loadPrefs angewendet.
   _prefs.cpu_clock_mhz = 0;
+  // Wunschliste 58 Phase A (2026-06-14): Display-Wake-Mode.
+  // 2 = on-at-new-messages (Default, behavior-kompat zum Bestand).
+  _prefs.display_wake_mode = 2;
 
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter Masks
   // Pre-Init: alle Masks = 0 -> global (alle Channels).
@@ -5153,46 +5161,50 @@ void MyMesh::begin(bool has_display) {
   resetContacts();
   _store->loadContacts(this);
   bootstrapRTCfromContacts();
-  // RTC-Persistierung (Bug-Fix 2026-06-14): zusaetzlich aus /rtc_persist
-  // laden. Wenn der dort gespeicherte Wert hoeher ist als das Resultat
-  // von bootstrapRTCfromContacts(), als naechste Approximation nehmen.
-  // (loadBucketsFromFlash kommt danach und bumpt nochmal, wenn die
-  // Buckets noch frischere Frame-Timestamps haben.)
-  {
-    uint32_t persisted = loadRtcPersist();
-    if (persisted != 0) {
-      uint32_t cur = getRTCClock()->getCurrentTime();
-      // Sanity: max 1 Jahr in der Zukunft vs aktuellem Bootstrap
-      const uint32_t ONE_YEAR_SECS = 365UL * 86400UL;
-      if (persisted + 1 > cur && persisted < cur + ONE_YEAR_SECS) {
-        getRTCClock()->setCurrentTime(persisted + 1);
-        // User-Wunsch 2026-06-14: in TRACE_RTC sichtbar machen (statt
-        // nur in pushDebugLog -- letzteres geht im normalen 'trace on'
-        // unter).
-        traceCompanion(TRACE_RTC,
-                       "[rtc-persist] geladen %lu, RTC %lu -> %lu",
-                       (unsigned long)persisted,
-                       (unsigned long)cur,
-                       (unsigned long)(persisted + 1));
-        _rtc_persist_last_saved = persisted;
-      } else if (persisted >= cur + ONE_YEAR_SECS) {
-        traceCompanion(TRACE_RTC,
-                       "[rtc-persist] SKIPPED: persisted %lu > cur %lu + 1 year",
-                       (unsigned long)persisted, (unsigned long)cur);
-      }
-    }
-  }
-  // Reise-Fix 2026-06-08: nach Boot-Bootstrap unsere Sync-State-Marker
-  // initialisieren, damit clock-Display die Quelle 'Bootstrap (last
-  // advert)' anzeigt statt einer evtl. spaeter eingefangenen Stale-
-  // Advert-Sync-Quelle. last_at_rtc = aktueller RTC = 'gerade synchron'.
-  // pub_key=[0xFF,0xFF,0xFF] als Bootstrap-Marker (App-Sync nutzt 0x00).
+  // Reise-Fix 2026-06-08: nach contacts-Bootstrap die Sync-State-Marker
+  // initialisieren. clock-Display nutzt die pubkey-Sentinels:
+  //   0xFFFFFF = Boot-Bootstrap (last advert in contacts)
+  //   0xFDFDFD = Boot-Bootstrap (RTC-Persist)                   <-- NEU 2026-06-14
+  //   0xFCFCFC = Boot-Bootstrap (stored message in Bucket)      <-- NEU 2026-06-14
+  //   0xFEFEFE = GPS (zuletzt; jetzt off)
+  //   0x000000 = App (CMD_SET_DEVICE_TIME)
+  //   sonst    = pub_key-Prefix vom Advert-Sender
+  // Persist + Buckets ueberschreiben den Marker spaeter wenn sie hoeher
+  // sind -- so spiegelt der Marker die tatsaechlich gewinnende Quelle.
   {
     uint32_t rtc_after_bootstrap = getRTCClock()->getCurrentTime();
     if (rtc_after_bootstrap > 1577836800UL /* 2020-01-01 */) {
       _time_sync_last_at_rtc = rtc_after_bootstrap;
       _time_sync_done_since_boot = true;
       memset(_time_sync_last_pubkey, 0xFF, sizeof(_time_sync_last_pubkey));
+    }
+  }
+  // RTC-Persistierung (Bug-Fix 2026-06-14): /rtc_persist laden und
+  // anwenden wenn hoeher als contacts-Bootstrap. Marker auf 0xFDFDFD.
+  // (loadBucketsFromFlash kommt danach und kann nochmal hoeher legen.)
+  {
+    uint32_t persisted = loadRtcPersist();
+    if (persisted != 0) {
+      uint32_t cur = getRTCClock()->getCurrentTime();
+      const uint32_t ONE_YEAR_SECS = 365UL * 86400UL;
+      if (persisted + 1 > cur && persisted < cur + ONE_YEAR_SECS) {
+        getRTCClock()->setCurrentTime(persisted + 1);
+        traceCompanion(TRACE_RTC,
+                       "[rtc-persist] geladen %lu, RTC %lu -> %lu",
+                       (unsigned long)persisted,
+                       (unsigned long)cur,
+                       (unsigned long)(persisted + 1));
+        _rtc_persist_last_saved = persisted;
+        // Marker auf 0xFDFDFD damit clock-Display 'RTC-Persist' zeigt.
+        _time_sync_last_at_rtc = persisted + 1;
+        _time_sync_done_since_boot = true;
+        memset(_time_sync_last_pubkey, 0xFD,
+               sizeof(_time_sync_last_pubkey));
+      } else if (persisted >= cur + ONE_YEAR_SECS) {
+        traceCompanion(TRACE_RTC,
+                       "[rtc-persist] SKIPPED: persisted %lu > cur %lu + 1 year",
+                       (unsigned long)persisted, (unsigned long)cur);
+      }
     }
   }
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
@@ -8441,6 +8453,12 @@ void MyMesh::backupSaveToSerial() {
     snprintf(buf, sizeof(buf), "%u", (unsigned)_prefs.cpu_clock_mhz);
     kv_str("cpu_clock_mhz", buf);
   }
+  // Wunschliste 58 Phase A (2026-06-14): Display-Wake-Mode als String
+  // damit Backup human-readable bleibt.
+  kv_str("display_wake_mode",
+         _prefs.display_wake_mode == 0 ? "off"
+       : _prefs.display_wake_mode == 1 ? "on"
+                                       : "on-at-new-messages");
   // Wunschliste 39: cap-Vars als kv_str mit follow/off Keywords wenn
   // anwendbar, sonst Number-as-String. Restore akzeptiert beide
   // Formate (number oder string) -- human-editable Backup.
@@ -9398,6 +9416,27 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
             _prefs.cpu_clock_mhz = (uint8_t)v;
           }
           // ungueltig: stillschweigend ignorieren, Default bleibt 0
+        }
+        _br_applied++;
+        return;
+      }
+      // Wunschliste 58 Phase A (2026-06-14): display_wake_mode aus
+      // Backup. String oder Number erlaubt.
+      if (strcmp(key, "display_wake_mode") == 0
+          || strcmp(key, "display") == 0
+          || strcmp(key, "display.wake") == 0
+          || strcmp(key, "display.wake.mode") == 0) {
+        char tmp[24]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
+        if (strcasecmp(tmp, "off") == 0)            _prefs.display_wake_mode = 0;
+        else if (strcasecmp(tmp, "on") == 0)        _prefs.display_wake_mode = 1;
+        else if (strcasecmp(tmp, "on-at-new-messages") == 0
+              || strcasecmp(tmp, "messages") == 0
+              || strcasecmp(tmp, "new-msgs") == 0
+              || strcasecmp(tmp, "default") == 0
+              || strcasecmp(tmp, "auto") == 0)       _prefs.display_wake_mode = 2;
+        else {
+          int v = atoi(tmp);
+          if (v >= 0 && v <= 2) _prefs.display_wake_mode = (uint8_t)v;
         }
         _br_applied++;
         return;
@@ -10600,6 +10639,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Upstream-MeshCore-Kompatibilitaet (https://docs.meshcore.io/cli_commands/)
     {"discover.neighbors", false}, {"neighbor.remove", true},
     {"advert.zerohop", false},
+    // Wunschliste 56 Phase 1 (2026-06-14): Quick-Wins ver+board fuer
+    // CLI-Doku-Parity. 'version' als laenger-Form (no_abbrev=false damit
+    // 've' eindeutig ver/version -> ver matchbar bleibt).
+    {"ver", false}, {"version", false}, {"board", false},
   };
   static const size_t TOP_N = sizeof(TOP_CMDS) / sizeof(TOP_CMDS[0]);
   size_t fw_len = 0;
@@ -11029,6 +11072,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  int.thresh (0=off, default 14)\n"
           "  agc.reset.interval (sec/4, 0=off)\n"
           "  ('set <key>' ohne Wert -> Detailhilfe)");
+        pushCompanionMessage(
+          "Display:\n"
+          "  display (off|on|on-at-new-messages)\n"
+          "    off = nie auto-on bei Channel-Msg;\n"
+          "    Button-Press weckt aber weiter.\n"
+          "    Default: on-at-new-messages");
         pushCompanionMessage(
           "Power/CPU:\n"
           "  cpu.clock (max|240|160|80|40|20|10)\n"
@@ -11475,10 +11524,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       "  messages, logging, unscoped-channelmessages,\n"
       "  contact, backup, save, discover, tempradio,\n"
       "  filter, remote, bluetooth, serial-cli,\n"
-      "  clear, reboot."
+      "  ver, board, clear, reboot."
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
     // (Wunschliste 40). Sehen Kommentare bei den Handlern.
+    return;
+  }
+
+  // ---------- ver / version ---------------------------------------------
+  // Wunschliste 56 Phase 1 (2026-06-14): Upstream-CLI-Kompat
+  // 'ver' / 'version'. Einzeilig, kein Verbose-Block (das macht 'status').
+  // Format: "MeshCore <FW_VERSION>  (built <BUILD_DATE>)"
+  if (starts_with_word(cmd, "ver") || starts_with_word(cmd, "version")) {
+    char line[120];
+    snprintf(line, sizeof(line), "MeshCore %s  (built %s)",
+             FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
+    pushCompanionMessage(line);
+    return;
+  }
+
+  // ---------- board -----------------------------------------------------
+  // Wunschliste 56 Phase 1 (2026-06-14): Upstream-CLI-Kompat 'board'.
+  // Liefert den Hardware-Namen aus board.getManufacturerName().
+  if (starts_with_word(cmd, "board")) {
+    char line[80];
+    snprintf(line, sizeof(line), "board: %s", board.getManufacturerName());
+    pushCompanionMessage(line);
     return;
   }
 
@@ -13580,14 +13651,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool gps_marker = (_time_sync_last_pubkey[0] == 0xFE
                          && _time_sync_last_pubkey[1] == 0xFE
                          && _time_sync_last_pubkey[2] == 0xFE);
+      // Granular bootstrap-Quellen (User-Wunsch 2026-06-14):
+      //   0xFD,0xFD,0xFD = RTC-Persist load (/rtc_persist)
+      //   0xFC,0xFC,0xFC = Buckets-Bootstrap (max stored frame ts)
+      bool boot_persist = (_time_sync_last_pubkey[0] == 0xFD
+                           && _time_sync_last_pubkey[1] == 0xFD
+                           && _time_sync_last_pubkey[2] == 0xFD);
+      bool boot_buckets = (_time_sync_last_pubkey[0] == 0xFC
+                           && _time_sync_last_pubkey[1] == 0xFC
+                           && _time_sync_last_pubkey[2] == 0xFC);
       if (isGpsAuthoritative()) {
         snprintf(src, sizeof(src), "GPS (active)");
       } else if (gps_marker) {
         snprintf(src, sizeof(src), "GPS (zuletzt; jetzt off)");
       } else if (app_sync) {
         snprintf(src, sizeof(src), "App (CMD_SET_DEVICE_TIME)");
+      } else if (boot_persist) {
+        snprintf(src, sizeof(src), "Boot-Bootstrap (RTC-Persist)");
+      } else if (boot_buckets) {
+        snprintf(src, sizeof(src), "Boot-Bootstrap (stored message)");
       } else if (bootstrap_sync) {
-        snprintf(src, sizeof(src), "Boot-Bootstrap (last advert in DB)");
+        snprintf(src, sizeof(src), "Boot-Bootstrap (last advert)");
       } else {
         snprintf(src, sizeof(src), "advert %02x%02x%02x",
                  _time_sync_last_pubkey[0],
@@ -17860,6 +17944,38 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // setzt Pref auf 0 -> Boot benutzt Build-Default (240 MHz).
     // Pref-Aenderung wirkt erst beim naechsten Boot (setCpuFrequencyMhz
     // im Runtime-State waere riskant -- BLE/LoRa Timing-Kalibrierung).
+    // Wunschliste 58 Phase A (2026-06-14): set display <off|on|new-msgs>
+    if (strcmp(key, "display") == 0
+        || strcmp(key, "display.wake") == 0
+        || strcmp(key, "display_wake_mode") == 0
+        || strcmp(key, "display.wake.mode") == 0) {
+      uint8_t mode = _prefs.display_wake_mode;
+      if (strcasecmp(value_lc, "off") == 0) {
+        mode = 0;
+      } else if (strcasecmp(value_lc, "on") == 0) {
+        mode = 1;
+      } else if (strcasecmp(value_lc, "on-at-new-messages") == 0
+                 || strcasecmp(value_lc, "new-msgs") == 0
+                 || strcasecmp(value_lc, "messages") == 0
+                 || strcasecmp(value_lc, "default") == 0
+                 || strcasecmp(value_lc, "auto") == 0) {
+        mode = 2;
+      } else {
+        pushCompanionMessage(
+          "display: off | on | on-at-new-messages");
+        return;
+      }
+      _prefs.display_wake_mode = mode;
+      savePrefs();
+      const char* name = (mode == 0) ? "off"
+                      : (mode == 1) ? "on"
+                                    : "on-at-new-messages";
+      char r[80];
+      snprintf(r, sizeof(r), "OK - display = %s", name);
+      pushCompanionMessage(r);
+      return;
+    }
+
     if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
         || strcmp(key, "cpu.clock.mhz") == 0
         || strcmp(key, "cpu_clock_mhz") == 0) {
@@ -18081,6 +18197,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           gline(tmp);
         }
       }
+      // Wunschliste 58 Phase A (2026-06-14): Display Wake-Mode.
+      // Default 2 = on-at-new-messages.
+      {
+        bool eq = (_prefs.display_wake_mode == 2);
+        if (!(list_changed && eq)) {
+          if (!eq) changed++;
+          const char* name = (_prefs.display_wake_mode == 0) ? "off"
+                          : (_prefs.display_wake_mode == 1) ? "on"
+                                                            : "on-at-new-messages";
+          if (eq) {
+            snprintf(tmp, sizeof(tmp),
+                     "  display = %s [default]", name);
+          } else {
+            snprintf(tmp, sizeof(tmp),
+                     "  display = %s (default: on-at-new-messages)",
+                     name);
+          }
+          gline(tmp);
+        }
+      }
       emit_float ("rxdelay",             _prefs.rx_delay_base,         0.0f,                   "",     3);
       // txdelay / direct_txdelay: Sentinel -1 = auto. Sonderdarstellung
       // statt nackter "-1.000". Default ist auto.
@@ -18246,6 +18382,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else
         snprintf(r, sizeof(r), "cpu.clock = %u MHz",
                  (unsigned)_prefs.cpu_clock_mhz);
+    }
+    else if (strcmp(key, "display") == 0
+             || strcmp(key, "display.wake") == 0
+             || strcmp(key, "display_wake_mode") == 0
+             || strcmp(key, "display.wake.mode") == 0) {
+      const char* name = (_prefs.display_wake_mode == 0) ? "off"
+                       : (_prefs.display_wake_mode == 1) ? "on"
+                                                         : "on-at-new-messages";
+      snprintf(r, sizeof(r), "display = %s", name);
     }
     else if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0)
       snprintf(r, sizeof(r), "int.thresh = %u dB%s", (unsigned)_prefs.interference_threshold,

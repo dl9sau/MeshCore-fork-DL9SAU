@@ -412,6 +412,12 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // 0xFF (Legacy/EOF Sentinel) -> 0 (= "Default benutzen")
     if (_prefs.cpu_clock_mhz == 0xFF) _prefs.cpu_clock_mhz = 0;
 
+    // Wunschliste 58 Phase A (2026-06-14): Display Wake-Mode.
+    file.read((uint8_t *)&_prefs.display_wake_mode,
+              sizeof(_prefs.display_wake_mode));
+    // 0xFF (Legacy/EOF Sentinel) -> 2 (= "on-at-new-messages")
+    if (_prefs.display_wake_mode == 0xFF) _prefs.display_wake_mode = 2;
+
     file.close();
   }
 }
@@ -601,6 +607,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Wunschliste 58 Phase B (2026-06-13): CPU-Clock-Frequenz.
     file.write((uint8_t *)&_prefs.cpu_clock_mhz,
                sizeof(_prefs.cpu_clock_mhz));
+
+    // Wunschliste 58 Phase A (2026-06-14): Display Wake-Mode.
+    file.write((uint8_t *)&_prefs.display_wake_mode,
+               sizeof(_prefs.display_wake_mode));
 
     file.close();
   }

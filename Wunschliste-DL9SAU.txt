@@ -4111,20 +4111,65 @@ Mode-Failure-Hypothesen:
      getrennt anbieten.
   e) ANON-Response wird durch Filter/Permission-Check rausgenommen.
 
-Plan:
-  1) Trace-Kategorie TRACE_DISCOVER erweitern: ANON_REQ-RESP-Empfang
+Plan (User-Praezisierung 2026-06-14):
+
+  Korrektur des Flow-Diagramms (Claude hatte das nicht ganz richtig):
+  Bei 'discover regions':
+    a) CTL_DISCOVER_REQ ZUERST via sendZeroHop() raus -- Broadcast an
+       alle Repeater in Funkreichweite.
+    b) PARALLEL: Schleife ueber _neighbours[] (direct-heard,
+       ADV_TYPE_REPEATER, <=3h) -> SOFORT ANON_REQ_TYPE_REGIONS an
+       jeden senden (Pre-Query aus Cache). Diese Repeater stehen
+       bereits in unserer Heard-List, koennen direkt befragt werden
+       statt CTL-Round-Trip abzuwarten.
+    c) WARTE-FENSTER: aktuell 30s, soll auf 60s erweitert werden
+       (s.u.). Waehrend des Fensters:
+         - CTL_DISCOVER_RESP -> _discover_resp_handler ->
+           _discover_entries[] (RAM, Cap MAX_DISCOVER_ENTRIES = 16)
+         - Wenn Sender REPEATER UND _discover_regions_chained:
+           zusaetzlich ANON_REQ_TYPE_REGIONS an Sender (Dedup
+           gegen Pre-Query via _anon_inflight[]).
+         - ANON-RESP -> _regions_completed[i].csv (RAM-Buffer, KEINE
+           Flash-Datei; Cap MAX_COMPLETED_REGIONS = 16). CSV ist
+           der Klartext '<region1>,<region2>,...' Plain-String.
+    d) finalizeRegionsChain() aggregiert + gibt Output via
+       pushCompanionMessage.
+
+Aenderungen:
+
+  1) Timeout-Fenster: 30s -> 60s (User-Wunsch 2026-06-14). Plus
+     EARLY-EXIT: sobald _anon_inflight_count == 0 (alle Antworten
+     da, leer oder mit CSV), finalize sofort. Ggf. cleaner cap:
+     wenn pre_queried + n_ctl == _regions_completed_count vor
+     den 60s. 60s ist ok weil 'discover' selbst auf 60s-Intervalle
+     throttled ist.
+
+  2) Trace-Kategorie TRACE_DISCOVER erweitern: ANON_REQ-RESP-Empfang
      mit pubkey-Prefix + CSV-Laenge protokollieren -- damit User in
      der Praxis sieht ob Responses kommen.
-  2) Wenn Response leer (CSV == 0 Byte): andere Diagnose-Zeile
+
+  3) Wenn Response leer (CSV == 0 Byte): andere Diagnose-Zeile
      '<repeater>: REGIONS-RESP leer (kein scope konfiguriert?)'.
-  3) Vielleicht zusaetzlich beim 'discover regions' Output zaehlen
-     wie viele Pre-Queried, wie viele geantwortet (auch leer), wie
-     viele mit Regions. Beispiel:
+
+  4) Beim 'discover regions'-Output zaehlen wie viele Pre-Queried,
+     wie viele geantwortet (auch leer), wie viele mit Regions.
+     Beispiel:
        'discover regions: 5 angefragt (2 cache + 3 CTL),
         antworten: 4 (1 leer, 3 mit Regionen).'
-  4) Investigation ob Repeater-Side bei leerer region-Liste explizit
+
+  5) PROGRESSIVE INFO (User-Wunsch 2026-06-14): jede ANON-RESP
+     wahrend des Fensters SOFORT als pushCompanionMessage
+     publizieren. So sieht der User schon vor dem 60s-Ablauf was
+     reinkommt:
+       'discover regions: <prefix> [REP] -> #region1, #region2'
+       'discover regions: <prefix> [REP] -> leer (kein scope)'
+
+  6) Investigation ob Repeater-Side bei leerer region-Liste explizit
      leer-RESP sendet oder gar nichts (Letzteres ist unklar -- dann
-     waeren Timeouts dominant).
+     waeren Timeouts dominant). Mit Punkt 2 + 3 wird das sichtbar:
+     wenn ein Repeater keine Trace-RESP-Zeile bringt, hat er nicht
+     geantwortet; mit Trace-RESP-Zeile-leer hat er geantwortet aber
+     ohne scopes.
 
 Verwandt:
   - Wunschliste 27 Phase A (Discoverability) -- ANON_REQ-Infrastruktur.

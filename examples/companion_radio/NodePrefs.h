@@ -599,6 +599,16 @@ struct NodePrefs {  // persisted to file
   // erklaerbar durch Clock + BLE-Overhead.
   uint8_t cpu_clock_mhz;
 
+  // Wunschliste 58 Phase A (2026-06-13/14): Display Power-Control.
+  //   0 = off                 -- nie auto-on (Channel-Msg etc);
+  //                             Hardware-Button-Press weckt weiterhin.
+  //   1 = on                  -- permanent an, kein Auto-Off-Timer.
+  //   2 = on-at-new-messages  -- Default, aktuelles Verhalten (auto-on
+  //                             bei Channel-Msg, dann Auto-Off-Timer).
+  // 0xFF im File = Sentinel (EOF/Legacy) -> Default 2 (Verhaltens-
+  // bruch-frei fuer Bestandsuser).
+  uint8_t display_wake_mode;
+
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
   // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].

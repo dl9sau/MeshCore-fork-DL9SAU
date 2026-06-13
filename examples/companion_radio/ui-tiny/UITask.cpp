@@ -508,8 +508,13 @@ void UITask::msgRead(int msgcount) {
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   _msgcount = msgcount;
 
+  // Wunschliste 58 Phase A (2026-06-14): Display Wake-Mode beruecksichtigen.
+  // Siehe ui-new/UITask.cpp newMsg fuer Details.
+  uint8_t wake_mode = _node_prefs ? _node_prefs->display_wake_mode : 2;
+  bool allow_auto_wake = (wake_mode != 0);
+
   if (_display != NULL) {
-    if (!_display->isOn() && !hasConnection()) {
+    if (allow_auto_wake && !_display->isOn() && !hasConnection()) {
       _display->turnOn();
     }
     if (_display->isOn()) {
@@ -713,7 +718,9 @@ void UITask::loop() {
       _auto_off = millis() + AUTO_OFF_MILLIS;
     }
 #endif
-    if (millis() > _auto_off) {
+    // Wunschliste 58 Phase A (2026-06-14): mode=1 'on' => kein Auto-Off.
+    bool keep_on = (_node_prefs && _node_prefs->display_wake_mode == 1);
+    if (!keep_on && millis() > _auto_off) {
       _display->turnOff();
     }
 #endif

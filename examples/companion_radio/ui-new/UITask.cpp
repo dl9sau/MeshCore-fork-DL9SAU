@@ -691,8 +691,21 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
   setCurrScreen(msg_preview);
 
+  // Wunschliste 58 Phase A (2026-06-14): Display Wake-Mode beruecksichtigen.
+  //   mode 0 = off        -> nicht auto-on (Channel-Msg). Button-Press
+  //                          weckt weiterhin via Hardware-Pfad in UITask::loop.
+  //   mode 1 = on         -> permanent an (Boot-Hook setzt das auch schon);
+  //                          aber jeden Channel-Msg-Refresh hier trotzdem
+  //                          handlen damit _next_refresh + _auto_off-Reset
+  //                          weiterhin laufen (Auto-Off bleibt fuer Mode 1
+  //                          ein No-Op da UITask::loop pruefen muss).
+  //   mode 2 = on-at-new-messages -> aktuelles Verhalten, wake auf Msg.
+  // User-Bug-Fix: bei dichtem Mesh-Verkehr ging das Display st. an.
+  uint8_t wake_mode = _node_prefs ? _node_prefs->display_wake_mode : 2;
+  bool allow_auto_wake = (wake_mode != 0);
+
   if (_display != NULL) {
-    if (!_display->isOn() && !hasConnection()) {
+    if (allow_auto_wake && !_display->isOn() && !hasConnection()) {
       _display->turnOn();
     }
     if (_display->isOn()) {
@@ -870,7 +883,10 @@ void UITask::loop() {
       _auto_off = millis() + AUTO_OFF_MILLIS;
     }
 #endif
-    if (millis() > _auto_off) {
+    // Wunschliste 58 Phase A (2026-06-14): mode=1 'on' => kein Auto-Off.
+    // Auto-Off-Timer wird hier ignoriert. mode=0/2 weiterhin via _auto_off.
+    bool keep_on = (_node_prefs && _node_prefs->display_wake_mode == 1);
+    if (!keep_on && millis() > _auto_off) {
       _display->turnOff();
     }
 #endif
