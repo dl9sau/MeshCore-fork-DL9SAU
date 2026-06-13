@@ -253,6 +253,19 @@ void setup() {
     #endif
   );
 
+  // Wunschliste 58 Phase B (2026-06-13): CPU-Clock-Frequenz aus Pref
+  // anwenden. Wert 0 = "Default behalten" (auf ESP32-S3 = 240 MHz).
+  // Anwendung NACH the_mesh.begin() (Prefs geladen) und VOR
+  // serial_interface.begin() / WiFi.begin() (BLE/WiFi-Stack-Init laeuft
+  // dann mit neuer Frequenz, Stack-Timing-Kalibrierung stimmt).
+  // User-Vergleich LoRa-APRS-Firmware: 80 MHz, 155 mA (kein BLE).
+  {
+    uint8_t cclk = the_mesh.getNodePrefs()->cpu_clock_mhz;
+    if (cclk != 0) {
+      setCpuFrequencyMhz((uint32_t)cclk);
+    }
+  }
+
 #ifdef WIFI_SSID
   board.setInhibitSleep(true);   // prevent sleep when WiFi is active
   WiFi.setAutoReconnect(true);

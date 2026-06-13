@@ -4641,6 +4641,11 @@ void MyMesh::begin(bool has_display) {
   _prefs.interference_threshold = 14;
   _prefs.agc_reset_interval = 0;
 
+  // Wunschliste 58 Phase B (2026-06-13): CPU-Clock Pref. 0 = "Default
+  // benutzen" (Build-spezifisch, auf ESP32-S3 = 240 MHz). Wird in
+  // main.cpp setup() nach loadPrefs angewendet.
+  _prefs.cpu_clock_mhz = 0;
+
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter Masks
   // Pre-Init: alle Masks = 0 -> global (alle Channels).
   _prefs.filter_sender_drop_on_channel_mask = 0;
@@ -8258,6 +8263,15 @@ void MyMesh::backupSaveToSerial() {
   kv_float("rxdelay",              _prefs.rx_delay_base, 3);
   kv_float("txdelay",              _prefs.tx_delay_factor, 3);
   kv_float("direct_txdelay",       _prefs.direct_tx_delay_factor, 3);
+  // Wunschliste 58 Phase B: CPU-Clock. 0 = Build-Default -> "max"
+  // im Backup damit round-trip auch bei Plattform-Wechsel sinnvoll.
+  if (_prefs.cpu_clock_mhz == 0) {
+    kv_str("cpu_clock_mhz", "max");
+  } else {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u", (unsigned)_prefs.cpu_clock_mhz);
+    kv_str("cpu_clock_mhz", buf);
+  }
   // Wunschliste 39: cap-Vars als kv_str mit follow/off Keywords wenn
   // anwendbar, sonst Number-as-String. Restore akzeptiert beide
   // Formate (number oder string) -- human-editable Backup.
@@ -9201,9 +9215,28 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "buzzer_quiet") == 0)          { _prefs.buzzer_quiet          = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0) { _prefs.interference_threshold = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "agc.reset.interval") == 0 || strcmp(key, "agc_reset_interval") == 0) { _prefs.agc_reset_interval = (uint8_t)as_uint(); _br_applied++; return; }
+      // Wunschliste 58 Phase B: cpu.clock -- 0 = Build-Default, sonst MHz.
+      // 'max' / 'default' / 'auto' im Backup ebenfalls erlaubt -> 0.
+      if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
+          || strcmp(key, "cpu.clock.mhz") == 0 || strcmp(key, "cpu_clock_mhz") == 0) {
+        char tmp[16]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
+        if (strcasecmp(tmp, "max") == 0 || strcasecmp(tmp, "default") == 0
+            || strcasecmp(tmp, "auto") == 0) {
+          _prefs.cpu_clock_mhz = 0;
+        } else {
+          int v = atoi(tmp);
+          if (v == 240 || v == 160 || v == 80 || v == 40 || v == 20 || v == 10) {
+            _prefs.cpu_clock_mhz = (uint8_t)v;
+          }
+          // ungueltig: stillschweigend ignorieren, Default bleibt 0
+        }
+        _br_applied++;
+        return;
+      }
       if (strcmp(key, "rxdelay") == 0)               { _prefs.rx_delay_base         = as_float();        _br_applied++; return; }
       if (strcmp(key, "txdelay") == 0)               { _prefs.tx_delay_factor       = as_float();        _br_applied++; return; }
-      if (strcmp(key, "direct_txdelay") == 0)        { _prefs.direct_tx_delay_factor= as_float();        _br_applied++; return; }
+      if (strcmp(key, "direct_txdelay") == 0
+          || strcmp(key, "direct.txdelay") == 0)        { _prefs.direct_tx_delay_factor= as_float();        _br_applied++; return; }
       if (strcmp(key, "flood_max_scope_region") == 0)   { _prefs.flood_max_scope_region = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max") == 0)             { _prefs.flood_max             = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "flood_max_infra") == 0)   { _prefs.flood_max_infra   = (uint8_t)as_uint(); _br_applied++; return; }
@@ -10827,6 +10860,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  int.thresh (0=off, default 14)\n"
           "  agc.reset.interval (sec/4, 0=off)\n"
           "  ('set <key>' ohne Wert -> Detailhilfe)");
+        pushCompanionMessage(
+          "Power/CPU:\n"
+          "  cpu.clock (max|240|160|80|40|20|10)\n"
+          "    MHz, wirkt ab Reboot.\n"
+          "    Default 'max'; 80 spart ~10-20 mA.");
         pushCompanionMessage(
           "Delays: rxdelay txdelay direct_txdelay\n"
           "  (tx/dir: 'auto' Default, oder 0..2)\n"
@@ -16554,7 +16592,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  hilft bei hochwertigem Standort/Reichweite.");
         return;
       }
-      if (strcmp(key, "direct_txdelay") == 0) {
+      if (strcmp(key, "direct_txdelay") == 0
+          || strcmp(key, "direct.txdelay") == 0) {
         pushCompanionMessage(
           "set direct_txdelay <auto | 0..2>:\n"
           "  Retransmit-Delay-Faktor x Airtime beim\n"
@@ -16945,7 +16984,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // getRetransmitDelay() / calcRxDelay(). 'auto' ist Sentinel (-1) der
     // den effektiven Wert aus repeater_profile + Kontext ableitet.
     if (strcmp(key, "txdelay") == 0 || strcmp(key, "rxdelay") == 0
-        || strcmp(key, "direct_txdelay") == 0) {
+        || strcmp(key, "direct_txdelay") == 0
+        || strcmp(key, "direct.txdelay") == 0) {
       bool is_auto = (strcasecmp(value_lc, "auto") == 0);
       float v = is_auto ? -1.0f : (float)atof(value_lc);
       if (!is_auto && (v < 0.0f || v > 20.0f)) {
@@ -17624,6 +17664,45 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Wunschliste 58 Phase B (2026-06-13): set cpu.clock <N|max>
+    // ESP32-S3 supports 240/160/80/40/20/10 MHz. Plattformfremd auf
+    // NRF52 (vorerst nur ESP32-Build relevant). 'max' bzw. 'default'
+    // setzt Pref auf 0 -> Boot benutzt Build-Default (240 MHz).
+    // Pref-Aenderung wirkt erst beim naechsten Boot (setCpuFrequencyMhz
+    // im Runtime-State waere riskant -- BLE/LoRa Timing-Kalibrierung).
+    if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
+        || strcmp(key, "cpu.clock.mhz") == 0
+        || strcmp(key, "cpu_clock_mhz") == 0) {
+      uint8_t new_mhz = 0;  // Sentinel = Default
+      if (strcasecmp(value_lc, "max") == 0
+          || strcasecmp(value_lc, "default") == 0
+          || strcasecmp(value_lc, "auto") == 0) {
+        new_mhz = 0;
+      } else {
+        int v = atoi(value_lc);
+        // ESP32-S3 valide Werte. Andere Plattformen: TODO.
+        if (v != 240 && v != 160 && v != 80 && v != 40 && v != 20 && v != 10) {
+          pushCompanionMessage(
+            "cpu.clock: erlaubt 240|160|80|40|20|10|max");
+          return;
+        }
+        new_mhz = (uint8_t)v;
+      }
+      _prefs.cpu_clock_mhz = new_mhz;
+      savePrefs();
+      char r[120];
+      if (new_mhz == 0) {
+        snprintf(r, sizeof(r),
+                 "OK - cpu.clock = max (Build-Default, Boot anwenden)");
+      } else {
+        snprintf(r, sizeof(r),
+                 "OK - cpu.clock = %u MHz (wirkt ab naechstem Boot/Reboot)",
+                 (unsigned)new_mhz);
+      }
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Wunschliste 45 (Reise 2026-06-09): set int.thresh <N>
     // RSSI-Margin (dB) ueber noise_floor. 0 = LBT off. Upstream-
     // Doku-Default 14. Praxis: 1..14 je nach Standort/SF.
@@ -17796,6 +17875,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                          _prefs.messages_append_scope_to_name, 0);
       emit_uint  ("int.thresh",          _prefs.interference_threshold, 14);
       emit_uint  ("agc.reset.interval",  _prefs.agc_reset_interval,    0);
+      // Wunschliste 58 Phase B: CPU-Clock. 0 = Default (Build-spezifisch).
+      // Anzeige: 'max' wenn Default, sonst MHz-Wert.
+      {
+        bool eq = (_prefs.cpu_clock_mhz == 0);
+        if (!(list_changed && eq)) {
+          if (!eq) changed++;
+          if (_prefs.cpu_clock_mhz == 0)
+            snprintf(tmp, sizeof(tmp),
+                     "  cpu.clock = max (Build-Default) [default]");
+          else
+            snprintf(tmp, sizeof(tmp),
+                     "  cpu.clock = %u MHz (default: max)",
+                     (unsigned)_prefs.cpu_clock_mhz);
+          gline(tmp);
+        }
+      }
       emit_float ("rxdelay",             _prefs.rx_delay_base,         0.0f,                   "",     3);
       // txdelay / direct_txdelay: Sentinel -1 = auto. Sonderdarstellung
       // statt nackter "-1.000". Default ist auto.
@@ -17953,6 +18048,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "telemetry_mode_loc") == 0) snprintf(r, sizeof(r), "telemetry_mode_loc = %u", (unsigned)_prefs.telemetry_mode_loc);
     else if (strcmp(key, "telemetry_mode_env") == 0) snprintf(r, sizeof(r), "telemetry_mode_env = %u", (unsigned)_prefs.telemetry_mode_env);
     else if (strcmp(key, "buzzer_quiet") == 0)      snprintf(r, sizeof(r), "buzzer_quiet = %u", (unsigned)_prefs.buzzer_quiet);
+    else if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
+             || strcmp(key, "cpu.clock.mhz") == 0
+             || strcmp(key, "cpu_clock_mhz") == 0) {
+      if (_prefs.cpu_clock_mhz == 0)
+        snprintf(r, sizeof(r), "cpu.clock = max (Build-Default)");
+      else
+        snprintf(r, sizeof(r), "cpu.clock = %u MHz",
+                 (unsigned)_prefs.cpu_clock_mhz);
+    }
     else if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0)
       snprintf(r, sizeof(r), "int.thresh = %u dB%s", (unsigned)_prefs.interference_threshold,
                _prefs.interference_threshold == 0 ? " (LBT off)" : "");
@@ -17974,7 +18078,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else
         snprintf(r, sizeof(r), "txdelay = %.3f", _prefs.tx_delay_factor);
     }
-    else if (strcmp(key, "direct_txdelay") == 0) {
+    else if (strcmp(key, "direct_txdelay") == 0
+             || strcmp(key, "direct.txdelay") == 0) {
       if (_prefs.direct_tx_delay_factor < 0.0f)
         snprintf(r, sizeof(r), "direct_txdelay = auto (effektiv %.2f)",
                  effectiveDirectTxDelayFactor());

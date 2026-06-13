@@ -406,6 +406,12 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.serial_cli_persist_on,
               sizeof(_prefs.serial_cli_persist_on));
 
+    // Wunschliste 58 Phase B (2026-06-13): CPU-Clock-Frequenz.
+    file.read((uint8_t *)&_prefs.cpu_clock_mhz,
+              sizeof(_prefs.cpu_clock_mhz));
+    // 0xFF (Legacy/EOF Sentinel) -> 0 (= "Default benutzen")
+    if (_prefs.cpu_clock_mhz == 0xFF) _prefs.cpu_clock_mhz = 0;
+
     file.close();
   }
 }
@@ -591,6 +597,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Wunschliste 10 (2026-06-11): Serial-CLI Persistent.
     file.write((uint8_t *)&_prefs.serial_cli_persist_on,
                sizeof(_prefs.serial_cli_persist_on));
+
+    // Wunschliste 58 Phase B (2026-06-13): CPU-Clock-Frequenz.
+    file.write((uint8_t *)&_prefs.cpu_clock_mhz,
+               sizeof(_prefs.cpu_clock_mhz));
 
     file.close();
   }

@@ -587,6 +587,18 @@ struct NodePrefs {  // persisted to file
   // Runtime-Toggle 'serial-cli on-temp' liegt im RAM und wird beim Reboot
   // verworfen (revertiert zum Persist-Wert).
   uint8_t serial_cli_persist_on;
+
+  // Wunschliste 58 Phase B (2026-06-13): CPU-Clock-Frequenz.
+  // Erlaubte Werte (ESP32-S3): 240, 160, 80, 40, 20, 10 MHz.
+  // 0 = Sentinel "Default benutzen" (ESP32: 240 MHz).
+  // 0xFF im File = Legacy/Pre-Init -> wird zu 0 normalisiert.
+  // Boot-Apply in main.cpp setup() NACH the_mesh.begin() (Prefs-load
+  // first), aber bevor sehr Timing-kritische Operationen folgen.
+  // User-Vergleich (LoRa-APRS-Firmware, 80 MHz, kein BLE): 155 mA.
+  // Unsere Firmware 240 MHz mit BLE active: 186-192 mA. Delta plausibel
+  // erklaerbar durch Clock + BLE-Overhead.
+  uint8_t cpu_clock_mhz;
+
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter -- pro Filter-Typ
   // einschraenken auf welchen Channels der Filter wirkt.
   // Bit-Mask: bit_i gesetzt -> filter wirkt auf channels[i].

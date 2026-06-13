@@ -3988,6 +3988,24 @@ Soll-Liste (Auszug, prioritaer Operational + Info + Stats):
                                  Upstream-Kompatibilitaet.
     - powersaving             -- Repeater Power-Save Toggle (wir haben
                                  Companion-Deep-Sleep Wunschliste 44).
+
+  Additional Findings 2026-06-13 (User-Tests):
+    - 'help serial-cli' liefert keine Beschreibung -- fehlt.
+    - 'get direct.txdelay' -> 'Unbekannter key' obwohl 'get help'
+      verspricht 'underscore-keys auch mit Punkt'. Bug: direct_txdelay
+      hat nur einen Match-Pfad ohne Dot-Alias.
+    - Vermutung weitere Keys ohne Dot-Alias: txdelay, rxdelay, ...
+      (uebersprungene Aliase). Audit noetig.
+    - Vorgehensvariante 1: surgical fix der bekannten Faelle (jeweils
+      strcmp-Block um 'key.with.dot' erweitern).
+    - Vorgehensvariante 2: Single-Point-Fix -- normalizeKey(s) macht
+      dots zu underscores vor jedem strcmp im set/get-Pfad. Sauberer.
+      Test gegen alle existierenden Keys (manche koennten Dots
+      explizit als ALIAS und nicht als Synonym haben).
+    - 'help set' -- Audit ob ALLE set-Keys auch im Help-Text auftauchen.
+      Generell-Regel: Hinzufuegen eines neuen set-Keys MUSS gleichzeitig
+      help-Eintrag + get/all-Zeile + backup save/restore-Bloecke
+      mitschleifen (vgl. Wunschliste 58 Phase A Erweiterung 2026-06-13).
     - region load/save/...    -- Wir haben scope-Verwaltung, aber
                                  region-Subkommandos koennten Wrapper
                                  sein, falls App-Kompatibilitaet wichtig.
@@ -4086,7 +4104,22 @@ Hintergrund:
   Display geht bei jeder Channel-Message an (UITask::newMsg ruft
   _display->turnOn) -- kostet wiederholt ~20-27 mA bis Auto-Off.
 
-Phase A -- Display Power-Control (User-Spec):
+Phase A -- Display Power-Control (User-Spec, ERWEITERT 2026-06-13):
+
+  User-Erinnerung 2026-06-13: feature komplett umsetzen heisst nicht
+  nur Pref + UITask-Hook. Vergesst nicht:
+    - 'get all' Block muss den Wert mit anzeigen
+    - 'backup save' Output muss display_wake_mode dumpen
+    - 'backup restore' muss display_wake_mode parsen
+    - 'help set' muss display erwaehnen
+    - 'help get' implizit ok wenn in 'get all' gelistet
+    - 'set display <mode>' AND 'display <mode>' top-level
+    - 'get display' Einzel-Query
+  Halbe Implementierung ('Pref existiert, aber set/get/help kennen
+  ihn nicht') ist fuer User unbrauchbar -- explizit User-Statement
+  2026-06-13. Gilt als generelle Regel fuer alle neuen Prefs.
+
+
   set display <off|on|on-at-new-messages|on-button-press-only>
     off                      -- nie auto-on, Button-Press auch nicht
                                 (Software-Suppress in UITask Button-Handler).
@@ -4161,6 +4194,30 @@ Phase E -- BLE-Sleep-Effektivitaet pruefen:
      vielleicht waehrend BOOT-Phase
   Erstmal beobachten via 'bluetooth status' + heartbeat-trace
   (Wunschliste 43 hat den Diagnose-Heartbeat).
+
+Phase F-LOCKUP 2026-06-13 (User-Test mit Commit 8ae3b492 + Revert
+a4293243):
+  Gute Nachricht: esp_bt_controller_disable() funktioniert -- Stromverbrauch
+  ging waehrend Sleep-Phase auf 115 mA (vorher 200 mA). Sleep-Theorie
+  bestaetigt.
+  Schlechte Nachricht: Tracker locked sich auf, kein Wakeup mehr.
+  Weisse LED bei Reset bleibt an, Button-Press wirkungslos, USB-CDC
+  reagiert nicht mehr. -> firmware-Deadlock.
+  Vermutete Ursache: manageBlePower() in MyMesh-loop ruft NACH
+  esp_bt_controller_disable() weiter _serial->isEnabled() /
+  isConnected() / pushDebugLog auf. arduino-esp32 BLE-Library
+  reagiert auf "Stack ohne Controller" anscheinend mit Block, nicht
+  mit cleanem false-Return.
+  Naechster Versuch braucht:
+   - Guard-Flag im SerialBLEInterface (_ctrl_disabled), der bei
+     disable() vor dem Controller-Disable gesetzt wird.
+   - Alle public Query-Methoden (isEnabled, isConnected, ...) returnen
+     bei gesetztem Flag direkt false ohne Stack-Aufruf.
+   - Keine BLE_DEBUG_PRINTLN nach Controller-Disable (writeFrame
+     usw. zuerst guard-checken).
+   - Optional: in MyMesh manageBlePower einen pre-check
+     '_serial && _serial->controllerEnabled()' bevor irgendwelche
+     Stack-Queries gemacht werden.
 
 Phase F -- BLE-Controller-Level Sleep (esp_bt_controller_disable):
   Aktuell: SerialBLEInterface::disable() stoppt nur Advertising +
