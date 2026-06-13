@@ -4149,7 +4149,11 @@ Aenderungen:
      der Praxis sieht ob Responses kommen.
 
   3) Wenn Response leer (CSV == 0 Byte): andere Diagnose-Zeile
-     '<repeater>: REGIONS-RESP leer (kein scope konfiguriert?)'.
+     '<repeater>: REGIONS-RESP leer (keine Region konfiguriert?)'.
+     -- Achtung Sprech (siehe Memory feedback-scope-vs-region-terminology):
+     INHALT der RESP ist eine Region-Liste, nicht 'scopes'. 'Kein
+     scope konfiguriert' waere doppeldeutig (koennte auch heissen
+     dass kein Transport-Code-Default am Repeater gesetzt ist).
 
   4) Beim 'discover regions'-Output zaehlen wie viele Pre-Queried,
      wie viele geantwortet (auch leer), wie viele mit Regions.
@@ -4164,12 +4168,12 @@ Aenderungen:
        'discover regions: <prefix> [REP] -> #region1, #region2'
        'discover regions: <prefix> [REP] -> leer (kein scope)'
 
-  6) Investigation ob Repeater-Side bei leerer region-Liste explizit
+  6) Investigation ob Repeater-Side bei leerer Region-Liste explizit
      leer-RESP sendet oder gar nichts (Letzteres ist unklar -- dann
      waeren Timeouts dominant). Mit Punkt 2 + 3 wird das sichtbar:
      wenn ein Repeater keine Trace-RESP-Zeile bringt, hat er nicht
      geantwortet; mit Trace-RESP-Zeile-leer hat er geantwortet aber
-     ohne scopes.
+     ohne Regionen.
 
 Verwandt:
   - Wunschliste 27 Phase A (Discoverability) -- ANON_REQ-Infrastruktur.

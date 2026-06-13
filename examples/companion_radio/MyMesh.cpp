@@ -11958,7 +11958,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Flood: Scope-Quelle vorab bestimmen fuer die Antwort, dann senden.
     // Reihenfolge muss zu chooseNightFloodScope passen:
     //   override (persistent) > bake > default > geo
-    char src_label[64] = "(none - kein scope verfuegbar)";
+    char src_label[64] = "(none - Keine Scopes verfuegbar)";
     bool have_scope = false;
     uint32_t now = getRTCClock()->getCurrentTime();
     // 1) override
