@@ -259,11 +259,19 @@ void setup() {
   // serial_interface.begin() / WiFi.begin() (BLE/WiFi-Stack-Init laeuft
   // dann mit neuer Frequenz, Stack-Timing-Kalibrierung stimmt).
   // User-Vergleich LoRa-APRS-Firmware: 80 MHz, 155 mA (kein BLE).
+  //
+  // SAFETY-FLOOR 80 MHz (User-Lockout 2026-06-14): 'set cpu.clock 40'
+  // sah harmlos aus aber das Geraet locked sich mit Boot-Loop (abort()
+  // an BLE/Radio-Init waehrend Stack-Initialisierung). User kommt dann
+  // nicht mehr an die CLI um zurueckzusetzen. -> Werte < 80 hier
+  // ignorieren (Default 240 wird angewendet); Pref bleibt fuer
+  // Diagnose im Flash, kann via CLI 'set cpu.clock max' geheilt werden.
   {
     uint8_t cclk = the_mesh.getNodePrefs()->cpu_clock_mhz;
-    if (cclk != 0) {
+    if (cclk != 0 && cclk >= 80) {
       setCpuFrequencyMhz((uint32_t)cclk);
     }
+    // else: Pref ungueltig oder 0 -> Build-Default behalten.
   }
 
 #ifdef WIFI_SSID

@@ -9415,10 +9415,13 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
           _prefs.cpu_clock_mhz = 0;
         } else {
           int v = atoi(tmp);
-          if (v == 240 || v == 160 || v == 80 || v == 40 || v == 20 || v == 10) {
+          // Safety-Floor 80 MHz (User-Lockout 2026-06-14, siehe set
+          // cpu.clock-Handler). < 80 wird stillschweigend zu 0 (= Default).
+          if (v == 240 || v == 160 || v == 80) {
             _prefs.cpu_clock_mhz = (uint8_t)v;
+          } else {
+            _prefs.cpu_clock_mhz = 0;
           }
-          // ungueltig: stillschweigend ignorieren, Default bleibt 0
         }
         _br_applied++;
         return;
@@ -11083,7 +11086,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "    Default: on-at-new-messages");
         pushCompanionMessage(
           "Power/CPU:\n"
-          "  cpu.clock (max|240|160|80|40|20|10)\n"
+          "  cpu.clock (max|240|160|80)\n"
           "    MHz, wirkt ab Reboot.\n"
           "    Default 'max'; 80 spart ~10-20 mA.");
         pushCompanionMessage(
@@ -17989,10 +17992,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         new_mhz = 0;
       } else {
         int v = atoi(value_lc);
-        // ESP32-S3 valide Werte. Andere Plattformen: TODO.
-        if (v != 240 && v != 160 && v != 80 && v != 40 && v != 20 && v != 10) {
+        // ESP32-S3 valide Werte ABZUEGLICH < 80 (User-Lockout 2026-06-14:
+        // 40 MHz fuehrt zu abort()/Boot-Loop am BLE-Init. 20 und 10 sind
+        // noch heikler). Andere Plattformen: TODO.
+        if (v != 240 && v != 160 && v != 80) {
           pushCompanionMessage(
-            "cpu.clock: erlaubt 240|160|80|40|20|10|max");
+            "cpu.clock: erlaubt 240|160|80|max\n"
+            "(< 80 MHz unsicher, locked Geraet aus)");
           return;
         }
         new_mhz = (uint8_t)v;
