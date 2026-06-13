@@ -132,6 +132,7 @@ struct RuntimeNeighbour {
   uint32_t heard_timestamp;  // RTC unix seconds (0 wenn RTC ungesetzt)
   uint32_t heard_millis;     // millis() zum Zeitpunkt des heard
   int8_t   snr;              // x 4 wie simple_repeater
+  int8_t   rssi_dbm;         // RSSI in dBm; INT8_MIN = ungesetzt
   uint8_t  adv_type;         // ADV_TYPE_*
   // Scope-Annotation (User-Wunsch 2026-06-11: in neighbors-Output zeigen
   // welcher Repeater einen default-scope gesetzt hat).
@@ -432,7 +433,8 @@ protected:
   // updaten. LRU-Verdraengung wenn voll. Wird aus onAdvertRecv gerufen
   // wenn packet->path_len == 0 (= zero-hop, direkt gehoert).
   void putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_timestamp,
-                           int8_t snr_q4, uint8_t adv_type,
+                           int8_t snr_q4, int8_t rssi_dbm,
+                           uint8_t adv_type,
                            const char* scope_name);
   void onControlDataRecv(mesh::Packet *packet) override;
   void onRawDataRecv(mesh::Packet *packet) override;
@@ -1133,6 +1135,7 @@ private:
   // in dB: gut >= 0, mittel >= -8, schlecht < -8). Dimensionen: [type][quality]
   uint16_t      _heard_quality[5][3];    // [ADV_TYPE_*][0=gut, 1=mittel, 2=schlecht]
   int8_t        _last_advert_snr_q4;     // SNR (q4) der zuletzt empfangenen Advert
+  int8_t        _last_advert_rssi_dbm;   // RSSI (dBm) der zuletzt empfangenen Advert
   int8_t        _last_advert_scoped;     // 1=scoped (transport_codes), 0=unscoped
   int8_t        _last_advert_route_direct; // 1=DIRECT-typed (sendZeroHop), 0=FLOOD-typed
   uint16_t      _rx_advert_total[5];     // ALLE empfangenen Adverts (egal Hop-Count) pro Node-Typ

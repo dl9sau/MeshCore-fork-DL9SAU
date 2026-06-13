@@ -1267,6 +1267,10 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
   // SNR vom Paket fuer die nachfolgende Quality-Klassifikation in
   // onDiscoveredContact() merken (Q4-Format, wie ueblich in MeshCore).
   _last_advert_snr_q4 = (packet != NULL) ? packet->_snr : 0;
+  // RSSI nicht in mesh::Packet -- direkt vom Radio holen (gleicher Empfangs-
+  // Slot wie das jetzt verarbeitete Paket). Format int8 dBm. User-Wunsch
+  // 2026-06-14: in 'neighbors' neben SNR auch RSSI zeigen.
+  _last_advert_rssi_dbm = (int8_t)radio_driver.getLastRSSI();
   // Wunschliste 26 C: Scope-Flag fuer die scoped/unscoped × adv-Typ
   // Aufschluesselung in onDiscoveredContact merken.
   _last_advert_scoped = (packet != NULL && packet->hasTransportCodes()) ? 1 : 0;
@@ -1291,7 +1295,8 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
         const char* rn = lookupRegionByTransportCode(packet);
         nb_scope = rn ? rn : "?";
       }
-      putRuntimeNeighbour(id, timestamp, _last_advert_snr_q4, parser.getType(), nb_scope);
+      putRuntimeNeighbour(id, timestamp, _last_advert_snr_q4,
+                          _last_advert_rssi_dbm, parser.getType(), nb_scope);
       // Wunschliste 31: Advert-basierte RTC-Sync. NUR zero-hop
       // (filterstaerke: Adversary muss in Funkreichweite sein).
       maybeAdvertTimeSync(id, timestamp, parser.getType());
@@ -1553,7 +1558,8 @@ void MyMesh::timeSyncFinalizeLazyCollection() {
 }
 
 void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_timestamp,
-                                 int8_t snr_q4, uint8_t adv_type,
+                                 int8_t snr_q4, int8_t rssi_dbm,
+                                 uint8_t adv_type,
                                  const char* scope_name) {
   // 1) Bereits bekannt? -> Eintrag updaten.
   for (int i = 0; i < _neighbours_count; i++) {
@@ -1562,6 +1568,7 @@ void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_times
       _neighbours[i].heard_timestamp  = getRTCClock()->getCurrentTime();
       _neighbours[i].heard_millis     = millis();
       _neighbours[i].snr              = snr_q4;
+      _neighbours[i].rssi_dbm         = rssi_dbm;
       _neighbours[i].adv_type         = adv_type;
       if (scope_name) {
         StrHelper::strzcpy(_neighbours[i].scope_name, scope_name,
@@ -1594,6 +1601,7 @@ void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_times
   _neighbours[target_idx].heard_timestamp  = getRTCClock()->getCurrentTime();
   _neighbours[target_idx].heard_millis     = millis();
   _neighbours[target_idx].snr              = snr_q4;
+  _neighbours[target_idx].rssi_dbm         = rssi_dbm;
   _neighbours[target_idx].adv_type         = adv_type;
   if (scope_name) {
     StrHelper::strzcpy(_neighbours[target_idx].scope_name, scope_name,
@@ -3842,10 +3850,13 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
     }
     if (pre_queried > 0) {
       char r[140];
+      // User-Wording 2026-06-14: 'bekannter/bekannte' Numerus + 'im Cache'
+      // (statt 'vorab angefragt'). Tippen-arm + idiomatisch deutsch.
       snprintf(r, sizeof(r),
-               "discover regions: %u bekannte REPEATER\n"
-               "(zero-hop, <= 3h) vorab angefragt.",
-               (unsigned)pre_queried);
+               "discover regions: %u %s REPEATER im Cache\n"
+               "(< 3h, zero-hop).",
+               (unsigned)pre_queried,
+               pre_queried == 1 ? "bekannter" : "bekannte");
       pushCompanionMessage(r);
     }
   }
@@ -3949,7 +3960,8 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   // User-Entscheidung 2026-06-12 'a' ohne Lock-Mechanismus).
   if (e.full_pubkey) {
     mesh::Identity nb_id(e.pub_key);
-    putRuntimeNeighbour(nb_id, now_rtc, e.our_snr_q4, e.adv_type, "");
+    putRuntimeNeighbour(nb_id, now_rtc, e.our_snr_q4, e.our_rssi_dbm,
+                        e.adv_type, "");
     ContactInfo* cp = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
     if (cp != NULL) {
       cp->lastmod = now_rtc;
@@ -4009,6 +4021,21 @@ bool MyMesh::sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_n
   memcpy(e.pubkey, pubkey32, PUB_KEY_SIZE);
   e.from_chain = _discover_regions_chained;
   return true;
+}
+
+// UTF-8-sichere In-Place-Truncation auf max. max_bytes Bytes.
+// Wenn s[max_bytes] mitten in einer UTF-8-Multibyte-Sequenz landet, gehen
+// wir rueckwaerts zum Start-Byte und schneiden VOR dem Codepoint. So
+// vermeiden wir den 'Replacement Character'-Tile in der App-Anzeige
+// (User-Bug 2026-06-14 'LOS_Schoeneiche3<?>').
+//   Continuation-Byte:  10xxxxxx -> (b & 0xC0) == 0x80
+//   Start- oder ASCII:  alles andere
+static void neighbors_utf8_safe_truncate(char* s, size_t max_bytes) {
+  size_t l = strlen(s);
+  if (l <= max_bytes) return;
+  size_t i = max_bytes;
+  while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80) i--;
+  s[i] = 0;
 }
 
 // Haversine-Distanz in km zwischen zwei lat/lon-Paaren (in degrees).
@@ -4186,9 +4213,13 @@ void MyMesh::finalizeRegionsChain() {
     }
   }
 
-  // Legende: ALLE CTL-Antworten einschliesslich derer ohne Region-Antwort.
-  // Format kompakt, <145 Byte pro Zeile (siehe Helper).
-  pushCompanionMessage("Legende:");
+  // Per-Repeater-Aufschluesselung: ALLE CTL-Antworten einschliesslich
+  // derer ohne Region-Antwort. Format kompakt, <145 Byte pro Zeile
+  // (siehe Helper). User-Wording 2026-06-14: 'Legende' war irrefuehrend,
+  // weil die Zeilen nicht die '#region (prefix...)'-Liste oben erklaeren,
+  // sondern eine separate Liste 'wer wurde gefragt + mit welchem Result'
+  // sind. Treffender: 'Zu Regionen befragt:'.
+  pushCompanionMessage("Zu Regionen befragt:");
   for (uint8_t i = 0; i < _discover_count; i++) {
     const DiscoverEntry& e = _discover_entries[i];
     const CompletedRegionsEntry* c = find_csv(e.pub_key);
@@ -4491,6 +4522,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(_heard_quality,      0, sizeof(_heard_quality));
   _tx_repeat_airtime_ms = 0;
   _last_advert_snr_q4 = 0;
+  _last_advert_rssi_dbm = INT8_MIN;
   memset(_duty_air_ms_per_minute, 0, sizeof(_duty_air_ms_per_minute));
   _duty_slot_idx = 0;
   _duty_slot_start_ms = 0;
@@ -12634,16 +12666,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       prefix6[6] = 0;
       char idstr[64];
       snprintf(idstr, sizeof(idstr), "%s %s", prefix6, c.name);
+      // UTF-8-sichere Truncation auf 25 Bytes (User-Bug 2026-06-14:
+      // mid-Sequence-Cut produzierte schwarzes Fragezeichen-Tile, weil
+      // %-25.25s rein byte-basiert abschneidet -- 'LOS_Schoeneiche3'
+      // verlor das halbe oe-UTF8-Pair). Lieber max. 25 Byte aber an
+      // Codepoint-Grenze; Spalten-Drift max ~1 Char.
+      neighbors_utf8_safe_truncate(idstr, 25);
 
-      // SNR + Scope aus _neighbours[] (per-pubkey) suchen. Nur direkt-
+      // SNR/RSSI + Scope aus _neighbours[] (per-pubkey) suchen. Nur direkt-
       // gehoert (zero-hop) liefert einen Eintrag. Bei Kontakten via Flood:
-      // '--' fuer SNR, kein Scope-Tag (User-Wunsch 2026-06-11).
-      char snr_buf[16];
+      // '--' fuer SNR/RSSI, kein Scope-Tag (User-Wunsch 2026-06-11).
+      char snr_buf[24];
       char scope_buf[24] = "";
-      int8_t snr_q4 = INT8_MIN;
+      int8_t snr_q4   = INT8_MIN;
+      int8_t rssi_dbm = INT8_MIN;
       for (uint8_t k = 0; k < _neighbours_count && k < MAX_RUNTIME_NEIGHBOURS; k++) {
         if (memcmp(_neighbours[k].pub_key, c.id.pub_key, 32) == 0) {
-          snr_q4 = _neighbours[k].snr;
+          snr_q4   = _neighbours[k].snr;
+          rssi_dbm = _neighbours[k].rssi_dbm;
           // Scope-Annotation '(#name)' oder '(#?)' bei scoped+unbekannt.
           // Unscoped: kein Tag.
           if (_neighbours[k].scope_name[0]) {
@@ -12653,19 +12693,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           break;
         }
       }
-      if (snr_q4 != INT8_MIN) {
-        snprintf(snr_buf, sizeof(snr_buf), "%+6.1fdB", (double)snr_q4 / 4.0);
+      // SNR/RSSI-Anzeige (User-Wunsch 2026-06-14: RSSI hinter SNR).
+      //   Beide bekannt:    "+0.5dB/-110dBm"
+      //   nur SNR:          "+0.5dB        "
+      //   nichts:           "     --       "
+      // Fixe Breite 15 fuer konsistente Spaltenausrichtung.
+      if (snr_q4 != INT8_MIN && rssi_dbm != INT8_MIN) {
+        snprintf(snr_buf, sizeof(snr_buf), "%+5.1fdB/%4ddBm",
+                 (double)snr_q4 / 4.0, (int)rssi_dbm);
+      } else if (snr_q4 != INT8_MIN) {
+        snprintf(snr_buf, sizeof(snr_buf), "%+5.1fdB        ",
+                 (double)snr_q4 / 4.0);
       } else {
-        snprintf(snr_buf, sizeof(snr_buf), "      --");
+        snprintf(snr_buf, sizeof(snr_buf), "     --        ");
       }
       char line[180];
       // Hops-Spalte nur zeigen wenn ueberhaupt hops-Filter aktiv ist
       // (sonst direct-only = hops immer 0 = redundant).
+      // %-25s (ohne .25-Precision) -- Truncation haben wir oben UTF-8-sicher
+      // gemacht; %-25s padded nur noch falls kuerzer.
       if (!has_hops) {
-        snprintf(line, sizeof(line), "  %s %-25.25s %6s %s%s%s",
+        snprintf(line, sizeof(line), "  %s %-25s %6s %s%s%s",
                  tname, idstr, age, snr_buf, scope_buf, dist_buf);
       } else {
-        snprintf(line, sizeof(line), "  %s %-25.25s %6s %s%s hops=%s%s",
+        snprintf(line, sizeof(line), "  %s %-25s %6s %s%s hops=%s%s",
                  tname, idstr, age, snr_buf, scope_buf, hop, dist_buf);
       }
       add_line(line);
