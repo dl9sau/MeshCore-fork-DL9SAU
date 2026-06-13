@@ -106,6 +106,19 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   pRxCharacteristic->setCallbacks(this);
 
   pServer->getAdvertising()->addServiceUUID(SERVICE_UUID);
+
+  // DL9SAU 2026-06-13: pService->start() einmalig hier in begin()
+  // statt frueher in enable() bei jedem Wake-up. Hintergrund: arduino-esp32
+  // BLEService::start() versucht alle Characteristics neu zu registrieren.
+  // Beim 2./3./N-ten Aufruf haben sie bereits Handles aus dem ersten
+  // start() -> ERROR-Log "Characteristic already has a handle." und
+  // verschwendete CPU-Arbeit. Im BLE-Cycle-Modus passierte das alle 60s
+  // (User-Beobachtung 2026-06-13 mit USB-cu Mitlauf). Folge-Effekt:
+  // ESP_LOGE-Output an Serial; bei USB-Power ohne Host-Reader (Powerbank)
+  // kann Serial.print blocken -> erhoehter Strom durch CPU-Spin statt
+  // Idle-Yield. Fix: Service start einmalig. enable()/disable() steuern
+  // nur noch Advertising + Connection-State.
+  pService->start();
 }
 
 // -------- BLESecurityCallbacks methods
@@ -198,20 +211,16 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic, esp_ble_gat
 
 // ---------- public methods
 
-void SerialBLEInterface::enable() { 
+void SerialBLEInterface::enable() {
   if (_isEnabled) return;
 
   _isEnabled = true;
   clearBuffers();
 
-  // Start the service
-  pService->start();
-
-  // Start advertising
-
-  //pServer->getAdvertising()->setMinInterval(500);
-  //pServer->getAdvertising()->setMaxInterval(1000);
-
+  // pService->start() entfernt -- ist jetzt in begin() einmalig (siehe
+  // Kommentar dort). Wir steuern nur noch Advertising. Wenn die
+  // Verbindung lebt, weckt das einen Disconnect nicht; wenn nicht,
+  // beginnt neues Advertising.
   pServer->getAdvertising()->start();
   adv_restart_time = 0;
 }
@@ -223,7 +232,16 @@ void SerialBLEInterface::disable() {
 
   pServer->getAdvertising()->stop();
   pServer->disconnect(last_conn_id);
-  pService->stop();
+  // pService->stop() entfernt: verursachte beim naechsten enable() das
+  // Re-Init-ERROR-Log "Characteristic already has a handle." (alle 60s
+  // im BLE-Cycle-Modus). Da arduino-esp32 BLEService::start() die
+  // Characteristics neu registrieren will, kollidiert das mit den noch
+  // bestehenden Handles. Folgekosten: ESP_LOGE-Spam an Serial,
+  // potentielles Serial.print-Blocking bei USB ohne Host-Reader,
+  // CPU-Spin statt Idle. -- ACHTUNG: GATT-Service bleibt damit aktiv
+  // waehrend BLE 'disabled' ist; das Radio wird hier NICHT vollstaendig
+  // schlafen gelegt. Echter Radio-Schlaf via esp_bt_controller_disable
+  // ist Wunschliste 58 Phase F (separat).
   oldDeviceConnected = deviceConnected = false;
   adv_restart_time = 0;
 }

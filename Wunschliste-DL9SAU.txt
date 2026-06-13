@@ -4064,6 +4064,155 @@ Quelle: User-Wunsch 2026-06-13 (peilbasierte Filterung beim mobilen
   Tracker-Use, Beispiel-Use-Case 'wer ist in Richtung Jever?').
 
 
+--------------------------------------------------------------------------------
+58. Stromverbrauch-Reduzierung Companion-Build (Heltec WT)
+--------------------------------------------------------------------------------
+
+Status: TODO Sammlung (User-Wunsch 2026-06-13). Vorher messen, vorsichtig
+        tunen -- jedes der Teilstuecke kann Funktionalitaet brechen.
+
+Hintergrund:
+  User-Messung 2026-06-13 in laendlicher Umgebung (kein LoRa-Traffic):
+    Heltec WT mit dieser Firmware:           ~200 mA (Display off)
+    Heltec WT mit dieser Firmware:           ~220-227 mA (Display on)
+    Heltec WT mit vorheriger Firmware:       ~180-190 mA (Display off)
+    Anderes Geraet, User-LoRa-APRS-Firmware: ~165 mA
+  Delta zur vorherigen Firmware: +10-20 mA trotz Einfuehrung der
+  BLE-Sleep-Mechanik (sollte eigentlich sparen). Delta zur LoRa-APRS-
+  Firmware: ~35 mA -- die nutzt CPU-Clock-Reduktion auf S3, kein
+  esp_pm Light-Sleep (User-Angabe).
+
+  Konkretes Auto-Wake-Problem (User-Beobachtung dichtes Mesh):
+  Display geht bei jeder Channel-Message an (UITask::newMsg ruft
+  _display->turnOn) -- kostet wiederholt ~20-27 mA bis Auto-Off.
+
+Phase A -- Display Power-Control (User-Spec):
+  set display <off|on|on-at-new-messages|on-button-press-only>
+    off                      -- nie auto-on, Button-Press auch nicht
+                                (Software-Suppress in UITask Button-Handler).
+    on                       -- permanent an
+    on-at-new-messages       -- aktuelles Default-Verhalten
+    on-button-press-only     -- Button weckt, Channel-Msg nicht
+  Pref: display_wake_mode (uint8_t, Sentinel 0xFF -> Default
+    on-at-new-messages).
+  Touchpoints: NodePrefs + DataStore + CLI + UITask (ui-tiny + ui-new)
+    newMsg() + Button-Handler. Help-Texte + 'get/set' Anzeige.
+
+Phase B -- ESP32-S3 CPU-Clock Reduktion:
+  setCpuFrequencyMhz(80) statt Default 240. Erwartung ~10-20 mA.
+  Caveats (von Claude initial unterschaetzt, User-Hinweis 2026-06-13):
+   - LoRa-RX-IRQ-Timing: SX1262-Pakete decoden, Demod-Sensitivitaet
+     kann marginal leiden -- empirisch testen.
+   - BLE-Stack: NimBLE/Bluedroid laufen auf core1, Timer-Latenz steigt
+     bei 80 MHz; Verbindungs-Setup koennte verzoegert sein.
+   - Companion-Channel-Throughput: longer pushCompanionMessage-Loops
+     wenn App synct.
+  Plan: Pref 'cpu_freq_mhz' (Default 240), CLI 'set cpu.freq <Mhz>'
+    (40 / 80 / 160 / 240). Boot-Apply via setCpuFrequencyMhz im setup().
+    Erstmal Diagnose-Build mit 80 MHz Default und Stresstest.
+
+Phase C -- esp_pm Light-Sleep (mittelfristig):
+  esp_pm_config_esp32s3_t mit max_freq=240, min_freq=10, light_sleep=true.
+  Caveats:
+   - LoRa-IRQ Wake-Pfad muss konfiguriert sein (RX-Done-IRQ als Wake-Source).
+   - Companion-loop delay(1) muss laenger werden (z.B. delay(10))
+     damit IDLE-Task in Light-Sleep einsteigt.
+   - BLE keep-alive Timing kritisch -- NimBLE braucht maybe RTOS-Hook.
+   - GPS-UART Wake -- muss IRQ-getriggert sein, nicht polled.
+   - Risiko: subtile Timing-Bugs erst nach Wochen sichtbar.
+  -> Diese Phase erst NACH Phase A+B implementieren.
+
+Phase D -- Loop-Idle-Coarse-Tick (mittelfristig):
+  Aktuell laufen ~13 Funktionsaufrufe + millis-Vergleiche jede
+  Loop-Iteration (=~1000/s bei delay(1)). Pattern fuer State-Maintenance
+  Calls (manageBlePower, manageGpsPower, updateMotionTracking,
+  discoverLoop, advert-checks, RTC-jump-detect) waere:
+
+    static uint32_t s_last_slow_tick = 0;
+    if (millis() - s_last_slow_tick >= 100) {
+      s_last_slow_tick = millis();
+      manageBlePower();
+      manageGpsPower();
+      updateMotionTracking();
+      ...
+    }
+
+  CPU-Last sinkt von 1000 Hz -> 10 Hz fuer diese Calls. Indirekter
+  Stromspar-Effekt nur in Kombination mit Phase C (esp_pm). Aber
+  spart Trace-Volumen + ggf. millis-Read-Anzahl.
+
+  Welche Calls MUESSEN jeden Loop laufen (also nicht in den slow-tick):
+   - BaseChatMesh::loop (RX-queue/TX-queue Servicing)
+   - checkSerialInterface (App-Frame-Parsen, latenz-empfindlich)
+   - serialCliLoop (User-Input-Echo)
+   - Display-Refresh (Smooth-Anzeige)
+   - updateDutyWindow (vor allowPacketForward, sonst staler Wert)
+
+Phase E -- BLE-Sleep-Effektivitaet pruefen:
+  User-Erwartung: vorherige Firmware hatte BLE always-on (~190 mA),
+  neue hat BLE-Cycle (sollte weniger). Beobachtung ist aber HOEHER
+  (~200 mA). Hypothesen:
+   - BLE-OFF-State deinitalisiert NimBLE/Bluedroid nicht wirklich
+     (nur Advertising aus, Stack laeuft weiter, Funk evtl. nicht aus).
+     Verifizieren: setBleEnabled(false) -> SerialBLEInterface::disable()
+     -> NimBLE-stop / Controller-off-Pfad?
+   - Cycle-Wake-Overhead frisst Sparpotenzial auf
+   - Phase BOOT zu lang (10 min) im Boot-Szenario; User misst
+     vielleicht waehrend BOOT-Phase
+  Erstmal beobachten via 'bluetooth status' + heartbeat-trace
+  (Wunschliste 43 hat den Diagnose-Heartbeat).
+
+Phase F -- BLE-Controller-Level Sleep (esp_bt_controller_disable):
+  Aktuell: SerialBLEInterface::disable() stoppt nur Advertising +
+  Disconnect; der BT-Controller + GATT-Stack + Radio laufen weiter.
+  Folge: 'BLE sleep' bringt KEINEN Strom-Gewinn, ist im Cycle-Modus
+  sogar TEUER (User-Messung 2026-06-13: Cycle 200+ mA vs always-on
+  185-195 mA), weil zusaetzlich Re-Init-Versuche bei jedem 'wake'
+  Arbeit erzeugen.
+
+  User-Constraint: LoRa-RX bleibt IMMER scharf (companion empfaengt
+  Messages zuverlaessig, repeater erst recht). Nur BLE-Chip schlaeft.
+
+  Plan (heikel, getrennt vom Quick-Fix von 2026-06-13):
+    1) esp_bt_controller_disable() im SerialBLEInterface::disable()
+       NACH Advertising-Stop + Disconnect. Stoppt das BT-Radio.
+    2) esp_bt_controller_enable() im enable() VOR Advertising-Start.
+    3) Energie-Budget pruefen: re-enable-Cost (Boot des Controllers,
+       ~100ms) muss kleiner sein als gesparte Sleep-Energie. Bei
+       'profile=normal' (5 min Hot-Start, dann permanent Sleep, Wake
+       nur via CLI/Button/Reboot) ist der re-init seltenst -> klare
+       Ersparnis erwartet. Im Cycle-Modus (40s sleep / 20s wake) ist
+       der Break-even noch zu rechnen.
+    4) Anti-Kollision mit esp_pm (Phase C): erst Phase F machen, dann
+       Phase C bauen, weil esp_pm Light-Sleep mit BT-Controller-Status
+       koordinieren muss.
+    5) Risiko: GATT-State haengt am Stack-Lifecycle. Nach
+       esp_bt_controller_enable muessen Service/Characteristics
+       moeglicherweise neu publiziert werden. Dann waere der heutige
+       Re-Init-Fix (Quick-Fix 2026-06-13: pService->start in begin)
+       fuer den enable-Pfad wieder relevant -- oder anders gemacht.
+
+  Status 2026-06-13: Quick-Fix erledigt (Re-Init-Spam weg, GATT-Service
+  bleibt aktiv waehrend BLE 'disabled'). Phase F voraussetzungs-pruefen
+  + implementieren ist offen.
+
+Quelle: User-Beobachtung + -Wunsch 2026-06-13. Reihenfolge der
+  Phasen: A (Display, low-risk) -> Diagnose B/E (clock + BLE) ->
+  F (BLE-Controller-Sleep, separate Untersuchung) ->
+  C (Light-Sleep, hoechstes Risiko, Stresstest noetig).
+
+CPU-Clock CLI (User-Wunsch 2026-06-13):
+  set cpu.clock <80|160|240|max>   -- MHz-Wert oder 'max' fuer Default
+  get cpu.clock                    -- aktueller Wert
+  Pref cpu_clock_mhz (uint8_t, 0=Sentinel/max). Boot-Apply via
+  setCpuFrequencyMhz im setup() vor Stack-Init. Plattformfrage:
+  ESP32-S3 supports 240/160/80/40/20/10 MHz; nrf52 hat andere Skala
+  (32/64 MHz); also nicht ein-zu-eins portabel. Help-Text muss die
+  pro-Build-Werte zeigen (z.B. Build-Time-Liste).
+  Achtung BLE: bei 80 MHz Verbindungs-Setup verzoegert. LoRa-RX-
+  Timing pruefen.
+
+
 
 
 
