@@ -4083,6 +4083,170 @@ Quelle: User-Wunsch 2026-06-13 (peilbasierte Filterung beim mobilen
 
 
 --------------------------------------------------------------------------------
+59. discover regions Zuverlaessigkeit + Direct-Heard-Quellen
+--------------------------------------------------------------------------------
+
+Status: User-Beobachtung 2026-06-14, Untersuchung TODO.
+
+User-Bericht: 'discover regions hat bisher noch nie Regionen
+angezeigt. Vorhin sah ich einen Repeater und er antworte mit Regionen,
+auf Anhieb. Aber auch nur ein mal -- vielleicht Gluecksache.'
+
+Aktueller Code (MyMesh.cpp:3828-3851):
+  - CTL_DISCOVER_REQ wird per sendZeroHop verschickt.
+  - Parallel werden _neighbours[]-Eintraege gefilterte (ADV_TYPE_REPEATER,
+    heard_timestamp != 0, < 3h alt) per ANON_REQ_TYPE_REGIONS direkt
+    angefragt.
+  - Nach 30s-Timeout finalizeRegionsChain aggregiert.
+
+Mode-Failure-Hypothesen:
+  a) Repeater hat keine Regionen konfiguriert -> antwortet mit leerem
+     CSV -> _regions_completed_count bleibt 0 -> kein 'Regionen:'-Block.
+  b) Repeater-Firmware unterstuetzt ANON_REQ_TYPE_REGIONS nicht
+     (alte Version oder andere Implementation).
+  c) Response-Frame zu lang, wird abgeschnitten / fragmentiert.
+  d) _neighbours[] ist leer (z.B. nach Reboot ohne Adverts gehoert)
+     -> nur die CTL_DISCOVER-Antworten landen im Pool, und die kommen
+     nur von Repeatern in Funkreichweite, die REGIONS auch noch
+     getrennt anbieten.
+  e) ANON-Response wird durch Filter/Permission-Check rausgenommen.
+
+Plan:
+  1) Trace-Kategorie TRACE_DISCOVER erweitern: ANON_REQ-RESP-Empfang
+     mit pubkey-Prefix + CSV-Laenge protokollieren -- damit User in
+     der Praxis sieht ob Responses kommen.
+  2) Wenn Response leer (CSV == 0 Byte): andere Diagnose-Zeile
+     '<repeater>: REGIONS-RESP leer (kein scope konfiguriert?)'.
+  3) Vielleicht zusaetzlich beim 'discover regions' Output zaehlen
+     wie viele Pre-Queried, wie viele geantwortet (auch leer), wie
+     viele mit Regions. Beispiel:
+       'discover regions: 5 angefragt (2 cache + 3 CTL),
+        antworten: 4 (1 leer, 3 mit Regionen).'
+  4) Investigation ob Repeater-Side bei leerer region-Liste explizit
+     leer-RESP sendet oder gar nichts (Letzteres ist unklar -- dann
+     waeren Timeouts dominant).
+
+Verwandt:
+  - Wunschliste 27 Phase A (Discoverability) -- ANON_REQ-Infrastruktur.
+  - Wunschliste 47 (scope-UX) -- Region-Verwaltung am Repeater.
+
+Quelle: User-Tour 2026-06-14.
+
+
+--------------------------------------------------------------------------------
+60. LoRa RX-Paketfehler-Statistik + LBT-Skipped-TX-Counter
+--------------------------------------------------------------------------------
+
+Status: User-Wunsch 2026-06-14, Prio MITTEL (vor 61 Voltage/Current).
+
+Use-Case:
+  Diagnose der RX-Empfangsqualitaet an einem Repeater-Standort. Drei
+  konkrete Counter den der User sehen will:
+    a) RX_CRC_ERR -- Pakete die wegen CRC-Fehler verworfen wurden
+    b) RX_HEADER_ERR -- Pakete mit beschaedigtem Header
+    c) LBT_SKIPPED_TX -- Sendung wegen besetztem Kanal (int.thresh)
+                         unterdrueckt
+
+Quelle der Daten:
+  - RadioLib SX126x/SX127x: getPacketErrorCount() bzw. getRxStatus
+    bietet CRC-Fehler-Counter. Architekturabhaengig ob direkt
+    persistent oder bei jedem RX-IRQ inkrementell.
+  - Header-Errors: meist als getInvalidHeaderCount() in RadioLib oder
+    aequivalent.
+  - LBT-Skip: bereits in MeshCore vorhanden? Lookup in transmitter-
+    Code (radio_driver.cpp / BaseChatMesh::sendPacket / interferenceCheck)
+    -- wir haben jetzt schon eine 'noise floor too high'-Schwelle
+    via int.thresh. Counter ist evtl. schon da, sonst hinzufuegen.
+
+Anzeige:
+  - 'stats-radio' oder neuer Block 'stats-rx-errors'
+  - 'stats-packets' bei LBT-skipped
+  - Verfuegbar via REQ_TYPE_GET_STATUS (Wunschliste 7) damit Remote-
+    Admin (Wunschliste 52) sie ueber Mesh abruft.
+
+Vorgehen:
+  1) Felder in RepeaterStats-Struct ergaenzen (1:1-Kompat-Erhaltung
+     mit simple_repeater -- ggf. neue Felder ans Ende, opt-in via
+     Version-Byte falls noetig).
+  2) Counter-Lifecycle: monoton ab Boot, in stats-Refresh aus
+     RadioLib auslesen (nicht reset). Auf 'clear stats' -> 0.
+  3) Anzeige + REQ_TYPE_GET_STATUS-Payload.
+
+Quelle: User-Tour 2026-06-14.
+
+
+--------------------------------------------------------------------------------
+61. Spannungs-/Strom-/Akku-Telemetrie im Repeater-Status
+--------------------------------------------------------------------------------
+
+Status: User-Wunsch 2026-06-14, Prio NIEDRIG (nach 60 RX-Errors).
+
+Use-Case:
+  Im profile=normal Repeater-Betrieb (oder wenn man sich als REPEATER
+  advertised + auf admin-requests antwortet) will User remote sehen:
+    - VBus / 5V-Versorgungsspannung
+    - Versorgungsstrom (wenn Hardware INA219/INA236 o.ae. hat)
+    - Akku-Spannung (wenn Akku angeschlossen)
+    - Akku-Lade-Strom (wenn Lademanagement Sensor liefert)
+
+Plattform-Abhaengigkeit:
+  - Heltec Wireless Tracker / V3: ADC + Spannungsteiler fuer VBat,
+    keine direkte Strommessung ohne externes Modul.
+  - T-Echo / RAK4631: Lithium-Spannung via ADC.
+  - NRF52 mit MAX17048 (Lipo Fuel Gauge): liefert SOC + Voltage.
+  - Mit INA219/INA236 auf den Companion-Builds: voller Strom-/
+    Spannungs-Logger.
+
+Vorgehen:
+  1) Plattform-Capability-Discovery (compile-time #defines).
+  2) Optionales Sensor-Mod-Polling (i2c).
+  3) Wire-Format in REQ_TYPE_GET_STATUS Antwort (Wunschliste 7) +
+     RepeaterStats-Struct (1:1-Kompat erhalten).
+  4) Anzeige in CLI 'stats' Block 'power'.
+  5) Wenn der Bus die Werte nicht liefert: skip mit '-' statt 0.
+
+Quelle: User-Tour 2026-06-14. Plattform-spezifisch, deshalb hinter
+  Wunschliste 60 (RX-Errors) priorisieren.
+
+
+--------------------------------------------------------------------------------
+62. RTC-Bootstrap: Quellen erweitern (Status: bereits durch Message-Buckets)
+--------------------------------------------------------------------------------
+
+Status: BEREITS UMGESETZT 2026-05-30 fuer Message-Buckets.
+
+User-Frage 2026-06-14:
+  'Die Uhrzeit nach Boot macht sich als erste Schaetzung an der
+  Nodelist (contacts) fest ... wir haben aber auch die message-
+  History fuer offline storage ... ebenfalls zur Zeitabschaetzung
+  heranziehen. Also beide checken, neuere gewinnt. Haben wir sonst
+  noch eine Liste, wie z.B. die discover-Liste?'
+
+Stand:
+  - bootstrapRTCfromContacts() (BaseChatMesh::, upstream) liefert
+    max(contact.lastmod).
+  - loadBucketsFromFlash() (MyMesh.cpp:478-503) scannt zusaetzlich
+    alle gespeicherten Frame-Timestamps in den Buckets (DM, public,
+    hashtag, privat, companion) und bumpt RTC bei hoeherem max_ts,
+    mit Sanity-Schranke (max 1 Jahr Sprung -> Schutz gegen
+    korrupte 2038-Frames vom NMEA-stale-time-Bug).
+  - Beide laufen beim Boot (begin()): contacts zuerst, dann Buckets.
+    Neuere Quelle gewinnt.
+
+Weitere Quellen-Kandidaten + Bewertung:
+  - _discover_entries[].recv_at_rtc: RAM-only, nach Reboot leer.
+    Nicht nutzbar fuer Boot-Bootstrap.
+  - _heard_list: ebenfalls RAM-only (zumindest aktuell), keine
+    persistente Quelle.
+  - _neighbours[]: RAM-only.
+
+Fazit: Aktuelle Implementation deckt die persistenten Quellen ab.
+Keine Aktion noetig. User-Erinnerung dokumentiert fuer Klaerheit.
+
+Quelle: User-Frage 2026-06-14.
+
+
+--------------------------------------------------------------------------------
 58. Stromverbrauch-Reduzierung Companion-Build (Heltec WT)
 --------------------------------------------------------------------------------
 
