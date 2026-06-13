@@ -1,5 +1,12 @@
 #include "SerialBLEInterface.h"
 #include "esp_mac.h"
+// Wunschliste 58 Phase F (2026-06-13): Controller-Level Sleep.
+// esp_bt_controller_disable/enable schalten das BT-Radio echt aus statt
+// nur das Advertising. User-Messung: Advertising-Stop allein KOSTET
+// Strom (200mA vs 186-192mA aktiv), weil ohne Advertising der Modem-
+// Sleep des Controllers nicht greift. Mit Controller-Disable sollte
+// der Radio-Teil komplett aus sein.
+#include "esp_bt.h"
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -214,13 +221,24 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic, esp_ble_gat
 void SerialBLEInterface::enable() {
   if (_isEnabled) return;
 
+  // Phase F: BT-Controller hochfahren wenn er schlaeft. Status-Check
+  // verhindert Doppel-Enable (Boot: BLEDevice::init in begin() hat den
+  // Controller bereits enabled). esp_bt_controller_get_status liefert
+  // ENABLED wenn schon laeuft, INITED wenn nur initialisiert aber
+  // disabled -- letzteres ist unser Wake-from-Sleep-Pfad.
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
+    esp_err_t err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (err != ESP_OK) {
+      BLE_DEBUG_PRINTLN("SerialBLEInterface::enable: ctrl_enable failed err=%d",
+                        (int)err);
+      // weiter probieren -- advertise.start liefert ggf. eigenen Fehler
+    }
+  }
+
   _isEnabled = true;
   clearBuffers();
 
-  // pService->start() entfernt -- ist jetzt in begin() einmalig (siehe
-  // Kommentar dort). Wir steuern nur noch Advertising. Wenn die
-  // Verbindung lebt, weckt das einen Disconnect nicht; wenn nicht,
-  // beginnt neues Advertising.
+  // pService->start() entfernt -- einmalig in begin() (siehe Kommentar dort).
   pServer->getAdvertising()->start();
   adv_restart_time = 0;
 }
@@ -230,17 +248,23 @@ void SerialBLEInterface::disable() {
 
   BLE_DEBUG_PRINTLN("SerialBLEInterface::disable");
 
-  // User-Messung 2026-06-13: Advertising-Stop kostet MEHR Strom als
-  // Advertising-an (200mA vs 186-192mA), vermutlich weil Modem-Sleep
-  // nur im aktiven Advertising-State greift. Deshalb Advertising NICHT
-  // mehr stoppen -- bringt nichts und ist sogar kontraproduktiv.
-  // Existierende Verbindung beenden bleibt, weil der Aufrufer (manageBlePower
-  // bei profile=normal Sleep-Phase) eine Disconnect erwartet hat.
-  // pService->stop() ebenfalls nicht (verursachte Re-Init-ERROR-Log).
-  // Echter Strom-Spar-Schlaf via esp_bt_controller_disable ist
-  // Wunschliste 58 Phase F (separater Commit).
+  // Phase F-Reihenfolge: erst Advertising stoppen + Disconnect, dann
+  // den Controller wirklich abschalten. Advertising-Stop allein hat
+  // 2026-06-13 das Stromproblem (kein Modem-Sleep ohne aktive ADV-
+  // Events) erzeugt; mit anschliessendem Controller-Disable ist das
+  // egal, weil der Controller danach ohnehin aus ist.
+  pServer->getAdvertising()->stop();
   pServer->disconnect(last_conn_id);
   oldDeviceConnected = deviceConnected = false;
+
+  // BT-Controller wirklich aus. Status-Check verhindert Doppel-Disable.
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    esp_err_t err = esp_bt_controller_disable();
+    if (err != ESP_OK) {
+      BLE_DEBUG_PRINTLN("SerialBLEInterface::disable: ctrl_disable failed err=%d",
+                        (int)err);
+    }
+  }
 }
 
 size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
