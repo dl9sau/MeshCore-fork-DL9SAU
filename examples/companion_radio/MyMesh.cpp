@@ -1,6 +1,10 @@
 #include "MyMesh.h"
 
 #include <Arduino.h> // needed for PlatformIO
+#include <time.h>    // gmtime_r + struct tm -- nRF52-newlib zieht das NICHT
+                     // transitiv ueber Arduino.h rein (ESP32 schon). Fix
+                     // 2026-06-14 nach nrf52-Audit (alle 75 Companion-
+                     // Builds gescheitert mit 'gmtime_r not declared').
 #include <Mesh.h>
 #include <SHA256.h>
 #include "dl9sau_geo_recommendations.h"
