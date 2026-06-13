@@ -4288,11 +4288,14 @@ void MyMesh::finalizeRegionsChain() {
     }
   }
 
-  // Header
+  // Header. Wording 2026-06-14: 'Scopes' -> 'Regionen' (Repeater liefert
+  // seine konfigurierten Regionen, das ist die Repeater-Sprech. 'Scope'
+  // ist der Setter-Begriff den der User nutzt, gehoert nicht in
+  // Result-Wording).
   char hdr[140];
   snprintf(hdr, sizeof(hdr),
            "discover regions: %u REPEATER,\n"
-           "  %u lieferten Scopes.",
+           "  %u lieferten Regionen.",
            (unsigned)_discover_count,
            (unsigned)_regions_completed_count);
   pushCompanionMessage(hdr);
