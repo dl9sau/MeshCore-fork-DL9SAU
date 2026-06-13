@@ -230,20 +230,17 @@ void SerialBLEInterface::disable() {
 
   BLE_DEBUG_PRINTLN("SerialBLEInterface::disable");
 
-  pServer->getAdvertising()->stop();
+  // User-Messung 2026-06-13: Advertising-Stop kostet MEHR Strom als
+  // Advertising-an (200mA vs 186-192mA), vermutlich weil Modem-Sleep
+  // nur im aktiven Advertising-State greift. Deshalb Advertising NICHT
+  // mehr stoppen -- bringt nichts und ist sogar kontraproduktiv.
+  // Existierende Verbindung beenden bleibt, weil der Aufrufer (manageBlePower
+  // bei profile=normal Sleep-Phase) eine Disconnect erwartet hat.
+  // pService->stop() ebenfalls nicht (verursachte Re-Init-ERROR-Log).
+  // Echter Strom-Spar-Schlaf via esp_bt_controller_disable ist
+  // Wunschliste 58 Phase F (separater Commit).
   pServer->disconnect(last_conn_id);
-  // pService->stop() entfernt: verursachte beim naechsten enable() das
-  // Re-Init-ERROR-Log "Characteristic already has a handle." (alle 60s
-  // im BLE-Cycle-Modus). Da arduino-esp32 BLEService::start() die
-  // Characteristics neu registrieren will, kollidiert das mit den noch
-  // bestehenden Handles. Folgekosten: ESP_LOGE-Spam an Serial,
-  // potentielles Serial.print-Blocking bei USB ohne Host-Reader,
-  // CPU-Spin statt Idle. -- ACHTUNG: GATT-Service bleibt damit aktiv
-  // waehrend BLE 'disabled' ist; das Radio wird hier NICHT vollstaendig
-  // schlafen gelegt. Echter Radio-Schlaf via esp_bt_controller_disable
-  // ist Wunschliste 58 Phase F (separat).
   oldDeviceConnected = deviceConnected = false;
-  adv_restart_time = 0;
 }
 
 size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
