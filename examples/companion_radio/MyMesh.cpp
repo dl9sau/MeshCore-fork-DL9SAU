@@ -503,6 +503,53 @@ void MyMesh::loadBucketsFromFlash() {
   }
 }
 
+// User-Bug 2026-06-14: nach App-Sync sind die Start-Meldungen aus dem
+// $companion-Bucket popt -- bei naechstem Reboot fehlt die "frische"
+// Zeitquelle. RTC faellt auf max(contact.lastmod) zurueck, sprich auf
+// den letzten Advert -- der im konkreten Fall 24h alt war. Folge: 5x
+// Reboot in Folge -> 5 Start-Meldungen alle mit der gleichen alten
+// Uhrzeit. Fix: dedizierte Persistenz fuer den RTC-Wert selber. Datei
+// /rtc_persist (9 byte): 0xAB | rtc(4) | rtc(4). Doppelte Kopie als
+// einfache Sanity (corruption / partial write erkennen).
+//
+// Geschrieben wird nur wenn sich der RTC um >= RTC_PERSIST_MIN_DELTA
+// gegenueber dem letzten persistierten Wert vorangetrieben hat
+// (Flash-Wear-Spar). loop() prueft alle 30 Min -- das erfasst auch
+// indirekte RTC-Quellen wie GPS, die nicht ueber MyMesh laufen.
+// Zusaetzlich rufen explizite setCurrentTime-Hooks (CMD_SET_DEVICE_TIME,
+// maybeAdvertTimeSync, ...) saveRtcPersist direkt auf -- so geht eine
+// frische App-Sync nicht verloren wenn der User Sekunden spaeter
+// rebooted.
+void MyMesh::saveRtcPersist(uint32_t rtc) {
+  if (rtc < 1500000000UL) return;   // < 2017-07: ungueltig
+  if (rtc <= _rtc_persist_last_saved) return;
+  if (rtc - _rtc_persist_last_saved < RTC_PERSIST_MIN_DELTA) return;
+  File f = _store->openWriteFile("/rtc_persist");
+  if (!f) return;
+  uint8_t magic = 0xAB;
+  f.write(&magic, 1);
+  f.write((const uint8_t*)&rtc, 4);
+  f.write((const uint8_t*)&rtc, 4);
+  f.close();
+  _rtc_persist_last_saved = rtc;
+}
+
+uint32_t MyMesh::loadRtcPersist() {
+  File f = _store->openRead("/rtc_persist");
+  if (!f) return 0;
+  uint8_t magic;
+  uint32_t a = 0, b = 0;
+  bool ok = (f.read(&magic, 1) == 1)
+         && (f.read((uint8_t*)&a, 4) == 4)
+         && (f.read((uint8_t*)&b, 4) == 4);
+  f.close();
+  if (!ok) return 0;
+  if (magic != 0xAB) return 0;
+  if (a != b) return 0;             // partial-write korruption
+  if (a < 1500000000UL) return 0;   // ungueltig
+  return a;
+}
+
 void MyMesh::clearBucket(MsgBucket b) {
   Frame* arr = NULL;
   int cap = 0;
@@ -1439,6 +1486,7 @@ void MyMesh::maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestam
     }
     // Anwenden
     getRTCClock()->setCurrentTime(adv_timestamp);
+    saveRtcPersist(adv_timestamp);  // Bug-Fix 2026-06-14
     _time_sync_last_at_rtc = adv_timestamp;
     _time_sync_strict_last_ts[src_idx] = adv_timestamp;
     _time_sync_done_since_boot = true;
@@ -1547,6 +1595,7 @@ void MyMesh::timeSyncFinalizeLazyCollection() {
     return;
   }
   getRTCClock()->setCurrentTime(chosen.timestamp);
+  saveRtcPersist(chosen.timestamp);  // Bug-Fix 2026-06-14: lazy-sync persistieren
   _time_sync_last_at_rtc = chosen.timestamp;
   _time_sync_done_since_boot = true;
   memcpy(_time_sync_last_pubkey, chosen.pub_key3, 3);
@@ -5064,6 +5113,30 @@ void MyMesh::begin(bool has_display) {
   resetContacts();
   _store->loadContacts(this);
   bootstrapRTCfromContacts();
+  // RTC-Persistierung (Bug-Fix 2026-06-14): zusaetzlich aus /rtc_persist
+  // laden. Wenn der dort gespeicherte Wert hoeher ist als das Resultat
+  // von bootstrapRTCfromContacts(), als naechste Approximation nehmen.
+  // (loadBucketsFromFlash kommt danach und bumpt nochmal, wenn die
+  // Buckets noch frischere Frame-Timestamps haben.)
+  {
+    uint32_t persisted = loadRtcPersist();
+    if (persisted != 0) {
+      uint32_t cur = getRTCClock()->getCurrentTime();
+      // Sanity: max 1 Jahr in der Zukunft vs aktuellem Bootstrap
+      const uint32_t ONE_YEAR_SECS = 365UL * 86400UL;
+      if (persisted + 1 > cur && persisted < cur + ONE_YEAR_SECS) {
+        getRTCClock()->setCurrentTime(persisted + 1);
+        pushDebugLog("[RTC-PERSIST] geladen %lu, RTC %lu -> %lu\n",
+                     (unsigned long)persisted,
+                     (unsigned long)cur,
+                     (unsigned long)(persisted + 1));
+        _rtc_persist_last_saved = persisted;
+      } else if (persisted >= cur + ONE_YEAR_SECS) {
+        pushDebugLog("[RTC-PERSIST] SKIPPED: persisted %lu > cur %lu + 1 year\n",
+                     (unsigned long)persisted, (unsigned long)cur);
+      }
+    }
+  }
   // Reise-Fix 2026-06-08: nach Boot-Bootstrap unsere Sync-State-Marker
   // initialisieren, damit clock-Display die Quelle 'Bootstrap (last
   // advert)' anzeigt statt einer evtl. spaeter eingefangenen Stale-
@@ -5691,6 +5764,10 @@ void MyMesh::handleCmdFrame(size_t len) {
         writeOKFrame();
       } else {
         getRTCClock()->setCurrentTime(secs);
+        // Bug-Fix 2026-06-14: App-Sync persistieren -- sonst geht der
+        // Wert bei naechstem Reboot ohne neuer Adverts/Messages
+        // verloren (Buckets sind nach Sync leer, contacts.lastmod 24h+).
+        saveRtcPersist(secs);
         // Reise-Fix 2026-06-08: App-Sync ueberschreibt auch unseren
         // advert-sync-State. Ohne das blieb _time_sync_last_at_rtc auf
         // dem (moeglicherweise alten) Wert eines frueheren adv-syncs
@@ -6874,6 +6951,21 @@ void MyMesh::loop() {
   // Adaptive zero-hop unscoped advert (3h / 1h / 15min depending on motion)
   updateMotionTracking();
   manageGpsPower();
+
+  // RTC-Persistierung Periodic-Check (Bug-Fix 2026-06-14): GPS-Sync
+  // setzt RTC direkt ueber _clock->setCurrentTime (in MicroNMEALocation-
+  // Provider), wir haben dort keinen direkten Hook. Periodisch
+  // (30 min) pruefen ob der aktuelle RTC um >= RTC_PERSIST_MIN_DELTA
+  // ueber dem zuletzt gespeicherten liegt -- saveRtcPersist guarded
+  // das intern, geschrieben wird also nur bei echtem Progress.
+  {
+    uint32_t now_ms = millis();
+    if (_rtc_persist_check_ms == 0
+        || now_ms - _rtc_persist_check_ms >= RTC_PERSIST_CHECK_INTERVAL_MS) {
+      _rtc_persist_check_ms = now_ms;
+      saveRtcPersist(getRTCClock()->getCurrentTime());
+    }
+  }
   if ((_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)
       && next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
     doPeriodicZeroHopAdvert();

@@ -1136,6 +1136,22 @@ private:
   uint16_t      _heard_quality[5][3];    // [ADV_TYPE_*][0=gut, 1=mittel, 2=schlecht]
   int8_t        _last_advert_snr_q4;     // SNR (q4) der zuletzt empfangenen Advert
   int8_t        _last_advert_rssi_dbm;   // RSSI (dBm) der zuletzt empfangenen Advert
+
+  // RTC-Persistierung (User-Bug 2026-06-14: nach App-Sync werden Messages
+  // aus den Buckets popt + Save-on-Pop entfernt sie aus Flash. Bei Reboot
+  // ohne neue Adverts/Messages faellt RTC-Bootstrap zurueck auf alte
+  // contact.lastmod -- der per BLE-Time-Sync gesetzte Wert ist verloren.)
+  // Wir schreiben den aktuellen RTC-Stand in eine kleine Flash-Datei
+  // (9 byte) wenn er sich um >= RTC_PERSIST_MIN_DELTA gegenueber dem
+  // zuletzt gespeicherten Wert weiterentwickelt hat. Beim Boot wird der
+  // Wert geladen und als zusaetzliche Bootstrap-Quelle verwendet (neuer
+  // gewinnt).
+  uint32_t      _rtc_persist_last_saved = 0;        // zuletzt persistierter RTC-Wert
+  uint32_t      _rtc_persist_check_ms = 0;          // millis() der letzten Loop-Pruefung
+  static const uint32_t RTC_PERSIST_MIN_DELTA = 60; // sec; spart Flash-Wear
+  static const uint32_t RTC_PERSIST_CHECK_INTERVAL_MS = 30UL*60UL*1000UL;  // 30 min
+  void          saveRtcPersist(uint32_t rtc);
+  uint32_t      loadRtcPersist();
   int8_t        _last_advert_scoped;     // 1=scoped (transport_codes), 0=unscoped
   int8_t        _last_advert_route_direct; // 1=DIRECT-typed (sendZeroHop), 0=FLOOD-typed
   uint16_t      _rx_advert_total[5];     // ALLE empfangenen Adverts (egal Hop-Count) pro Node-Typ
