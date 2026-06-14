@@ -1175,6 +1175,13 @@ private:
   // bug-haftem Adverter der alle 3min adverten wuerde (User-Sorge
   // 2026-06-14). 10 min -> max ~144 Writes/Tag, plus 30-min Periodic.
   static const uint32_t RTC_PERSIST_MIN_WRITE_INTERVAL_MS = 10UL*60UL*1000UL;
+  // User-Bug 2026-06-14: Reboot-Gruende koennen Bugs sein, tiefentladener
+  // Akku, oder Solar-Unterversorgung. In den ersten 90s nach Boot keine
+  // Persist-Writes -- sonst koennte ein moeglicherweise korrupter RTC-Wert
+  // beim sofortigen Boot+GPS-Fix schon den File-Stempel ueberschreiben.
+  // Nach 90s sind Sync-Quellen (GPS, lazy-advert, strict-advert,
+  // CMD_SET_DEVICE_TIME) plausibel etabliert; ab dann normale Write-Logik.
+  static const uint32_t RTC_PERSIST_BOOT_DELAY_MS = 90UL*1000UL;  // 90 sec
   // User-Bug 2026-06-14: nach Flash 8.5min laufen lassen + Reboot zeigte
   // RTC-Rueckwaerts-Sprung weil periodic check erst bei 30min greift.
   // Auf 10min runter -- damit erster Save schon bei Boot+10min liegt;

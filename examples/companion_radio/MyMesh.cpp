@@ -531,6 +531,13 @@ void MyMesh::loadBucketsFromFlash() {
 // rebooted.
 void MyMesh::saveRtcPersist(uint32_t rtc, bool force) {
   if (rtc < 1500000000UL) return;   // < 2017-07: ungueltig
+  // Boot-Delay (User-Wunsch 2026-06-14): in den ersten 90s nach Boot
+  // keine Persist-Writes. Schuetzt vor: sofortiger Save mit
+  // moeglicherweise korruptem RTC nach Bug-Reboot / tiefentladenem Akku
+  // / Solar-Unterversorgung. Auch force=true (App-Sync) muss warten --
+  // die App-Zeit waere plausibel, aber 90s sind ein vernachlaessigbarer
+  // Lag und vereinheitlichen die Logik.
+  if (millis() < RTC_PERSIST_BOOT_DELAY_MS) return;
   // force=true (z.B. von CMD_SET_DEVICE_TIME): App ist immer
   // authoritativ, auch wenn ihr Wert KLEINER ist als unser letzter
   // Save (Rueckwaerts-Korrektur). Sonst klassisch monoton: nur
@@ -11126,7 +11133,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "External (Hashtag-Channels ohne Subscribe):\n"
           "  set ch.hops #bots 0 (nicht abonniert, blocken)\n"
-          "  PSK aus Name ableitbar (sha256), kein Slot noetig.\n"
+          "  PSK aus Name ableitbar (sha256).\n"
           "  Anzeige: '#bots (ext)' in 'ch.hops status'.");
         pushCompanionMessage(
           "Private-Channels (Random-PSK): nur blockbar wenn\n"
@@ -11134,8 +11141,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Absenders). Sonst pauschal via 'unknown'.");
         pushCompanionMessage(
           "Spezial-Name 'unknown' -> Cap fuer Channel-Hashes\n"
-          "  die auf keinen Slot/External matchen. CH_HOPS_OFF\n"
-          "  (default) = follow flood_max.\n"
+          "  die zu keinem der konfigurierten Channels\n"
+          "  passen. CH_HOPS_OFF (default) = follow flood_max.\n"
           "$companion: forced 0, nicht aenderbar.");
         return;
       }
@@ -18203,10 +18210,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char r[120];
       if (new_mhz == 0) {
         snprintf(r, sizeof(r),
-                 "OK - cpu.clock = max (Build-Default, Boot anwenden)");
+                 "OK - cpu.clock = max (Build-Default, Neustart erforderlich)");
       } else {
         snprintf(r, sizeof(r),
-                 "OK - cpu.clock = %u MHz (wirkt ab naechstem Boot/Reboot)",
+                 "OK - cpu.clock = %u MHz (Neustart erforderlich)",
                  (unsigned)new_mhz);
       }
       pushCompanionMessage(r);
