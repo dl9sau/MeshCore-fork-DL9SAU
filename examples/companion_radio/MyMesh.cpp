@@ -9395,7 +9395,8 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "airtime_factor") == 0)        { _prefs.airtime_factor        = as_float();        _br_applied++; return; }
       if (strcmp(key, "rx_boosted_gain") == 0)       { _prefs.rx_boosted_gain       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "manual_add_contacts") == 0)   { _prefs.manual_add_contacts   = (uint8_t)as_uint(); _br_applied++; return; }
-      if (strcmp(key, "multi_acks") == 0)            { _prefs.multi_acks            = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "multi_acks") == 0
+          || strcmp(key, "multi.acks") == 0)         { _prefs.multi_acks            = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "path_hash_mode") == 0)        { _prefs.path_hash_mode        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "autoadd_config") == 0)        { _prefs.autoadd_config        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "autoadd_max_hops") == 0)      { _prefs.autoadd_max_hops      = (uint8_t)as_uint(); _br_applied++; return; }
@@ -11809,11 +11810,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // wie der nightly-Job (runtime > default > geo). Triggert die jeweilige
   // doX-Funktion direkt (umgeht den auto_advert_enabled-Gate damit man
   // explizit per Befehl senden kann auch wenn die Scheduler aus sind).
-  // Upstream-Alias: 'advert.zerohop' = 'advert' (= zero-hop in unserer
-  // Firmware). Upstream-Repeater hat 'advert' als flood-Default und bietet
-  // 'advert.zerohop' fuer den 1-Hop-Modus an -- wir spiegeln den Namen
-  // damit Scripts/Anleitungen kompatibel sind. Direkt zum advert() Aufruf,
-  // ohne weitere Sub-Args.
+  // Upstream-Alias: 'advert.zerohop' explizit fuer den 1-Hop-Modus
+  // (entspricht advert() in BaseChatMesh, das intern sendZeroHop nutzt).
+  // Plain 'advert' (ohne Arg) ist seit 2026-06-14 flood-Default wie
+  // Upstream-Repeater (vorher zero-hop -- User-Wunsch fuer Upstream-
+  // Symmetrie). Skripte die das alte zero-hop-Verhalten brauchen
+  // sollten 'advert zero-hop', 'advert zerohop' oder 'advert.zerohop'
+  // nutzen.
   if (starts_with_word(cmd, "advert.zerohop")) {
     if (advert()) {
       pushCompanionMessage("OK - advert (zero-hop) gesendet.");
@@ -11831,9 +11834,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg && arg[0] == '?' && (arg[1] == 0 || arg[1] == ' ')) {
       pushCompanionMessage("advert -- Sub-Befehle:");
       pushCompanionMessage(
-        "  advert [zero-hop | flood]\n"
-        "    Einmal-Advert senden (zero-hop = single-hop neighbours,\n"
-        "    flood = scoped flood-advert wie nightly).");
+        "  advert [flood | zero-hop]\n"
+        "    Default ohne Arg = flood (wie Upstream-Repeater).\n"
+        "    zero-hop = nur single-hop neighbours.\n"
+        "    flood = scoped flood-advert wie nightly.");
       pushCompanionMessage(
         "  advert role\n"
         "    Status (configured + effective Role)");
@@ -11918,7 +11922,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    bool want_flood = false;
+    // Default-Aenderung 2026-06-14 (User-Wunsch): plain 'advert' jetzt
+    // flood (wie Upstream-Repeater); 'advert flood' ist die explizite/
+    // verbose Form derselben Action. 'advert zero-hop' / 'zerohop' fuer
+    // zero-hop. 'advert.zerohop' weiterhin als Top-Level-Alias.
+    bool want_flood = true;
     if (arg && *arg) {
       // "zerohop" (ohne Bindestrich) als Alias bewahren: vor match_choice
       // auf den kanonischen Namen normalisieren.
@@ -18018,6 +18026,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Wunschliste 56 Quick-Fix 2026-06-14: set multi.acks <0|1>
+    // Bisher fehlte der CLI-Set-Pfad komplett (Pref nur via App
+    // CMD_SET_PREFS oder backup-restore). User-Bug-Report 2026-06-14:
+    //   set multi.acks  -> generisches Usage
+    //   set multi_acks  -> 'Unbekannter set-key'
+    //   get multi_acks  -> 1   <-- Inkonsistent
+    // 0 = 1 Ack (Default), 1 = 2 Acks (mehr ACK-Redundanz).
+    if (strcmp(key, "multi_acks") == 0 || strcmp(key, "multi.acks") == 0) {
+      int v = atoi(value_lc);
+      if (v != 0 && v != 1) {
+        pushCompanionMessage("multi.acks: 0 (1 Ack) oder 1 (2 Acks)");
+        return;
+      }
+      _prefs.multi_acks = (uint8_t)v;
+      savePrefs();
+      char r[80];
+      snprintf(r, sizeof(r), "OK - multi.acks = %d (%s)",
+               v, v == 0 ? "1 Ack" : "2 Acks");
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Wunschliste 45 (Reise 2026-06-09): set int.thresh <N>
     // RSSI-Margin (dB) ueber noise_floor. 0 = LBT off. Upstream-
     // Doku-Default 14. Praxis: 1..14 je nach Standort/SF.
@@ -18374,7 +18404,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "airtime_factor") == 0)    snprintf(r, sizeof(r), "airtime_factor = %.3f", _prefs.airtime_factor);
     else if (strcmp(key, "rx_boosted_gain") == 0)   snprintf(r, sizeof(r), "rx_boosted_gain = %u", (unsigned)_prefs.rx_boosted_gain);
     else if (strcmp(key, "manual_add_contacts") == 0) snprintf(r, sizeof(r), "manual_add_contacts = %u", (unsigned)_prefs.manual_add_contacts);
-    else if (strcmp(key, "multi_acks") == 0)        snprintf(r, sizeof(r), "multi_acks = %u", (unsigned)_prefs.multi_acks);
+    else if (strcmp(key, "multi_acks") == 0
+             || strcmp(key, "multi.acks") == 0)      snprintf(r, sizeof(r), "multi_acks = %u", (unsigned)_prefs.multi_acks);
     else if (strcmp(key, "path_hash_mode") == 0)    snprintf(r, sizeof(r), "path_hash_mode = %u", (unsigned)_prefs.path_hash_mode);
     else if (strcmp(key, "autoadd_config") == 0)    snprintf(r, sizeof(r), "autoadd_config = %u", (unsigned)_prefs.autoadd_config);
     else if (strcmp(key, "autoadd_max_hops") == 0)  snprintf(r, sizeof(r), "autoadd_max_hops = %u", (unsigned)_prefs.autoadd_max_hops);

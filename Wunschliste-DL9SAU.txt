@@ -4018,7 +4018,10 @@ Soll-Liste (Auszug, prioritaer Operational + Info + Stats):
 
   Vermutlich nicht im Companion-Build noetig (Repeater-only Concepts,
   die im Companion-Context keinen Sinn machen):
-    - multi.acks  (wir setzen ACK-Verhalten anders)
+    - multi.acks  -- ACK-Redundanz konfigurierbar machen
+                     (0 = 1 Ack [Default], 1 = 2 Acks). App setzt via
+                     CMD_SET_PREFS, CLI-Set-Pfad fehlte komplett bis
+                     2026-06-14 (Bugfix mit Aliase multi.acks/multi_acks).
     - bridge.*    (ESPNow-Bridge Hardware-Build)
     - sensor list/get/set  (eigene Companion-Sensoren via 'sensor'-
                             Frame-Protokoll, nicht CLI)
