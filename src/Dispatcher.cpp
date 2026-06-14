@@ -290,10 +290,12 @@ void Dispatcher::checkSend() {
   if (_radio->isReceiving()) {
     if (cad_busy_start == 0) {
       cad_busy_start = _ms->getMillis();   // record when CAD busy state started
+      n_lbt_defer_episodes++;              // Wunschliste 60: neue Busy-Episode
     }
 
     if (_ms->getMillis() - cad_busy_start > getCADFailMaxDuration()) {
       _err_flags |= ERR_EVENT_CAD_TIMEOUT;
+      n_lbt_force_send++;                  // Wunschliste 60: force-send Pfad
 
       MESH_DEBUG_PRINTLN("%s Dispatcher::checkSend(): CAD busy max duration reached!", getLogDateTime());
       // channel activity has gone on too long... (Radio might be in a bad state)
@@ -302,6 +304,12 @@ void Dispatcher::checkSend() {
       next_tx_time = futureMillis(getCADFailRetryDelay());
       return;
     }
+  }
+  // Wunschliste 60: kumulative LBT-Wartezeit beim Verlassen des
+  // busy-State erfassen (sowohl 'channel frei geworden' als auch
+  // 'force-send wegen Timeout' kommen hier durch).
+  if (cad_busy_start != 0) {
+    n_lbt_defer_total_ms += (uint32_t)(_ms->getMillis() - cad_busy_start);
   }
   cad_busy_start = 0;  // reset busy state
 

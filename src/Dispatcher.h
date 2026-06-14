@@ -123,6 +123,18 @@ class Dispatcher {
   bool  prev_isrecv_mode;
   uint32_t n_sent_flood, n_sent_direct;
   uint32_t n_recv_flood, n_recv_direct;
+  // Wunschliste 60 (2026-06-14): LBT/CAD-Counter.
+  //   n_lbt_defer_episodes: Anzahl distinkter 'channel busy' Episoden
+  //     (cad_busy_start transition von 0 auf now).
+  //   n_lbt_defer_total_ms: kumulativ Millisekunden in busy-deferred-State.
+  //   n_lbt_force_send:    Episoden wo wir trotz busy gesendet haben weil
+  //                        CAD-Timeout erreicht war (force-send Pfad).
+  // Diagnose-Werkzeug fuer LBT-Probleme an verrauschten Standorten:
+  // wenn n_lbt_defer_episodes hoch + force_send hoch -> Standort hat
+  // dauerhafte Stoerung; wenn defers ohne force_send -> normal LBT.
+  uint32_t n_lbt_defer_episodes;
+  uint32_t n_lbt_defer_total_ms;
+  uint32_t n_lbt_force_send;
   unsigned long tx_budget_ms;
   unsigned long last_budget_update;
   unsigned long duty_cycle_window_ms;
@@ -150,6 +162,8 @@ protected:
     tx_budget_ms = 0;
     last_budget_update = 0;
     duty_cycle_window_ms = 3600000;
+    n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
+    n_lbt_defer_episodes = n_lbt_defer_total_ms = n_lbt_force_send = 0;
   }
 
   virtual DispatcherAction onRecvPacket(Packet* pkt) = 0;
@@ -191,8 +205,13 @@ public:
   uint32_t getNumSentDirect() const { return n_sent_direct; }
   uint32_t getNumRecvFlood() const { return n_recv_flood; }
   uint32_t getNumRecvDirect() const { return n_recv_direct; }
+  // Wunschliste 60: LBT-Stats (2026-06-14).
+  uint32_t getNumLbtDefers() const     { return n_lbt_defer_episodes; }
+  uint32_t getLbtDeferTotalMs() const  { return n_lbt_defer_total_ms; }
+  uint32_t getNumLbtForceSend() const  { return n_lbt_force_send; }
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
+    n_lbt_defer_episodes = n_lbt_defer_total_ms = n_lbt_force_send = 0;
     _err_flags = 0;
   }
 

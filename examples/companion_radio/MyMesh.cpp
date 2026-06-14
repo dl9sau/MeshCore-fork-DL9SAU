@@ -11446,6 +11446,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         pushCompanionMessage(
           "Plus duty-cycle 1h-Window vs 10%-Limit.\n"
+          "Plus LBT-Counter (defers + force-sends).\n"
           "Subset von 'stats'. Docs-konform."
         );
         return;
@@ -18732,6 +18733,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              "  duty last_h = %s of %s (%.1f%%)",
              rx_s, rx_pct, tx_s, tx_pct,
              duty_cur_s, duty_hard_s, duty_pct);
+    pushCompanionMessage(block);
+
+    // Wunschliste 60 (2026-06-14): LBT/CAD-Counter. Diagnose-Werkzeug
+    // fuer Standorte mit hoher Stoer-RF: zeigt wie oft wir vor TX
+    // ausweichen mussten + ob's am Ende ein force-send wurde.
+    //   defers > 0 + force = 0          : LBT funktioniert wie gewollt
+    //   defers > 0 + force > 0          : Standort hat Daueraktivitaet
+    //                                     ueber int.thresh -- ggf. threshold
+    //                                     anpassen oder Standort hinterfragen
+    //   defers == 0                     : int.thresh = 0 (LBT off) ODER
+    //                                     keine Stoerung
+    uint32_t lbt_n   = getNumLbtDefers();
+    uint32_t lbt_ms  = getLbtDeferTotalMs();
+    uint32_t lbt_frc = getNumLbtForceSend();
+    char lbt_s[16]; fmt_secs(lbt_s, sizeof(lbt_s), lbt_ms);
+    snprintf(block, sizeof(block),
+             "lbt (int.thresh = %u dB):\n"
+             "  n_defers = %lu   total_wait = %s\n"
+             "  n_force_sends = %lu",
+             (unsigned)_prefs.interference_threshold,
+             (unsigned long)lbt_n, lbt_s, (unsigned long)lbt_frc);
     pushCompanionMessage(block);
     return;
   }
