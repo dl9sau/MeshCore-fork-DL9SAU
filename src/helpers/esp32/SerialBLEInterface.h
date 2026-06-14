@@ -21,6 +21,11 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   // Stack rufen und sich aufhaengen (Lockup im 1. Versuch Commit
   // 8ae3b492, revert a4293243).
   bool _ctrl_disabled;
+  // Wunschliste 58 Phase F Retry 2026-06-14: nach esp_bt_controller_enable
+  // muss der Device-Name neu gesetzt werden -- der GAP-Layer behaelt ihn
+  // nicht. Saved Copy aus begin(); enable() ruft esp_ble_gap_set_device_name
+  // wenn der Controller neu hochfaehrt.
+  char _saved_dev_name[48];
   uint16_t last_conn_id;
   uint32_t _pin_code;
   unsigned long _last_write;
@@ -55,6 +60,14 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   Frame send_queue[FRAME_QUEUE_SIZE];
 
   void clearBuffers() { recv_queue_len = 0; send_queue_len = 0; }
+
+  // Wunschliste 58 Phase F Retry 2026-06-14: Stack-State der nach
+  // esp_bt_controller_enable wieder gesetzt werden muss. Wird auch von
+  // enable() aufgerufen wenn der Controller neu hochfuhr. Eigene Methode
+  // damit kein duplizierter Code zwischen begin() und enable() entsteht
+  // (Flash-Spar). Erweiterbar falls weitere Stack-Settings nach Wake
+  // verloren gehen.
+  void reapplyControllerState();
 
 protected:
   // BLESecurityCallbacks methods
@@ -92,6 +105,7 @@ public:
     _recv_queue_high_water = 0;
     _send_queue_high_water = 0;
     _ctrl_disabled = false;
+    _saved_dev_name[0] = 0;
   }
 
   uint32_t getDisconnectCount() const override { return _disconnect_count; }

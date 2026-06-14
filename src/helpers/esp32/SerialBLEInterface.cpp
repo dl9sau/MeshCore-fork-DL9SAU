@@ -6,6 +6,9 @@
 // dass alle public-API Methoden sauber returnen ohne in den
 // abgeschalteten Stack zu rufen.
 #include "esp_bt.h"
+// fuer esp_ble_gap_set_device_name (Phase F Retry: Name nach Controller-
+// Re-Enable wieder setzen).
+#include "esp_gap_ble_api.h"
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -82,6 +85,18 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
     // Name-Teil komplett rausgefiltert. Fallback.
     snprintf(clean, sizeof(clean), "%sNode-%02X%02X",
              prefix, addr[1], addr[0]);
+  }
+
+  // Wunschliste 58 Phase F Retry 2026-06-14: Device-Name sichern damit
+  // wir ihn nach esp_bt_controller_enable wieder setzen koennen
+  // (GAP-Layer behaelt den Namen nicht ueber Controller-Disable hinweg --
+  // User-Bug 2026-06-14: nach Wake meldete sich Geraet generisch als
+  // 'ESP32').
+  {
+    size_t cl = strlen(clean);
+    if (cl >= sizeof(_saved_dev_name)) cl = sizeof(_saved_dev_name) - 1;
+    memcpy(_saved_dev_name, clean, cl);
+    _saved_dev_name[cl] = 0;
   }
 
   // Create the BLE Device
@@ -217,6 +232,18 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic, esp_ble_gat
 
 // ---------- public methods
 
+// Wunschliste 58 Phase F Retry 2026-06-14: nach esp_bt_controller_enable
+// muessen Stack-Settings die der Controller verliert wieder gesetzt
+// werden. Aktuell: Device-Name (sonst meldet sich Geraet generisch als
+// 'ESP32'). Erweiterbar wenn weitere Settings (Advertising-Data,
+// Connection-Parameter) verloren gehen.
+// Code-Spar: eine Methode statt duplizierten Setup in mehreren Pfaden.
+void SerialBLEInterface::reapplyControllerState() {
+  if (_saved_dev_name[0]) {
+    esp_ble_gap_set_device_name(_saved_dev_name);
+  }
+}
+
 void SerialBLEInterface::enable() {
   if (_isEnabled) return;
 
@@ -238,6 +265,9 @@ void SerialBLEInterface::enable() {
       // Guard bleibt gesetzt -- weiterer Stack-Call wuerde sonst hangen.
       return;
     }
+    // Controller wurde gerade hochgefahren -> Stack-State (Device-Name
+    // etc.) wieder anwenden bevor Advertising startet.
+    reapplyControllerState();
   }
   _ctrl_disabled = false;  // Stack-Calls jetzt sicher
 
