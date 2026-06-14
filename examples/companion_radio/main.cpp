@@ -7,19 +7,159 @@
   #include <esp_wifi.h>
 #endif
 
-// Wunschliste 53 Phase 1 (2026-06-14): ESP32 Task-Watchdog. Schuetzt vor
-// Hang im loop() (Memory-Corruption, Stack-Overflow, infinite Callback-
-// Loop) -- TWDT loest dann Panic-Reboot statt 'tot im Feld'. NRF52 hat
-// schon den BLE-Advertising-Watchdog (SerialBLEInterface.cpp:343 NRF52-
-// Variante), dort ist's nicht so akut. RP2040/STM32 spaeter.
+// Wunschliste 53 (2026-06-14): Hardware-Watchdog. Schuetzt vor Hang im
+// loop() (Memory-Corruption, Stack-Overflow, infinite Callback-Loop) --
+// loest dann Panic-Reboot statt 'tot im Feld'.
+// Aktivierung gated von Pref watchdog_mode (Default off) -- Stage 1+2
+// nach Aenderung 2026-06-14: ESP32 TWDT + NRF52 nrfx_wdt.
+// Aktivierung am Ende vom ersten loop() (nicht setup()), damit BLE/
+// LoRa/Sensor-Init nicht durch falsche Pet-Annahmen reboot triggern
+// koennen -- Meshtastic-Pattern.
+#ifndef WATCHDOG_TIMEOUT_S
+  #define WATCHDOG_TIMEOUT_S 90   // 90s: Meshtastic-bewaehrt. LoRa-TX
+                                  // ~10s + flash + Margin -- async
+                                  // Companion-Ops blockieren loop() eh
+                                  // nicht. Override -D moeglich.
+#endif
+#ifndef WATCHDOG_SKIP_WIN_MS
+  #define WATCHDOG_SKIP_WIN_MS (10UL * 60UL * 1000UL)  // 10 min Skip-
+                                    // Window wenn letzter Reset WDT war.
+                                    // Schuetzt vor Boot-Loop und gibt
+                                    // dem User Zeit das Log anzuschauen.
+#endif
+
 #if defined(ESP32)
   #include "esp_task_wdt.h"
-  #ifndef WATCHDOG_TIMEOUT_S
-    #define WATCHDOG_TIMEOUT_S 60   // 60s: lange genug fuer LoRa-TX(~10s)
-                                    // + flash-write + Margin. Override per
-                                    // -D WATCHDOG_TIMEOUT_S=<sec> moeglich.
-  #endif
 #endif
+#if defined(NRF52_PLATFORM)
+  // HAL-only (header-inline). nrfx_wdt-Driver waere die High-Level-API,
+  // braucht aber dass nrfx_wdt.c im Build inkludiert wird (Meshtastic
+  // umgeht das mit '#include <nrfx_wdt.c>'). HAL ist direkter +
+  // ausreichend fuer unser One-Channel-Pet-Pattern.
+  #include "nrf_wdt.h"
+#endif
+
+// Reset-Reason Mapping (Plattform-uebergreifend einheitlich):
+enum WdtResetKind : uint8_t {
+  WDT_RESET_UNKNOWN  = 0,
+  WDT_RESET_COLD     = 1,  // power-on, BOR
+  WDT_RESET_WARM     = 2,  // user "reboot" CLI, Reset-Button, sw-reset
+  WDT_RESET_WDT      = 3,  // watchdog timeout
+  WDT_RESET_PANIC    = 4,  // panic / abort / lockup
+  WDT_RESET_BROWNOUT = 5,  // ESP32 only -- NRF52 hat keine Direkt-
+                           // entsprechung, wir mappen das auf COLD.
+};
+
+// State-Machine fuer WDT-Activation:
+enum WdtState : uint8_t {
+  WDT_STATE_OFF      = 0,  // Pref off -- niemals aktivieren
+  WDT_STATE_PENDING  = 1,  // arm am Ende vom ersten loop()
+  WDT_STATE_SKIP_WIN = 2,  // letzter Reset war WDT -- wait 10 min
+  WDT_STATE_ACTIVE   = 3,  // aktiv -- pet bei jedem loop()
+};
+
+static WdtResetKind _wdt_last_reset    = WDT_RESET_UNKNOWN;
+static WdtState     _wdt_state         = WDT_STATE_OFF;
+static uint32_t     _wdt_skip_until_ms = 0;
+
+static WdtResetKind readResetReason() {
+#if defined(ESP32)
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return WDT_RESET_COLD;
+    case ESP_RST_SW:       return WDT_RESET_WARM;
+    case ESP_RST_EXT:      return WDT_RESET_WARM;
+    case ESP_RST_PANIC:    return WDT_RESET_PANIC;
+    case ESP_RST_INT_WDT:  return WDT_RESET_WDT;
+    case ESP_RST_TASK_WDT: return WDT_RESET_WDT;
+    case ESP_RST_WDT:      return WDT_RESET_WDT;
+    case ESP_RST_BROWNOUT: return WDT_RESET_BROWNOUT;
+    default:               return WDT_RESET_UNKNOWN;
+  }
+#elif defined(NRF52_PLATFORM)
+  // NRF_POWER->RESETREAS Bits: RESETPIN, DOG, SREQ, LOCKUP, OFF, ...
+  // Write-1-to-clear: lesen + zuruecklehnen damit beim naechsten Reset
+  // die Bits korrekt akkumuliert sind (sonst verbleiben alte).
+  uint32_t r = NRF_POWER->RESETREAS;
+  NRF_POWER->RESETREAS = 0xFFFFFFFFUL;
+  if (r & POWER_RESETREAS_DOG_Msk)      return WDT_RESET_WDT;
+  if (r & POWER_RESETREAS_LOCKUP_Msk)   return WDT_RESET_PANIC;
+  if (r & POWER_RESETREAS_SREQ_Msk)     return WDT_RESET_WARM;
+  if (r & POWER_RESETREAS_RESETPIN_Msk) return WDT_RESET_WARM;
+  return WDT_RESET_COLD;  // OFF / POR / BOR / r==0 -> kalt
+#else
+  return WDT_RESET_UNKNOWN;
+#endif
+}
+
+static const char* resetKindStr(WdtResetKind k) {
+  switch (k) {
+    case WDT_RESET_COLD:     return "COLD";
+    case WDT_RESET_WARM:     return "WARM";
+    case WDT_RESET_WDT:      return "WDT";
+    case WDT_RESET_PANIC:    return "PANIC";
+    case WDT_RESET_BROWNOUT: return "BROWNOUT";
+    default:                 return "UNKNOWN";
+  }
+}
+
+static void activateWatchdog() {
+#if defined(ESP32)
+  // arduino-esp32 hat den TWDT schon initialisiert (5s default fuer IDLE-
+  // Tasks). Wir rekonfigurieren auf unser Timeout + adden loopTask.
+  // API-Unterschied: ESP-IDF 4.x (espressif32@6.x, arduino-esp32 2.x)
+  // bietet nur die alte init(timeout, panic)-Form, IDF 5.x die neue
+  // reconfigure(config_t*)-Form.
+  #if ESP_IDF_VERSION_MAJOR >= 5
+    esp_task_wdt_config_t cfg = {
+      .timeout_ms     = (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
+      .idle_core_mask = 0,
+      .trigger_panic  = true,
+    };
+    esp_task_wdt_reconfigure(&cfg);
+  #else
+    esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
+  #endif
+  esp_task_wdt_add(NULL);   // loopTask
+#endif
+#if defined(NRF52_PLATFORM)
+  // NRF52 WDT ist NICHT stoppbar einmal gestartet -- nur Reset stoppt ihn.
+  // Daher Timeout grosszuegig + PAUSE_SLEEP_HALT-Behavior:
+  // pausiert im System-ON-Sleep (Bluefruit/SoftDevice WFE) und im
+  // Debugger-HALT -- kein faelschliches Trigger bei legitimen Idle-Phasen.
+  // CRV-Register: Zaehler in 32.768kHz-Ticks. 90s * 32768 = 2949120.
+  nrf_wdt_behaviour_set(NRF_WDT, NRF_WDT_BEHAVIOUR_PAUSE_SLEEP_HALT);
+  nrf_wdt_reload_value_set(NRF_WDT,
+      (uint32_t)WATCHDOG_TIMEOUT_S * 32768UL);
+  nrf_wdt_reload_request_enable(NRF_WDT, NRF_WDT_RR0);
+  nrf_wdt_task_trigger(NRF_WDT, NRF_WDT_TASK_START);
+#endif
+}
+
+static void petWatchdog() {
+  if (_wdt_state != WDT_STATE_ACTIVE) return;
+#if defined(ESP32)
+  esp_task_wdt_reset();
+#endif
+#if defined(NRF52_PLATFORM)
+  nrf_wdt_reload_request_set(NRF_WDT, NRF_WDT_RR0);
+#endif
+}
+
+// Wird am Ende vom loop() aufgerufen -- handle State-Transitions:
+//   PENDING  -> ACTIVE  (nach erstem loop())
+//   SKIP_WIN -> ACTIVE  (nach 10 min wenn letzter Reset WDT war)
+static void maintainWatchdog() {
+  if (_wdt_state == WDT_STATE_PENDING) {
+    activateWatchdog();
+    _wdt_state = WDT_STATE_ACTIVE;
+  } else if (_wdt_state == WDT_STATE_SKIP_WIN) {
+    // Wraparound-sicher: signed-Diff fuer 'jetzt >= until'
+    if ((int32_t)(millis() - _wdt_skip_until_ms) >= 0) {
+      activateWatchdog();
+      _wdt_state = WDT_STATE_ACTIVE;
+    }
+  }
+}
 
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
@@ -330,46 +470,33 @@ void setup() {
 
   board.onBootComplete();
 
-#if defined(ESP32)
-  // Wunschliste 53 Phase 1: TWDT mit Custom-Timeout konfigurieren
-  // (arduino-esp32 hat ihn schon initialisiert fuer IDLE-Tasks mit ~5s
-  // Default -- wir wollen 60s und loopTask aktiv ueberwachen).
-  // API-Unterschied: ESP-IDF 4.x (espressif32@6.x, arduino-esp32 2.x)
-  // bietet nur die alte init(timeout, panic)-Form, IDF 5.x (pioarduino
-  // 51.x+, arduino-esp32 3.x) hat die neue reconfigure(config_t*)-Form.
-  #if ESP_IDF_VERSION_MAJOR >= 5
-    esp_task_wdt_config_t _wdt_cfg = {
-      .timeout_ms     = (uint32_t)(WATCHDOG_TIMEOUT_S) * 1000UL,
-      .idle_core_mask = 0,            // IDLE-Tasks bleiben so wie arduino-
-                                      // esp32 sie aufgesetzt hat (doppeltes
-                                      // Add wuerde kollidieren).
-      .trigger_panic  = true,         // Timeout -> panic -> Reboot
-    };
-    esp_task_wdt_reconfigure(&_wdt_cfg);
-  #else
-    // V1-API: erneutes init() ueberschreibt den Default-Timeout fuer alle
-    // bereits registrierten Tasks. panic=true == Reboot bei Timeout.
-    esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
-  #endif
-  // loopTask zur Watchlist hinzufuegen (API identisch in v1/v2).
-  // ESP_ERR_INVALID_STATE wenn schon drin -- ignorieren.
-  esp_task_wdt_add(NULL);
-#endif
+  // Wunschliste 53 (2026-06-14): Reset-Reason auslesen + an MyMesh
+  // weitergeben fuer stats-core 'last_reset'-Anzeige + Boot-Log.
+  _wdt_last_reset = readResetReason();
+  the_mesh.setLastResetReason((uint8_t)_wdt_last_reset);
+  // WDT-State initialisieren (kein activate hier -- erst am Ende vom
+  // ersten loop(), damit BLE/LoRa-/Sensor-Init mit ihren langlaufenden
+  // Stack-Inits den Pet-Cycle nicht verzoegern).
+  if (the_mesh.getNodePrefs()->watchdog_mode == 1) {
+    if (_wdt_last_reset == WDT_RESET_WDT) {
+      // Letzter Reset war WDT-Trigger -- 10 min Skip-Window, dann scharf.
+      _wdt_state         = WDT_STATE_SKIP_WIN;
+      _wdt_skip_until_ms = millis() + WATCHDOG_SKIP_WIN_MS;
+    } else {
+      _wdt_state = WDT_STATE_PENDING;
+    }
+  }
 }
 
 void loop() {
-#if defined(ESP32)
-  // Wunschliste 53 Phase 1: Watchdog fuettern. Vor allen Loop-Sub-Calls
-  // damit ein Hang in einem Sub-Modul den naechsten Pet-Cycle blockiert
-  // und Recovery via TWDT-Panic-Reboot triggert.
-  esp_task_wdt_reset();
-#endif
+  petWatchdog();   // No-op wenn nicht ACTIVE
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
   ui_task.loop();
 #endif
   rtc_clock.tick();
+  maintainWatchdog();   // PENDING -> ACTIVE (nach 1. loop), SKIP -> ACTIVE
   delay(1);   // yield to FreeRTOS idle task; lets ESP32 idle-tick run (and, if
               // esp_pm light sleep is ever enabled, lets the CPU actually sleep)
 

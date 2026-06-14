@@ -461,6 +461,24 @@ public:
     _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
 
+  // Wunschliste 53 (2026-06-14): main.cpp meldet beim Boot die Reset-
+  // Reason (Plattform-spezifisch ausgelesen, einheitlich gemappt).
+  void setLastResetReason(uint8_t kind) { _last_reset_reason = kind; }
+  uint8_t getLastResetReason() const    { return _last_reset_reason; }
+  // String-Mapping (mirrored main.cpp resetKindStr). Indirektion damit
+  // CLI/stats-core direkt aufrufen koennen ohne main.cpp-Symbol-Dependency.
+  const char* getLastResetReasonStr() const {
+    switch (_last_reset_reason) {
+      case 1: return "COLD";
+      case 2: return "WARM";
+      case 3: return "WDT";
+      case 4: return "PANIC";
+      case 5: return "BROWNOUT";
+      default: return "UNKNOWN";
+    }
+  }
+  uint32_t getLastSessionUptimeMs() const { return _last_session_uptime_ms; }
+
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {
     sensors.setSettingValue("gps", _prefs.gps_enabled ? "1" : "0");
@@ -1169,6 +1187,14 @@ private:
   uint32_t      _rtc_persist_last_saved = 0;        // zuletzt persistierter RTC-Wert
   uint32_t      _rtc_persist_check_ms = 0;          // millis() der letzten Loop-Pruefung
   uint32_t      _rtc_persist_last_write_ms = 0;     // millis() des letzten echten Flash-Writes
+  // Wunschliste 53 Phase 2026-06-14: Piggyback der Session-Uptime in
+  // rtc_persist. Wird in loadRtcPersist() befuellt (0 wenn Alt-Format).
+  // Vom Boot-Log gelesen fuer "Letzte Session lief ~Xh"-Anzeige.
+  uint32_t      _last_session_uptime_ms = 0;
+  // Wunschliste 53 Phase 2026-06-14: Reset-Reason vom main.cpp gemeldet.
+  // Enum-Mapping siehe main.cpp WdtResetKind. Wird fuer stats-core
+  // 'last_reset'-Zeile und Boot-Log gelesen.
+  uint8_t       _last_reset_reason = 0;  // 0 = UNKNOWN
   // RTC-Progress-Grenze: kleinere Bumps zaehlen als 'kein Fortschritt'.
   static const uint32_t RTC_PERSIST_MIN_DELTA = 60; // sec
   // Min-Abstand zwischen tatsaechlichen Flash-Writes -- schuetzt vor

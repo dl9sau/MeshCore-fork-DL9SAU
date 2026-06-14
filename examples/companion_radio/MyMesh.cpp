@@ -518,8 +518,12 @@ void MyMesh::loadBucketsFromFlash() {
 // den letzten Advert -- der im konkreten Fall 24h alt war. Folge: 5x
 // Reboot in Folge -> 5 Start-Meldungen alle mit der gleichen alten
 // Uhrzeit. Fix: dedizierte Persistenz fuer den RTC-Wert selber. Datei
-// /rtc_persist (9 byte): 0xAB | rtc(4) | rtc(4). Doppelte Kopie als
-// einfache Sanity (corruption / partial write erkennen).
+// /rtc_persist (9 byte alt / 13 byte neu): 0xAB | rtc(4) | rtc(4) [|
+// uptime_ms(4) -- Wunschliste 53 Phase 2026-06-14]. Doppelte rtc-Kopie
+// als einfache Sanity (corruption / partial write erkennen). uptime_ms
+// hilft Boot-Log eine Session-Laufzeit anzuzeigen ("Tracker lief
+// ~14d3h"). Alte 9-byte-Files weiterhin lesbar; loadRtcPersist setzt
+// dann _last_session_uptime_ms = 0 ("unbekannt").
 //
 // Geschrieben wird nur wenn sich der RTC um >= RTC_PERSIST_MIN_DELTA
 // gegenueber dem letzten persistierten Wert vorangetrieben hat
@@ -562,6 +566,11 @@ void MyMesh::saveRtcPersist(uint32_t rtc, bool force) {
   f.write(&magic, 1);
   f.write((const uint8_t*)&rtc, 4);
   f.write((const uint8_t*)&rtc, 4);
+  // Wunschliste 53 Phase 2026-06-14: Piggyback aktuelle Uptime ms.
+  // Boot-Log benutzt dies fuer "letzte Session lief ~Xh" (+/- 10min
+  // Toleranz weil Write-Interval = MIN_WRITE_INTERVAL_MS = 10min).
+  uint32_t uptime_ms = now_ms;
+  f.write((const uint8_t*)&uptime_ms, 4);
   f.close();
   _rtc_persist_last_saved = rtc;
   _rtc_persist_last_write_ms = (now_ms == 0 ? 1 : now_ms);  // 0 ist Sentinel
@@ -578,11 +587,19 @@ uint32_t MyMesh::loadRtcPersist() {
   bool ok = (f.read(&magic, 1) == 1)
          && (f.read((uint8_t*)&a, 4) == 4)
          && (f.read((uint8_t*)&b, 4) == 4);
+  // Wunschliste 53 Phase 2026-06-14: optional 4 Bytes uptime_ms (piggy-
+  // back, neues Format). Alte 9-Byte-Files liefern hier 0 Bytes -> bleibt
+  // bei _last_session_uptime_ms = 0 ("unbekannt").
+  uint32_t up = 0;
+  if (ok) {
+    f.read((uint8_t*)&up, 4);  // ignoriere short read (=alt-Format)
+  }
   f.close();
   if (!ok) return 0;
   if (magic != 0xAB) return 0;
   if (a != b) return 0;             // partial-write korruption
   if (a < 1500000000UL) return 0;   // ungueltig
+  _last_session_uptime_ms = up;
   return a;
 }
 
@@ -8577,6 +8594,8 @@ void MyMesh::backupSaveToSerial() {
          _prefs.display_wake_mode == 0 ? "off"
        : _prefs.display_wake_mode == 1 ? "on"
                                        : "on-at-new-messages");
+  // Wunschliste 53 (2026-06-14): Watchdog-Pref.
+  kv_str("watchdog", _prefs.watchdog_mode ? "on" : "off");
   // Wunschliste 39: cap-Vars als kv_str mit follow/off Keywords wenn
   // anwendbar, sonst Number-as-String. Restore akzeptiert beide
   // Formate (number oder string) -- human-editable Backup.
@@ -9559,6 +9578,17 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
         else {
           int v = atoi(tmp);
           if (v >= 0 && v <= 2) _prefs.display_wake_mode = (uint8_t)v;
+        }
+        _br_applied++;
+        return;
+      }
+      // Wunschliste 53 (2026-06-14): watchdog-Pref aus Backup.
+      if (strcmp(key, "watchdog") == 0 || strcmp(key, "wdt") == 0) {
+        char tmp[8]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
+        if (strcasecmp(tmp, "on") == 0 || strcmp(tmp, "1") == 0) {
+          _prefs.watchdog_mode = 1;
+        } else {
+          _prefs.watchdog_mode = 0;
         }
         _br_applied++;
         return;
@@ -11215,6 +11245,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  cpu.clock (max|240|160|80)\n"
           "    MHz, wirkt ab Reboot.\n"
           "    Default 'max'; 80 spart ~10-20 mA.");
+        pushCompanionMessage(
+          "Watchdog (Hang-Recovery):\n"
+          "  watchdog (on|off) - Default off.\n"
+          "  Wirkt ab Reboot. 90s Timeout,\n"
+          "  10min Skip nach WDT-Reset.");
         pushCompanionMessage(
           "Delays: rxdelay txdelay direct_txdelay\n"
           "  (tx/dir: 'auto' Default, oder 0..2)\n"
@@ -18190,6 +18225,29 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Wunschliste 53 (2026-06-14): set watchdog on|off
+    // Persistent Pref; wirkt erst beim naechsten Neustart -- im
+    // laufenden Betrieb umschalten ist riskant (User-Entscheidung).
+    if (strcmp(key, "watchdog") == 0 || strcmp(key, "wdt") == 0) {
+      uint8_t v;
+      if (strcasecmp(value_lc, "off") == 0 || strcmp(value_lc, "0") == 0) {
+        v = 0;
+      } else if (strcasecmp(value_lc, "on") == 0 || strcmp(value_lc, "1") == 0) {
+        v = 1;
+      } else {
+        pushCompanionMessage("watchdog: on | off");
+        return;
+      }
+      _prefs.watchdog_mode = v;
+      savePrefs();
+      char r[120];
+      snprintf(r, sizeof(r),
+               "OK - watchdog = %s (wirkt beim naechsten Neustart)",
+               v ? "on" : "off");
+      pushCompanionMessage(r);
+      return;
+    }
+
     if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
         || strcmp(key, "cpu.clock.mhz") == 0
         || strcmp(key, "cpu_clock_mhz") == 0) {
@@ -18632,6 +18690,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                                          : "on-at-new-messages";
       snprintf(r, sizeof(r), "display = %s", name);
     }
+    else if (strcmp(key, "watchdog") == 0 || strcmp(key, "wdt") == 0) {
+      // Wunschliste 53 (2026-06-14): zusaetzlich aktuelle Reset-Reason
+      // im 'get'-Output, damit User direkt sieht ob letzter Reset
+      // brisant war.
+      snprintf(r, sizeof(r), "watchdog = %s  (last reset: %s)",
+               _prefs.watchdog_mode ? "on" : "off",
+               getLastResetReasonStr());
+    }
     else if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0)
       snprintf(r, sizeof(r), "int.thresh = %u dB%s", (unsigned)_prefs.interference_threshold,
                _prefs.interference_threshold == 0 ? " (LBT off)" : "");
@@ -18878,6 +18944,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     n += snprintf(block+n, sizeof(block)-n,
                   "  cpu temp  = %.1f C\n", (double)cpu_temp_c);
 #endif
+    // Wunschliste 53 (2026-06-14): vorige Session-Uptime (Piggyback
+    // aus rtc_persist, +-10min Toleranz) und Reset-Reason. Im Feld
+    // Diagnose ohne App-Debug-Log: "lief 14d03h dann WDT".
+    {
+      uint32_t prev_up_ms = getLastSessionUptimeMs();
+      if (prev_up_ms != 0) {
+        uint32_t prev_s = prev_up_ms / 1000;
+        uint32_t pd = prev_s / 86400;
+        uint32_t ph = (prev_s % 86400) / 3600;
+        uint32_t pm = (prev_s % 3600) / 60;
+        if (pd > 0) n += snprintf(block+n, sizeof(block)-n,
+                                  "  lastUptime= %lud%02luh%02lum\n",
+                                  pd, ph, pm);
+        else        n += snprintf(block+n, sizeof(block)-n,
+                                  "  lastUptime= %luh%02lum\n",
+                                  ph, pm);
+      }
+      n += snprintf(block+n, sizeof(block)-n,
+                    "  lastCause = %s\n", getLastResetReasonStr());
+    }
     n += snprintf(block+n, sizeof(block)-n,
                   "  trace     = 0x%04X (%s)",
                   (unsigned)_trace_flags,
