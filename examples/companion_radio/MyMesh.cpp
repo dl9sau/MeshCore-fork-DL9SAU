@@ -18848,9 +18848,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                 "%luh%02lum\n", up_h, up_m);
     n += snprintf(block+n, sizeof(block)-n,
                   "  battery   = %u mV\n"
-                  "  msg-queue = %d / %d slots\n"
+                  "  msg-queue = %d / %d slots\n",
+                  (unsigned)batt_mv, q_used, q_cap);
+    // CPU-Temperatur (User-Wunsch 2026-06-14): ESP32-S3 hat internen
+    // Temp-Sensor. Arduino-ESP32 temperatureRead() liefert float °C.
+    // Auf NRF52/anderen Plattformen nicht verfuegbar -- daher #ifdef.
+    // Sensor-Genauigkeit +/- 1-2°C, Trend ist relevant fuer Repeater
+    // im Sommer / Gehaeuse-Heat-Issues.
+#if defined(ESP32)
+    float cpu_temp_c = temperatureRead();
+    n += snprintf(block+n, sizeof(block)-n,
+                  "  cpu temp  = %.1f C\n", (double)cpu_temp_c);
+#endif
+    n += snprintf(block+n, sizeof(block)-n,
                   "  trace     = 0x%04X (%s)",
-                  (unsigned)batt_mv, q_used, q_cap,
                   (unsigned)_trace_flags,
                   _trace_flags ? "active" : "off");
     pushCompanionMessage(block);
