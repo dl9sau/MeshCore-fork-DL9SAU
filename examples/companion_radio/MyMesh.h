@@ -615,6 +615,17 @@ private:
   static const int MAX_COMPLETED_REGIONS = 16;
   CompletedRegionsEntry _regions_completed[MAX_COMPLETED_REGIONS];
   uint8_t  _regions_completed_count;
+  // Wunschliste 59 (2026-06-14): Chain-Counter fuer Early-Exit + bessere
+  // Diagnose-Anzeige im finalize-Output.
+  //   _chain_total_queried:  pre-cache + CTL-triggered ANON-REQs (alle die
+  //                          gesendet wurden). Vergleichswert fuer Early-Exit.
+  //   _chain_responded_empty: REGIONS-RESP ohne CSV-Inhalt (Repeater hat
+  //                          keine Region konfiguriert). Nicht in
+  //                          _regions_completed weil dort nur with-CSV.
+  // _regions_completed_count zaehlt with-CSV. Early-Exit-Bedingung:
+  // (_regions_completed_count + _chain_responded_empty) >= _chain_total_queried.
+  uint8_t  _chain_total_queried;
+  uint8_t  _chain_responded_empty;
   // Flag: 'discover regions' (no args) hat CTL-Discover ausgeloest und
   // erwartet pro REPEATER-RESP einen automatischen ANON_REQ_TYPE_REGIONS.
   bool          _discover_regions_chained;

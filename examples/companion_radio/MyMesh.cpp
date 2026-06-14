@@ -3711,14 +3711,47 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       bool from_chain = _regions_pending[i].from_chain;
       if (from_chain) {
         // Chain-Modus: in den Completed-Buffer fuer spaeteren Aggregat-Output.
-        if (_regions_completed_count < MAX_COMPLETED_REGIONS && len > 8) {
-          CompletedRegionsEntry& ce = _regions_completed[_regions_completed_count++];
-          memcpy(ce.pubkey, _regions_pending[i].pubkey, PUB_KEY_SIZE);
-          ce.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
-          size_t csv_len = len - 8;
-          if (csv_len > sizeof(ce.csv) - 1) csv_len = sizeof(ce.csv) - 1;
-          memcpy(ce.csv, &data[8], csv_len);
-          ce.csv[csv_len] = 0;
+        // Wunschliste 59 (2026-06-14): zusaetzlich Trace + Progressive-Output
+        // damit User waehrend der bis-zu-60s-Wartezeit schon Antworten sieht
+        // und Diagnose-Hinweise bekommt.
+        const uint8_t* pk = _regions_pending[i].pubkey;
+        char prefix6[7];
+        for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", pk[j]);
+        prefix6[6] = 0;
+        size_t csv_len = (len > 8) ? (size_t)(len - 8) : 0;
+        // Trace: in TRACE_DISCOVER sichtbar wenn 'trace on discover' aktiv.
+        traceCompanion(TRACE_DISCOVER,
+                       "[discover] REGIONS-RESP von %s csv_len=%u",
+                       prefix6, (unsigned)csv_len);
+        if (csv_len > 0) {
+          // Progressive: sofort an User schicken statt erst bei finalize.
+          // Format kompakt -- Wir geben das volle CSV durch (Zeilenumbruch
+          // in pushCompanionMessage wird zu \r\n im USB-Serial).
+          char buf[200];
+          size_t emit_len = csv_len;
+          if (emit_len > sizeof(buf) - 80) emit_len = sizeof(buf) - 80;
+          snprintf(buf, sizeof(buf),
+                   "discover regions: %s -> %.*s",
+                   prefix6, (int)emit_len, (const char*)&data[8]);
+          pushCompanionMessage(buf);
+          if (_regions_completed_count < MAX_COMPLETED_REGIONS) {
+            CompletedRegionsEntry& ce = _regions_completed[_regions_completed_count++];
+            memcpy(ce.pubkey, _regions_pending[i].pubkey, PUB_KEY_SIZE);
+            ce.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
+            if (csv_len > sizeof(ce.csv) - 1) csv_len = sizeof(ce.csv) - 1;
+            memcpy(ce.csv, &data[8], csv_len);
+            ce.csv[csv_len] = 0;
+          }
+        } else {
+          // Leere RESP -- Repeater hat keine Region konfiguriert.
+          // Progressive Diagnose-Zeile + Counter fuer finalize-Aufstellung.
+          char buf[120];
+          snprintf(buf, sizeof(buf),
+                   "discover regions: %s -> leer "
+                   "(keine Region konfiguriert?)",
+                   prefix6);
+          pushCompanionMessage(buf);
+          if (_chain_responded_empty < 0xFF) _chain_responded_empty++;
         }
       } else {
         // Manuelle 'discover <regions|owner|basic> <name>' Antwort:
@@ -3948,6 +3981,13 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
                pre_queried == 1 ? "bekannter" : "bekannte");
       pushCompanionMessage(r);
     }
+    // Wunschliste 59 (2026-06-14): Chain-Queried-Counter fuer Early-Exit
+    // setzen. Wird in onAnonDataRecv durch CTL-triggered Queries weiter
+    // hochgezaehlt; finalize-loop checkt
+    //   _regions_completed_count + _chain_responded_empty >= _chain_total_queried
+    // und kann dann frueher als bei 60s Timeout finalisieren.
+    _chain_total_queried = pre_queried;
+    _chain_responded_empty = 0;
   }
 
   // Listening-Window: 30 s
@@ -4067,7 +4107,12 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   // Sensors koennen REGIONS-Antworten nicht handhaben -- skip.
   if (_discover_regions_chained && e.full_pubkey && e.adv_type == ADV_TYPE_REPEATER) {
     ContactInfo* known = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
-    sendRegionsQueryZeroHop(e.pub_key, known ? known->name : "");
+    // Wunschliste 59 (2026-06-14): Counter fuer Early-Exit. Inkrement nur
+    // wenn die Query auch tatsaechlich abgesetzt wurde (sendRegionsQueryZeroHop
+    // returnt false bei Dedup-Hit gegen bereits aus Cache abgefragten Knoten).
+    if (sendRegionsQueryZeroHop(e.pub_key, known ? known->name : "")) {
+      _chain_total_queried++;
+    }
   }
 }
 
@@ -4309,12 +4354,22 @@ void MyMesh::finalizeRegionsChain() {
   // seine konfigurierten Regionen, das ist die Repeater-Sprech. 'Scope'
   // ist der Setter-Begriff den der User nutzt, gehoert nicht in
   // Result-Wording).
-  char hdr[140];
+  // Wunschliste 59 (2026-06-14): Counter-Aufstellung erweitert -- zeigt
+  // wie viele angefragt vs wie viele geantwortet (Region oder leer) und
+  // wie viele still-ohne-Antwort blieben (Timeout-Faelle).
+  uint8_t total_q     = _chain_total_queried;
+  uint8_t responded   = _regions_completed_count + _chain_responded_empty;
+  uint8_t no_response = (total_q > responded) ? (total_q - responded) : 0;
+  char hdr[200];
   snprintf(hdr, sizeof(hdr),
-           "discover regions: %u REPEATER,\n"
-           "  %u lieferten Regionen.",
-           (unsigned)_discover_count,
-           (unsigned)_regions_completed_count);
+           "discover regions: %u angefragt,\n"
+           "  %u geantwortet (%u Regionen, %u leer),\n"
+           "  %u ohne Antwort.",
+           (unsigned)total_q,
+           (unsigned)responded,
+           (unsigned)_regions_completed_count,
+           (unsigned)_chain_responded_empty,
+           (unsigned)no_response);
   pushCompanionMessage(hdr);
 
   // Region-Tabelle
@@ -4342,6 +4397,8 @@ void MyMesh::finalizeRegionsChain() {
 
   _regions_completed_count = 0;
   _regions_pending_count   = 0;
+  _chain_total_queried = 0;
+  _chain_responded_empty = 0;
   _discover_regions_chained = false;
   _regions_chain_finalize_at = 0;
 }
@@ -4406,11 +4463,15 @@ void MyMesh::discoverFinishAndPrint() {
     snprintf(r, sizeof(r),
              "discover regions chain: %u REPEATER,\n"
              "  %u ANON-REQs offen.\n"
-             "Aggregat in 30s (oder nach Abschluss).",
+             "Aggregat in 60s (oder nach Abschluss).",
              (unsigned)_discover_count,
              (unsigned)_regions_pending_count);
     pushCompanionMessage(r);
-    _regions_chain_finalize_at = futureMillis(30000);
+    // Wunschliste 59 (2026-06-14): 30s -> 60s. User-Constraint: discover
+    // selbst ist auf 60s-Intervalle throttled, also keine zusaetzliche
+    // Wartezeit fuer User. Plus Early-Exit-Pfad in loop()-Check unten
+    // beendet das Fenster sobald alle queries beantwortet sind.
+    _regions_chain_finalize_at = futureMillis(60000);
     return;
   }
   if (_discover_count == 0) {
@@ -4451,10 +4512,17 @@ void MyMesh::discoverLoop() {
       discoverFinishAndPrint();
     }
   }
-  // Chain-Aggregat-Finalize: separater Timer nach CTL-Window-Ende
-  if (_regions_chain_finalize_at != 0
-      && millisHasNowPassed(_regions_chain_finalize_at)) {
-    finalizeRegionsChain();
+  // Chain-Aggregat-Finalize: separater Timer nach CTL-Window-Ende.
+  // Wunschliste 59 (2026-06-14): Early-Exit zusaetzlich zum Timeout --
+  // wenn alle queried Repeater (Cache + CTL-triggered) geantwortet haben
+  // (with-content oder leer), keine Wartezeit auf 60s mehr.
+  if (_regions_chain_finalize_at != 0) {
+    bool early_exit = (_chain_total_queried > 0)
+        && ((uint16_t)_regions_completed_count + _chain_responded_empty
+            >= _chain_total_queried);
+    if (early_exit || millisHasNowPassed(_regions_chain_finalize_at)) {
+      finalizeRegionsChain();
+    }
   }
 }
 
@@ -4619,6 +4687,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _regions_pending_count = 0;
   memset(_regions_completed, 0, sizeof(_regions_completed));
   _regions_completed_count = 0;
+  _chain_total_queried = 0;
+  _chain_responded_empty = 0;
   _discover_regions_chained = false;
   _regions_chain_finalize_at = 0;
   _last_advert_route_direct = 0;
