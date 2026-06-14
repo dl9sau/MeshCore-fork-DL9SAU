@@ -529,10 +529,16 @@ void MyMesh::loadBucketsFromFlash() {
 // maybeAdvertTimeSync, ...) saveRtcPersist direkt auf -- so geht eine
 // frische App-Sync nicht verloren wenn der User Sekunden spaeter
 // rebooted.
-void MyMesh::saveRtcPersist(uint32_t rtc) {
+void MyMesh::saveRtcPersist(uint32_t rtc, bool force) {
   if (rtc < 1500000000UL) return;   // < 2017-07: ungueltig
-  if (rtc <= _rtc_persist_last_saved) return;
-  if (rtc - _rtc_persist_last_saved < RTC_PERSIST_MIN_DELTA) return;
+  // force=true (z.B. von CMD_SET_DEVICE_TIME): App ist immer
+  // authoritativ, auch wenn ihr Wert KLEINER ist als unser letzter
+  // Save (Rueckwaerts-Korrektur). Sonst klassisch monoton: nur
+  // hoeher und um >= MIN_DELTA fortgeschritten.
+  if (!force) {
+    if (rtc <= _rtc_persist_last_saved) return;
+    if (rtc - _rtc_persist_last_saved < RTC_PERSIST_MIN_DELTA) return;
+  }
   // Write-Interval-Guard (User-Sorge 2026-06-14: Flash-Wear bei
   // pathologisch haeufigen Adverts). Min 10 min Pause zwischen
   // Writes; das schluckt 'taube' Sync-Bursts (z.B. Adverter alle 3
@@ -5801,51 +5807,53 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint32_t secs;
     memcpy(&secs, &cmd_frame[1], 4);
     uint32_t curr = getRTCClock()->getCurrentTime();
-    if (secs >= curr) {
-      uint32_t delta = secs - curr;
-      // Toleranz fuer App-Sync (Test-Bericht 2026-05-30): jeder App-Connect
-      // schickt CMD_SET_DEVICE_TIME. Bei kleinen Deltas (App-Clock und RTC
-      // praktisch identisch) wuerde sonst jedes Connect-Event den Nightly-
-      // Slot invalidieren -> ungewollte Re-Schedules pro App-Connect.
-      //   delta <= 10s    : komplett ignorieren (RTC bleibt, Slot bleibt)
-      //   delta <= 3600s  : RTC aktualisieren, Slot beibehalten (1h-Drift
-      //                     innerhalb des 23-05-Fensters bleibt der Slot
-      //                     plausibel)
-      //   delta > 3600s   : RTC aktualisieren UND Slot invalidieren
-      if (delta <= 10) {
-        // praktisch synchron -- still OK. Aber: Sync-State auch hier
-        // aktualisieren, damit der Marker auf 'App' wechselt (war
-        // moeglicherweise Boot-Bootstrap, jetzt durch App bestaetigt).
-        // age = now - last_at_rtc rutscht damit zurueck nahe 0.
-        // Reise-Fix 2026-06-08.
+    // App ist immer authoritativ (User-Spec 2026-06-14: 'die App hat
+    // uebrigens immer recht, egal wie unsere Uhr falsch geht'). Frueher
+    // wurde secs < curr mit ILLEGAL_ARG abgewiesen -- damit konnte die
+    // App eine falsch vorlaufende RTC nicht zurueckkorrigieren.
+    // Sanity: secs muss eine plausible Zeit nach 2020 sein, sonst
+    // ist's ein App-Bug oder korruptes Frame.
+    if (secs < 1577836800UL /* 2020-01-01 */) {
+      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+    } else {
+      // Vorzeichenbehafteter Delta-Vergleich -- positiv = App vor uns,
+      // negativ = App hinter uns (wir gehen vor).
+      int32_t signed_delta = (int32_t)(secs - curr);
+      uint32_t abs_delta = signed_delta < 0
+                         ? (uint32_t)(-signed_delta)
+                         : (uint32_t)signed_delta;
+      // Toleranz fuer App-Sync (Test-Bericht 2026-05-30): jeder App-
+      // Connect schickt CMD_SET_DEVICE_TIME. Bei kleinen Deltas wuerde
+      // sonst jedes Connect-Event den Nightly-Slot invalidieren.
+      //   abs <= 10s    : RTC bleibt, nur Sync-State-Marker auf 'App'
+      //   abs <= 3600s  : RTC aktualisieren, Slot beibehalten
+      //                   (1h-Drift im 23-05-Fenster bleibt plausibel)
+      //   abs > 3600s   : RTC aktualisieren UND Slot invalidieren
+      if (abs_delta <= 10) {
         _time_sync_last_at_rtc = secs;
         _time_sync_done_since_boot = true;
         memset(_time_sync_last_pubkey, 0, sizeof(_time_sync_last_pubkey));
         writeOKFrame();
       } else {
         getRTCClock()->setCurrentTime(secs);
-        // Bug-Fix 2026-06-14: App-Sync persistieren -- sonst geht der
-        // Wert bei naechstem Reboot ohne neuer Adverts/Messages
-        // verloren (Buckets sind nach Sync leer, contacts.lastmod 24h+).
-        saveRtcPersist(secs);
+        // App-Sync persistieren mit force=true: erlaubt auch
+        // Rueckwaerts-Korrektur (z.B. RTC war drift-bedingt 3 min vor
+        // Echtzeit -- App korrigiert nach unten; ohne force wuerde
+        // _rtc_persist_last_saved den Save abwehren).
+        saveRtcPersist(secs, /*force=*/true);
         // Reise-Fix 2026-06-08: App-Sync ueberschreibt auch unseren
-        // advert-sync-State. Ohne das blieb _time_sync_last_at_rtc auf
-        // dem (moeglicherweise alten) Wert eines frueheren adv-syncs
-        // haengen, und 'clock' zeigte 'age = jetzt - alter advert',
-        // teilweise Jahre Diff. pub_key={0,0,0} markiert App als Quelle.
+        // advert-sync-State. pub_key={0,0,0} markiert App als Quelle.
         _time_sync_last_at_rtc = secs;
         _time_sync_done_since_boot = true;
         memset(_time_sync_last_pubkey, 0, sizeof(_time_sync_last_pubkey));
-        bool invalidate = (delta > 3600);
+        bool invalidate = (abs_delta > 3600);
         if (invalidate) next_night_flood_unix = 0;
-        pushDebugLog("[ADV-DBG] CMD_SET_DEVICE_TIME: rtc %lu -> %lu (delta %lus)%s\n",
+        pushDebugLog("[ADV-DBG] CMD_SET_DEVICE_TIME: rtc %lu -> %lu (delta %+lds)%s\n",
                       (unsigned long)curr, (unsigned long)secs,
-                      (unsigned long)delta,
+                      (long)signed_delta,
                       invalidate ? ", nightly slot invalidated" : "");
         writeOKFrame();
       }
-    } else {
-      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
   } else if (cmd_frame[0] == CMD_SEND_SELF_ADVERT) {
     if (dutyHardReached()) {

@@ -1156,7 +1156,10 @@ private:
   // 2026-06-14). 10 min -> max ~144 Writes/Tag, plus 30-min Periodic.
   static const uint32_t RTC_PERSIST_MIN_WRITE_INTERVAL_MS = 10UL*60UL*1000UL;
   static const uint32_t RTC_PERSIST_CHECK_INTERVAL_MS = 30UL*60UL*1000UL;  // 30 min
-  void          saveRtcPersist(uint32_t rtc);
+  // force=true: Save erlauben auch wenn rtc <= last_saved (z.B. App-
+  // CMD_SET_DEVICE_TIME bei Rueckwaerts-Korrektur, App ist immer
+  // authoritativ -- User-Spec 2026-06-14).
+  void          saveRtcPersist(uint32_t rtc, bool force = false);
   uint32_t      loadRtcPersist();
   int8_t        _last_advert_scoped;     // 1=scoped (transport_codes), 0=unscoped
   int8_t        _last_advert_route_direct; // 1=DIRECT-typed (sendZeroHop), 0=FLOOD-typed
