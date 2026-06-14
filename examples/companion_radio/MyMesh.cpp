@@ -3727,9 +3727,12 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
           // Progressive: sofort an User schicken statt erst bei finalize.
           // Format kompakt -- Wir geben das volle CSV durch (Zeilenumbruch
           // in pushCompanionMessage wird zu \r\n im USB-Serial).
-          char buf[200];
+          // 145-Byte-Limit pro $companion-Message (Memory-Entry):
+          //   Prefix 'discover regions: <prefix6> -> ' = 28 Byte
+          //   CSV-Slot 100 Byte -> Gesamt max 128 Byte (safe).
+          char buf[160];
           size_t emit_len = csv_len;
-          if (emit_len > sizeof(buf) - 80) emit_len = sizeof(buf) - 80;
+          if (emit_len > 100) emit_len = 100;
           snprintf(buf, sizeof(buf),
                    "discover regions: %s -> %.*s",
                    prefix6, (int)emit_len, (const char*)&data[8]);
@@ -10675,6 +10678,7 @@ static const TraceCat trace_cats[] = {
   { "duty",     TRACE_DUTY,     "Duty-Cycle Drops (Soft/Hard) ueber 10% TX/h" },
   { "msgstore", TRACE_MSGSTORE, "Offline-Queue Flash-Persistenz-Writes (Flash-Wear-Diagnose)" },
   { "bt",       TRACE_BT,       "Bluetooth-Diagnose alle 5min: heap + disconnect-counter (default off)" },
+  { "discover", TRACE_DISCOVER, "discover regions ANON-RESP-Empfang + leer-Diagnose" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
