@@ -3859,6 +3859,58 @@ Plan:
     Risiko: jeder zusaetzliche Task ist eine neue Quelle fuer
     False-Positive-Reboots -- daher erst Phase 1 stabilisieren.
 
+  Phase 9 -- LoRa SPI-Liveness-Probe [ERLEDIGT 2026-06-14]
+    User-Frage 2026-06-14: 'Kann man nicht sowas wie get-rssi machen und
+    schauen ob der Chip noch antwortet?' -> JA, sauber implementierbar.
+
+    Mechanismus:
+      In MyMesh::loop() periodisch (30s):
+        if (_prefs.watchdog_mode == 1
+            && !_radio->isReceivingPacket()) {
+          float rssi = _radio->getCurrentRSSI();
+          if (rssi > -20 || rssi < -135) _radio_dead_strikes++;
+          else                            _radio_dead_strikes = 0;
+          if (strikes >= 3) {
+            bootLogWritePreReboot("LORA-DEAD");
+            board.reboot();
+          }
+        }
+
+    Verifizierung getCurrentRSSI() vs getNoiseFloor():
+      - getNoiseFloor() ist cached value (RadioLibWrappers.h:50, _noise_floor
+        Member). Nur initiale Sampling-Phase aktualisiert ihn ueber loop().
+        Nach Convergenz: statischer Cache -> NUTZLOS fuer SPI-Liveness.
+      - getCurrentRSSI() ruft SX1262::getRSSI(false) (LIVE SPI-Read, ohne
+        Mode-Switch). RadioLibWrapper::loop() nutzt das selbst fuer
+        noise-floor sampling. Sicher zu rufen wenn !isReceivingPacket
+        (waehrend RX-in-flight koennte SPI-Race entstehen).
+
+    Detection-Range -20 .. -135 dBm:
+      - SX126x: RSSI = -raw/2. MISO-stuck-high (0xFF) -> -127.5 dBm
+        (knapp unter -135 -> Strike).
+      - MISO-stuck-low (0x00) -> 0 dBm (out of range high -> Strike).
+      - MISO-floating Random-Bytes: koennten manchmal in-range fallen ->
+        3-Strikes-Filter (3 * 30s = 90s) verhindert Single-Glitch-Reboot.
+      - Realer Bereich: Noise floor ~-100..-110, starkes Signal bis -30.
+        -135 als Lower-Bound, -20 als Upper-Bound -> grosse Marge zu
+        legitimen Werten.
+
+    Pre-Reboot-Boot-Log:
+      bootLogWritePreReboot(const char* cause) erweitert auf parametri-
+      sierten Cause-String. "WARM(cli)" fuer reboot-CLI, "LORA-DEAD" fuer
+      Stage 9. Beim naechsten Boot zeigt 'log read' den exakten Grund.
+
+    Pref-Kopplung:
+      Aktiv NUR wenn _prefs.watchdog_mode == 1 (gleicher Schalter wie
+      Phase 1+2 Hardware-WDT). Konsistente UX: 'set watchdog on' = alle
+      WDT-Mechanismen, kein separater 'watchdog.lora'.
+
+    Size-Impact: <1KB Flash beide Plattformen.
+
+    Stage 9 verbindet sich elegant mit Stage 7 (Boot-Log) und Phase 1+2
+    (Hardware-WDT): bei LoRa-Trouble haben wir spezifischen Eintrag im
+    Boot-Log, beim normalen loop()-Hang den generischen WDT-Eintrag.
+
   Phase 7 -- Persistenter Boot-Log [ERLEDIGT 2026-06-14]
     User-Wunsch 2026-06-14: nicht nur "letzter Reset" in stats-core,
     sondern dauerhaftes Logbuch mit Uhrzeit + Reset-Reason + vorheriger

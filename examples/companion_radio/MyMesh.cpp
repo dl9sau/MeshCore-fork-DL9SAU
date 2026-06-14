@@ -643,10 +643,14 @@ void MyMesh::bootLogAppend() {
   char existing[BOOT_LOG_MAX_ENTRIES][96];
   int existing_n = bootLogLoad(existing, BOOT_LOG_MAX_ENTRIES);
   uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
+  // Dedup-Check (Stage 7 + Stage 9): wenn unser SW-Reset eine Vor-
+  // Reboot-Sequenz hatte (bootLogWritePreReboot() vor board.reboot()),
+  // sehen wir hier _last_reset_reason == WARM und einen jungen Eintrag.
+  // Cause-String egal -- WARM(cli), LORA-DEAD oder zukuenftige Pre-
+  // Reboot-Marker werden alle erkannt.
   if (_last_reset_reason == 2 /* WARM */ && existing_n > 0) {
     uint32_t e_secs = (uint32_t)strtoul(existing[0], NULL, 10);
-    if (e_secs > 0 && now_secs > 0 && now_secs - e_secs < 30
-        && strstr(existing[0], "WARM(cli)")) {
+    if (e_secs > 0 && now_secs > 0 && now_secs - e_secs < 30) {
       return;   // schon geloggt im Pre-Reboot-Schritt
     }
   }
@@ -683,14 +687,14 @@ void MyMesh::bootLogAppend() {
   pushCompanionMessage(msg);
 }
 
-void MyMesh::bootLogWritePreReboot() {
+void MyMesh::bootLogWritePreReboot(const char* cause) {
   uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
   uint32_t up_ms    = millis();
   char dur[20];
   formatBootLogDuration(up_ms, dur, sizeof(dur));
   char entry[96];
-  snprintf(entry, sizeof(entry), "%lu WARM(cli) uptime=%s",
-           (unsigned long)now_secs, dur);
+  snprintf(entry, sizeof(entry), "%lu %s uptime=%s",
+           (unsigned long)now_secs, cause, dur);
   // Prepend wie bootLogAppend, aber ohne Dedup-Check und ohne Channel-
   // Push (der Reboot kommt sowieso gleich).
   char existing[BOOT_LOG_MAX_ENTRIES][96];
@@ -7437,6 +7441,49 @@ void MyMesh::loop() {
     }
   }
 #endif
+
+  // Wunschliste 53 Stage 9 (2026-06-14): LoRa SPI-Liveness-Probe.
+  // Periodisch (30s) RSSI live vom Chip lesen. Out-of-range
+  // (MISO-stuck-0 oder MISO-stuck-1 oder Random-Floating) -> Strikes.
+  // 3 Strikes hintereinander (90s) -> Reboot mit LORA-DEAD-Marker.
+  // Nur wenn watchdog_mode == 1 (zusammen mit Phase 1+2 WDT-Pref).
+  // Nur wenn !isReceivingPacket() -- waehrend RX-in-flight nicht
+  // proben (Chip-State-Disturbance vermeiden).
+  if (_prefs.watchdog_mode == 1
+      && (long)(millis() - _radio_health_check_ms)
+         >= (long)RADIO_HEALTH_INTERVAL_MS) {
+    _radio_health_check_ms = millis();
+    // radio_driver ist die WRAPPER_CLASS-Instanz (variant-spezifisch:
+    // CustomSX1262Wrapper, CustomLR1110Wrapper etc., alle subclasses
+    // von RadioLibWrapper). _radio (mesh::Radio*) exposed nur die
+    // generische API; fuer isReceivingPacket() + getCurrentRSSI()
+    // muessen wir die Subclass-API direkt anrufen.
+    if (!radio_driver.isReceivingPacket()) {
+      float rssi = radio_driver.getCurrentRSSI();
+      // Plausibler Bereich: -135..-20 dBm. SX126x meldet RSSI = -val/2,
+      // also raw 0xFF -> -127.5 (knapp <unter Range -130), raw 0x00 -> 0
+      // (out of range high). Random Float koennte in-range fallen --
+      // daher 3 Strikes statt 1.
+      if (rssi > -20.0f || rssi < -135.0f) {
+        _radio_dead_strikes++;
+        pushDebugLog("[wdt] LoRa health: RSSI=%.1f out of range (%u/%u)\n",
+                     (double)rssi,
+                     (unsigned)_radio_dead_strikes,
+                     (unsigned)RADIO_HEALTH_MAX_STRIKES);
+        if (_radio_dead_strikes >= RADIO_HEALTH_MAX_STRIKES) {
+          // Marker im Boot-Log + Reboot.
+          bootLogWritePreReboot("LORA-DEAD");
+          board.reboot();
+          // returns not.
+        }
+      } else {
+        if (_radio_dead_strikes > 0) {
+          pushDebugLog("[wdt] LoRa recovered: RSSI=%.1f\n", (double)rssi);
+        }
+        _radio_dead_strikes = 0;
+      }
+    }
+  }
 
   // Deferred reboot — siehe handleCompanionCommand("reboot"). Erst hier am
   // Ende der loop() pruefen: bis dahin hatten App-Frame-Auslieferung +

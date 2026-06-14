@@ -491,8 +491,9 @@ public:
   //      'log' allein -> Status.
   void          bootLogAppend();         // Boot-Time: Eintrag fuer
                                          //  jetzigen Boot
-  void          bootLogWritePreReboot(); // Vor reboot-CLI: WARM(cli)
-                                         //  mit exakter Uptime
+  // Pre-Reboot-Eintrag mit exakter Uptime. cause default "WARM(cli)"
+  // fuer reboot-CLI, "LORA-DEAD" fuer Stage 9 SPI-Liveness-Trigger.
+  void          bootLogWritePreReboot(const char* cause = "WARM(cli)");
   void          bootLogPrint();          // CLI 'log read'
   void          bootLogClear();          // CLI 'log clear'
 
@@ -1212,6 +1213,17 @@ private:
   // Enum-Mapping siehe main.cpp WdtResetKind. Wird fuer stats-core
   // 'last_reset'-Zeile und Boot-Log gelesen.
   uint8_t       _last_reset_reason = 0;  // 0 = UNKNOWN
+  // Wunschliste 53 Stage 9 (2026-06-14): LoRa SPI-Liveness-Probe.
+  // Periodisches getCurrentRSSI() (live SPI-Read von SX126x getRSSI(false))
+  // checkt ob Chip antwortet. MISO-stuck-high -> RSSI -127.5 dBm, MISO-
+  // stuck-low -> 0 dBm; beides out-of-range. 3 Strikes hintereinander
+  // (= 90s) -> Reboot mit Boot-Log Cause "LORA-DEAD".
+  // Nur aktiv wenn _prefs.watchdog_mode == 1, nur wenn !isReceivingPacket
+  // (kein TX/RX in flight um Chip nicht zu stoeren).
+  uint32_t      _radio_health_check_ms = 0;
+  uint8_t       _radio_dead_strikes    = 0;
+  static const uint32_t RADIO_HEALTH_INTERVAL_MS = 30UL * 1000;
+  static const uint8_t  RADIO_HEALTH_MAX_STRIKES = 3;
   // RTC-Progress-Grenze: kleinere Bumps zaehlen als 'kein Fortschritt'.
   static const uint32_t RTC_PERSIST_MIN_DELTA = 60; // sec
   // Min-Abstand zwischen tatsaechlichen Flash-Writes -- schuetzt vor
