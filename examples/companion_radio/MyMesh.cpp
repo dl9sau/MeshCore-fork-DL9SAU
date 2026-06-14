@@ -4884,6 +4884,12 @@ void MyMesh::begin(bool has_display) {
   // Wunschliste 58 Phase A (2026-06-14): Display-Wake-Mode.
   // 2 = on-at-new-messages (Default, behavior-kompat zum Bestand).
   _prefs.display_wake_mode = 2;
+  // Wunschliste 53 Phase 1+2 (2026-06-14): Hardware-Watchdog Pref.
+  // Default off bis Validierungs-Phase abgeschlossen. Bei Legacy-File
+  // ohne dieses Byte: file.read 0 Bytes -> Pre-Init steht (0). Falls
+  // explizit 0xFF im File: DataStore mapped 0xFF -> 0 (safeguard fuer
+  // Migration-Value-Collision).
+  _prefs.watchdog_mode = 0;
 
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter Masks
   // Pre-Init: alle Masks = 0 -> global (alle Channels).

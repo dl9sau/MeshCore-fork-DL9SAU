@@ -418,6 +418,13 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // 0xFF (Legacy/EOF Sentinel) -> 2 (= "on-at-new-messages")
     if (_prefs.display_wake_mode == 0xFF) _prefs.display_wake_mode = 2;
 
+    // Wunschliste 53 Phase 1+2 (2026-06-14): Hardware-Watchdog Pref.
+    // Pre-Init in begin() setzt 0xFF -- wenn file.read 0 Bytes liefert
+    // (alte Datei ohne dieses Byte), bleibt 0xFF -> Migration zu 0 (off).
+    file.read((uint8_t *)&_prefs.watchdog_mode,
+              sizeof(_prefs.watchdog_mode));
+    if (_prefs.watchdog_mode == 0xFF) _prefs.watchdog_mode = 0;
+
     file.close();
   }
 }
@@ -611,6 +618,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Wunschliste 58 Phase A (2026-06-14): Display Wake-Mode.
     file.write((uint8_t *)&_prefs.display_wake_mode,
                sizeof(_prefs.display_wake_mode));
+
+    // Wunschliste 53 Phase 1+2 (2026-06-14): Hardware-Watchdog Pref.
+    file.write((uint8_t *)&_prefs.watchdog_mode,
+               sizeof(_prefs.watchdog_mode));
 
     file.close();
   }

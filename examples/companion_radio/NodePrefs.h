@@ -643,4 +643,12 @@ struct NodePrefs {  // persisted to file
   // CLI: set passwd_admin <pw> / set passwd_guest <pw> / ...clear
   char           passwd_admin[32];
   char           passwd_guest[32];
+
+  // Wunschliste 53 Phase 1+2 (2026-06-14): Hardware-Watchdog Pref.
+  //   0 = off (Default, Validierungs-Phase nach Implementation)
+  //   1 = on  (ESP32: TWDT 90s panic-reboot, NRF52: nrfx_wdt 90s).
+  // Aenderung wirkt erst beim naechsten Neustart (im laufenden Betrieb
+  // an/aus zu schalten ist zu riskant). 0xFF im File = EOF-Sentinel ->
+  // Migration zu 0 (off).
+  uint8_t        watchdog_mode;
 };
