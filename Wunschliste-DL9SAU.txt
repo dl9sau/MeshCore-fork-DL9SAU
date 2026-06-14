@@ -3772,11 +3772,13 @@ Quelle: User-Wunsch 2026-06-09 ('vollstaendiges commandset'
 
 
 --------------------------------------------------------------------------------
-53. Hardware-Watchdog ESP32 -- Hang-Recovery
+53. Hardware-Watchdog ESP32 + NRF52 -- Hang-Recovery
 --------------------------------------------------------------------------------
 
-Status: TODO Liste (User-Wunsch 2026-06-09). Vor Aktivierung
-        Stabilitaetstests noetig.
+Status: Phase 1 (ESP32 loopTask, 60s) IMPLEMENTIERT 2026-06-14
+        (commits 9ccf07ae + b8e6fbe3). Vor Deployment im Feld
+        Stabilitaetstests noetig (BLE-Stress, GPS-Cycling).
+        Phase 2 NRF52, Phase 3 Multi-Task ESP32 = TODO.
 
 Aktueller Stand:
   - Arduino-ESP32-Framework: Task-Watchdog (TWDT) fuer loopTask
@@ -3794,13 +3796,46 @@ Use-Case:
   Geraet sich selber neu starten statt 'tot' im Feld zu stehen.
 
 Plan:
-  Phase 1 -- TWDT initial aktivieren mit grossem Timeout (z.B. 60s):
-    esp_task_wdt_init(60, true);   // panic_handler reboot
-    esp_task_wdt_add(NULL);        // current task (loop)
-    Plus in loop(): esp_task_wdt_reset() bei jedem Iteration.
+  Phase 1 -- ESP32 loopTask TWDT [ERLEDIGT 2026-06-14]
+    main.cpp setup(): esp_task_wdt_reconfigure / -init (API je IDF-
+      Version, 60s, panic=true -> Reboot) + esp_task_wdt_add(NULL).
+    main.cpp loop() Anfang: esp_task_wdt_reset() vor allen Sub-Calls.
+    Override-Hook: -D WATCHDOG_TIMEOUT_S=<sec> ueber Build-Flag.
+    API-Aware: ESP_IDF_VERSION_MAJOR >= 5 -> reconfigure(config_t*),
+               sonst -> init(timeout, panic) [aktuell IDF 4.4.x].
 
-  Phase 2 -- Mehrere Task-Pfade.
-    User-Erfahrung (LoRa-APRS-Firmware, User-Notiz 2026-06-09):
+  Phase 2 -- NRF52 Hardware-Watchdog [TODO]
+    User-Klarstellung 2026-06-14: BLE-Adv-Watchdog deckt nur BLE-Hangs,
+    nicht totale loop()-Hangs. Echter Geraete-Watchdog noetig.
+    API: nrfx_wdt (HAL-Layer ist im Adafruit-Fork drin -- siehe
+         cores/nRF5/nordic/nrfx/drivers/include/nrfx_wdt.h).
+    Plan:
+      setup() (NRF52-Zweig):
+        nrf_wdt_behaviour_set(NRF_WDT, NRF_WDT_BEHAVIOUR_PAUSE_SLEEP);
+        nrf_wdt_reload_value_set(NRF_WDT, WATCHDOG_TIMEOUT_S * 32768);
+        nrf_wdt_reload_request_enable(NRF_WDT, NRF_WDT_RR0);
+        nrf_wdt_task_trigger(NRF_WDT, NRF_WDT_TASK_START);
+      loop():
+        nrf_wdt_reload_request_set(NRF_WDT, NRF_WDT_RR0);   // pet
+    Tuecken/Constraints:
+      a) Hardware-WDT auf NRF52 ist NICHT stoppbar -- einmal gestartet,
+         nur Reset stoppt ihn. -> Timeout muss laengste legitime
+         Blockier-Phase decken (discover regions = 60s, sollte passen).
+      b) Sleep-Kompatibilitaet: 2 Behavior-Modes verfuegbar
+         - NRF_WDT_BEHAVIOUR_RUN_SLEEP: zaehlt auch im System-ON-Sleep
+           (WFE/WFI). Bluefruit/SoftDevice idle-WFE wuerde dann
+           Reboot triggern wenn naechster Loop > 60s entfernt.
+         - NRF_WDT_BEHAVIOUR_PAUSE_SLEEP: pausiert wenn CPU schlaeft
+           (sicherer fuer BLE-Sleep). EMPFOHLEN.
+         System-OFF (echter Deep-Sleep): Wake-via-Reset, WDT-State
+         irrelevant weil neu gebootet wird.
+      c) SoftDevice-Kompatibilitaet: Nordic empfiehlt WDT explizit
+         als okay mit SoftDevice -- sollte nicht crashen.
+    Quelle: User-Frage 2026-06-14 'der BLE-watchdog ist fuer BLE ok,
+            uns geht es aber um watchdog fuer das gesamte Geraet'.
+
+  Phase 3 -- Multi-Task ESP32 [TODO, niedrige Prio]
+    User-Erfahrung (LoRa-APRS-Firmware, 2026-06-09):
     'Es gibt 2 threads, main und Webserver (eigentlich noch 2
     weitere, bluetooth und serial). Alle laufen unabhaengig und
     alle muessen den watchdog triggern.'
@@ -3808,17 +3843,52 @@ Plan:
     -> Pro Task ein periodischer Reset (z.B. am Anfang vom
        jeweiligen FreeRTOS-Task-Loop).
     DL9SAU-Tasks:
-       - loop() (main)
-       - BLE-Task (NimBLE/Bluedroid)
+       - loop() (main) [PH 1 done]
+       - BLE-Task (NimBLE/Bluedroid)  -- Handle ueber XTaskHandle
        - vermutlich Wifi-Task wenn relevant
        - LoRa-Driver-Task (Radio-IRQ-Handling)
+    Risiko: jeder zusaetzliche Task ist eine neue Quelle fuer
+    False-Positive-Reboots -- daher erst Phase 1 stabilisieren.
 
-  Phase 3 -- Timeout abstimmen:
-    Tradeoff zwischen False-Positives (zu kurz = Reboot bei
-    legitimen langen Operationen) und Recovery-Speed (zu lang =
-    User wartet ewig).
-    Plausibel: 60s Timeout, weil eine LoRa-TX max ~10s dauert plus
-    Margin fuer flash-write etc.
+  Phase 4 -- Timeout-Tuning [aktiv mit jeder Phase]
+    Tradeoff zwischen False-Positives (zu kurz = Reboot bei legitimen
+    langen Operationen) und Recovery-Speed (zu lang = User wartet ewig).
+    Aktuell: 60s -- LoRa-TX max ~10s + flash-write + Margin.
+
+Interaction mit Wunschliste 58 (Power-Management):
+
+  WICHTIG: Hier muss Phase C (ESP-PM Light-Sleep) auf Phase 1 (WDT)
+  Ruecksicht nehmen, NICHT umgekehrt.
+
+  Status quo Phase 1: loop() pet bei jedem Iteration. Aktuelles
+  loop() hat delay(1) -> vTaskDelay(1) tick. Reicht NICHT fuer
+  nennenswerten Light-Sleep (tickless idle braucht >= 2 ticks).
+  Solange loop() pro 60s mind. einmal komplett durchlaeuft = ok.
+
+  Wenn 58 Phase C kommt:
+    Option A -- Timeout > laengste Sleep-Phase setzen:
+      z.B. WATCHDOG_TIMEOUT_S=120 wenn Light-Sleep < 30s
+      einfachster Weg, verlaengert aber Recovery-Zeit.
+    Option B -- Sleep-Sektionen explizit deregistrieren:
+      esp_task_wdt_delete(NULL) vor vTaskDelay(>10s),
+      esp_task_wdt_add(NULL) nach Wake. Sauberer, aber
+      Vergessen-Risiko.
+    Option C -- ESP-PM Idle-Hook nutzen:
+      Bei tickless idle pflegt arduino-esp32 ggf. den IDLE-Task-
+      WDT selber. Da wir loopTask EXPLIZIT watchen statt IDLE,
+      sind wir davon NICHT abgedeckt -- Option A oder B noetig.
+
+  Entscheidung wenn 58 Phase C realisiert wird:
+    -> Default A (Timeout-Erhoehung passend zu max-Sleep-Phase).
+    -> B nur fuer dedizierte langlaeufige CLI-Operationen
+       ('discover regions' 60s, scheint mit aktuellen 60s knapp,
+       evtl. auf 90s bumpen).
+
+NRF52 Sleep-Interaktion (Phase 2 spaeter):
+  Bluefruit/SoftDevice WFE-Sleep + PAUSE_SLEEP-Behavior = WDT
+  zaehlt nur in aktiven Phasen. Sleep-Energiespar-Mechanismen
+  und WDT schliessen sich also NICHT aus.
+  System-OFF (Deep) ist eh ein Reboot-on-Wake -- WDT-State irrelevant.
 
 Caveats:
   - User-Erfahrung 2026-06-09: 'Hat mich etwas Muehe gekostet, aber
@@ -3832,6 +3902,7 @@ Caveats:
 
 Quelle: User-Wunsch 2026-06-09, basierend auf positiver Erfahrung
         in einer LoRa-APRS-Firmware mit Multi-Thread-WDT.
+        NRF52-Ergaenzung User-Frage 2026-06-14.
 
 
 --------------------------------------------------------------------------------
@@ -4441,6 +4512,13 @@ Phase C -- esp_pm Light-Sleep (mittelfristig):
    - BLE keep-alive Timing kritisch -- NimBLE braucht maybe RTOS-Hook.
    - GPS-UART Wake -- muss IRQ-getriggert sein, nicht polled.
    - Risiko: subtile Timing-Bugs erst nach Wochen sichtbar.
+   - WICHTIG: Watchdog-Interaktion mit Wunschliste 53 Phase 1 klaeren.
+     Phase 1 hat loopTask im TWDT mit 60s Timeout, Pet am loop()-Anfang.
+     Bei Light-Sleep ueber tickless idle pausiert loop() voruebergehend.
+     Default-Strategie wenn Phase C kommt: WATCHDOG_TIMEOUT_S auf
+     max(120, 2*laengster_sleep_phase) anheben. Alternative: vor langen
+     vTaskDelay() esp_task_wdt_delete(NULL), nach Wake _add(NULL).
+     Siehe Wunschliste 53 Plan-Abschnitt 'Interaction mit Wunschliste 58'.
   -> Diese Phase erst NACH Phase A+B implementieren.
 
 Phase D -- Loop-Idle-Coarse-Tick (mittelfristig):
