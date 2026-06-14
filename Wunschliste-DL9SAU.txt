@@ -4699,6 +4699,117 @@ Out-of-scope:
 Quelle: User-Frage 2026-06-14 zu Strings vs Wunschliste 60/61 vs
   spaetere Bilingual-Plaene.
 
+Phase 5 NEU 2026-06-14 (User-Entscheidung): Help-Texte in LittleFS
+auslagern. Direktester Pfad mit hoechstem Gewinn fuer T096-Target.
+  - Build-Step: Help-Texte als docs/help/*.txt anlegen, im LittleFS-
+    Image mit hochladen (PIO board_build.filesystem = littlefs +
+    extra_scripts hook fuer 'data/' Folder).
+  - Runtime: 'help X' liest /help/X.txt von LittleFS, pushed Zeilen.
+    Lazy-Load auf 1. Aufruf, kein Cache (Speicher-spar) -- jeder Help-
+    Aufruf re-liest die Datei (10-50ms FS-I/O akzeptabel).
+  - Fallback: Datei fehlt -> kurze Generic-Message 'Help-Datei nicht
+    geflasht. Siehe Wiki.'
+  - Kein Komprimierungs-Decoder noetig -- Datenpartition ist gross
+    (1-4 MB auf ESP32-S3). User-Argument: 'wenn doch knapp, Help-
+    Datei einfach nicht aufspielen, mit kurzer usage leben.'
+  - Bonus: Help-Updates ohne kompletter FW-Reflash (OTA-Update der
+    Datenpartition reicht).
+  - Aufraeum-Aufwand: einige Top-Level-Befehle haben heute mehrzeilige
+    Inline-Help die auf 'help X' verweist (z.B. 'trace'). Diese
+    muessen gekuerzt werden und der Inhalt in die externe Help-Datei
+    wandern.
+  - Plattform-Beschraenkung: nur Builds mit Datei-System (ESP32,
+    NRF52 mit QSPIFlash, Heltec t096 mit LittleFS). Builds ohne FS
+    behalten die in-Firmware Help-Texte.
+
+User-Target 2026-06-14: Heltec T096 (aktuell OVERFLOW, siehe Audit
+docs/dl9sau_nrf52_size_audit_2026-06-14.md). Mit Help-Auslagerung
+soll T096 wieder mit voller Funktionalitaet bauen koennen.
+
+
+--------------------------------------------------------------------------------
+66. TIGHT-Build Compile-Flag-Slim-Down
+--------------------------------------------------------------------------------
+
+Status: TODO. User-Wunsch 2026-06-14 nach Audit-Diskussion. Komplementaer
+        zu Wunschliste 65 Phase 5 (Help-in-LittleFS).
+
+Anlass:
+  Audit 2026-06-14 zeigt 3 Boards mit OVERFLOW (Heltec_t096_ble,
+  Heltec_t1_ble, WioTrackerL1_usb) und 20 Boards bei >= 95% Flash.
+  Wunschliste 65 Phase 5 (Help in LittleFS) loest den Help-Anteil
+  fuer ESP32-S3-Boards mit FS. Restliche Reduktion ueber gezielte
+  Feature-Defines die per platformio.ini Variant-spezifisch
+  deaktivierbar sind.
+
+User-Klassifizierung 2026-06-14:
+  - User-Statement: 'Wer so beschraenkte Resourcen hat, flasht sich
+    die Original Repeater firmware'. Heisst: bei TIGHT-Boards darf
+    der DL9SAU-Fork bewusst reduzierte Companion-Funktionalitaet
+    haben. Repeater-Build laeuft eh kleiner.
+
+Compile-Flag Vorschlaege (mit grober Flash-Ersparnis-Schaetzung):
+
+  -D DL9SAU_NO_DISCOVER_REGIONS=1     (~2-4k)
+     Companion-side ANON_REQ_TYPE_REGIONS Chain entfaellt. App kann
+     Regionen ohnehin selber discoveren -- doppelte Funktion auf
+     beschraenkter Hardware nicht noetig. Affected: chain code,
+     finalizeRegionsChain, _regions_completed/_pending Arrays.
+     User-OK 2026-06-14.
+
+  -D DL9SAU_NO_REMOTE_ADMIN=1         (~2-3k)
+     Wunschliste 52 raus -- Multi-Frame-Reply Pagination,
+     REQ_TYPE_ADMIN_CMD Permission-Checks, Capture-Buffer.
+     User-OK 2026-06-14.
+
+  -D DL9SAU_NO_FILTER_PHASE4=1        (~3-5k)
+     Pubkey-Hardblock + Sender-Pubkey-Block + Advert-Name Soft-Drop.
+     Filter Phase 1-3 (sender/text/scope drop+keep mit Pattern-Match)
+     bleiben verfuegbar.
+     -> Risiko: ohne Hardblock keine Spammer-Verteidigung auf
+        Wire-Ebene. Trade-off.
+
+  -D DL9SAU_NO_DETAILED_HELP=1        (~10-15k, ggf. obsolet wenn 65 P5)
+     Topic-Detail-Help-Bloecke entfallen, nur Befehlsliste + kurze
+     Inline-Usage bleibt. Obsolet sobald Wunschliste 65 Phase 5
+     (Help-in-LittleFS) durch ist -- dann wandert das gleichmaessig
+     auf Datenpartition.
+
+  -D DL9SAU_NO_BACKUP_RESTORE=1       (~3-4k)
+     'backup save' + 'backup restore' raus -- App-Sync ist primaerer
+     Konfig-Pfad. CLI-Restore-State-Machine + JSON-Parser-Code weg.
+     -> Risiko: kein lokales Recovery-Path bei App-Defekt.
+
+  -D DL9SAU_NO_REGIONS_CSV=1          (~5-8k, wenn Region-Tabelle leer)
+     dl9sau_regions.py erzeugt Header mit Region-Bbox-Tabelle (vermutlich
+     mehrere kB statisch). Wenn Variant Region-AUTO/-DEFAULT nicht
+     nutzen will (z.B. fester Repeater-Standort mit override-Scope),
+     kann die Tabelle leer bleiben.
+
+Variant-Inis koennten je nach Hardware-Klasse die Flags setzen, z.B.
+heltec_t096 'companion_radio_ble' env mit
+    build_flags = ${Heltec_t096_base.build_flags}
+      -D DL9SAU_NO_DISCOVER_REGIONS=1
+      -D DL9SAU_NO_REMOTE_ADMIN=1
+
+Implementations-Plan:
+  1) Phase 1: pro Define eine sauber abgrenzbare Code-Region per
+     #ifdef einrahmen. Beim Compile-Test pro Variant pruefen ob
+     die Define-Kombination wirklich kleiner wird.
+  2) Phase 2: Default-Defines pro Variant in den Variant-Inis
+     (heltec_t096_*, Heltec_t1_*, WioTrackerL1_*). Audit-Rerun
+     zeigt ob Boards wieder bauen.
+  3) Phase 3 (optional): zusaetzlich Help-in-LittleFS (Wunschliste 65
+     Phase 5) fuer ESP32-Boards mit Datenpartition. Damit volle
+     Funktionalitaet plus reduzierter Help-Footprint.
+
+User-Target: Bei T096 ist Phase 5 (Help-in-LittleFS) Vorrang, weil
+volle Funktionalitaet erhalten bleiben soll. Bei kleineren Boards
+zusaetzlich Compile-Flags zur Reduzierung.
+
+Quelle: User-Wunsch 2026-06-14 nach Audit-Diskussion + LittleFS-
+  Help-Klaerung.
+
 
 
 
