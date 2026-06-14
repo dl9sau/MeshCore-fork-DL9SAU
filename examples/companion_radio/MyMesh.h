@@ -479,6 +479,23 @@ public:
   }
   uint32_t getLastSessionUptimeMs() const { return _last_session_uptime_ms; }
 
+  // Wunschliste 53 Phase 7 (2026-06-14): Boot-Log Public-API.
+  // /boot_log.txt in LittleFS, Ring-Buffer 10 Eintraege, plain-text.
+  // Eintrags-Schema: "<unixsec> <cause>[ uptime=<dur>]\n"
+  //   - unixsec aus rtc_clock zur Schreibzeit (kommt aus rtc_persist
+  //     +- 10min beim Boot, exakt nach App-Sync)
+  //   - cause aus _last_reset_reason (COLD/WARM/WDT/PANIC/...)
+  //   - uptime aus _last_session_uptime_ms (rtc_persist piggyback);
+  //     bei COLD ohne, weil Power-Cycle das uptime-tracking resettet.
+  // CLI: 'log read|clear', 'log dest <usb|channel> <on|off>',
+  //      'log' allein -> Status.
+  void          bootLogAppend();         // Boot-Time: Eintrag fuer
+                                         //  jetzigen Boot
+  void          bootLogWritePreReboot(); // Vor reboot-CLI: WARM(cli)
+                                         //  mit exakter Uptime
+  void          bootLogPrint();          // CLI 'log read'
+  void          bootLogClear();          // CLI 'log clear'
+
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {
     sensors.setSettingValue("gps", _prefs.gps_enabled ? "1" : "0");
@@ -1220,6 +1237,12 @@ private:
   // authoritativ -- User-Spec 2026-06-14).
   void          saveRtcPersist(uint32_t rtc, bool force = false);
   uint32_t      loadRtcPersist();
+  // Wunschliste 53 Phase 7 (2026-06-14): private Helper fuer Boot-Log
+  // (Lade-Routine fuer Ring-Buffer-Read in append/print). Public-Methoden
+  // bootLogAppend / bootLogWritePreReboot / bootLogPrint / bootLogClear
+  // im public-Block (siehe oben bei savePrefs).
+  int           bootLogLoad(char dst[][96], int max_entries);
+  static const int BOOT_LOG_MAX_ENTRIES = 10;
   int8_t        _last_advert_scoped;     // 1=scoped (transport_codes), 0=unscoped
   int8_t        _last_advert_route_direct; // 1=DIRECT-typed (sendZeroHop), 0=FLOOD-typed
   uint16_t      _rx_advert_total[5];     // ALLE empfangenen Adverts (egal Hop-Count) pro Node-Typ

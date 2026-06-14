@@ -3775,10 +3775,12 @@ Quelle: User-Wunsch 2026-06-09 ('vollstaendiges commandset'
 53. Hardware-Watchdog ESP32 + NRF52 -- Hang-Recovery
 --------------------------------------------------------------------------------
 
-Status: Phase 1 (ESP32 loopTask, 60s) IMPLEMENTIERT 2026-06-14
-        (commits 9ccf07ae + b8e6fbe3). Vor Deployment im Feld
-        Stabilitaetstests noetig (BLE-Stress, GPS-Cycling).
-        Phase 2 NRF52, Phase 3 Multi-Task ESP32 = TODO.
+Status: Phase 1+2 ESP32 TWDT + NRF52 nrfx_wdt ERLEDIGT 2026-06-14
+        (commits 9ccf07ae b8e6fbe3 3907a338 + Watchdog-Refactor +
+        Boot-Log). Vor Deployment im Feld Stabilitaetstests noetig
+        (BLE-Stress, GPS-Cycling). Phase 3 Multi-Task ESP32 = TODO.
+
+Phase 7 (Boot-Log + log CLI) zusaetzlich ERLEDIGT 2026-06-14.
 
 Aktueller Stand:
   - Arduino-ESP32-Framework: Task-Watchdog (TWDT) fuer loopTask
@@ -3804,11 +3806,15 @@ Plan:
     API-Aware: ESP_IDF_VERSION_MAJOR >= 5 -> reconfigure(config_t*),
                sonst -> init(timeout, panic) [aktuell IDF 4.4.x].
 
-  Phase 2 -- NRF52 Hardware-Watchdog [TODO]
+  Phase 2 -- NRF52 Hardware-Watchdog [ERLEDIGT 2026-06-14]
     User-Klarstellung 2026-06-14: BLE-Adv-Watchdog deckt nur BLE-Hangs,
     nicht totale loop()-Hangs. Echter Geraete-Watchdog noetig.
-    API: nrfx_wdt (HAL-Layer ist im Adafruit-Fork drin -- siehe
-         cores/nRF5/nordic/nrfx/drivers/include/nrfx_wdt.h).
+    API: nrf_wdt HAL header-only (statt nrfx_wdt driver, der wuerde
+         '#include <nrfx_wdt.c>'-hack brauchen wie bei Meshtastic).
+    Realisiert: PAUSE_SLEEP_HALT-Behavior, 90s Timeout, CRV in
+    32.768kHz-Ticks. RESETREAS-Bitmask Mapping in main.cpp readReset-
+    Reason: DOG -> WDT, LOCKUP -> PANIC, SREQ/RESETPIN -> WARM, sonst
+    COLD. Wert wird vom RESETREAS-Register gelesen + dann W1C-cleared.
     Plan:
       setup() (NRF52-Zweig):
         nrf_wdt_behaviour_set(NRF_WDT, NRF_WDT_BEHAVIOUR_PAUSE_SLEEP);
@@ -3852,6 +3858,41 @@ Plan:
        - LoRa-Driver-Task (Radio-IRQ-Handling)
     Risiko: jeder zusaetzliche Task ist eine neue Quelle fuer
     False-Positive-Reboots -- daher erst Phase 1 stabilisieren.
+
+  Phase 7 -- Persistenter Boot-Log [ERLEDIGT 2026-06-14]
+    User-Wunsch 2026-06-14: nicht nur "letzter Reset" in stats-core,
+    sondern dauerhaftes Logbuch mit Uhrzeit + Reset-Reason + vorheriger
+    Uptime. Diagnose ohne App-Debug-Log nach langer Feld-Zeit.
+
+    /boot_log.txt in LittleFS, Ring-Buffer 10 Eintraege, plain-text.
+    Schema: "<unixsec> <cause> uptime=<dur>"
+      Cause-Mapping: COLD WARM WARM(cli) WDT PANIC BROWNOUT UNKNOWN
+      unixsec aus rtc_clock (kommt aus rtc_persist +-10min)
+      uptime nur wenn rtc_persist Piggyback vorhanden (Phase 7
+        wird auch rtc_persist um +4 Bytes uptime_ms erweitert,
+        alt-kompatibel)
+
+    Pre-Reboot-Hook im 'reboot' CLI:
+      bootLogWritePreReboot() schreibt WARM(cli)-Eintrag mit
+      EXAKTER Uptime in Flash BEVOR der Reboot triggert. Beim
+      naechsten Boot erkennt bootLogAppend() den Marker innerhalb
+      30s + skipt eigenen Eintrag -> kein Duplikat.
+
+    CLI: unified 'log'-Befehl (ersetzt altes 'logging'):
+      log                  Status (usb/channel/boot-log-count)
+      log read             10 Eintraege ausgeben
+      log clear            Boot-Log loeschen (RESERVED WORD,
+                            volles Wort, KEIN prefix-abbrev)
+      log dest usb on|off       Console-Output redirect
+      log dest channel on|off   $companion-Channel redirect
+    Sub-Befehle akzeptieren Prefix-Match (z.B. 'log de chan on')
+    AUSSER 'clear' (reserved damit kein versehentliches 'log c').
+
+    Beim Boot zusaetzlich Push '[boot] <entry>' in $companion-
+    Channel damit User die Boot-Reason direkt im Chat sieht ohne
+    'log read' triggern zu muessen.
+
+    Size-Impact: ~2.5KB Flash beide Plattformen (Stage 7 allein).
 
   Phase 4 -- Timeout-Tuning [aktiv mit jeder Phase]
     Tradeoff zwischen False-Positives (zu kurz = Reboot bei legitimen

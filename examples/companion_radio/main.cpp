@@ -62,7 +62,7 @@ static WdtResetKind _wdt_last_reset    = WDT_RESET_UNKNOWN;
 static WdtState     _wdt_state         = WDT_STATE_OFF;
 static uint32_t     _wdt_skip_until_ms = 0;
 
-static WdtResetKind readResetReason() {
+static WdtResetKind wdtMapResetReason() {
 #if defined(ESP32)
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:  return WDT_RESET_COLD;
@@ -472,8 +472,12 @@ void setup() {
 
   // Wunschliste 53 (2026-06-14): Reset-Reason auslesen + an MyMesh
   // weitergeben fuer stats-core 'last_reset'-Anzeige + Boot-Log.
-  _wdt_last_reset = readResetReason();
+  _wdt_last_reset = wdtMapResetReason();
   the_mesh.setLastResetReason((uint8_t)_wdt_last_reset);
+  // Persistenten Boot-Log um neuen Eintrag erweitern (Ring 10, oldest
+  // out). Pusht zugleich '[boot] ...' an $companion-Channel damit User
+  // den Reboot-Grund direkt im Chat sieht.
+  the_mesh.bootLogAppend();
   // WDT-State initialisieren (kein activate hier -- erst am Ende vom
   // ersten loop(), damit BLE/LoRa-/Sensor-Init mit ihren langlaufenden
   // Stack-Inits den Pet-Cycle nicht verzoegern).

@@ -603,6 +603,147 @@ uint32_t MyMesh::loadRtcPersist() {
   return a;
 }
 
+// Wunschliste 53 Phase 7 (2026-06-14): Boot-Log /boot_log.txt -- Ring
+// 10 Eintraege, plain-text, neuester zuerst. Beim Boot bootLogAppend()
+// in begin() nachdem Reset-Reason + RTC-Persist geladen sind.
+// Format pro Zeile: "<unixsec> <cause>[ uptime=<dur>]\n", max 95 Bytes.
+
+int MyMesh::bootLogLoad(char dst[][96], int max_entries) {
+  File f = _store->openRead("/boot_log.txt");
+  if (!f) return 0;
+  int count = 0;
+  while (count < max_entries && f.available()) {
+    int n = 0;
+    while (n < 95 && f.available()) {
+      int c = f.read();
+      if (c < 0 || c == '\n') break;
+      if (c != '\r') dst[count][n++] = (char)c;
+    }
+    dst[count][n] = 0;
+    if (n > 0) count++;
+  }
+  f.close();
+  return count;
+}
+
+static void formatBootLogDuration(uint32_t ms, char* out, size_t out_sz) {
+  uint32_t s = ms / 1000;
+  uint32_t d = s / 86400;
+  uint32_t h = (s % 86400) / 3600;
+  uint32_t m = (s % 3600) / 60;
+  if (d > 0)      snprintf(out, out_sz, "%lud%02luh%02lum", d, h, m);
+  else if (h > 0) snprintf(out, out_sz, "%luh%02lum", h, m);
+  else            snprintf(out, out_sz, "%lum", m);
+}
+
+void MyMesh::bootLogAppend() {
+  // Skip wenn letzter Eintrag ein juenger "WARM(cli)"-Pre-Reboot war:
+  // bootLogWritePreReboot() hat ihn schon korrekt geschrieben mit
+  // exakter Uptime; ein 2. Eintrag waere doppelt.
+  char existing[BOOT_LOG_MAX_ENTRIES][96];
+  int existing_n = bootLogLoad(existing, BOOT_LOG_MAX_ENTRIES);
+  uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
+  if (_last_reset_reason == 2 /* WARM */ && existing_n > 0) {
+    uint32_t e_secs = (uint32_t)strtoul(existing[0], NULL, 10);
+    if (e_secs > 0 && now_secs > 0 && now_secs - e_secs < 30
+        && strstr(existing[0], "WARM(cli)")) {
+      return;   // schon geloggt im Pre-Reboot-Schritt
+    }
+  }
+  // Neuen Eintrag bauen.
+  char entry[96];
+  if (_last_reset_reason == 1 /* COLD */
+      || _last_session_uptime_ms == 0) {
+    snprintf(entry, sizeof(entry), "%lu %s",
+             (unsigned long)now_secs, getLastResetReasonStr());
+  } else {
+    char dur[20];
+    formatBootLogDuration(_last_session_uptime_ms, dur, sizeof(dur));
+    snprintf(entry, sizeof(entry), "%lu %s uptime=%s",
+             (unsigned long)now_secs, getLastResetReasonStr(), dur);
+  }
+  // Schreiben: neuer Eintrag zuerst, dann max BOOT_LOG_MAX_ENTRIES-1
+  // existing (aelteste fliegt raus).
+  File w = _store->openWriteFile("/boot_log.txt");
+  if (!w) return;
+  w.write((const uint8_t*)entry, strlen(entry));
+  w.write((const uint8_t*)"\n", 1);
+  int keep = (existing_n < BOOT_LOG_MAX_ENTRIES - 1)
+             ? existing_n : BOOT_LOG_MAX_ENTRIES - 1;
+  for (int i = 0; i < keep; i++) {
+    w.write((const uint8_t*)existing[i], strlen(existing[i]));
+    w.write((const uint8_t*)"\n", 1);
+  }
+  w.close();
+  // User-Wunsch 2026-06-14: beim Boot die neueste Info auch in den
+  // $companion-Channel pushen -- damit User die Boot-Reason ohne
+  // 'log read' direkt im Chat sieht.
+  char msg[160];
+  snprintf(msg, sizeof(msg), "[boot] %s", entry);
+  pushCompanionMessage(msg);
+}
+
+void MyMesh::bootLogWritePreReboot() {
+  uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
+  uint32_t up_ms    = millis();
+  char dur[20];
+  formatBootLogDuration(up_ms, dur, sizeof(dur));
+  char entry[96];
+  snprintf(entry, sizeof(entry), "%lu WARM(cli) uptime=%s",
+           (unsigned long)now_secs, dur);
+  // Prepend wie bootLogAppend, aber ohne Dedup-Check und ohne Channel-
+  // Push (der Reboot kommt sowieso gleich).
+  char existing[BOOT_LOG_MAX_ENTRIES][96];
+  int existing_n = bootLogLoad(existing, BOOT_LOG_MAX_ENTRIES);
+  File w = _store->openWriteFile("/boot_log.txt");
+  if (!w) return;
+  w.write((const uint8_t*)entry, strlen(entry));
+  w.write((const uint8_t*)"\n", 1);
+  int keep = (existing_n < BOOT_LOG_MAX_ENTRIES - 1)
+             ? existing_n : BOOT_LOG_MAX_ENTRIES - 1;
+  for (int i = 0; i < keep; i++) {
+    w.write((const uint8_t*)existing[i], strlen(existing[i]));
+    w.write((const uint8_t*)"\n", 1);
+  }
+  w.close();
+}
+
+void MyMesh::bootLogPrint() {
+  char entries[BOOT_LOG_MAX_ENTRIES][96];
+  int n = bootLogLoad(entries, BOOT_LOG_MAX_ENTRIES);
+  if (n == 0) {
+    pushCompanionMessage("log: (leer)");
+    return;
+  }
+  // Sammle bis 145 Byte pro Companion-Message (siehe Memory-Note
+  // feedback_companion_msg_145_byte_limit), entstehen ggf. mehrere
+  // Bloecke. Eintraege sind ca. 30-60 chars -> 2-3 Eintraege/Block.
+  char block[160];
+  int n_block = 0;
+  block[0] = 0;
+  for (int i = 0; i < n; i++) {
+    int elen = (int)strlen(entries[i]);
+    // +1 fuer "\n", +0 fuer Block-Header. Wenn Eintrag nicht reinpasst:
+    // erst flush, dann neuer Block.
+    if (n_block + elen + 2 >= 140) {
+      pushCompanionMessage(block);
+      n_block = 0;
+      block[0] = 0;
+    }
+    int w = snprintf(block + n_block, sizeof(block) - n_block,
+                     "%s%s",
+                     n_block == 0 ? "" : "\n",
+                     entries[i]);
+    if (w > 0) n_block += w;
+  }
+  if (n_block > 0) pushCompanionMessage(block);
+}
+
+void MyMesh::bootLogClear() {
+  _store->removeFile("/boot_log.txt");
+  pushCompanionMessage("OK - log geloescht");
+}
+
 void MyMesh::clearBucket(MsgBucket b) {
   Frame* arr = NULL;
   int cap = 0;
@@ -10791,7 +10932,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     {"chatname", false}, {"reboot", true}, {"duty", false}, {"scope", false},
     {"prefs", false}, {"neighbors", false}, {"tempradio", false},
     {"set", false}, {"get", false}, {"clock", false}, {"date", false}, {"time", false},
-    {"messages", false}, {"logging", false}, {"unscoped-channelmessages", false},
+    {"messages", false}, {"log", false}, {"unscoped-channelmessages", false},
     {"clear", true},
     {"contact", false}, {"backup", false}, {"save", false}, {"discover", false},
     {"ch.hops", false},
@@ -11335,22 +11476,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
-      if (topic_prefix_match(topic, "logging")) {
+      if (topic_prefix_match(topic, "log")
+          || topic_prefix_match(topic, "logging")) {
         pushCompanionMessage(
-          "logging: Master-Switches fuer Debug-Output-Senken.\n"
-          "  logging                  zeigt Status"
+          "log: Persistenter Boot-Log + Debug-Output-Senken.\n"
+          "  log                  Status"
         );
         pushCompanionMessage(
-          "  logging usb on|off       Serial/USB-Output\n"
+          "  log read             10 letzte Boot-Eintraege\n"
+          "  log clear            Boot-Log loeschen (volles Wort)"
+        );
+        pushCompanionMessage(
+          "  log dest usb on|off       Serial/USB-Output\n"
           "  Default OFF (safe fuer USB-Companion-Builds)."
         );
         pushCompanionMessage(
-          "  logging channel on|off   $companion-Channel-Output\n"
+          "  log dest channel on|off   $companion-Channel\n"
           "  Default ON. Trace-Kategorien werden dort gezeigt."
         );
         pushCompanionMessage(
-          "App-Debug-Frame bleibt von 'usb off' unbeeinflusst --\n"
-          "nur die Serial-Console wird stumm."
+          "App-Debug-Frame (PUSH_CODE_LOG_DATA) bleibt von\n"
+          "'log dest usb off' unbeeinflusst -- nur Console schweigt."
+        );
+        pushCompanionMessage(
+          "Boot-Log-Eintrag: '<unixsec> <cause> uptime=<dur>'\n"
+          "Cause: COLD WARM WDT PANIC BROWNOUT.\n"
+          "Push bei Boot: neueste Info in $companion-Channel."
         );
         return;
       }
@@ -14199,54 +14350,93 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
-  if (starts_with_word(cmd, "logging")) {
+  // Wunschliste 53 Phase 7 (2026-06-14): unified 'log'-Command.
+  // Loest altes 'logging' ab + integriert Boot-Log.
+  //   log                  Status (usb/channel/boot-log-count)
+  //   log read | r ...     Boot-Log Eintraege ausgeben
+  //   log clear            Boot-Log loeschen (reserved word, no abbrev)
+  //   log dest usb on|off       redirect Console (default off)
+  //   log dest channel on|off   redirect Channel  (default on)
+  // Sub-Befehle akzeptieren Prefix-Abkuerzungen (topic_prefix_match)
+  // ausser 'clear' (reserved). Abkuerzung-Beispiel: 'log de chan on'.
+  if (starts_with_word(cmd, "log")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
-    bool usb_on  =  (_prefs.log_flags & 0x01) != 0;  // bit=on  -> on
-    bool chan_on = !(_prefs.log_flags & 0x02);       // bit=off -> on
+    bool usb_on  =  (_prefs.log_flags & 0x01) != 0;
+    bool chan_on = !(_prefs.log_flags & 0x02);
     if (!arg || *arg == 0) {
+      char tmp_entries[1][96];
+      int cnt = bootLogLoad(tmp_entries, 1);
+      // Channel-Count via Read-all -- aber wir wollen die Gesamtzahl,
+      // nicht nur eins. Lesen erneut bis MAX.
+      char all[BOOT_LOG_MAX_ENTRIES][96];
+      cnt = bootLogLoad(all, BOOT_LOG_MAX_ENTRIES);
       char block[200];
       snprintf(block, sizeof(block),
-               "logging:\n"
+               "log:\n"
                "  usb     = %s   (default: off)\n"
-               "  channel = %s   (default: on)",
+               "  channel = %s   (default: on)\n"
+               "  boot-log= %d Eintraege",
                usb_on  ? "on " : "off",
-               chan_on ? "on " : "off");
+               chan_on ? "on " : "off",
+               cnt);
       pushCompanionMessage(block);
       return;
     }
-    // Sub-Befehl extrahieren
-    char sub[16];
-    size_t si = 0;
-    while (*arg && *arg != ' ' && si + 1 < sizeof(sub)) sub[si++] = *arg++;
-    sub[si] = 0;
-    while (*arg == ' ' || *arg == '\t') arg++;
-    int bit = -1;
-    bool inverted = false;        // true: bit=1 heisst off (channel-Stil)
-    if (strcmp(sub, "usb") == 0)     { bit = 0; inverted = false; }
-    else if (strcmp(sub, "channel") == 0) { bit = 1; inverted = true; }
-    else {
-      pushCompanionMessage("Usage: logging <usb|channel> <on|off>");
+    // 'clear' MUSS ausgeschrieben sein (reserved word -- versehentliches
+    // 'log c' (-> clear) waere katastrophal, wir wollen explizit).
+    if (strcmp(arg, "clear") == 0) {
+      bootLogClear();
       return;
     }
-    int m = match_on_off(arg);
-    if (m < 0) {
-      pushCompanionMessage("on/off erwartet.");
+    // Andere Sub-Befehle via Prefix-Match.
+    if (topic_prefix_match(arg, "read")) {
+      bootLogPrint();
       return;
     }
-    // bit-setzen-bei = (on XOR inverted): wenn nicht-invertiert
-    // (USB, bit=on), setze bei m==on. Wenn invertiert (channel, bit=off),
-    // setze bei m==off.
-    bool set_bit = (m == 1) ^ inverted;
-    if (set_bit) {
-      _prefs.log_flags |=  (uint8_t)(1 << bit);
-    } else {
-      _prefs.log_flags &= ~(uint8_t)(1 << bit);
+    if (topic_prefix_match(arg, "dest")) {
+      // Skip 'dest' + whitespace.
+      while (*arg && *arg != ' ' && *arg != '\t') arg++;
+      while (*arg == ' ' || *arg == '\t') arg++;
+      if (!*arg) {
+        pushCompanionMessage(
+          "Usage: log dest <usb|channel> <on|off>");
+        return;
+      }
+      // Sub-which extrahieren.
+      char which[16];
+      size_t wi = 0;
+      while (*arg && *arg != ' ' && *arg != '\t' && wi + 1 < sizeof(which))
+        which[wi++] = *arg++;
+      which[wi] = 0;
+      while (*arg == ' ' || *arg == '\t') arg++;
+      int bit = -1;
+      bool inverted = false;
+      if (topic_prefix_match(which, "usb"))          { bit = 0; inverted = false; }
+      else if (topic_prefix_match(which, "channel")) { bit = 1; inverted = true; }
+      else {
+        pushCompanionMessage(
+          "Usage: log dest <usb|channel> <on|off>");
+        return;
+      }
+      int m = match_on_off(arg);
+      if (m < 0) {
+        pushCompanionMessage("on/off erwartet.");
+        return;
+      }
+      bool set_bit = (m == 1) ^ inverted;
+      if (set_bit) _prefs.log_flags |=  (uint8_t)(1 << bit);
+      else         _prefs.log_flags &= ~(uint8_t)(1 << bit);
+      savePrefs();
+      char r[80];
+      snprintf(r, sizeof(r), "OK - log dest %s = %s.",
+               bit == 0 ? "usb" : "channel",
+               m ? "on" : "off");
+      pushCompanionMessage(r);
+      return;
     }
-    savePrefs();
-    char r[80];
-    snprintf(r, sizeof(r), "OK - logging %s = %s.", sub, m ? "on" : "off");
-    pushCompanionMessage(r);
+    pushCompanionMessage(
+      "Usage: log [read|clear|dest <usb|channel> <on|off>]");
     return;
   }
 
@@ -18865,6 +19055,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // ---------- reboot ----------------------------------------------------
   if (starts_with_word(cmd, "reboot")) {
     pushCompanionMessage("Rebooting now..");
+    // Wunschliste 53 Phase 7 (2026-06-14): Pre-Reboot Boot-Log-Entry
+    // mit EXAKTER Uptime + WARM(cli)-Marker. Beim naechsten Boot
+    // erkennt bootLogAppend den Marker innerhalb 30s und vermeidet
+    // doppelten Eintrag. Wir schreiben hier sofort, damit der Eintrag
+    // im Flash sitzt bevor der naechste Schritt (board.reboot()) ihn
+    // potentiell unterbrechen koennte.
+    bootLogWritePreReboot();
     // DEFERRED reboot: blockierendes delay() hier wuerde die loop()
     // pausieren — Push-Frame-Auslieferung (PUSH_CODE_MSG_WAITING-Tickle
     // + App-CMD_SYNC_NEXT_MSG-Round-Trip) UND der OK-Frame zur App
@@ -18962,7 +19159,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                   ph, pm);
       }
       n += snprintf(block+n, sizeof(block)-n,
-                    "  lastCause = %s\n", getLastResetReasonStr());
+                    "  lastReset = %s\n", getLastResetReasonStr());
     }
     n += snprintf(block+n, sizeof(block)-n,
                   "  trace     = 0x%04X (%s)",
