@@ -11386,7 +11386,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Cycle-Mode (Default): 10min Boot-Grace,\n"
           "  5min Hot-Start nach Disconnect, dann\n"
-          "  180s sleep + 30s wait Listening-Window.");
+          "  40s SLEEP + 20s WAIT Listening-Window.\n"
+          "  Recency-Bonus: ersten 10min nach Disconnect\n"
+          "    SLEEP nur 20s (schnellerer App-Reconnect).");
         pushCompanionMessage(
           "Wake-on-LoRa: eingehende DM oder admin-cmd\n"
           "  weckt Bluetooth fuer 5min HOT_START.\n"
