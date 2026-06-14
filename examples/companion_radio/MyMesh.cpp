@@ -643,16 +643,17 @@ void MyMesh::bootLogAppend() {
   char existing[BOOT_LOG_MAX_ENTRIES][96];
   int existing_n = bootLogLoad(existing, BOOT_LOG_MAX_ENTRIES);
   uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
-  // Dedup-Check (Stage 7 + Stage 9): wenn unser SW-Reset eine Vor-
-  // Reboot-Sequenz hatte (bootLogWritePreReboot() vor board.reboot()),
-  // sehen wir hier _last_reset_reason == WARM und einen jungen Eintrag.
-  // Cause-String egal -- WARM(cli), LORA-DEAD oder zukuenftige Pre-
-  // Reboot-Marker werden alle erkannt.
-  if (_last_reset_reason == 2 /* WARM */ && existing_n > 0) {
-    uint32_t e_secs = (uint32_t)strtoul(existing[0], NULL, 10);
-    if (e_secs > 0 && now_secs > 0 && now_secs - e_secs < 30) {
-      return;   // schon geloggt im Pre-Reboot-Schritt
-    }
+  // Dedup (Stage 7 + 9, Bug-Fix 2026-06-14): Pre-Reboot-Eintraege
+  // haben IMMER eine Klammer im Cause-Token (WARM(cli), LORA(dead),
+  // zukuenftige Marker analog). Boot-Side-Causes sind primitive
+  // Uppercase-Worte ohne Klammer (COLD WARM WDT PANIC BROWNOUT
+  // UNKNOWN). Timestamp-Vergleich war buggy weil rtc_persist in
+  // kurzen Sessions (< MIN_WRITE_INTERVAL_MS) nicht beschrieben
+  // wurde -> Boot-Side-Timestamp war ALT, Pre-Reboot-Timestamp neu
+  // -> Diff negativ als uint32 -> Dedup zog nicht.
+  if (_last_reset_reason == 2 /* WARM */ && existing_n > 0
+      && strchr(existing[0], '(') != NULL) {
+    return;   // Pre-Reboot-Marker erkannt
   }
   // Neuen Eintrag bauen.
   char entry[96];
@@ -690,6 +691,30 @@ void MyMesh::bootLogAppend() {
 void MyMesh::bootLogWritePreReboot(const char* cause) {
   uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
   uint32_t up_ms    = millis();
+  // User-Beobachtung 2026-06-14: rtc_persist wird in kurzen Sessions
+  // (<10min Min-Write-Interval) NIE geschrieben, daher rtc_clock beim
+  // naechsten Boot zeigt altes Timestamp + piggyback-uptime aus vor-
+  // vorletzter Session. Pre-Reboot ist explizite User-Aktion, da ist
+  // Force-Write gerechtfertigt -- jetzt-Timestamp + jetzt-Uptime
+  // landen im rtc_persist.txt, naechster Boot zeigt korrekte Werte.
+  // saveRtcPersist(force=true) bypasst Monotonic-Check + MIN_DELTA,
+  // aber NICHT MIN_WRITE_INTERVAL_MS. Hier sind wir ueber den Boot-
+  // Delay-Schutz hinaus (User-Befehl) und wollen den write garantieren
+  // -> direkter File-Write statt der saveRtcPersist-Routine.
+  if (now_secs >= 1500000000UL
+      && millis() >= RTC_PERSIST_BOOT_DELAY_MS) {
+    File f = _store->openWriteFile("/rtc_persist");
+    if (f) {
+      uint8_t magic = 0xAB;
+      f.write(&magic, 1);
+      f.write((const uint8_t*)&now_secs, 4);
+      f.write((const uint8_t*)&now_secs, 4);
+      f.write((const uint8_t*)&up_ms, 4);
+      f.close();
+      _rtc_persist_last_saved = now_secs;
+      _rtc_persist_last_write_ms = millis();
+    }
+  }
   char dur[20];
   formatBootLogDuration(up_ms, dur, sizeof(dur));
   char entry[96];
@@ -719,17 +744,41 @@ void MyMesh::bootLogPrint() {
     pushCompanionMessage("log: (leer)");
     return;
   }
-  // Sammle bis 145 Byte pro Companion-Message (siehe Memory-Note
-  // feedback_companion_msg_145_byte_limit), entstehen ggf. mehrere
-  // Bloecke. Eintraege sind ca. 30-60 chars -> 2-3 Eintraege/Block.
+  // User-Wunsch 2026-06-14: Datum-Uhrzeit statt Unix-Timestamp im
+  // Output, mit Local-TZ (Pref tz_mode/tz_offset_min). Speicher-Format
+  // bleibt Unix (kompakt), Display konvertiert.
+  // 145-Byte-Block-Limit pro pushCompanionMessage (siehe Memory-Note
+  // feedback_companion_msg_145_byte_limit).
   char block[160];
   int n_block = 0;
   block[0] = 0;
   for (int i = 0; i < n; i++) {
-    int elen = (int)strlen(entries[i]);
-    // +1 fuer "\n", +0 fuer Block-Header. Wenn Eintrag nicht reinpasst:
-    // erst flush, dann neuer Block.
-    if (n_block + elen + 2 >= 140) {
+    // Parse Unix-Timestamp am Anfang der Zeile.
+    uint32_t e_secs = (uint32_t)strtoul(entries[i], NULL, 10);
+    const char* rest = entries[i];
+    while (*rest && *rest != ' ') rest++;
+    while (*rest == ' ') rest++;
+    // Format-Konversion
+    char line[120];
+    if (e_secs >= 1500000000UL) {
+      time_t lt = (time_t)(e_secs + (uint32_t)localTzOffsetSecs(e_secs));
+      struct tm tm_loc;
+      gmtime_r(&lt, &tm_loc);
+      snprintf(line, sizeof(line),
+               "%04d-%02d-%02d %02d:%02d %s",
+               tm_loc.tm_year + 1900,
+               tm_loc.tm_mon + 1,
+               tm_loc.tm_mday,
+               tm_loc.tm_hour,
+               tm_loc.tm_min,
+               rest);
+    } else {
+      // RTC war ungueltig beim Schreiben (Pre-RTC-Sync Boot) --
+      // Unix-Timestamp roh anzeigen + Marker.
+      snprintf(line, sizeof(line), "(rtc?) %s", rest);
+    }
+    int llen = (int)strlen(line);
+    if (n_block + llen + 2 >= 140) {
       pushCompanionMessage(block);
       n_block = 0;
       block[0] = 0;
@@ -737,7 +786,7 @@ void MyMesh::bootLogPrint() {
     int w = snprintf(block + n_block, sizeof(block) - n_block,
                      "%s%s",
                      n_block == 0 ? "" : "\n",
-                     entries[i]);
+                     line);
     if (w > 0) n_block += w;
   }
   if (n_block > 0) pushCompanionMessage(block);
@@ -7472,7 +7521,12 @@ void MyMesh::loop() {
                      (unsigned)RADIO_HEALTH_MAX_STRIKES);
         if (_radio_dead_strikes >= RADIO_HEALTH_MAX_STRIKES) {
           // Marker im Boot-Log + Reboot.
-          bootLogWritePreReboot("LORA-DEAD");
+          // Marker-Konvention 2026-06-14: Pre-Reboot-Causes haben
+          // Klammer "(...)" damit Boot-Side-Dedup sie via strchr('(')
+          // erkennt. Sonst koennten ungeklammerte Causes (z.B.
+          // "LORA-DEAD") faelschlich als Boot-Side-Cause interpretiert
+          // werden.
+          bootLogWritePreReboot("LORA(dead)");
           board.reboot();
           // returns not.
         }
