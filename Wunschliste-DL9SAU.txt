@@ -4198,6 +4198,22 @@ upstream repeater stats lesen (simple_repeater + meshcore.io/cli_commands
 welche DL9SAU-Statistik-Daten ggf. noch in upstream-Anzeige fehlen
 und ergaenzen damit unsere Firmware nichts vermissen laesst.
 
+Phase 1 IMPLEMENTIERT 2026-06-14: Dispatcher-Counter
+n_lbt_defer_episodes / n_lbt_defer_total_ms / n_lbt_force_send +
+Anzeige in 'stats-radio'. RX-Errors waren bereits vollstaendig drin.
+
+Phase 2 OFFEN (App-Anzeige):
+  Aktuell sind die LBT-Counter NUR im lokalen CLI sichtbar -- nicht
+  in der RepeaterStats Wire-Struct die zur App geht. Erweiterung
+  waere ein wire-protocol Bruch. Saubere Loesung: neuer Response-Code
+  RESP_CODE_REPEATER_STATS_V2 mit erweiterter Struct, App fragt je
+  nach Capability. Alter RESP_CODE bleibt 1:1 zum upstream simple_
+  repeater (User-Spec 'wire 1:1 kompatibel' in MyMesh.h:147).
+  Trigger fuer Phase 2: wenn App-Entwickler die LBT-Anzeige machen
+  will, oder wenn wir noch weitere DL9SAU-spezifische Stats (Wunschliste
+  61 Voltage/Current, eigene Counter) ohnehin uebermitteln muessen.
+  Dann mit Versioning sauber.
+
 Use-Case:
   Diagnose der RX-Empfangsqualitaet an einem Repeater-Standort. Drei
   konkrete Counter den der User sehen will:
