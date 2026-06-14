@@ -3819,8 +3819,11 @@ Plan:
         nrf_wdt_reload_request_set(NRF_WDT, NRF_WDT_RR0);   // pet
     Tuecken/Constraints:
       a) Hardware-WDT auf NRF52 ist NICHT stoppbar -- einmal gestartet,
-         nur Reset stoppt ihn. -> Timeout muss laengste legitime
-         Blockier-Phase decken (discover regions = 60s, sollte passen).
+         nur Reset stoppt ihn. -> Timeout muss laengste loop()-
+         Blockier-Phase decken. NB: 'discover regions' BLOCKIERT NICHT
+         60s -- ist komplett async (Timer + RX-Callback), Main-Thread
+         rotiert weiter. Der einzige echte Bump-Grund ist Light-Sleep
+         (siehe 58 Phase C).
       b) Sleep-Kompatibilitaet: 2 Behavior-Modes verfuegbar
          - NRF_WDT_BEHAVIOUR_RUN_SLEEP: zaehlt auch im System-ON-Sleep
            (WFE/WFI). Bluefruit/SoftDevice idle-WFE wuerde dann
@@ -3853,7 +3856,14 @@ Plan:
   Phase 4 -- Timeout-Tuning [aktiv mit jeder Phase]
     Tradeoff zwischen False-Positives (zu kurz = Reboot bei legitimen
     langen Operationen) und Recovery-Speed (zu lang = User wartet ewig).
-    Aktuell: 60s -- LoRa-TX max ~10s + flash-write + Margin.
+    Aktuell: 60s -- aber: alle laenger laufenden Companion-Ops sind
+    ASYNC (discover regions, advert chains, LoRa-TX queue). Der
+    Main-Thread rotiert immer ~1000/s mit delay(1)-ticks und petet
+    den WDT. Echte synchrone Blocker waeren z.B. langlaufende Flash-
+    Writes (<100ms) oder pathologische Faelle (Memory-Corruption ->
+    infinite loop -> Reboot ist gewuenscht).
+    -> 60s ist konservativ + sicher. Verkuerzung auf 30s denkbar
+       nach Stabilitaetstests.
 
 Interaction mit Wunschliste 58 (Power-Management):
 
