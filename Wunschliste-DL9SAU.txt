@@ -4522,6 +4522,67 @@ CPU-Clock CLI (User-Wunsch 2026-06-13):
   Timing pruefen.
 
 
+--------------------------------------------------------------------------------
+64. Display 2-Stufen-Sleep / Echte Power-Off (CLOSED)
+--------------------------------------------------------------------------------
+
+Status: CLOSED 2026-06-14 -- aktuelle Implementation reicht. Hier
+        nur dokumentiert falls man spaeter doch tiefer gehen will.
+
+User-Diskussion 2026-06-14: '2-Stufen-Sleep' angedacht (sleep -> 10min
+-> echtes turnOff) plus Frage ob turnOff einen Re-Init verlangt. Bei
+Analyse der Driver-Realitaet stellte sich heraus:
+
+  - LGFXDisplay (TFT, Heltec Wireless Tracker):
+      turnOff()    -> display->sleep()    (LovyanGFX Sleep-IN)
+      turnOn()     -> display->wakeup()   (Sleep-OUT, ~5ms)
+      Beide Stages waeren auf dieser Hardware identisch.
+  - SH1106Display (OLED):
+      turnOff()    -> SH110X_DISPLAYOFF (0xAE)
+      turnOn()     -> SH110X_DISPLAYON  (0xAF)
+      Auch ein-stufig.
+  - Re-Init beim Wake: NICHT noetig, schnelle command-level Wake.
+
+Aktuelle Pref-Werte 'set display off|on|on-at-new-messages' nutzen
+diese single-stage Logik. Strom-Footprint im 'off':
+  TFT-Controller im Sleep:   ~1-3 mA
+  Backlight aus:             0 mA
+  Backlight ist der Brocken (20-40 mA) und ist im 'off' aus.
+
+Was eine echte 2-Stufen-Implementation bringen wuerde, falls jemand
+die Power-Schraube weiter dreht:
+
+  A) DisplayDriver-API erweitern:
+       virtual void sleep() = 0;        // light, schnelle Wake
+       virtual void turnOff() = 0;      // deep, evtl. Re-Init noetig
+     LGFX-Impl: sleep = aktuelles turnOff; turnOff = sleep + Backlight-
+     Pin explizit auf 0 + DISPLAY_OFF command (0x28).
+
+  B) Hardware-Untersuchung am Heltec Wireless Tracker:
+     - V_EXT (Pin 3): laut Variant-Kommentar 'connected to VDD which
+       is also connected to OLED & GPS'. Aber: Heltec WT hat kein
+       OLED (TFT). Kommentar stammt vermutlich vom V3-Vorlagentext.
+       Multimeter-Test wuerde klaeren welche Rails V_EXT konkret
+       schaltet -- moeglicherweise gar nicht das TFT (das laeuft auf
+       Always-On 3V3 vom Main-Regulator).
+     - GPS_EN (Pin 35): klar getrennter Switch fuer GPS-Modul. Wenn
+       man wirklich V_EXT killen wuerde, wuerde GPS mit-sterben --
+       aber GPS_EN allein reicht fuer GPS-only-Aus.
+     - TFT-VCC: vermutlich kein separater Schalter. Komplette Display-
+       Stromlos-Abschaltung wuerde Hardware-Mod erfordern (P-FET an
+       TFT-VCC mit GPIO-Steuerung).
+
+  C) E-Ink Displays (E290, GxEPD): andere Welt. Echte Deep-Sleep ohne
+     Strom, Re-Init nach Wake. Hier macht eine 2-Stufen-API wirklich
+     Sinn. Wenn wir die einbauen, sollte (A) + zumindest E-Ink-Driver
+     mitziehen.
+
+Entscheidung User 2026-06-14: aktuelles Verhalten reicht. Erst wenn
+Strom-Messung zeigt dass die ~1-3 mA TFT-Sleep ein echtes Problem
+sind (z.B. bei Solar-betriebenen Repeatern), tieferen Refactor
+angehen.
+
+
 
 
 
