@@ -1155,7 +1155,13 @@ private:
   // bug-haftem Adverter der alle 3min adverten wuerde (User-Sorge
   // 2026-06-14). 10 min -> max ~144 Writes/Tag, plus 30-min Periodic.
   static const uint32_t RTC_PERSIST_MIN_WRITE_INTERVAL_MS = 10UL*60UL*1000UL;
-  static const uint32_t RTC_PERSIST_CHECK_INTERVAL_MS = 30UL*60UL*1000UL;  // 30 min
+  // User-Bug 2026-06-14: nach Flash 8.5min laufen lassen + Reboot zeigte
+  // RTC-Rueckwaerts-Sprung weil periodic check erst bei 30min greift.
+  // Auf 10min runter -- damit erster Save schon bei Boot+10min liegt;
+  // Reboot-Risiko-Fenster halbiert sich gegenueber 30min-Setup.
+  // Write-Interval-Guard (RTC_PERSIST_MIN_WRITE_INTERVAL_MS) verhindert
+  // weiterhin Haeufungen -- echte Writes maximal alle 10min.
+  static const uint32_t RTC_PERSIST_CHECK_INTERVAL_MS = 10UL*60UL*1000UL;  // 10 min
   // force=true: Save erlauben auch wenn rtc <= last_saved (z.B. App-
   // CMD_SET_DEVICE_TIME bei Rueckwaerts-Korrektur, App ist immer
   // authoritativ -- User-Spec 2026-06-14).
