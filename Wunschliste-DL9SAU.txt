@@ -4191,6 +4191,13 @@ Quelle: User-Tour 2026-06-14.
 
 Status: User-Wunsch 2026-06-14, Prio MITTEL (vor 61 Voltage/Current).
 
+User-Constraint 2026-06-14: Naming + Output-Format an upstream-
+Repeater-Firmware orientieren damit Einheitlichkeit. Vor Implementation
+upstream repeater stats lesen (simple_repeater + meshcore.io/cli_commands
+'stats-radio', 'stats-packets'), Felder mappen. Plus generell: pruefen
+welche DL9SAU-Statistik-Daten ggf. noch in upstream-Anzeige fehlen
+und ergaenzen damit unsere Firmware nichts vermissen laesst.
+
 Use-Case:
   Diagnose der RX-Empfangsqualitaet an einem Repeater-Standort. Drei
   konkrete Counter den der User sehen will:
@@ -4232,6 +4239,12 @@ Quelle: User-Tour 2026-06-14.
 --------------------------------------------------------------------------------
 
 Status: User-Wunsch 2026-06-14, Prio NIEDRIG (nach 60 RX-Errors).
+
+User-Constraint 2026-06-14: Einheiten + Output an upstream-Repeater
+ausrichten. Konkret: 'U V' (Volt) und Akkuladung in %. Vor
+Implementation upstream-Doku/Code lesen welche Felder/Skala
+ueblich sind (status-Block, stats-Output). Wenn upstream nicht
+spezifiziert: dt267-Stil als Referenz nehmen.
 
 Use-Case:
   Im profile=normal Repeater-Betrieb (oder wenn man sich als REPEATER
