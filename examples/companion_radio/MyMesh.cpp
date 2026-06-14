@@ -3362,12 +3362,23 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
     stats.n_packets_recv       = radio_driver.getPacketsRecv();
     stats.n_packets_sent       = radio_driver.getPacketsSent();
     stats.total_air_time_secs  = getTotalAirTime() / 1000;
-    stats.total_up_time_secs   = millis() / 1000;
+    // Bugfix 2026-06-14: millis-wrap durch _millis_wraps beruecksichtigen,
+    // sonst zeigt der Tracker nach 49 Tagen Uptime einen scheinbar
+    // niedrigeren Wert (millis() wrappt auf 0, /1000 gibt kleinen
+    // Wert obwohl Geraet seit Wochen laeuft).
+    {
+      uint64_t up_ms = (uint64_t)_millis_wraps * 4294967296ULL
+                     + (uint64_t)millis();
+      stats.total_up_time_secs = (uint32_t)(up_ms / 1000ULL);
+    }
     stats.n_sent_flood         = getNumSentFlood();
     stats.n_sent_direct        = getNumSentDirect();
     stats.n_recv_flood         = getNumRecvFlood();
     stats.n_recv_direct        = getNumRecvDirect();
-    stats.err_events           = 0;
+    // Bugfix 2026-06-14: war hardcoded 0 -- _err_flags (CAD_TIMEOUT,
+    // STARTRX_TIMEOUT, FULL) wurde nicht durchgereicht zur App,
+    // entgegen Wire-Struct-Definition.
+    stats.err_events           = _err_flags;
     stats.last_snr             = (int16_t)(radio_driver.getLastSNR() * 4);
     stats.n_direct_dups        = ((SimpleMeshTables*)getTables())->getNumDirectDups();
     stats.n_flood_dups         = ((SimpleMeshTables*)getTables())->getNumFloodDups();
