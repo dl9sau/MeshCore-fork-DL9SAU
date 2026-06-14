@@ -731,7 +731,7 @@ private:
                     const char* expected_label);
 
   // Wunschliste 43 (2026-06-10): BLE-Power-Cycle State Machine.
-  //   BLE_PWR_BOOT      = Boot-Grace (30 min, BLE an, wartet auf ersten Connect)
+  //   BLE_PWR_BOOT      = Boot-Grace (10 min, BLE an, wartet auf ersten Connect)
   //   BLE_PWR_AWAKE     = App connected ODER nach Connect-Hot-Start (5 min)
   //   BLE_PWR_HOT_START = 5 min nach Disconnect, BLE noch an
   //   BLE_PWR_SLEEP     = Cycle: 180s aus
