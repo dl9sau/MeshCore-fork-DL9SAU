@@ -2751,10 +2751,17 @@ Quelle: User-Idee 2026-06-06, mit Klarstellung dass 30s-Pause
 
 
 --------------------------------------------------------------------------------
-45. LBT (Listen-Before-Talk) Stub im Companion entfernen
+45. LBT (Listen-Before-Talk) Stub im Companion entfernen -- ERLEDIGT
 --------------------------------------------------------------------------------
 
-Status: Idee, niedrigere Prio als Deep-Sleep (Wunschliste 44).
+Status: IMPLEMENTIERT Reise 2026-06-09. Stub entfernt in
+        examples/companion_radio/MyMesh.cpp:744 -- returnt jetzt
+        _prefs.interference_threshold. Auf top: 2026-06-14 (Wunschliste
+        60) wurden Counter ergaenzt damit User die Wirkung im
+        'stats-radio' lbt-Block sehen kann.
+
+Voriger Status (vor Implementierung):
+        Idee, niedrigere Prio als Deep-Sleep (Wunschliste 44).
         Bedingt durch upstream-`currentRSSI()`-Problem.
 
 Hintergrund:
