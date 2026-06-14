@@ -12684,7 +12684,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (arg[0] == '?' || consume_word(arg, "help")) {
           pushCompanionMessage(
             "neighbors [<role>...] [hops <N>] [km <D>]\n"
-            "          [deg <X> | <FROM>-<TO>]:");
+            "          [deg <X> | <FROM>-<TO>]\n"
+            "          [last <N>d|h]:");
           pushCompanionMessage(
             "  <role>: repeater|companion|sensor|room\n"
             "    (abkuerzbar+kombinierbar, z.B. 'rep')");
@@ -12696,9 +12697,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             "  deg <FROM>-<TO>: Peil-Sektor,\n"
             "    darf 0 wrappen (z.B. 340-005).");
           pushCompanionMessage(
+            "  last <N>d|h: Zeit-Fenster (Default 48h).\n"
+            "    z.B. 'last 7d' (1..30 Tage),\n"
+            "         'last 24h' (1..720 Stunden).");
+          pushCompanionMessage(
             "  Mehrere Filter = UND-Verknuepfung.\n"
             "  ohne Filter -> nur direct-gehoerte.\n"
-            "  Bsp: neighbors km 50 deg 340-005");
+            "  Bsp: neighbors km 50 deg 340-005 last 7d");
           return;
         }
         // Rollen-Token: exakt ODER unambig-Prefix. So tippt der User
