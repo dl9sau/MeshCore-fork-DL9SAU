@@ -1,5 +1,11 @@
 #include "SerialBLEInterface.h"
 #include "esp_mac.h"
+// Wunschliste 58 Phase F Retry 2026-06-14: esp_bt_controller_disable
+// schaltet das BT-Radio echt aus (1. Versuch in Commit 8ae3b492 fuhrte
+// zu Lockup, revert in a4293243). Diesmal mit Guard-Flag _ctrl_disabled
+// dass alle public-API Methoden sauber returnen ohne in den
+// abgeschalteten Stack zu rufen.
+#include "esp_bt.h"
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -214,6 +220,27 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic, esp_ble_gat
 void SerialBLEInterface::enable() {
   if (_isEnabled) return;
 
+  // Wunschliste 58 Phase F Retry 2026-06-14: BT-Controller wieder
+  // hochfahren falls er schlaeft. Reihenfolge wichtig:
+  //   1) Guard-Flag ZUERST loeschen (interne Re-Aktivierung darf
+  //      Stack-Calls erlauben), aber NACH erfolgreichem
+  //      esp_bt_controller_enable -- vorher wuerden potentielle
+  //      Aufrufe an den noch nicht hochgefahrenen Stack hangen.
+  //   2) Advertising starten.
+  // Status-Check: INITED bedeutet 'initialisiert aber nicht enabled'
+  // (= unser disabled-Zustand). ENABLED ist Boot-Zustand wo BLEDevice::
+  // init bereits den Controller hochgefahren hat -- dort kein
+  // Re-Enable noetig.
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
+    esp_err_t err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (err != ESP_OK) {
+      BLE_DEBUG_PRINTLN("enable: ctrl_enable failed err=%d", (int)err);
+      // Guard bleibt gesetzt -- weiterer Stack-Call wuerde sonst hangen.
+      return;
+    }
+  }
+  _ctrl_disabled = false;  // Stack-Calls jetzt sicher
+
   _isEnabled = true;
   clearBuffers();
 
@@ -230,20 +257,31 @@ void SerialBLEInterface::disable() {
 
   BLE_DEBUG_PRINTLN("SerialBLEInterface::disable");
 
-  // User-Messung 2026-06-13: Advertising-Stop kostet MEHR Strom als
-  // Advertising-an (200mA vs 186-192mA), vermutlich weil Modem-Sleep
-  // nur im aktiven Advertising-State greift. Deshalb Advertising NICHT
-  // mehr stoppen -- bringt nichts und ist sogar kontraproduktiv.
-  // Existierende Verbindung beenden bleibt, weil der Aufrufer (manageBlePower
-  // bei profile=normal Sleep-Phase) eine Disconnect erwartet hat.
-  // pService->stop() ebenfalls nicht (verursachte Re-Init-ERROR-Log).
-  // Echter Strom-Spar-Schlaf via esp_bt_controller_disable ist
-  // Wunschliste 58 Phase F (separater Commit).
+  // Wunschliste 58 Phase F Retry 2026-06-14: Guard-Flag VOR Stack-
+  // Manipulation setzen. Damit returnen alle parallel laufenden
+  // Aufrufer (manageBlePower-Loop in MyMesh) sofort false/0 ohne in
+  // den gleich abgeschalteten Stack zu rufen.
+  _ctrl_disabled = true;
   pServer->disconnect(last_conn_id);
   oldDeviceConnected = deviceConnected = false;
+
+  // Phase F: BT-Controller wirklich aus. Status-Check verhindert
+  // Doppel-Disable. esp_bt_controller_disable schaltet das BT-Radio
+  // ab -- bestaetigt 70+ mA Strom-Spar im 1. Versuch (Commit 8ae3b492
+  // 2026-06-13). Damals durch Lockup revertiert. Diesmal mit Guard.
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    esp_err_t err = esp_bt_controller_disable();
+    if (err != ESP_OK) {
+      BLE_DEBUG_PRINTLN("disable: ctrl_disable failed err=%d", (int)err);
+    }
+  }
 }
 
 size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
+  // Phase F Retry: sofort raus wenn Controller schlaeft. Sonst
+  // wuerde pTxCharacteristic->notify() in checkRecvFrame in den
+  // toten Stack rufen.
+  if (_ctrl_disabled) return 0;
   if (len > MAX_FRAME_SIZE) {
     BLE_DEBUG_PRINTLN("writeFrame(), frame too big, len=%d", len);
     return 0;
@@ -270,10 +308,18 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
 #define  BLE_WRITE_MIN_INTERVAL   60
 
 bool SerialBLEInterface::isWriteBusy() const {
+  // Phase F Retry: nicht busy wenn Controller schlaeft -- writeFrame
+  // wuerde sowieso 0 returnen.
+  if (_ctrl_disabled) return false;
   return millis() < _last_write + BLE_WRITE_MIN_INTERVAL;   // still too soon to start another write?
 }
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
+  // Phase F Retry: sofort raus wenn Controller schlaeft. Schuetzt vor
+  // pTxCharacteristic->notify(), pServer->getConnectedCount(),
+  // pServer->getAdvertising()->start/stop -- alles Stack-Calls die
+  // ohne Controller blockten/abstuerzten im 1. Versuch.
+  if (_ctrl_disabled) return 0;
   if (send_queue_len > 0   // first, check send queue
     && millis() >= _last_write + BLE_WRITE_MIN_INTERVAL    // space the writes apart
   ) {
@@ -336,5 +382,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
 }
 
 bool SerialBLEInterface::isConnected() const {
+  // Phase F Retry: bei abgeschaltetem Controller sicher false.
+  if (_ctrl_disabled) return false;
   return deviceConnected;  //pServer != NULL && pServer->getConnectedCount() > 0;
 }

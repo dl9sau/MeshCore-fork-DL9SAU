@@ -13,6 +13,14 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   bool deviceConnected;
   bool oldDeviceConnected;
   bool _isEnabled;
+  // Wunschliste 58 Phase F Retry 2026-06-14: Guard-Flag fuer
+  // esp_bt_controller_disable. Wenn true, returnen alle public-API
+  // Methoden (isEnabled, isConnected, writeFrame, checkRecvFrame)
+  // sofort false/0 ohne in den BLE-Stack zu rufen. Verhindert dass
+  // manageBlePower() oder andere Loop-Code Wege in den abgeschalteten
+  // Stack rufen und sich aufhaengen (Lockup im 1. Versuch Commit
+  // 8ae3b492, revert a4293243).
+  bool _ctrl_disabled;
   uint16_t last_conn_id;
   uint32_t _pin_code;
   unsigned long _last_write;
@@ -83,6 +91,7 @@ public:
     _send_overflow_count = 0;
     _recv_queue_high_water = 0;
     _send_queue_high_water = 0;
+    _ctrl_disabled = false;
   }
 
   uint32_t getDisconnectCount() const override { return _disconnect_count; }
@@ -103,7 +112,11 @@ public:
   // BaseSerialInterface methods
   void enable() override;
   void disable() override;
-  bool isEnabled() const override { return _isEnabled; }
+  // Wunschliste 58 Phase F Retry: isEnabled muss auch _ctrl_disabled
+  // pruefen damit Loop-Code (manageBlePower) waehrend Controller-Down
+  // den State sauber 'aus' sieht. _isEnabled wird in disable()
+  // sowieso auf false gesetzt; doppelt sicher schadet nicht.
+  bool isEnabled() const override { return _isEnabled && !_ctrl_disabled; }
 
   bool isConnected() const override;
 
