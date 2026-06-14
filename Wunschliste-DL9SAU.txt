@@ -4296,6 +4296,42 @@ Quelle: User-Frage 2026-06-14.
 
 
 --------------------------------------------------------------------------------
+63. board-Name: Variants praeziser identifizieren (V3 vs Wireless Tracker)
+--------------------------------------------------------------------------------
+
+Status: User-Wunsch 2026-06-14, Prio MITTEL.
+
+Use-Case: Repeater sitzt 30m am Mast. User flasht "die Heltec-Firmware"
+und merkt nach Mast-Klettern dass es ein Heltec Wireless Tracker statt
+V3 war -- TFT-statt-OLED + GPS-Pins fehlen -> Firmware crashed oder GPIO-
+Belegung falsch. Konsequenz schlecht.
+
+Beobachtung:
+  - Beide Boards teilen den ESP32-S3 (gleiche MAC), Unterschied ist
+    nur Peripherie (Display-Tech, GPS, Buzzer beim V3, ...).
+  - 'board' CLI-Befehl liefert heute board.getManufacturerName() --
+    bei mehreren Variants steht da generisch 'Heltec V3' obwohl es
+    ein Wireless Tracker ist.
+
+Plan:
+  1) Audit der Variant-Inis welche Boards welchen Manufacturer-Namen
+     zurueckliefern. Variant-Inis pruefen ob die board.getManufacturer-
+     Name-Logik konsistent gesetzt ist.
+  2) Wenn moeglich pro Variant einen praeziseren Build-Define + Name
+     setzen (compile-time).
+  3) Laufzeit-Cross-Check (optional): I2C-Probe auf 0x3C (OLED) vs
+     SPI-CS-Probe auf TFT-Pins; UART-Lauschen auf NMEA-Chatter. Wenn
+     die Hardware-Detection vom Build-Namen abweicht: WARNUNG in
+     'board'-Output ('Hardware sagt TFT+GPS, Build sagt V3-OLED --
+     falsche Firmware?').
+  4) Beim 'board'-Befehl optional die Variant-Compile-Defines mit
+     ausgeben ('-D HELTEC_WIRELESS_TRACKER' etc.) sodass der User
+     beim Anschauen direkt sieht was reingebaut wurde.
+
+Quelle: User-Hinweis 2026-06-14 ('Repeater mast'-Scenario).
+
+
+--------------------------------------------------------------------------------
 58. Stromverbrauch-Reduzierung Companion-Build (Heltec WT)
 --------------------------------------------------------------------------------
 
