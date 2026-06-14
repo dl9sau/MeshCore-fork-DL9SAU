@@ -331,20 +331,28 @@ void setup() {
   board.onBootComplete();
 
 #if defined(ESP32)
-  // Wunschliste 53 Phase 1: TWDT mit Custom-Timeout neu konfigurieren
+  // Wunschliste 53 Phase 1: TWDT mit Custom-Timeout konfigurieren
   // (arduino-esp32 hat ihn schon initialisiert fuer IDLE-Tasks mit ~5s
   // Default -- wir wollen 60s und loopTask aktiv ueberwachen).
-  //   trigger_panic=true: bei Timeout panic -> Reboot.
-  //   idle_core_mask=0: IDLE-Tasks nicht zusaetzlich watchen
-  //     (arduino-esp32 macht das schon, doppeltes Add kollidiert).
-  esp_task_wdt_config_t _wdt_cfg = {
-    .timeout_ms     = (uint32_t)(WATCHDOG_TIMEOUT_S) * 1000UL,
-    .idle_core_mask = 0,
-    .trigger_panic  = true,
-  };
-  esp_task_wdt_reconfigure(&_wdt_cfg);
-  // loopTask zur Watchlist hinzufuegen. ESP_ERR_INVALID_STATE wenn schon
-  // drin (z.B. bei Reset-Loop) -- ignorieren.
+  // API-Unterschied: ESP-IDF 4.x (espressif32@6.x, arduino-esp32 2.x)
+  // bietet nur die alte init(timeout, panic)-Form, IDF 5.x (pioarduino
+  // 51.x+, arduino-esp32 3.x) hat die neue reconfigure(config_t*)-Form.
+  #if ESP_IDF_VERSION_MAJOR >= 5
+    esp_task_wdt_config_t _wdt_cfg = {
+      .timeout_ms     = (uint32_t)(WATCHDOG_TIMEOUT_S) * 1000UL,
+      .idle_core_mask = 0,            // IDLE-Tasks bleiben so wie arduino-
+                                      // esp32 sie aufgesetzt hat (doppeltes
+                                      // Add wuerde kollidieren).
+      .trigger_panic  = true,         // Timeout -> panic -> Reboot
+    };
+    esp_task_wdt_reconfigure(&_wdt_cfg);
+  #else
+    // V1-API: erneutes init() ueberschreibt den Default-Timeout fuer alle
+    // bereits registrierten Tasks. panic=true == Reboot bei Timeout.
+    esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
+  #endif
+  // loopTask zur Watchlist hinzufuegen (API identisch in v1/v2).
+  // ESP_ERR_INVALID_STATE wenn schon drin -- ignorieren.
   esp_task_wdt_add(NULL);
 #endif
 }
