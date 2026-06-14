@@ -11142,7 +11142,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "neighbors")) {
         pushCompanionMessage(
           "neighbors [<role>...] [hops <N>] [km <D>]\n"
-          "          [deg <X>|<FROM>-<TO>]:\n"
+          "          [deg <X>|<FROM>-<TO>] [last <N>d|h]:\n"
           "  ohne Arg: nur direkt-gehoerte.");
         pushCompanionMessage(
           "  <role>: repeater|companion|sensor|room\n"
@@ -11153,7 +11153,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  deg <X>:  Peilung X +/- 1.5 Grad.");
         pushCompanionMessage(
           "  deg <FROM>-<TO>: Sektor,\n"
-          "    darf 0 wrappen (z.B. 340-005).");
+          "    darf 0 wrappen (z.B. 340-005).\n"
+          "  last <N>d|h: Zeit-Fenster\n"
+          "    (Default 48h; '7d' 1-30 Tage, '24h' 1-720h)");
         pushCompanionMessage(
           "Mehrere Filter werden UND-verknuepft.\n"
           "Bsp: neighbors km 50 deg 340-005\n"
@@ -12645,6 +12647,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     bool   has_hops = false;
     bool   has_km   = false;
     bool   has_deg  = false;
+    bool   has_last = false;
+    // User-Wunsch 2026-06-14: 'last <N>d|h' Fenster statt fixe 48h.
+    // Default = CR_HEARD_MAX_AGE_SECS (48h). Mit 'last 7d' z.B. werden
+    // Kontakte die in den letzten 7 Tagen ein Advert hatten gelistet
+    // (statt nur 48h). Max 30 Tage (= Kontakt-Lebenszeit). Mit 'last 1h'
+    // engere Filterung als Default.
+    uint32_t last_age_secs = (uint32_t)CR_HEARD_MAX_AGE_SECS;
+    char     last_arg_buf[12];
+    last_arg_buf[0] = 0;
     // Bearing-Filter in 1/10-Grad-Skala (ganzzahlig, Wrap-fest). Tolerance
     // bei Single-Value: +/- 1.5 Grad (User-Spec 2026-06-13).
     int    deg_lo_x10 = 0;        // 0..3599
@@ -12832,6 +12843,49 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           has_deg = true;
           continue;
         }
+        if (consume_word(arg, "last")) {
+          // last <N>d|h -- Zeit-Fenster fuer 48h-Cutoff ueberschreiben.
+          // User-Wunsch 2026-06-14: Default 48h zu eng wenn man auch
+          // aeltere bekannte Knoten sehen will.
+          if (*arg < '0' || *arg > '9') {
+            pushCompanionMessage(
+              "Usage: ... last <N>d|h  (z.B. 7d, 24h)");
+            return;
+          }
+          int n = atoi(arg);
+          // Suffix-Zeichen einscannen
+          while (*arg >= '0' && *arg <= '9') arg++;
+          char unit = 0;
+          if (*arg == 'd' || *arg == 'D' || *arg == 'h' || *arg == 'H') {
+            unit = (*arg == 'D') ? 'd' : (*arg == 'H') ? 'h' : *arg;
+            arg++;
+          }
+          while (*arg == ' ' || *arg == '\t') arg++;
+          if (unit == 0) {
+            pushCompanionMessage(
+              "last: Einheit fehlt -- N mit 'd' oder 'h'.");
+            return;
+          }
+          uint32_t secs;
+          if (unit == 'd') {
+            if (n < 1 || n > 30) {
+              pushCompanionMessage("last: Tage 1..30");
+              return;
+            }
+            secs = (uint32_t)n * 86400UL;
+          } else {  // 'h'
+            if (n < 1 || n > 720) {
+              pushCompanionMessage("last: Stunden 1..720");
+              return;
+            }
+            secs = (uint32_t)n * 3600UL;
+          }
+          last_age_secs = secs;
+          has_last = true;
+          snprintf(last_arg_buf, sizeof(last_arg_buf),
+                   "%d%c", n, unit);
+          continue;
+        }
         pushCompanionMessage(
           "Usage: neighbors [rep|cmp|sns|room]\n"
           "  [hops <N>] [km <D>] [deg <X|FROM-TO>]\n"
@@ -12902,7 +12956,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (has_km)   { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "<=%.0fkm", max_km); }
         if (has_deg)  { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "deg %s", deg_arg_buf); }
       }
-      hp += snprintf(h + hp, sizeof(h) - hp, ", < 48h):");
+      // Wunschliste-Erweiterung 2026-06-14: Window-Anzeige '< 48h' wird
+      // dynamisch -- Default 48h, mit 'last N' der User-Wert.
+      if (has_last) {
+        hp += snprintf(h + hp, sizeof(h) - hp, ", < %s):", last_arg_buf);
+      } else {
+        hp += snprintf(h + hp, sizeof(h) - hp, ", < 48h):");
+      }
       add_line(h);
     }
 
@@ -12912,7 +12972,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       ContactInfo c;
       if (!getContactByIdx(i, c)) continue;
       if (c.lastmod == 0) continue;
-      if (now - c.lastmod > CR_HEARD_MAX_AGE_SECS) continue;
+      if (now - c.lastmod > last_age_secs) continue;
 
       // Distanz/Bearing einmal berechnen wenn beide GPS-Positionen
       // bekannt -- wird sowohl fuer km/deg-Filter als auch fuer
@@ -13135,6 +13195,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(summary, sizeof(summary),
                "total: %d contacts + %d discover-only, %d known",
                shown, discover_shown, num);
+    } else if (has_last) {
+      snprintf(summary, sizeof(summary),
+               "total: %d within %s, %d known",
+               shown, last_arg_buf, num);
     } else {
       snprintf(summary, sizeof(summary),
                "total: %d within 48h, %d known", shown, num);
