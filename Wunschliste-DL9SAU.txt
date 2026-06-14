@@ -4596,6 +4596,87 @@ sind (z.B. bei Solar-betriebenen Repeatern), tieferen Refactor
 angehen.
 
 
+--------------------------------------------------------------------------------
+65. Help-Text Struktur-Helper + Flash-String-Strategie
+--------------------------------------------------------------------------------
+
+Status: TODO, niedrige Prio. Aktivieren wenn TIGHT-Boards (siehe
+        docs/dl9sau_nrf52_size_audit_2026-06-14.md) anfangen zu
+        kippen oder wenn en/de-Bilingual gewollt ist.
+
+Anlass:
+  User-Frage 2026-06-14 nach String-Resource-Verbrauch. Konkrete
+  Messung in MyMesh.cpp:
+    - 2889 String-Literale >= 8 chars
+    - 2264 eindeutig (625 = 22% Duplikate)
+    - ~76k Bytes eindeutige Strings -- ~10% des 696k-Flash-Budgets,
+      nur in EINER Datei.
+  Mit en+de-Bilingual wuerde sich das verdoppeln -> direkter
+  Showstopper bei den 20 TIGHT-Boards.
+
+Wichtige Klarstellung (User-Annahme zu pessimistisch):
+  ARM-GCC mit -Os macht -fmerge-constants per Default. Identische
+  Literale werden im Linker-Output bereits deduped. Die "27x ' [default]'"
+  stehen NICHT 27x im Flash. Per-Source-File-Duplikate koennen
+  auftreten aber innerhalb einer Translation-Unit ist's optimiert.
+  -> Plumper Const-Refactor ("static const char S_X[] = ...; statt
+     "..." inline) bringt kaum messbaren Flash-Gewinn.
+
+Echte Hebel mit Wirkungs-Verhaeltnis:
+
+  1) Help-Text Struktur-Helper (1-2h, 3-8k Flash):
+     Heutige Patterns wie
+       pushCompanionMessage("set int.thresh <0..255>: ...\n  ...");
+       pushCompanionMessage("set agc.reset.interval <0..255>: ...");
+     wiederholen "set ", "<", ":", "\n  " usw. Helper-Funktion
+     mit Format-Args:
+       helpSetKey("int.thresh", "0..255", "RSSI-Margin ueber...");
+     spart die repetitive Struktur.
+
+  2) Compile-Time Language Selection (2-3h):
+     Macro im Stil
+       #define T_DE_EN(de,en) (LANG==DE ? de : en)
+       pushCompanionMessage(T_DE_EN("Hilfe", "Help"));
+     bei -D LANG=DE waehlt Compiler den de-String, anderer faellt
+     raus. Kein Runtime-Overhead, kein Doppel-Speichern.
+     ABER: 'en'-String wird vermutlich von -O2/Os nicht eliminiert
+     wenn er als Literal vorkommt -- besser direkt Preprocessor:
+       #if LANG_DE
+       #define HELP_X "Hilfe"
+       #else
+       #define HELP_X "Help"
+       #endif
+     Aufwendiger an jedem Touchpoint, dafuer wirklich nur 1 Sprache
+     im Binary.
+
+  3) String-Kondenser-Pass (30-60 min, 2-5k Flash):
+     Help-Texte kuerzen ohne Verstaendlichkeitsverlust:
+       'Anzeige: '   -> ''
+       '(Default)' -> '[d]'
+       Mehrzeiliges 'Default ...\n  ...' -> einzeilig
+     Plus Synonyme entfernen (z.B. wenn 'multi.acks' + 'multi_acks'
+     Help getrennt steht: zusammenfassen).
+
+  4) Compressed Resource Block (1 Tag, 30-50k Flash, RAM-Cost):
+     Help-Texte aus Code raus, als LittleFS-File mit heatshrink/lz4
+     komprimiert. Beim Boot in's RAM laden + on-demand decompress.
+     Hoch-aufwendig, Risiko viele Bugs (fs-deps, Boot-Komplexitaet).
+     ERST wenn (1)+(2)+(3) nicht reichen.
+
+Reihenfolge: niedrig-aufwand zuerst. (3) ist halbe Stunde, (1) bringt
+am meisten Verhaeltnis-maessig, (2) ist Voraussetzung fuer en+de.
+(4) ist die ultima-ratio.
+
+Out-of-scope:
+  - Plumper String-Const-Refactor (siehe Klarstellung oben).
+  - In-Firmware Flash-Budget-Anzeige (User-Entscheidung 2026-06-14:
+    nicht noetig in der Firmware, audit-Tool als externes Werkzeug
+    reicht).
+
+Quelle: User-Frage 2026-06-14 zu Strings vs Wunschliste 60/61 vs
+  spaetere Bilingual-Plaene.
+
+
 
 
 
