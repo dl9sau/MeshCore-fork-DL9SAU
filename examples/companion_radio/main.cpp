@@ -7,6 +7,20 @@
   #include <esp_wifi.h>
 #endif
 
+// Wunschliste 53 Phase 1 (2026-06-14): ESP32 Task-Watchdog. Schuetzt vor
+// Hang im loop() (Memory-Corruption, Stack-Overflow, infinite Callback-
+// Loop) -- TWDT loest dann Panic-Reboot statt 'tot im Feld'. NRF52 hat
+// schon den BLE-Advertising-Watchdog (SerialBLEInterface.cpp:343 NRF52-
+// Variante), dort ist's nicht so akut. RP2040/STM32 spaeter.
+#if defined(ESP32)
+  #include "esp_task_wdt.h"
+  #ifndef WATCHDOG_TIMEOUT_S
+    #define WATCHDOG_TIMEOUT_S 60   // 60s: lange genug fuer LoRa-TX(~10s)
+                                    // + flash-write + Margin. Override per
+                                    // -D WATCHDOG_TIMEOUT_S=<sec> moeglich.
+  #endif
+#endif
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -315,9 +329,33 @@ void setup() {
 #endif
 
   board.onBootComplete();
+
+#if defined(ESP32)
+  // Wunschliste 53 Phase 1: TWDT mit Custom-Timeout neu konfigurieren
+  // (arduino-esp32 hat ihn schon initialisiert fuer IDLE-Tasks mit ~5s
+  // Default -- wir wollen 60s und loopTask aktiv ueberwachen).
+  //   trigger_panic=true: bei Timeout panic -> Reboot.
+  //   idle_core_mask=0: IDLE-Tasks nicht zusaetzlich watchen
+  //     (arduino-esp32 macht das schon, doppeltes Add kollidiert).
+  esp_task_wdt_config_t _wdt_cfg = {
+    .timeout_ms     = (uint32_t)(WATCHDOG_TIMEOUT_S) * 1000UL,
+    .idle_core_mask = 0,
+    .trigger_panic  = true,
+  };
+  esp_task_wdt_reconfigure(&_wdt_cfg);
+  // loopTask zur Watchlist hinzufuegen. ESP_ERR_INVALID_STATE wenn schon
+  // drin (z.B. bei Reset-Loop) -- ignorieren.
+  esp_task_wdt_add(NULL);
+#endif
 }
 
 void loop() {
+#if defined(ESP32)
+  // Wunschliste 53 Phase 1: Watchdog fuettern. Vor allen Loop-Sub-Calls
+  // damit ein Hang in einem Sub-Modul den naechsten Pet-Cycle blockiert
+  // und Recovery via TWDT-Panic-Reboot triggert.
+  esp_task_wdt_reset();
+#endif
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
