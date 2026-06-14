@@ -717,6 +717,14 @@ private:
   // Serial umgeleitet wird (waehrend Dispatch eines per Serial-CLI
   // eingegangenen Befehls).
   bool     _serial_cli_active = false;
+  // Wunschliste 10 (2026-06-14): wenn ein CLI-Dispatch eine ASYNC-Antwort
+  // produziert (z.B. 'discover regions' kommt nach bis zu 60s zurueck mit
+  // Progressive-Output), ist _serial_cli_active beim Eintreffen schon false
+  // -- pushCompanionMessage wuerde an BLE/companion routen statt an Serial.
+  // _serial_cli_async_expiry_ms verlaengert das Serial-Routing fuer die
+  // Dauer des async-Window. 0 = kein async-window aktiv. Aufrufer (z.B.
+  // discoverStart) setzt es bei Start.
+  unsigned long _serial_cli_async_expiry_ms = 0;
   // _serial_cli_temp_on: Runtime-Override 'serial-cli on-temp'. Reboot
   // verwirft -- Persistenz liegt in _prefs.serial_cli_persist_on.
   bool     _serial_cli_temp_on = false;

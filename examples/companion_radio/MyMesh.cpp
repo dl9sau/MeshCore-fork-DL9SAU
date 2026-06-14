@@ -3911,7 +3911,17 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
 
 // Wunschliste 27 (a): Diagnose-Sender 'discover'.
 // Baut einen CTL_TYPE_NODE_DISCOVER_REQ und sendet ihn via sendZeroHop.
+// Wunschliste 10 (2026-06-14): wenn der Aufrufer ein Serial-CLI-Dispatch ist,
+// muessen die ASYNC-Antworten (CTL-RESP nach 30s, ANON-RESP bis 60s+) trotzdem
+// in den Serial-Stream gespiegelt werden -- sonst verschwinden sie in
+// $companion. Aktuell nur am Anfang von discoverStart relevant; falls
+// weitere async-CLI-Befehle dazukommen, dort die gleiche Set-Logik
+// ergaenzen.
 void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
+  if (_serial_cli_active) {
+    // Discover-Round + Chain-Aggregat max 60s + Puffer.
+    _serial_cli_async_expiry_ms = millis() + 65000;
+  }
   // Default = ALLE Adv-Type-Bits (forward-kompatibel falls die Spec
   // jemals CHAT/ROOM responder hinzubekommt). Bit 0 (= ADV_TYPE_NONE)
   // bleibt 0 -- sinnlos. Heute antworten nur REPEATER + SENSOR;
@@ -10299,7 +10309,14 @@ void MyMesh::pushCompanionMessage(const char* text) {
   // gehen die ueberzaehligen Bytes verloren (sichtbare Truncation in
   // help admin / help filter / etc.). Bounded Retry mit 200ms gesamt
   // damit BLE-Supervision (4s) nicht reisst auch bei 5-Frame-Help.
-  if (_serial_cli_active && Serial) {
+  // Wunschliste 10 (2026-06-14): Async-Window-Verlaengerung. CLI-Dispatch
+  // (z.B. 'discover regions') endet schon nachdem CTL-Discover-REQ raus
+  // ist; Antworten kommen aber bis zu 60s spaeter. _serial_cli_async_expiry_ms
+  // hebt den Serial-Mirror solange am Leben. Millis-wrap-safe via
+  // signed-Vergleich.
+  bool async_mirror = (_serial_cli_async_expiry_ms != 0
+                       && (int32_t)(millis() - _serial_cli_async_expiry_ms) < 0);
+  if ((_serial_cli_active || async_mirror) && Serial) {
     char out[400];
     int oi = 0;
     size_t tl = strlen(text);
