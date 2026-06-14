@@ -505,6 +505,19 @@ void UITask::msgRead(int msgcount) {
   }
 }
 
+// Wunschliste 58 Phase A (2026-06-14): Sofort-Anwendung nach 'set display'.
+// Siehe ui-new/UITask.cpp applyDisplayWakeMode fuer ausfuehrliche Doku.
+void UITask::applyDisplayWakeMode() {
+  if (_display == NULL || _node_prefs == NULL) return;
+  uint8_t mode = _node_prefs->display_wake_mode;
+  if (mode == 0) {
+    if (_display->isOn()) _display->turnOff();
+  } else if (mode == 1) {
+    if (!_display->isOn()) _display->turnOn();
+    _next_refresh = 100;
+  }
+}
+
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   _msgcount = msgcount;
 

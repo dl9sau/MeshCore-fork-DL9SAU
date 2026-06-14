@@ -17981,6 +17981,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       _prefs.display_wake_mode = mode;
       savePrefs();
+      // Sofort-Anwendung (User-Bug 2026-06-14: set display off liess
+      // display weiterlaufen; set display on bei aus tat nichts bis
+      // zur naechsten Msg). UITask::applyDisplayWakeMode liest pref +
+      // turnOn/turnOff entsprechend.
+      if (_ui) _ui->applyDisplayWakeMode();
       const char* name = (mode == 0) ? "off"
                       : (mode == 1) ? "on"
                                     : "on-at-new-messages";

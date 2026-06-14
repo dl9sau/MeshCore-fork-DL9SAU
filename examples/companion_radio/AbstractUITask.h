@@ -43,4 +43,12 @@ public:
   virtual void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) = 0;
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual void loop() = 0;
+  // Wunschliste 58 Phase A (2026-06-14): nach 'set display' direkt
+  // anwenden statt erst beim naechsten Event/Refresh. Liest
+  // _node_prefs->display_wake_mode:
+  //   0 = off                -> display.turnOff() sofort
+  //   1 = on                 -> display.turnOn() + Auto-Off canceln
+  //   2 = on-at-new-messages -> aktueller Zustand bleibt
+  // Default-Implementation als No-Op fuer UI-Varianten ohne Display.
+  virtual void applyDisplayWakeMode() {}
 };

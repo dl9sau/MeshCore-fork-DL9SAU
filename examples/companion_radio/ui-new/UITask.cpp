@@ -685,6 +685,28 @@ void UITask::msgRead(int msgcount) {
   }
 }
 
+// Wunschliste 58 Phase A (2026-06-14): Sofort-Anwendung nach 'set display'.
+// Aufrufer (MyMesh.cpp set-display-Handler) muss nach savePrefs den Aufruf
+// machen. Vorher: User-Beobachtung 'set display off' liess Display
+// weiterlaufen bis Auto-Off-Timeout; 'set display on' bei ausgeschaltetem
+// Display tat nix bis zur naechsten Channel-Msg.
+void UITask::applyDisplayWakeMode() {
+  if (_display == NULL || _node_prefs == NULL) return;
+  uint8_t mode = _node_prefs->display_wake_mode;
+  if (mode == 0) {
+    // off -> sofort ausschalten. Loop-Auto-Off ist redundant
+    // (gleicher Effekt) aber wuerde erst nach Timeout greifen.
+    if (_display->isOn()) _display->turnOff();
+  } else if (mode == 1) {
+    // on -> sofort einschalten. Loop ueberspringt turnOff bei mode==1
+    // (siehe loop-Aenderung), Display bleibt also auch persistent an.
+    if (!_display->isOn()) _display->turnOn();
+    _next_refresh = 100;  // sofort Refresh anstossen
+  }
+  // mode == 2 (on-at-new-messages): aktueller Zustand bleibt;
+  // newMsg() weckt bei Bedarf.
+}
+
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   _msgcount = msgcount;
 
