@@ -5628,3 +5628,47 @@ Test-Plan:
 Quelle: User-Report 2026-06-15 abends nach Test backup restore aus
   persistierter Datei (mit 9 filter_scope_drop + 20 Channels) -> 
   filter-Liste + Channels leer geblieben.
+
+
+Bug 4 (Erweiterung 2026-06-15): String-Handler im val_type=='n' Block
+================================================================
+
+  Symptom:
+    Backup hatte 'display_wake_mode': 'off'. Nach restore: weiterhin
+    'on-at-new-messages' (= Default).
+    User-Test: 'get display_wake_mode' -> 'display = on-at-new-messages'.
+    Selbe Problematik fuer: 'cpu_clock_mhz': 'max', 'watchdog': 'on'.
+
+  Root cause:
+    JSON-Parser markiert Strings als val_type='s' (MyMesh.cpp:9514),
+    Numbers als 'n' (Z 9550).
+
+    Die Handler fuer cpu_clock_mhz (Z 9869), display_wake_mode (Z 9892),
+    watchdog (Z 9911) sind ALLE im Branch
+      if (block_type == 2) {
+        if (val_type == 'n') { ... }     <- hier drin!
+      }
+    Sie nutzen brExtractString -- LESEN STRINGS! Aber der
+    val_type=='n' Branch wird nur fuer Number-Values betreten.
+
+    Backup-Save schreibt diese drei Keys als Strings:
+      kv_str("cpu_clock_mhz", "max")     -- MyMesh.cpp:8881-8889
+      kv_str("display_wake_mode", "off") -- MyMesh.cpp:8895-8898
+      kv_str("watchdog", ...)            -- MyMesh.cpp:8899
+
+    Beim Restore landen sie mit val_type='s' im NODE MAIN-Branch
+    (block_type=2). Der Number-Sub-Branch wird NICHT betreten,
+    kein Handler matched -> _br_skipped (silent).
+
+  Fix:
+    Die drei Handler aus dem val_type=='n' Branch raus, dahinter
+    als val_type=='s' Block oder ohne val_type-Pruefung positionieren.
+
+  Reihenfolge fuer Implementation (revidiert):
+    1. Bug 1 (Channels-Dispatch) -- 1-Zeilen-Fix
+    2. Bug 4 (val_type=='n' Container falsch) -- 3 Handler verschieben
+    3. Bug 2 (Filter Block-Mismatch) -- Handler nach block_type==2 ziehen
+    4. Bug 3 (get prv.key) -- kurzer CLI-Handler
+
+  Quelle: User-Report 2026-06-15 abends, Erweiterung der Wunschliste 69
+    nach Beobachtung dass display_wake_mode nicht restored wurde.
