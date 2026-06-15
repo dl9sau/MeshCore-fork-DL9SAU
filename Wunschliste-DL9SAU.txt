@@ -5055,3 +5055,61 @@ Implementation Stage 1 (sobald Voraussetzungen erfuellt):
 
 Quelle: User-Hinweis 2026-06-15 mit Link zur deutschen T1000-E
   Bootloader-Doku.
+
+--------------------------------------------------------------------------------
+68. ESP32 OTA-Update ueber WiFi
+--------------------------------------------------------------------------------
+
+Status: User-Wunsch 2026-06-15. Code-Basis ist da, User hatte
+        Partition-Layout-Issue beim ersten Versuch (Fork-Versuch
+        2026 -- User-Notiz 'irgendwas stimmte nicht im partition
+        layout, mein Fehler').
+
+Aktueller Stand:
+  - platformio.ini hat schon `[esp32_ota]` Block mit lib_deps fuer
+    ESPAsyncWebServer + AsyncElegantOTA (vorab gepflegt).
+  - WiFi-Stack auf ESP32-S3 ist vorhanden, in Companion-Builds
+    standardmaessig AUS (Strom-Spar). Aktivierbar mit -DWIFI_SSID etc.
+  - main.cpp hat schon Reconnect-Logik fuer WIFI_SSID-Builds.
+  - OTA-Trigger braucht zwei App-Partitions damit waehrend des Updates
+    weiter laufen kann -- HIER war beim User-Versuch der Knack.
+
+Partition-Layout-Problem dokumentieren:
+  - Default ESP32-Arduino-Partition ist 1 App-Partition + SPIFFS.
+  - Fuer OTA muss man auf custom-partition.csv umstellen mit 2 App-
+    Slots (factory + ota_0, ggf. ota_1 fuer rollback).
+  - 4 MB Flash: typisches Layout 1.5 MB App + 1.5 MB OTA + Rest data.
+  - 8 MB / 16 MB Flash (Heltec WT V2 hat 8 MB): mehr Headroom, OTA
+    bequemer.
+  - board_build.partitions = partitions_custom.csv in der Variant-Ini.
+
+Trade-offs:
+  - WiFi-Strom: aktiv 100-200 mA zusaetzlich. Fuer Battery-Repeater
+    schlecht. Fuer Mains-versorgten Repeater (PoE/Netzteil) ok.
+  - WiFi-Sicherheit: WPA2-PSK Standard, aber OTA-Webserver hat keine
+    Auth standardmaessig -- jeder im LAN kann flashen. Auth-Layer
+    nachruesten (AsyncElegantOTA hat HTTP-Basic-Auth Option).
+
+Use-Cases:
+  - Repeater am festen Standort (Dachmast, Garten) wo physischer
+    Zugriff schwer ist.
+  - Test-Flash-Round im Lab waehrend Geraet schon im Gehaeuse sitzt.
+  - Companion-Geraete im Haus die nicht per USB erreichbar sind.
+
+Implementation-Schritte fuer aktivierbare OTA:
+  1) Custom-Partition-CSV pro Variant erstellen (oder eine
+     gemeinsame fuer ESP32-OTA-faehige Boards).
+  2) Variant-Ini: board_build.partitions = <csv> + WiFi-Defines
+     + lib_deps ergaenzt um esp32_ota-Block.
+  3) main.cpp #ifdef OTA_ENABLED Block: AsyncWebServer + ElegantOTA
+     init + start, gated von WIFI_SSID.
+  4) CLI-Erweiterung 'wifi status' / 'wifi reconnect' fuer Debug.
+  5) Optional CLI 'ota url <url>' fuer Pull-Variante (Geraet zieht
+     selbst Firmware), wenn Push-Web-Interface zu offen ist.
+
+Nach erfolgreichem ersten Setup: 'set wifi.ssid' + 'set wifi.psk'
+zur Runtime-Konfiguration (waere Folge-Stage). Aktuell sind die
+Credentials Build-Defines -- nicht User-aenderbar zur Laufzeit.
+
+Quelle: User-Wunsch 2026-06-15 nach Erinnerung an gescheiterten
+  ersten OTA-Versuch wegen falschem Partition-Layout.
