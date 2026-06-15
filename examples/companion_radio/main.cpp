@@ -312,11 +312,6 @@ void halt() {
 
 void setup() {
   Serial.begin(115200);
-  // DL9SAU 2026-06-15 DEBUG TRACE: Marker an Schluesselstellen damit wir
-  // sehen wo setup() haengt. Jeder Marker wird sofort ueber Serial.flush()
-  // rausgedrueckt damit USB-CDC ihn vor einem moeglichen Hang ausspuckt.
-  #define DBG_TRACE(MSG) do { Serial.println(F("[dbg] " MSG)); Serial.flush(); } while(0)
-  DBG_TRACE("setup() start");
   // DL9SAU 2026-06-01 v2: USB-CDC TX-Timeout sehr klein halten. Verhindert
   // loop()-Stalls wenn das Geraet ohne USB-Host laeuft (z.B. Powerbank) und
   // der TX-FIFO sich fuellt -- ohne diesen Hint koennte Serial.write() bis
@@ -367,9 +362,7 @@ void setup() {
   esp_wifi_deinit();
 #endif
 
-  DBG_TRACE("before board.begin()");
   board.begin();
-  DBG_TRACE("after board.begin()");
 
 #ifdef DISPLAY_CLASS
   DisplayDriver* disp = NULL;
@@ -384,17 +377,12 @@ void setup() {
   }
 #endif
 
-  DBG_TRACE("before radio_init()");
-  if (!radio_init()) { DBG_TRACE("radio_init FAILED, halt"); halt(); }
-  DBG_TRACE("after radio_init()");
+  if (!radio_init()) { halt(); }
 
   fast_rng.begin(radio_driver.getRngSeed());
-  DBG_TRACE("after fast_rng.begin");
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  DBG_TRACE("before InternalFS.begin()");
   InternalFS.begin();
-  DBG_TRACE("after InternalFS.begin()");
   #if defined(QSPIFLASH)
     if (!QSPIFlash.begin()) {
       // debug output might not be available at this point, might be too early. maybe should fall back to InternalFS here?
@@ -407,9 +395,7 @@ void setup() {
       ExtraFS.begin();
   #endif
   #endif
-  DBG_TRACE("before store.begin()");
   store.begin();
-  DBG_TRACE("before the_mesh.begin()");
   the_mesh.begin(
     #ifdef DISPLAY_CLASS
         disp != NULL
@@ -417,18 +403,13 @@ void setup() {
         false
     #endif
   );
-  DBG_TRACE("after the_mesh.begin()");
 
 #ifdef BLE_PIN_CODE
-  DBG_TRACE("before serial_interface.begin(BLE)");
   serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
-  DBG_TRACE("after serial_interface.begin(BLE)");
 #else
   serial_interface.begin(Serial);
 #endif
-  DBG_TRACE("before startInterface");
   the_mesh.startInterface(serial_interface);
-  DBG_TRACE("after startInterface");
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
   store.begin();
@@ -517,34 +498,26 @@ void setup() {
   #error "need to define filesystem"
 #endif
 
-  DBG_TRACE("before sensors.begin()");
   sensors.begin();
-  DBG_TRACE("after sensors.begin()");
 
 #if ENV_INCLUDE_GPS == 1
   the_mesh.applyGpsPrefs();
-  DBG_TRACE("after applyGpsPrefs");
 #endif
 
 #ifdef DISPLAY_CLASS
-  ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());
-  DBG_TRACE("after ui_task.begin");
+  ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
 #endif
 
-  DBG_TRACE("before onBootComplete");
   board.onBootComplete();
-  DBG_TRACE("after onBootComplete");
 
   // Wunschliste 53 (2026-06-14): Reset-Reason auslesen + an MyMesh
   // weitergeben fuer stats-core 'last_reset'-Anzeige + Boot-Log.
   _wdt_last_reset = wdtMapResetReason();
-  DBG_TRACE("after wdtMapResetReason");
   the_mesh.setLastResetReason((uint8_t)_wdt_last_reset);
   // Persistenten Boot-Log um neuen Eintrag erweitern (Ring 10, oldest
   // out). Pusht zugleich '[boot] ...' an $companion-Channel damit User
   // den Reboot-Grund direkt im Chat sieht.
   the_mesh.bootLogAppend();
-  DBG_TRACE("after bootLogAppend -- setup() ENDE");
   // WDT-State initialisieren (kein activate hier -- erst am Ende vom
   // ersten loop(), damit BLE/LoRa-/Sensor-Init mit ihren langlaufenden
   // Stack-Inits den Pet-Cycle nicht verzoegern).
