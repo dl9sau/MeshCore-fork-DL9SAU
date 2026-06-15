@@ -7559,16 +7559,21 @@ void MyMesh::loop() {
   // CMD_SYNC_NEXT_MSG genug Zeit. (long)(now - target) >= 0 ist
   // wrap-safe via signed-diff.
   if (_pending_reboot_at != 0 && (long)(millis() - _pending_reboot_at) >= 0) {
-    // 2026-06-15 BUGFIX: board.reboot() ruft direkt NVIC_SystemReset()
-    // -- bei aktivem SoftDevice schreibt das auf SCB->AIRCR was unter
-    // SD-Protection fallen kann. Statt Reset spinnt CPU in for(;;)
-    // -- USB-CDC bleibt aus macOS-Sicht stabil, User sieht 'haengt'.
-    // Selbe Klasse wie der RESETREAS-Bugfix vorhin. SD-aware Variante:
+    // 2026-06-15 RE-FIX: board.reboot() ruft direkt NVIC_SystemReset()
+    // -- ohne sd_softdevice_disable() davor greift der Reset auf
+    // T1000-E nicht zuverlaessig. Adafruit-Pattern aus wiring.c
+    // reset_mcu() nachstellen: SD aus + alle Interrupts aus, dann
+    // NVIC_SystemReset(). Genau dies macht enterUf2Dfu(), nur ohne
+    // GPREGRET-Magic (= normaler Reboot statt DFU-Mode).
 #if defined(NRF52_PLATFORM)
-    uint8_t sd_enabled = 0;
-    sd_softdevice_is_enabled(&sd_enabled);
-    if (sd_enabled) sd_nvic_SystemReset();
-    else            NVIC_SystemReset();
+    sd_softdevice_disable();
+    NVIC->ICER[0] = 0xFFFFFFFFUL;
+    NVIC->ICPR[0] = 0xFFFFFFFFUL;
+#if defined(__NRF_NVIC_ISER_COUNT) && __NRF_NVIC_ISER_COUNT == 2
+    NVIC->ICER[1] = 0xFFFFFFFFUL;
+    NVIC->ICPR[1] = 0xFFFFFFFFUL;
+#endif
+    NVIC_SystemReset();
 #else
     board.reboot();
 #endif
@@ -7579,22 +7584,16 @@ void MyMesh::loop() {
   // + NVIC_SystemReset -> Bootloader bleibt im DFU-Mode.
 #if defined(NRF52_PLATFORM)
   if (_pending_dfu_at != 0 && (long)(millis() - _pending_dfu_at) >= 0) {
-    // 2026-06-15 BUGFIX: Adafruit enterUf2Dfu/enterSerialDfu rufen
-    // direkt NVIC_SystemReset(), gleiche Klasse wie reboot-Bug oben.
-    // SD-aware Variante: GPREGRET via SVC, dann sd_nvic_SystemReset.
-    // Magic-Werte siehe framework-arduinoadafruitnrf52/cores/nRF5/
-    // wiring.c (DFU_MAGIC_UF2_RESET=0x57, _SERIAL_ONLY=0x4E).
-    const uint32_t magic = _pending_dfu_serial ? 0x4E : 0x57;
-    uint8_t sd_enabled = 0;
-    sd_softdevice_is_enabled(&sd_enabled);
-    if (sd_enabled) {
-      sd_power_gpregret_clr(0, 0xFF);
-      sd_power_gpregret_set(0, magic);
-      sd_nvic_SystemReset();
-    } else {
-      NRF_POWER->GPREGRET = magic;
-      NVIC_SystemReset();
-    }
+    // 2026-06-15 RE-FIX: Adafruit enterUf2Dfu/enterSerialDfu nutzen --
+    // diese machen vor NVIC_SystemReset einen sd_softdevice_disable() +
+    // disable ALL interrupts (NVIC->ICER/ICPR = 0xFFFFFFFF). DAS ist
+    // der entscheidende Schritt der den Reset zuverlaessig macht.
+    // Mein vorheriger "SD-aware" Fix hat das uebersprungen und nur
+    // sd_nvic_SystemReset() gerufen (= NVIC_SystemReset() wrapper) --
+    // ohne SD-Disable greift Reset auf T1000-E nicht. User-Hinweis:
+    // 'meshtastic macht dfu uf2 via enterUf2Dfu zuverlaessig 20 mal'.
+    if (_pending_dfu_serial) enterSerialDfu();
+    else                     enterUf2Dfu();
     // returns not.
   }
 #endif
