@@ -5249,25 +5249,78 @@ Alte Befehle 'dfu uf2'/'dfu serial' bleiben als Alias.
 Referenzen:
 ================================================================
 
-Vorbilder fuer UX:
-- MeshCom AFU OTA: https://icssw.org/meshcom-ota-update/
-  (180s Window, AP-Modus + STA-Modus, drag-drop Web-Page)
+Vorbilder fuer Variante A (Standard-2-Slot):
 - Meshtastic Heltec WT: default_8MB.csv mit Standard-2-Slot-OTA,
   HTTP-Server in Haupt-Firmware integriert
 
-Vorbilder fuer Helper-Pattern:
-- Meshtastic seeed-sensecap-indicator (8MB MUI): flashApp 640KB
-- Meshtastic unphone / picomputer-s3 (8MB MUI): selbe
-  flashApp-Partition
+Vorbilder fuer Variante B (Helper-Firmware in eigener Partition):
+- MeshCom AFU OTA: https://icssw.org/meshcom-ota-update/
+  Hauptfirmware setzt nur otadata + reboot. Separate OTA-Helper-
+  Firmware uebernimmt: WiFi (AP/STA), HTTP-Upload-Page, 180s Window.
+  User-Argument 2026-06-15: 'Die meshcom firmware selbst muss
+  m.E. gar nichts ueber ota-firmware-upgrade wissen, ausser dass
+  es das Geraet veranlasst von der anderen partition zu booten'
+- Meshtastic seeed-sensecap-indicator / unphone / picomputer-s3
+  (8MB MUI): flashApp 640KB Helper-Partition
 
-Entscheidung:
+Entscheidung 2026-06-15:
 ================================================================
 
-VARIANTE A fuer Heltec WT: Hauptfirmware bringt WiFi+HTTP mit, kein
-Helper noetig. Implementation ~1-2 Tage konzentriert.
+VARIANTE B (Helper-Firmware) bevorzugt -- Argument der sauberen
+Trennung gewinnt:
 
-VARIANTE B als Spaeter-Erweiterung wenn wir Boards mit dicker
-Haupt-Firmware bauen (z.B. wenn MUI-Boards dazukommen).
+  Pro VARIANTE B:
+  - Hauptfirmware bleibt clean: KEIN WiFi-Stack, KEIN HTTP-Server,
+    KEIN OTA-Code in der Mainline -- nur otadata-set + reboot.
+    Reduziert Angriffsflaeche + Bug-Quellen in der eigentlichen
+    Companion-Firmware.
+  - Strom: WiFi-Stack nur waehrend OTA aktiv. Normalbetrieb hat
+    keinen WiFi-Footprint. Wichtig fuer Repeater/Tracker mit Akku.
+  - Code-Size der Hauptfirmware bleibt schlank.
+  - OTA-Helper-Firmware ist isoliert testbar.
 
-Quelle Vertiefung: User-Wunsch 2026-06-15 nach Heltec-WT-Reflash-
-Analyse (Meshtastic-Layout default_8MB.csv = simples 2-Slot-OTA).
+  Contra VARIANTE B:
+  - Zwei Build-Artefakte (Hauptfirmware + OTA-Helper)
+  - User muss Helper einmalig installieren (bei erstem Setup)
+  - Update der Helper selber ist Sonderfall (nicht via OTA moeglich)
+
+Pragmatik: VARIANTE B wenn Implementation steht. Variante A nur als
+Fallback dokumentieren falls Helper-Implementation zu komplex.
+
+Implementation-Anpassung fuer VARIANTE B:
+================================================================
+
+Hauptfirmware-Aenderungen MINIMAL:
+  1. Partition-Switch: ein OTA-Helper-Layout (siehe oben Variante B)
+  2. CLI: 'update wifi' Handler macht NUR:
+       - bootLogWritePreReboot("OTA(wifi)")
+       - esp_ota_set_boot_partition(helper_partition)
+       - ESP.restart()
+  3. Keine WiFi-Stack-Aenderungen in Mainline
+  4. Keine HTTP-Server in Mainline
+
+OTA-Helper-Firmware (separates PIO-Env / Build-Target):
+  - eigener Build-Env z.B. Heltec_Wireless_Tracker_ota_helper
+  - Sehr klein, ~300-500 KB:
+    - WiFi (AP-Default 'MeshCore-OTA-XXX', STA via gespeicherte
+      Credentials wenn vorhanden)
+    - AsyncWebServer + AsyncElegantOTA
+    - 180s Timeout-Timer
+    - Bei erfolgreichem Update: schreibt nach ota_0 (Hauptfirmware-
+      Slot), setzt otadata zurueck, ESP.restart()
+    - Bei Timeout: setzt otadata zurueck auf ota_0, ESP.restart()
+
+  - WiFi-Credentials shared via spiffs (Pref-File von Mainline)
+    oder via nvs (ESP-IDF Standard-Storage), damit Helper sie liest.
+
+Build-Workflow:
+  - 'pio run -e Heltec_Wireless_Tracker_companion_radio_ble'
+    -> Hauptfirmware
+  - 'pio run -e Heltec_Wireless_Tracker_ota_helper'
+    -> Helper-Firmware
+  - Beim ersten Setup: User flasht beide (Hauptfirmware nach
+    ota_0, Helper nach ota_1 -- via esptool oder Combined-UF2).
+
+Quelle Vertiefung 2026-06-15: User-Hinweis dass MeshCom-AFU-
+Pattern (Hauptfirmware blind gegen OTA-Mechanismus, dedizierte
+Helper-Firmware fuer Update-Empfang) das sauberere Design ist.
