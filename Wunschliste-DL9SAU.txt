@@ -5007,6 +5007,21 @@ Quelle: User-Wunsch 2026-06-14 nach Audit-Diskussion + LittleFS-
 Status: User-Wunsch 2026-06-15. CLI 'dfu uf2|serial' ist ERLEDIGT
         (commit 4c8bb832). 'dfu ota' fehlt als 3. Mode.
 
+KORREKTUR 2026-06-15 abends: UPSTREAM MeshCore HAT BLE-DFU/OTA
+schon eingebaut! Siehe upstream-main:
+  - examples/simple_room_server/main.cpp: 'start ota' CLI-Befehl
+    (commit 51ab76ec, Feb 2025)
+  - src/helpers/NRF52Board.cpp::startOTAUpdate() -- bledfu setup
+  - src/helpers/nrf52/SerialBLEInterface.cpp PR #2323 (Apr 2026):
+    bledfu auch im normalen BLE-Stack registriert, paired clients
+    koennen DFU direkt triggern.
+  - Doku: https://docs.meshcore.io/cli_commands/
+
+Bedeutet: Wir muessen nicht eigene 'dfu ota' Implementation bauen
+sondern: upstream-OTA-Code in Companion-Build erreichbar machen.
+Detail-Plan siehe Wunschliste 68 'WICHTIGE REVISION 2026-06-15
+abends'-Abschnitt.
+
 Aktueller Stand:
   - Adafruit-Bluefruit-nRF52 wiring.h exposed schon enterOTADfu()
     -- API ist also direkt verfuegbar, Stage-1-Code waere wenige
@@ -5372,3 +5387,90 @@ Build-Workflow:
 Quelle Vertiefung 2026-06-15: User-Hinweis dass MeshCom-AFU-
 Pattern (Hauptfirmware blind gegen OTA-Mechanismus, dedizierte
 Helper-Firmware fuer Update-Empfang) das sauberere Design ist.
+
+================================================================
+WICHTIGE REVISION 2026-06-15 (spaeter abends):
+================================================================
+
+Upstream MeshCore HAT bereits OTA-Support implementiert!
+Befehl: 'start ota' (https://docs.meshcore.io/cli_commands/)
+
+Implementierungs-Pfad upstream:
+  src/MeshCore.h                : virtual bool startOTAUpdate()
+  src/helpers/ESP32Board.cpp    : ESP32-Implementation
+  src/helpers/NRF52Board.cpp    : NRF52-Implementation
+  src/helpers/CommonCLI.cpp     : CLI-Handler '_board->startOTAUpdate()'
+  src/helpers/nrf52/SerialBLEInterface.cpp : PR #2323 -- bledfu auf
+    main BLE stack registriert (paired clients koennen DFU direkt
+    ohne 'start ota' triggern)
+
+ESP32-Implementation (siehe ESP32Board.cpp):
+  bool startOTAUpdate(id, reply) {
+    inhibit_sleep = true;
+    WiFi.softAP("MeshCore-OTA", NULL);   // open AP
+    AsyncWebServer* server = new AsyncWebServer(80);
+    AsyncElegantOTA.setID(id_buf);
+    AsyncElegantOTA.begin(server);
+    server->begin();
+    return true;
+  }
+  Reply: "Started: http://192.168.4.1/update"
+
+  -> VARIANTE A (Mainline + HTTP-Server), KEIN Helper-Firmware-Pattern
+  -> Sehr klein, ~30 LoC Mainline-Code
+  -> Open-AP (kein PSK Default!) -- bei uns ggf. mit Pref absichern
+
+NRF52-Implementation (siehe NRF52Board.cpp):
+  Konfiguriert Bluefruit auf max bandwidth (fuer OTA), startet
+  bledfu Service, advertised als 'MeshCore-OTA-<MAC>'. Phone-App
+  (nrfConnect / Nordic-Tools / MeshCore-Companion-App mit DFU-
+  Modul) findet das + uploaded firmware via Nordic-DFU-Protokoll.
+
+Was das fuer unsere Wunschliste 68 + 67 bedeutet:
+
+  Wunschliste 67 (NRF52 BLE-DFU): IST UPSTREAM IMPLEMENTIERT
+    -> Wir muessen upstream/main mergen + startOTAUpdate() im
+       companion_radio Build erreichbar machen (CommonCLI kennt
+       'start ota' aber Companion hat aktuell keine MainBoard-
+       Reference fuer den CLI-Handler).
+    -> Unser 'dfu uf2/serial' CLI bleibt als alternativer Pfad
+       fuer manuellen Bootloader-Mode (drag-drop UF2 oder
+       adafruit-nrfutil).
+    -> Naming: 'start ota' als Alias zu 'dfu ota' (oder umgekehrt)
+       fuer Konsistenz mit upstream-Repeater/Room-Server.
+
+  Wunschliste 68 (ESP32 WiFi-OTA): UPSTREAM-PATTERN ist VARIANTE A
+    (Mainline + ElegantOTA), NICHT Variante B (Helper-Firmware).
+    -> Unsere Variante-B2-Empfehlung (MeshCom-Pattern) ist
+       eleganter aber NICHT kompatibel zu upstream MeshCore.
+    -> Kompatibilitaets-Pfad: Variante A uebernehmen, dann sind
+       wir 'start ota' kompatibel zu Repeater-Firmware.
+    -> Variante B2 als spaetere Erweiterung wenn Strom-Sparen
+       (kein dauerhafter WiFi-Stack-Code in Mainline) wichtiger
+       wird als Upstream-Kompat.
+
+Aktion fuer Implementation:
+
+  1. upstream/main mergen (oder zumindest Cherry-Pick der OTA-
+     Commits: 51ab76ec, 77d737be, 96a16c23, 21455e62, 54a48da6).
+  2. Companion-Build CommonCLI nutzen lassen (oder eigenen 'start
+     ota' Handler in MyMesh::handleCompanionCommand) der
+     'the_board->startOTAUpdate(node_name, reply)' ruft.
+  3. ESP32: [esp32_ota] Block in der platformio.ini in der
+     Heltec-WT-Companion-Env aktivieren (lib_deps).
+  4. NRF52: bledfu in SerialBLEInterface schon im PR #2323
+     dabei -- nach upstream-Merge automatisch.
+  5. Default-Sicherheit: Pref 'ota_password' / 'ota_enabled' um
+     OTA-Zugriff zu kontrollieren (upstream nimmt open AP, fuer
+     uns ggf. mit HTTP-Basic-Auth absichern).
+  6. Naming-Entscheidung:
+     - 'start ota' (upstream-kompat)
+     - oder 'dfu ota' / 'update wifi' (unsere Notation)
+     - Mein Vorschlag: 'start ota' als kanonischer Befehl
+       (upstream-Kompat), plus unser 'dfu uf2' / 'dfu serial'
+       bleibt als Alternativ-Pfad fuer NRF52 mit manueller UF2.
+
+Quelle Revision 2026-06-15: User-Hinweis abends nach Test von
+MeshCom auf Lilygo T-Beam ('wifi firmware upgrade ist sowas von
+schick einfach'). Anschliessend Discovery von 'start ota' in
+upstream MeshCore docs + Source-Inspektion.
