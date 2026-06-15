@@ -37,6 +37,8 @@
   // umgeht das mit '#include <nrfx_wdt.c>'). HAL ist direkter +
   // ausreichend fuer unser One-Channel-Pet-Pattern.
   #include "nrf_wdt.h"
+  #include <nrf_soc.h>
+  #include <nrf_sdm.h>
   // 2026-06-15: 'dfu'-CLI fuer NRF52 (SenseCap T1000E etc.). Spart die
   // fehlertraechtige Reset-Button-Doppelklick-Sequenz beim Firmware-
   // Update. enterUf2Dfu()/enterSerialDfu() von Adafruit-nRF52 wiring.h:
@@ -44,6 +46,21 @@
   // DFU-Mode statt App-Start. Mechanismus von Meshtastic uebernommen.
   extern "C" void enterUf2Dfu(void);
   extern "C" void enterSerialDfu(void);
+  // 2026-06-15 BUGFIX: SenseCap T1000E hing nach Flash in early boot.
+  // Root cause: NRF_POWER->RESETREAS direkt zu lesen+clearen ist
+  // erlaubt SOLANGE SoftDevice noch NICHT aktiv ist. Wenn wir's spaeter
+  // in setup() versuchen (nach board.begin() -> Bluefruit/SoftDevice
+  // aktiv), gibt's HardFault -> Reboot-Loop -> BLE nie sichtbar.
+  // Fix: Pre-SoftDevice-Capture via Constructor-Priority 101 (laeuft
+  // vor SystemInit (102) und vor C++-Constructors). Pattern stammt
+  // aus src/helpers/NRF52Board.cpp. Spaeter im map-Code lesen wir nur
+  // diese Variable; das Clear muss SoftDevice-safe sein (SVC oder
+  // direkt -- je nach Status).
+  static uint32_t s_nrf52_resetreas_captured = 0;
+  static void __attribute__((constructor(101)))
+              wdtCaptureResetReason(void) {
+    s_nrf52_resetreas_captured = NRF_POWER->RESETREAS;
+  }
 #endif
 
 // Reset-Reason Mapping (Plattform-uebergreifend einheitlich):
@@ -83,11 +100,19 @@ static WdtResetKind wdtMapResetReason() {
     default:               return WDT_RESET_UNKNOWN;
   }
 #elif defined(NRF52_PLATFORM)
-  // NRF_POWER->RESETREAS Bits: RESETPIN, DOG, SREQ, LOCKUP, OFF, ...
-  // Write-1-to-clear: lesen + zuruecklehnen damit beim naechsten Reset
-  // die Bits korrekt akkumuliert sind (sonst verbleiben alte).
-  uint32_t r = NRF_POWER->RESETREAS;
-  NRF_POWER->RESETREAS = 0xFFFFFFFFUL;
+  // 2026-06-15 BUGFIX: NICHT direkt von NRF_POWER->RESETREAS lesen --
+  // SoftDevice ist hier (nach board.begin()) schon aktiv, direkter
+  // Zugriff = HardFault. Wir lesen den vor SystemInit captured Wert
+  // (siehe constructor wdtCaptureResetReason oben) und clearen via
+  // SoftDevice-aware Pfad.
+  uint32_t r = s_nrf52_resetreas_captured;
+  uint8_t sd_enabled = 0;
+  sd_softdevice_is_enabled(&sd_enabled);
+  if (sd_enabled) {
+    sd_power_reset_reason_clr(0xFFFFFFFFUL);
+  } else {
+    NRF_POWER->RESETREAS = 0xFFFFFFFFUL;
+  }
   if (r & POWER_RESETREAS_DOG_Msk)      return WDT_RESET_WDT;
   if (r & POWER_RESETREAS_LOCKUP_Msk)   return WDT_RESET_PANIC;
   if (r & POWER_RESETREAS_SREQ_Msk)     return WDT_RESET_WARM;
