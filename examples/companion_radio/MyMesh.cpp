@@ -738,7 +738,14 @@ void MyMesh::bootLogWritePreReboot(const char* cause) {
 }
 
 void MyMesh::bootLogPrint() {
-  char entries[BOOT_LOG_MAX_ENTRIES][96];
+  // User-Bug 2026-06-15: T1000-E froze nach 'log read'. Stack-Overflow
+  // Verdacht -- frueher hatten wir ~1240 Bytes lokal (10x96 + 160 +
+  // 120). Im BLE-Callback-Task-Kontext zu viel. Loesung: alle grossen
+  // Buffer static (= BSS, einmalig allokiert). Kostet 960 + 160 + 120
+  // = 1240 Bytes RAM permanent, dafuer kein Stack-Risk.
+  static char entries[BOOT_LOG_MAX_ENTRIES][96];
+  static char block[160];
+  static char line[120];
   int n = bootLogLoad(entries, BOOT_LOG_MAX_ENTRIES);
   if (n == 0) {
     pushCompanionMessage("log: (leer)");
@@ -749,7 +756,6 @@ void MyMesh::bootLogPrint() {
   // bleibt Unix (kompakt), Display konvertiert.
   // 145-Byte-Block-Limit pro pushCompanionMessage (siehe Memory-Note
   // feedback_companion_msg_145_byte_limit).
-  char block[160];
   int n_block = 0;
   block[0] = 0;
   for (int i = 0; i < n; i++) {
@@ -759,7 +765,6 @@ void MyMesh::bootLogPrint() {
     while (*rest && *rest != ' ') rest++;
     while (*rest == ' ') rest++;
     // Format-Konversion
-    char line[120];
     if (e_secs >= 1500000000UL) {
       time_t lt = (time_t)(e_secs + (uint32_t)localTzOffsetSecs(e_secs));
       struct tm tm_loc;
@@ -11619,8 +11624,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "dfu")) {
         pushCompanionMessage(
           "dfu: NRF52 in Bootloader-Mode versetzen.\n"
-          "  dfu              UF2 (drag-drop) -- Default\n"
-          "  dfu uf2          explizit UF2\n"
+          "  dfu              Usage anzeigen (kein Trigger)\n"
+          "  dfu uf2          UF2 (drag-drop USB-Storage)\n"
           "  dfu serial       Serial-DFU (nrfutil)"
         );
         pushCompanionMessage(
@@ -19210,13 +19215,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
     bool serial_mode = false;
-    if (arg && *arg) {
-      if (topic_prefix_match(arg, "serial"))     serial_mode = true;
-      else if (topic_prefix_match(arg, "uf2"))   serial_mode = false;
-      else {
-        pushCompanionMessage("dfu: uf2 | serial (default uf2)");
-        return;
-      }
+    // User-Feedback 2026-06-15: 'dfu' ohne Argument darf NICHT direkt
+    // ins DFU springen -- ist Foot-Gun bei Tipp-Reflex. Stattdessen
+    // Usage anzeigen; explizit 'dfu uf2' bzw. 'dfu serial' verlangen.
+    if (!arg || !*arg) {
+      pushCompanionMessage(
+        "dfu: NRF52 in Bootloader-Mode.\n"
+        "  dfu uf2      drag-drop UF2\n"
+        "  dfu serial   nrfutil/adafruit-nrfutil");
+      return;
+    }
+    if (topic_prefix_match(arg, "serial"))     serial_mode = true;
+    else if (topic_prefix_match(arg, "uf2"))   serial_mode = false;
+    else {
+      pushCompanionMessage("dfu: uf2 | serial");
+      return;
     }
     pushCompanionMessage(serial_mode
       ? "Entering Serial-DFU in 3s.."
