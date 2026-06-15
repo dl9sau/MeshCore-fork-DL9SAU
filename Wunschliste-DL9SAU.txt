@@ -5027,11 +5027,12 @@ Risiko:
 
 Voraussetzungen fuer Stage 'dfu ota':
   1) Bestaetigen dass das Board einen OTA-faehigen Bootloader hat.
-     Default Adafruit-Bootloader auf SenseCap T1000-E koennte
-     bereits OK sein. Fuer T1000-E gibt's deutsche Doku zum
-     Bootloader-Neu-Flashen unter:
-     https://meshcore-de.fyi/meshcore:allgemeines:t1000-e_bootloader_neu_flashen
-  2) BLE-DFU-Client-App: nrfConnect, Nordic-Tools, oder DFU-fähige
+     Default Adafruit-Bootloader hat bekannte OTA-Issues. Eine
+     gefixte Variante (User-Hinweis 2026-06-15):
+       https://github.com/oltaco/Adafruit_nRF52_Bootloader_OTAFIX
+     Fuer T1000-E gibt's deutsche Doku zum Bootloader-Neu-Flashen:
+       https://meshcore-de.fyi/meshcore:allgemeines:t1000-e_bootloader_neu_flashen
+  2) BLE-DFU-Client-App: nrfConnect, Nordic-Tools, oder DFU-faehige
      MeshCore-Companion-App.
   3) Test-Flow mit harmloser App-Image-Variante bevor produktive
      Firmware uebertragen wird.
