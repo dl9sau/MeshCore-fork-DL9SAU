@@ -5114,3 +5114,160 @@ Credentials Build-Defines -- nicht User-aenderbar zur Laufzeit.
 
 Quelle: User-Wunsch 2026-06-15 nach Erinnerung an gescheiterten
   ersten OTA-Versuch wegen falschem Partition-Layout.
+
+================================================================
+Vertiefung 2026-06-15 (nach Heltec-WT-Reflash-Analyse + Meshtastic-
+Layout-Vergleich + MeshCom-AFU-Doku-Studie):
+================================================================
+
+Zwei Partition-Strategien moeglich:
+
+VARIANTE A -- Einfaches 2-App-OTA (Empfohlen fuer Heltec WT)
+================================================================
+
+Layout (default_8MB.csv, von Meshtastic auf Heltec WT genutzt):
+  nvs,      data, nvs,     0x9000,  0x5000,    (20 KB)
+  otadata,  data, ota,     0xe000,  0x2000,    (8 KB)
+  app0,     app,  ota_0,   0x10000, 0x330000,  (3.19 MB - Haupt-Firmware)
+  app1,     app,  ota_1,   0x340000,0x330000,  (3.19 MB - inaktiv, OTA-Empfang)
+  spiffs,   data, spiffs,  0x670000,0x190000,  (1.56 MB)
+
+Workflow:
+  1. User triggert via 'update wifi' CLI (oder App-Befehl)
+  2. Haupt-Firmware oeffnet WiFi (AP oder STA je nach NodePrefs)
+     - STA: connect zu konfigurierter WiFi + AsyncWebServer auf <hostname>.local
+     - AP:  oeffnet 'MeshCore-OTA-XXX' AP, 192.168.4.1
+  3. AsyncElegantOTA exponed Web-Upload-Page (drag-drop firmware.bin)
+  4. Firmware schreibt empfangene Bytes in inaktive Partition (app1)
+     via Arduino Update.h / esp_ota_write API
+  5. Bei Erfolg: otadata-Flag auf ota_1 + reboot
+  6. Bootloader liest otadata, startet von app1
+  7. 180s Timeout (analog MeshCom-UX): wenn keine Datei kommt, regulaerer
+     Reboot -> ota_0 wieder aktiv
+
+Vorteil:
+  - Keine separate OTA-Helper-Firmware
+  - Haupt-Firmware enthaelt WiFi + HTTP-Server-Code direkt
+  - Auf Heltec WT (8MB Flash) reichlich Platz fuer 2x 3.19MB Slots
+  - Unsere aktuelle Firmware ist ~1.8MB -> passt locker in 3.19MB Slot
+
+Nachteil:
+  - WiFi-Stack im Companion-Build erhoeht Code-Size + Strom (~10-20mA)
+  - Wir disablen WiFi aktuell explizit in main.cpp:359-363 fuer Strom-Spar
+  - Implementation komplexer wenn WiFi-Pref + Connect-Logic + Trigger
+
+VARIANTE B -- Helper-Firmware in eigener Partition (a la Meshtastic-MUI / MeshCom)
+================================================================
+
+Layout (8MB, fuer dicke Haupt-Firmware oder strikte Trennung):
+  nvs,      data, nvs,     0x9000,  0x5000,
+  otadata,  data, ota,     0xe000,  0x2000,
+  app0,     app,  ota_0,   0x10000, 0x5C0000,   (5.75 MB - Haupt-Firmware)
+  flashApp, app,  ota_1,   0x5D0000,0x0A0000,   (640 KB - Helper)
+  spiffs,   data, spiffs,  0x670000,0x180000,   (1.5 MB)
+
+Workflow:
+  1. User triggert OTA -> Haupt-Firmware setzt otadata auf 'boot ota_1' + reboot
+  2. flashApp laeuft (minimal-Firmware mit nur WiFi + HTTP-Upload)
+  3. flashApp zeigt Upload-Page
+  4. User uploaded firmware.bin
+  5. flashApp schreibt nach ota_0 (Haupt-Slot)
+  6. flashApp setzt otadata zurueck auf ota_0 + reboot
+  7. Neue Haupt-Firmware laeuft
+
+Vorteil:
+  - Saubere Trennung: Haupt-Firmware muss kein WiFi+HTTP enthalten
+  - Mehr Platz fuer dicke Haupt-Firmware (z.B. MUI-Boards mit grossem
+    Display + Touch-Stack + viele Fonts)
+  - flashApp koennte sogar zwischen MeshCore-Updates persistent bleiben
+  - Strom: WiFi nur waehrend Update aktiv, normaler Betrieb ohne
+
+Nachteil:
+  - Zwei Firmware-Artefakte (Haupt-Firmware + flashApp)
+  - Build-System komplexer
+  - User muss flashApp einmalig installieren (oder via Init-UF2 bundlen)
+  - Update von flashApp selber ist ein Sonder-Fall
+
+Implementations-Schritte VARIANTE A (concrete):
+================================================================
+
+1. Variant-Ini: heltec_tracker companion_radio_ble erweitern
+     board_build.partitions = default_8MB.csv
+     lib_deps += ${esp32_ota.lib_deps}
+     build_flags += -D WIFI_OTA=1
+
+2. NodePrefs append-only:
+     uint8_t wifi_mode;          // 0=off, 1=sta, 2=ap (only-when-needed)
+     char    wifi_ssid[32];
+     char    wifi_psk[64];
+
+3. main.cpp setup() unter -D WIFI_OTA=1:
+     - WiFi nicht stillegen wenn wifi_mode != off
+     - Nur dann WiFi-Stack initialisieren
+
+4. main.cpp loop(): WiFi-Reconnect-Logic (gibt's schon Stub)
+
+5. CLI Befehle:
+     set wifi.ssid <ssid>
+     set wifi.psk  <psk>
+     set wifi.mode off|sta|ap
+     get wifi
+     update wifi              -- triggert OTA-Modus (180s Window)
+     update status            -- aktuelle Partition + Version
+
+6. update wifi Handler:
+     - bootLogWritePreReboot("OTA(wifi)")  [Marker im Boot-Log]
+     - WiFi je nach mode aktivieren (STA-connect oder AP starten)
+     - AsyncWebServer auf Port 80 + AsyncElegantOTA mounten
+     - 180s Timer; bei Timeout: WiFi off + zurueck normal
+     - Bei erfolgreichem Update: otadata schon gesetzt durch ElegantOTA,
+       wir rufen ESP.restart() -- neuer Slot bootet
+
+7. Boot-Log: Cause 'OTA(wifi)' analog DFU-Marker fuer NRF52
+
+8. Help-Text fuer 'update wifi' + 'set wifi.*' + 'get wifi'
+
+9. Sicherheit:
+     - HTTP-Basic-Auth via wifi_psk oder separater ota_password Pref
+     - Default: kein OTA bis explizit aktiviert (Sicherheits-Hygiene)
+
+Namens-Vorschlag:
+================================================================
+
+'dfu' ist Nordic/USB-DFU-spezifisch -- passt nicht fuer ESP32 WiFi-OTA.
+Unified 'update' Verbose wirkt sauberer:
+
+  update uf2           -- NRF52 UF2 (bisher 'dfu uf2')
+  update serial        -- NRF52 Serial-DFU (bisher 'dfu serial')
+  update wifi          -- NEU ESP32 WiFi-OTA via HTTP-Upload
+  update ota           -- NRF52 BLE-DFU (Wunschliste 67)
+  update status        -- cross-platform Stats: aktive Partition,
+                          Version, freier Slot-Platz
+
+Alte Befehle 'dfu uf2'/'dfu serial' bleiben als Alias.
+
+Referenzen:
+================================================================
+
+Vorbilder fuer UX:
+- MeshCom AFU OTA: https://icssw.org/meshcom-ota-update/
+  (180s Window, AP-Modus + STA-Modus, drag-drop Web-Page)
+- Meshtastic Heltec WT: default_8MB.csv mit Standard-2-Slot-OTA,
+  HTTP-Server in Haupt-Firmware integriert
+
+Vorbilder fuer Helper-Pattern:
+- Meshtastic seeed-sensecap-indicator (8MB MUI): flashApp 640KB
+- Meshtastic unphone / picomputer-s3 (8MB MUI): selbe
+  flashApp-Partition
+
+Entscheidung:
+================================================================
+
+VARIANTE A fuer Heltec WT: Hauptfirmware bringt WiFi+HTTP mit, kein
+Helper noetig. Implementation ~1-2 Tage konzentriert.
+
+VARIANTE B als Spaeter-Erweiterung wenn wir Boards mit dicker
+Haupt-Firmware bauen (z.B. wenn MUI-Boards dazukommen).
+
+Quelle Vertiefung: User-Wunsch 2026-06-15 nach Heltec-WT-Reflash-
+Analyse (Meshtastic-Layout default_8MB.csv = simples 2-Slot-OTA).
