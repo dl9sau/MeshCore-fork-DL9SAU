@@ -699,7 +699,11 @@ private:
   uint8_t  _br_block_type;          // 0=none, 1=dl9sau, 2=main
   char     _br_line[96];
   uint16_t _br_line_len;
-  char     _br_json[2560];
+  // User-Bug 2026-06-15: 2560 reichte nicht fuer NODE MAIN Block mit
+  // ~9 filter_scope_drop-Eintraegen. Bump auf 6KB schluckt das aktuelle
+  // Worst-Case + Reserve fuer wachsende Filter-Liste, RAM-Footprint
+  // bleibt vertretbar (~3.5KB mehr in BSS).
+  char     _br_json[6144];
   uint16_t _br_json_len;
   int16_t  _br_brace_depth;
   bool     _br_in_string;
