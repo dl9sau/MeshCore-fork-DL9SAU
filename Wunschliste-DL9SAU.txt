@@ -4999,3 +4999,59 @@ Quelle: User-Wunsch 2026-06-14 nach Audit-Diskussion + LittleFS-
 
 
 
+
+--------------------------------------------------------------------------------
+67. NRF52 BLE-DFU (OTA Firmware-Update)
+--------------------------------------------------------------------------------
+
+Status: User-Wunsch 2026-06-15. CLI 'dfu uf2|serial' ist ERLEDIGT
+        (commit 4c8bb832). 'dfu ota' fehlt als 3. Mode.
+
+Aktueller Stand:
+  - Adafruit-Bluefruit-nRF52 wiring.h exposed schon enterOTADfu()
+    -- API ist also direkt verfuegbar, Stage-1-Code waere wenige
+    Zeilen analog zu enterUf2Dfu().
+  - ABER: Der OTA-Trigger braucht einen OTA-FAEHIGEN Bootloader auf
+    dem Board. Standard Adafruit-Bootloader hat OTA-DFU eingebaut,
+    Nordic Secure-DFU ist die professionelle Variante mit Signatur-
+    Verifikation.
+
+Risiko:
+  - Bootloader-Updates sind die einzigen Firmware-Operationen wo
+    Bricking realistisches Outcome ist.
+  - Falls Bootloader-Flash mittendrin abbricht: Board braucht SWD-
+    Adapter (J-Link, Black Magic Probe) um wieder reinkommen zu
+    koennen.
+  - User-Aussage 2026-06-15: 'extra bootloaderfirmware habe ich mir
+    aber noch nicht getraut'.
+
+Voraussetzungen fuer Stage 'dfu ota':
+  1) Bestaetigen dass das Board einen OTA-faehigen Bootloader hat.
+     Default Adafruit-Bootloader auf SenseCap T1000-E koennte
+     bereits OK sein. Fuer T1000-E gibt's deutsche Doku zum
+     Bootloader-Neu-Flashen unter:
+     https://meshcore-de.fyi/meshcore:allgemeines:t1000-e_bootloader_neu_flashen
+  2) BLE-DFU-Client-App: nrfConnect, Nordic-Tools, oder DFU-fähige
+     MeshCore-Companion-App.
+  3) Test-Flow mit harmloser App-Image-Variante bevor produktive
+     Firmware uebertragen wird.
+
+Implementation Stage 1 (sobald Voraussetzungen erfuellt):
+  In MyMesh.cpp 'dfu'-CLI-Handler:
+    if (topic_prefix_match(arg, "ota")) {
+      pushCompanionMessage("Entering OTA-DFU in 3s..");
+      bootLogWritePreReboot("DFU(ota)");
+      _pending_dfu_at  = millis() + 3000;
+      _pending_dfu_ota = true;   // neues bool oder enum statt _serial
+    }
+  Loop()-end:
+    if (_pending_dfu_at != 0 && ...) {
+      if (_pending_dfu_ota)         enterOTADfu();
+      else if (_pending_dfu_serial) enterSerialDfu();
+      else                          enterUf2Dfu();
+    }
+  In main.cpp extern "C" void enterOTADfu(void); ergaenzen.
+  Help-Text 'dfu' um Zeile 'dfu ota -- BLE-DFU' erweitern.
+
+Quelle: User-Hinweis 2026-06-15 mit Link zur deutschen T1000-E
+  Bootloader-Doku.
