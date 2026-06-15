@@ -1184,6 +1184,14 @@ private:
   // CLI-Handler — sonst wuerde die loop() pausiert und der "Rebooting
   // now.."-Push waere nicht zur App ausgeliefert.
   unsigned long _pending_reboot_at;
+#if defined(NRF52_PLATFORM)
+  // 2026-06-15: deferred DFU-Mode-Entry (NRF52 only -- ESP32 hat keinen
+  // SoftDevice-Bootloader, dort spart das #ifdef RAM). _pending_dfu_at = 0
+  // sentinel 'nichts pending'. _pending_dfu_serial = true -> enterSerialDfu,
+  // sonst enterUf2Dfu (Default UF2 = drag-and-drop USB-Mass-Storage).
+  unsigned long _pending_dfu_at    = 0;
+  bool          _pending_dfu_serial = false;
+#endif
   // Detail-Statistik-Counter (RAM-only, reset bei Reboot).
   // Indizes: ADV_TYPE_* (0..4) bzw. PAYLOAD_TYPE_* (0..0x0F).
   uint16_t      _heard_direct[5];        // zero-hop empfangene Adverts pro Node-Typ

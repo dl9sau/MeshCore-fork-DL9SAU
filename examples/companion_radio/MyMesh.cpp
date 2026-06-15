@@ -7547,6 +7547,16 @@ void MyMesh::loop() {
     board.reboot();
     // returns not.
   }
+  // 2026-06-15: Deferred DFU-Entry (NRF52). Sentinel _pending_dfu_at = 0
+  // bedeutet 'nichts pending'. enterUf2Dfu/enterSerialDfu setzen GPREGRET
+  // + NVIC_SystemReset -> Bootloader bleibt im DFU-Mode.
+#if defined(NRF52_PLATFORM)
+  if (_pending_dfu_at != 0 && (long)(millis() - _pending_dfu_at) >= 0) {
+    if (_pending_dfu_serial) enterSerialDfu();
+    else                     enterUf2Dfu();
+    // returns not.
+  }
+#endif
 }
 
 bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
@@ -11030,7 +11040,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     {"stats-core", false}, {"stats-radio", false}, {"stats-packets", false},
     {"uptime", false}, {"advert", false}, {"autoadv", false},
     {"repeater", false}, {"gps", false}, {"trace", false},
-    {"chatname", false}, {"reboot", true}, {"duty", false}, {"scope", false},
+    {"chatname", false}, {"reboot", true}, {"dfu", false}, {"duty", false}, {"scope", false},
     {"prefs", false}, {"neighbors", false}, {"tempradio", false},
     {"set", false}, {"get", false}, {"clock", false}, {"date", false}, {"time", false},
     {"messages", false}, {"log", false}, {"unscoped-channelmessages", false},
@@ -11603,6 +11613,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Boot-Log-Eintrag: '<unixsec> <cause> uptime=<dur>'\n"
           "Cause: COLD WARM WDT PANIC BROWNOUT.\n"
           "Push bei Boot: neueste Info in $companion-Channel."
+        );
+        return;
+      }
+      if (topic_prefix_match(topic, "dfu")) {
+        pushCompanionMessage(
+          "dfu: NRF52 in Bootloader-Mode versetzen.\n"
+          "  dfu              UF2 (drag-drop) -- Default\n"
+          "  dfu uf2          explizit UF2\n"
+          "  dfu serial       Serial-DFU (nrfutil)"
+        );
+        pushCompanionMessage(
+          "Spart die Reset-Button-Doppelklick-Sequenz.\n"
+          "Boot-Log Eintrag: DFU(uf2) bzw. DFU(serial).\n"
+          "ESP32: nicht unterstuetzt (boot-Mode-Pins)."
         );
         return;
       }
@@ -19171,6 +19195,44 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Frame-Verarbeitung zu blockieren.
     _pending_reboot_at = millis() + 3000;
     if (_pending_reboot_at == 0) _pending_reboot_at = 1;  // 0 = sentinel "nichts pending"
+    return;
+  }
+
+  // 2026-06-15: 'dfu' CLI fuer NRF52 -- triggert Bootloader-DFU-Mode
+  // ohne Reset-Button-Doppelklick. Vorbild Meshtastic enterDfuMode.
+  //   dfu              Default UF2 (drag-and-drop USB-Mass-Storage)
+  //   dfu uf2          Explizit UF2
+  //   dfu serial       Serial DFU (nrfutil ueber USB-CDC)
+  // ESP32 unterstuetzt das so nicht (boot-Mode-Pins, kein
+  // SoftDevice-Bootloader). Wir antworten dort mit Hinweis.
+  if (starts_with_word(cmd, "dfu")) {
+#if defined(NRF52_PLATFORM)
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    bool serial_mode = false;
+    if (arg && *arg) {
+      if (topic_prefix_match(arg, "serial"))     serial_mode = true;
+      else if (topic_prefix_match(arg, "uf2"))   serial_mode = false;
+      else {
+        pushCompanionMessage("dfu: uf2 | serial (default uf2)");
+        return;
+      }
+    }
+    pushCompanionMessage(serial_mode
+      ? "Entering Serial-DFU in 3s.."
+      : "Entering UF2-DFU in 3s..");
+    // Pre-DFU Boot-Log Eintrag. Marker '(' damit naechster Boot
+    // bootLogAppend den Eintrag erkennt + nicht doppelt loggt
+    // (analog Pre-Reboot-Pfad in 'reboot' CLI).
+    bootLogWritePreReboot(serial_mode ? "DFU(serial)" : "DFU(uf2)");
+    // Deferred-Trigger (analog reboot-CLI) -- Frame muss noch
+    // ausgeliefert werden bevor wir die App verlassen.
+    _pending_dfu_at     = millis() + 3000;
+    if (_pending_dfu_at == 0) _pending_dfu_at = 1;
+    _pending_dfu_serial = serial_mode;
+#else
+    pushCompanionMessage("dfu: nur auf NRF52 verfuegbar.");
+#endif
     return;
   }
 

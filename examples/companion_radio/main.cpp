@@ -37,6 +37,13 @@
   // umgeht das mit '#include <nrfx_wdt.c>'). HAL ist direkter +
   // ausreichend fuer unser One-Channel-Pet-Pattern.
   #include "nrf_wdt.h"
+  // 2026-06-15: 'dfu'-CLI fuer NRF52 (SenseCap T1000E etc.). Spart die
+  // fehlertraechtige Reset-Button-Doppelklick-Sequenz beim Firmware-
+  // Update. enterUf2Dfu()/enterSerialDfu() von Adafruit-nRF52 wiring.h:
+  // setzt GPREGRET-Magic + NVIC_SystemReset -> Bootloader landet im
+  // DFU-Mode statt App-Start. Mechanismus von Meshtastic uebernommen.
+  extern "C" void enterUf2Dfu(void);
+  extern "C" void enterSerialDfu(void);
 #endif
 
 // Reset-Reason Mapping (Plattform-uebergreifend einheitlich):
