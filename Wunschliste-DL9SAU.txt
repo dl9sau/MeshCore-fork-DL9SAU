@@ -5516,3 +5516,115 @@ NRF52 (Wunschliste 67):
 
   Boot-Log-Eintrag: 'OTA(start)' Pre-Reboot-Marker damit klar
   ist warum WDT ausgelassen wurde.
+
+
+--------------------------------------------------------------------------------
+69. Backup save/restore Bugs (User-Report 2026-06-15 abends)
+--------------------------------------------------------------------------------
+
+Status: TODO. Drei Bugs entdeckt bei User-Test auf Heltec WT nach
+        backup restore aus persistierter Datei. Filter-Listen + Channels
+        gehen verloren.
+
+Bug 1: HASHTAG CHANNELS Block-Dispatch fehlt
+================================================================
+
+  Symptom:
+    User pasted backup mit ch0..ch18 + ch_pub_0 (20 Channels).
+    Output: 'applied+0 errors+0' fuer HASHTAG CHANNELS block.
+    Naechstes 'backup save' zeigt HASHTAG CHANNELS block leer.
+
+  Root cause:
+    examples/companion_radio/MyMesh.cpp:9560:
+      } else if (_br_block_type == 1 || _br_block_type == 2) {
+        brApplyField(_br_block_type, key, val_start, val_len, val_type);
+      }
+    block_type == 3 (HASHTAG CHANNELS) wird NICHT dispatched.
+
+    Der Handler in brApplyField (block_type == 3) existiert ab
+    Zeile 10007, wird aber nie gerufen.
+
+  Fix:
+    Dispatcher erweitern:
+      } else if (_br_block_type >= 1 && _br_block_type <= 3) {
+        brApplyField(_br_block_type, key, val_start, val_len, val_type);
+      }
+
+Bug 2: Filter-Keys Save/Restore Block-Mismatch
+================================================================
+
+  Symptom:
+    User hatte filter_scope_drop mit 9 Eintraegen (#de, #europe,
+    unscoped, #de-nord, #de-west, #de-sued, #de-mitte, #de-ost, #foo).
+    Nach restore: 'filter scope drop list' zeigt leer.
+
+  Root cause:
+    Save-Seite emittet ALLE Filter-Keys im NODE MAIN block:
+      MyMesh.cpp:8951  kv_uint("filter_unknown_channel_repeat", ...)
+      MyMesh.cpp:8970  emit_filter_list("filter_sender_drop", ...)
+      MyMesh.cpp:8990  emit_filter_list("filter_text_drop", ...)
+      MyMesh.cpp:9000  emit_filter_scope_list("filter_scope_drop", ...)
+      MyMesh.cpp:9004  emit_filter_scope_list("filter_scope_keep", ...)
+      ... alles zwischen BACKUP NODE MAIN BEGIN (Z 8855) und END (Z 9011)
+
+    Restore-Seite hat die Handler im block_type == 1 (DL9SAU PREFS):
+      MyMesh.cpp:9701  filter_unknown_channel_repeat
+      MyMesh.cpp:9707  try_filter_field lambda
+      MyMesh.cpp:9758  try_scope_field lambda
+      MyMesh.cpp:9807  try_filter_field("filter_sender_drop", ...)
+      MyMesh.cpp:9817  try_filter_field("filter_text_drop", ...)
+      MyMesh.cpp:9827  try_scope_field("filter_scope_drop", ...)
+      MyMesh.cpp:9832  try_scope_field("filter_scope_keep", ...)
+
+    Beim Restore-Parsing landen die filter_-Keys aus NODE MAIN im
+    block_type == 2 Branch (Z 9841). Der hat KEINE Filter-Handler ->
+    Keys fallen durch als _br_skipped++. Lost.
+
+  Fix-Option A (Restore-Handler nach block_type == 2 verschieben):
+    Vorteil: Save-Seite bleibt unveraendert
+    Nachteil: brApplyField wird laenger
+
+  Fix-Option B (Save-Seite nach DL9SAU PREFS block verschieben):
+    Vorteil: filter_* sind DL9SAU-spezifisch -> semantisch passender
+    Nachteil: bricht backward-compat mit existierenden Backup-Files
+
+  Empfehlung: Option A (Handler verschieben), erhaltet backward-compat.
+
+Bug 3: 'get prv.key' nicht implementiert
+================================================================
+
+  Symptom:
+    User-Test: 'get prv.key' -> 'Unbekannter key 'prv.key'.'
+
+  Sollte:
+    Entweder die Private-Key (Hex) zurueckgeben (Security-Risk!)
+    oder eine Hilfsmeldung 'use backup save fuer prv_key export'.
+
+  Pragmatik: prv_key sollte NICHT casually via 'get' exposed werden
+    (Identity-Diebstahl wenn jemand im laufenden Betrieb mitliest).
+    'backup save' ist der bewusste Export-Pfad mit klarer User-
+    Intention. 'get prv.key' sollte explizit auf den 'backup save'
+    Pfad verweisen.
+
+  Implementation:
+    if (strcmp(key, "prv.key") == 0 || strcmp(key, "prv_key") == 0) {
+      snprintf(r, sizeof(r),
+        "prv.key: aus Security-Gruenden nicht via 'get'.\n"
+        "Benutze 'backup save' fuer Export.");
+    }
+
+Reihenfolge fuer Implementation:
+  1. Bug 1 (Channels-Dispatch) -- 1-Zeilen-Fix
+  2. Bug 2 (Filter Block-Mismatch) -- Handler nach block_type==2 ziehen
+  3. Bug 3 (get prv.key) -- kurzer CLI-Handler-Hinzufuegen
+
+Test-Plan:
+  - backup save vor Fix -> Datei speichern
+  - alle drei Bugs fixen
+  - backup restore aus alter Datei -> applied=N (mit N > 0 fuer
+    Channels + Filter)
+  - get prv.key -> sinnvolle Antwort
+
+Quelle: User-Report 2026-06-15 abends nach Test backup restore aus
+  persistierter Datei (mit 9 filter_scope_drop + 20 Channels) -> 
+  filter-Liste + Channels leer geblieben.
