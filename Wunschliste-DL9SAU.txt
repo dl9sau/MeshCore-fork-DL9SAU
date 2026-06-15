@@ -5672,3 +5672,43 @@ Bug 4 (Erweiterung 2026-06-15): String-Handler im val_type=='n' Block
 
   Quelle: User-Report 2026-06-15 abends, Erweiterung der Wunschliste 69
     nach Beobachtung dass display_wake_mode nicht restored wurde.
+
+
+Bug 5 (User-Report 2026-06-15 spaet abends): backup save HASHTAG CHANNELS leer
+================================================================
+
+  Symptom:
+    User hatte Channels via App-Backup restauriert (also persistent
+    vorhanden, ueber App-Side-Mechanism geschrieben). 'backup save'
+    in der CLI gibt HASHTAG CHANNELS Block leer aus:
+      --- BACKUP HASHTAG CHANNELS BEGIN ---
+      { "_meta": {...} }   <- nur meta, KEINE ch0..chN Eintraege
+      --- BACKUP HASHTAG CHANNELS END ---
+
+  Vermutung:
+    backup save iteriert ueber Channels via getChannel(i) wie der
+    Restore-Path. Wenn der CLI-Backup-Save-Pfad ander Region/Slots
+    abfragt als die App beim Schreiben nutzt, sehen wir leer.
+
+    Moegliche Ursachen:
+    a) App-Side schreibt in einen anderen Slot-Bereich (z.B. ext_
+       Slots) als getChannel(0..MAX_GROUP_CHANNELS-1) abdeckt.
+    b) Channel-Filter im Save (z.B. is_hashtag, secret-PSK-Check)
+       schliesst die via App restaurierten Channels aus.
+    c) Save erwartet Channels in InternalFS bzw. ExtraFS-Region,
+       App schreibt aber an anderer Position.
+
+  Untersuchungs-Plan:
+    1. Im backup save Code (MyMesh.cpp:emit HASHTAG CHANNELS Block,
+       suche nach 'BACKUP HASHTAG CHANNELS BEGIN') die Iterations-
+       Logik anschauen.
+    2. Vergleich gegen App-Side Channel-Restore-Pfad
+       (CMD_*_CHANNEL Frames). Wo werden Channels von App geschrieben?
+    3. Test: 'channels' CLI-Befehl listet User-Channels. Wenn dort
+       sichtbar, sind sie im Standard-Slot-Range. Wenn nicht, sind
+       sie in einem ander erreichbaren Bereich.
+
+  Reihenfolge:
+    Untersuchen nach Bug 1-4 fixen.
+
+  Quelle: User-Report 2026-06-15 spaet abends.
