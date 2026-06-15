@@ -5156,36 +5156,79 @@ Nachteil:
   - Wir disablen WiFi aktuell explizit in main.cpp:359-363 fuer Strom-Spar
   - Implementation komplexer wenn WiFi-Pref + Connect-Logic + Trigger
 
-VARIANTE B -- Helper-Firmware in eigener Partition (a la Meshtastic-MUI / MeshCom)
+VARIANTE B -- Helper-Firmware in eigener Partition
 ================================================================
 
-Layout (8MB, fuer dicke Haupt-Firmware oder strikte Trennung):
-  nvs,      data, nvs,     0x9000,  0x5000,
-  otadata,  data, ota,     0xe000,  0x2000,
-  app0,     app,  ota_0,   0x10000, 0x5C0000,   (5.75 MB - Haupt-Firmware)
-  flashApp, app,  ota_1,   0x5D0000,0x0A0000,   (640 KB - Helper)
-  spiffs,   data, spiffs,  0x670000,0x180000,   (1.5 MB)
+Zwei Sub-Patterns innerhalb Variante B:
 
-Workflow:
-  1. User triggert OTA -> Haupt-Firmware setzt otadata auf 'boot ota_1' + reboot
-  2. flashApp laeuft (minimal-Firmware mit nur WiFi + HTTP-Upload)
-  3. flashApp zeigt Upload-Page
-  4. User uploaded firmware.bin
-  5. flashApp schreibt nach ota_0 (Haupt-Slot)
-  6. flashApp setzt otadata zurueck auf ota_0 + reboot
-  7. Neue Haupt-Firmware laeuft
+  B1 -- Meshtastic-MUI-Pattern (ota_0 + ota_1=flashApp):
+    Layout 8MB (fuer MUI-Boards mit grossem Display):
+      nvs       data nvs     0x9000   0x5000
+      otadata   data ota     0xe000   0x2000
+      app0      app  ota_0   0x10000  0x5C0000   (5.75 MB Haupt)
+      flashApp  app  ota_1   0x5D0000 0x0A0000   (640 KB Helper)
+      spiffs    data spiffs  0x670000 0x180000   (1.5 MB)
+    Nutzt OTA-Slot-1 als Helper-Position -- klassische 2-Slot-OTA
+    aber mit "kleinem ota_1".
 
-Vorteil:
-  - Saubere Trennung: Haupt-Firmware muss kein WiFi+HTTP enthalten
-  - Mehr Platz fuer dicke Haupt-Firmware (z.B. MUI-Boards mit grossem
-    Display + Touch-Stack + viele Fonts)
-  - flashApp koennte sogar zwischen MeshCore-Updates persistent bleiben
-  - Strom: WiFi nur waehrend Update aktiv, normaler Betrieb ohne
+  B2 -- MeshCom-Pattern (factory + ota_0): -- ELEGANTER
+    Layout 4MB (von MeshCom-Firmware verwendet):
+      nvs       data nvs       36K     20K
+      otadata   data ota       56K     8K
+      safeboot  app  factory   64K     704K      (Helper als FACTORY)
+      app       app  ota_0     768K    3324K     (Haupt-Firmware 3.3 MB)
+      coredump  data coredump  4092K   4K
+    Layout 16MB analog: app=12MB, plus spiffs 3.3MB davor coredump.
 
-Nachteil:
-  - Zwei Firmware-Artefakte (Haupt-Firmware + flashApp)
+    KEY-INSIGHT: ESP32 kennt 3 App-Partition-Typen:
+      factory    Fallback-Firmware (boot wenn otadata invalid)
+      ota_0      OTA-Slot 0
+      ota_1      OTA-Slot 1
+    MeshCom nutzt 'factory' als Helper-Slot statt ota_1.
+
+    Vorteile vs B1:
+      - factory ist "natuerliche" Fallback-Position im ESP32-Standard
+      - Boot-Loader respektiert factory + otadata-Override
+      - Bei verlorener otadata-Info (z.B. nach Power-Loss waehrend Update)
+        bootet sich der Helper AUTOMATISCH -> Recovery-Mechanismus
+        eingebaut
+      - Kein klassisches Dual-OTA Setup -- weniger verwirrend
+      - Helper kann via 'factory' immer wieder angesprungen werden,
+        ohne dass man zwei OTA-Slots verwalten muss
+
+  -> Empfehlung: B2 (MeshCom-Pattern) verwenden.
+
+Workflow (B2):
+  1. User triggert 'update wifi' in Haupt-Firmware
+  2. Haupt-Firmware: esp_ota_set_boot_partition(factory_partition)
+     + ESP.restart()
+  3. Bootloader liest otadata -> "boot factory" -> safeboot laeuft
+  4. safeboot: WiFi (AP-Default oder STA-gespeicherte Credentials),
+     AsyncWebServer auf Port 80, AsyncElegantOTA-Form
+  5. User uploaded firmware.bin
+  6. safeboot schreibt empfangene Bytes in ota_0-Partition via
+     esp_ota_write
+  7. safeboot: esp_ota_set_boot_partition(ota_0) + ESP.restart()
+  8. Bootloader -> "boot ota_0" -> neue Haupt-Firmware laeuft
+  9. Bei Timeout (180s ohne Upload): safeboot setzt zurueck +
+     rebootet -> Haupt-Firmware
+
+Vorteile B2 generell:
+  - Saubere Trennung: Haupt-Firmware enthaelt NUR die 4 Zeilen Code
+    fuer den Boot-Partition-Switch
+  - factory-Partition ist eingebauter Recovery-Mechanismus
+  - Strom: WiFi-Stack nur waehrend OTA aktiv
+  - safeboot bleibt persistent ueber Haupt-Firmware-Updates hinweg
+    (wird nur ueberschrieben wenn safeboot SELBST upgegradet wird,
+    was Sonderfall ist)
+
+Nachteile B2:
+  - Zwei Firmware-Artefakte (Haupt + safeboot)
   - Build-System komplexer
-  - User muss flashApp einmalig installieren (oder via Init-UF2 bundlen)
+  - User muss safeboot einmalig flashen (kann via Init-Combined-Bin
+    bei erstem Setup -- esptool merge_bin -- vereinfacht werden)
+  - Update der safeboot SELBER: nicht via OTA moeglich, braucht
+    Cable-Flash (selten noetig)
   - Update von flashApp selber ist ein Sonder-Fall
 
 Implementations-Schritte VARIANTE A (concrete):
@@ -5256,12 +5299,17 @@ Vorbilder fuer Variante A (Standard-2-Slot):
 Vorbilder fuer Variante B (Helper-Firmware in eigener Partition):
 - MeshCom AFU OTA: https://icssw.org/meshcom-ota-update/
   Hauptfirmware setzt nur otadata + reboot. Separate OTA-Helper-
-  Firmware uebernimmt: WiFi (AP/STA), HTTP-Upload-Page, 180s Window.
+  Firmware (safeboot, factory-Partition) uebernimmt: WiFi (AP/STA),
+  HTTP-Upload-Page, 180s Window.
   User-Argument 2026-06-15: 'Die meshcom firmware selbst muss
   m.E. gar nichts ueber ota-firmware-upgrade wissen, ausser dass
   es das Geraet veranlasst von der anderen partition zu booten'
+  CSV-Dateien:
+    https://github.com/icssw-org/MeshCom-Firmware/blob/dev/partitions-4MB-safeboot.csv
+    https://github.com/icssw-org/MeshCom-Firmware/blob/dev/partitions-16MB-safeboot.csv
+  Pattern B2: factory + ota_0 (NICHT klassisches Dual-OTA)
 - Meshtastic seeed-sensecap-indicator / unphone / picomputer-s3
-  (8MB MUI): flashApp 640KB Helper-Partition
+  (8MB MUI): flashApp 640KB ota_1 Helper-Partition (Pattern B1)
 
 Entscheidung 2026-06-15:
 ================================================================
