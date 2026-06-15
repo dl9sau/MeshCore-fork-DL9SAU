@@ -2,6 +2,15 @@
 
 #include <Arduino.h> // needed for PlatformIO
 #include <time.h>    // gmtime_r + struct tm -- nRF52-newlib zieht das NICHT
+
+// 2026-06-15: SoftDevice-aware reboot in MyMesh::loop() benoetigt:
+//   sd_softdevice_is_enabled (aus nrf_sdm.h)
+//   sd_nvic_SystemReset      (aus nrf_nvic.h direkt)
+#if defined(NRF52_PLATFORM)
+  #include <nrf_soc.h>
+  #include <nrf_sdm.h>
+  #include <nrf_nvic.h>
+#endif
                      // transitiv ueber Arduino.h rein (ESP32 schon). Fix
                      // 2026-06-14 nach nrf52-Audit (alle 75 Companion-
                      // Builds gescheitert mit 'gmtime_r not declared').
@@ -4907,6 +4916,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _br_applied = 0;
   _br_skipped = 0;
   _br_errors = 0;
+  _br_error_log[0] = 0;
   _br_reboot_recommended = false;
   // Wunschliste 27: CTL_TYPE_NODE_DISCOVER state
   _discover_active = false;
@@ -7549,7 +7559,19 @@ void MyMesh::loop() {
   // CMD_SYNC_NEXT_MSG genug Zeit. (long)(now - target) >= 0 ist
   // wrap-safe via signed-diff.
   if (_pending_reboot_at != 0 && (long)(millis() - _pending_reboot_at) >= 0) {
+    // 2026-06-15 BUGFIX: board.reboot() ruft direkt NVIC_SystemReset()
+    // -- bei aktivem SoftDevice schreibt das auf SCB->AIRCR was unter
+    // SD-Protection fallen kann. Statt Reset spinnt CPU in for(;;)
+    // -- USB-CDC bleibt aus macOS-Sicht stabil, User sieht 'haengt'.
+    // Selbe Klasse wie der RESETREAS-Bugfix vorhin. SD-aware Variante:
+#if defined(NRF52_PLATFORM)
+    uint8_t sd_enabled = 0;
+    sd_softdevice_is_enabled(&sd_enabled);
+    if (sd_enabled) sd_nvic_SystemReset();
+    else            NVIC_SystemReset();
+#else
     board.reboot();
+#endif
     // returns not.
   }
   // 2026-06-15: Deferred DFU-Entry (NRF52). Sentinel _pending_dfu_at = 0
@@ -7557,8 +7579,22 @@ void MyMesh::loop() {
   // + NVIC_SystemReset -> Bootloader bleibt im DFU-Mode.
 #if defined(NRF52_PLATFORM)
   if (_pending_dfu_at != 0 && (long)(millis() - _pending_dfu_at) >= 0) {
-    if (_pending_dfu_serial) enterSerialDfu();
-    else                     enterUf2Dfu();
+    // 2026-06-15 BUGFIX: Adafruit enterUf2Dfu/enterSerialDfu rufen
+    // direkt NVIC_SystemReset(), gleiche Klasse wie reboot-Bug oben.
+    // SD-aware Variante: GPREGRET via SVC, dann sd_nvic_SystemReset.
+    // Magic-Werte siehe framework-arduinoadafruitnrf52/cores/nRF5/
+    // wiring.c (DFU_MAGIC_UF2_RESET=0x57, _SERIAL_ONLY=0x4E).
+    const uint32_t magic = _pending_dfu_serial ? 0x4E : 0x57;
+    uint8_t sd_enabled = 0;
+    sd_softdevice_is_enabled(&sd_enabled);
+    if (sd_enabled) {
+      sd_power_gpregret_clr(0, 0xFF);
+      sd_power_gpregret_set(0, magic);
+      sd_nvic_SystemReset();
+    } else {
+      NRF_POWER->GPREGRET = magic;
+      NVIC_SystemReset();
+    }
     // returns not.
   }
 #endif
@@ -9064,6 +9100,7 @@ void MyMesh::backupRestoreStart() {
   _br_applied = 0;
   _br_skipped = 0;
   _br_errors = 0;
+  _br_error_log[0] = 0;
   _br_reboot_recommended = false;
   _br_timeout_at = futureMillis(60000);  // 60 s
   // RX-Buffer aufstocken damit ein 3-4 KB Paste-Burst nicht im
@@ -9084,17 +9121,35 @@ void MyMesh::backupRestoreStart() {
                        "Ctrl-D (0x04) zum Beenden. 60s Timeout.");
 }
 
+// 2026-06-15: User-Frage 'welches setting wurde nicht angewendet?' --
+// _br_error_log sammelt die Tokens (key oder kurzer Diagnose-String)
+// pro _br_errors++ Site. Komma-separiert, capped auf Buffer-Groesse.
+void MyMesh::brRecordError(const char* token) {
+  if (!token || !*token) return;
+  size_t cur_len = strlen(_br_error_log);
+  size_t cap = sizeof(_br_error_log);
+  if (cur_len + 3 >= cap) return;  // Buffer voll
+  const char* sep = (cur_len == 0) ? "" : ",";
+  snprintf(_br_error_log + cur_len, cap - cur_len, "%s%s", sep, token);
+}
+
 void MyMesh::backupRestoreFinish(const char* reason) {
   // End-Statusmeldung. Bei reboot-relevanten Feldern (Radio-Params,
   // prv_key) wird zusaetzlich ein Reboot-Hinweis angehaengt -- kein
   // auto-Reboot, User entscheidet.
-  char r[200];
+  char r[300];
   int n = snprintf(r, sizeof(r),
            "backup restore %s.\n"
            "applied=%u skipped=%u errors=%u\n"
            "(runtime only -- 'save' (USB-Serial oder $companion) fuer persistent)",
            reason ? reason : "done",
            (unsigned)_br_applied, (unsigned)_br_skipped, (unsigned)_br_errors);
+  if (_br_errors > 0 && _br_error_log[0] != 0
+      && n > 0 && n < (int)sizeof(r)) {
+    int w = snprintf(r + n, sizeof(r) - n,
+                     "\nfailed: %s", _br_error_log);
+    if (w > 0) n += w;
+  }
   if (_br_reboot_recommended && n > 0 && n < (int)sizeof(r)) {
     snprintf(r + n, sizeof(r) - n,
              "\nreboot empfohlen (radio/identity geaendert).");
@@ -9231,6 +9286,7 @@ void MyMesh::backupRestoreLoop() {
     else if (_br_state == BR_READING_JSON) {
       if (_br_json_len >= sizeof(_br_json) - 1) {
         _br_errors++;
+        brRecordError("json-overflow");
         Serial.println("# error: JSON buffer overflow, skipping block.");
         _br_state = BR_WAIT_MARKER;
         _br_json_len = 0;
@@ -9409,6 +9465,7 @@ void MyMesh::backupRestoreParseBlock() {
   while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
   if (p >= end || *p != '{') {
     _br_errors++;
+    brRecordError("parse-no-brace");
     Serial.println("# parse error: expected '{' at start of JSON block.");
     return;
   }
@@ -9420,6 +9477,7 @@ void MyMesh::backupRestoreParseBlock() {
     // Expect "key"
     if (*p != '"') {
       _br_errors++;
+      brRecordError("parse-no-key");
       break;
     }
     p++;
@@ -9533,6 +9591,7 @@ void MyMesh::brApplyMeta(const char* val_start, size_t val_len) {
   // Validieren
   if (!mesh::LocalIdentity::validatePrivateKey(prv)) {
     _br_errors++;
+    brRecordError("prv_key-invalid");
     Serial.println("# meta.prv_key: invalid -- ignored.");
     return;
   }
@@ -9542,6 +9601,7 @@ void MyMesh::brApplyMeta(const char* val_start, size_t val_len) {
   new_id.readFrom(prv, PRV_KEY_SIZE);
   if (!_store->saveMainIdentity(new_id)) {
     _br_errors++;
+    brRecordError("prv_key-savefail");
     Serial.println("# meta.prv_key: saveMainIdentity FAILED.");
     return;
   }
@@ -9981,6 +10041,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (slot < 0) slot = empty_slot;
       if (slot < 0) {
         _br_errors++;
+        brRecordError(chname);
         Serial.printf("# channel %s: no free slot, skipped.\r\n", chname);
         return;
       }
@@ -9989,6 +10050,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
         _br_applied++;
       } else {
         _br_errors++;
+        brRecordError(chname);
         Serial.printf("# channel %s: setChannel failed.\r\n", chname);
       }
       return;
@@ -10025,6 +10087,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (slot < 0) slot = empty_slot;
       if (slot < 0) {
         _br_errors++;
+        brRecordError(pname);
         Serial.printf("# ch_pub %s: no free slot, skipped.\r\n", pname);
         return;
       }
@@ -10033,6 +10096,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
         _br_applied++;
       } else {
         _br_errors++;
+        brRecordError(pname);
         Serial.printf("# ch_pub %s: setChannel failed.\r\n", pname);
       }
       return;
@@ -10067,6 +10131,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (!channelHopsUpsert(_prefs, h, (uint8_t)cap,
                              CH_HOPS_FLAG_EXTERNAL, hash16[0], raw)) {
         _br_errors++;
+        brRecordError(raw);
         Serial.printf("# ch.hops ext %s: list full, skipped.\r\n", raw);
         return;
       }
@@ -10085,6 +10150,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       uint32_t h = fnv1a32_cstr(raw);
       if (!channelHopsUpsert(_prefs, h, (uint8_t)cap, 0, 0, raw)) {
         _br_errors++;
+        brRecordError(raw);
         Serial.printf("# ch.hops %s: list full, skipped.\r\n", raw);
         return;
       }

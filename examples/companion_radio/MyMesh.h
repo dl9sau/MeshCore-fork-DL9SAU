@@ -708,6 +708,10 @@ private:
   uint16_t _br_applied;
   uint16_t _br_skipped;
   uint16_t _br_errors;
+  // User-Wunsch 2026-06-15: bei errors > 0 muss die App-sichtbare
+  // Summary sagen WELCHE keys/Issues fehlschlugen. _br_error_log
+  // sammelt komma-separierte Tokens (capped). brRecordError() hängt an.
+  char     _br_error_log[120];
   // True wenn restorerte Felder einen Reboot empfehlen (Radio-Params,
   // prv_key). Wird in der End-Statusmeldung gehinted, kein auto-action.
   bool     _br_reboot_recommended;
@@ -719,6 +723,9 @@ private:
   void backupRestoreParseBlock();
   // Beenden / abbrechen
   void backupRestoreFinish(const char* reason);
+  // 2026-06-15: Error-Logger fuer App-sichtbare Diagnose. Haengt token
+  // an _br_error_log an (komma-separiert, capped). NULL/leer = ignore.
+  void brRecordError(const char* token);
   // Field-Dispatcher (block_type 1 = DL9SAU, 2 = MAIN)
   void brApplyField(uint8_t block_type, const char* key,
                     const char* val_start, size_t val_len, char val_type);
