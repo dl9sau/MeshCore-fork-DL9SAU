@@ -168,6 +168,14 @@ static void activateWatchdog() {
 }
 
 static void petWatchdog() {
+#if defined(NRF52_PLATFORM)
+  // 2026-06-15 T1000-E Workaround: wenn CLI 'reboot' oder 'dfu' das
+  // shouldStopPettingWdt-Flag gesetzt hat, NICHT mehr petten. WDT
+  // feuert dann nach <=5s (frisch gestartet via armWdtReset) bzw.
+  // <=90s (bestehender App-WDT). Universeller Reset-Mechanismus weil
+  // NVIC_SystemReset auf T1000-E nicht zuverlaessig greift.
+  if (the_mesh.shouldStopPettingWdt()) return;
+#endif
   if (_wdt_state != WDT_STATE_ACTIVE) return;
 #if defined(ESP32)
   esp_task_wdt_reset();

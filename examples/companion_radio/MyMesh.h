@@ -479,6 +479,21 @@ public:
   }
   uint32_t getLastSessionUptimeMs() const { return _last_session_uptime_ms; }
 
+#if defined(NRF52_PLATFORM)
+  // 2026-06-15 T1000-E Workaround: getter fuer main.cpp::petWatchdog().
+  // Wenn true, hoert main.cpp auf zu petten -> WDT feuert -> Reset.
+  // Sauberster Weg da NVIC_SystemReset() auf T1000-E nicht zuverlaessig
+  // reseted (auch nicht via Adafruit reset_mcu Pattern).
+  bool shouldStopPettingWdt() const { return _wdt_let_fire; }
+  // armWdtReset(): wenn WDT noch nicht laeuft, mit 5s Timeout starten
+  // (NRF52-WDT ist nach Start nicht stoppbar -- macht nichts, wir
+  // resetten gleich). Dann flag setzen -> petWatchdog() stoppt -> WDT
+  // feuert spaetestens nach 5s (oder ≤90s wenn unser App-WDT bereits
+  // mit Default-Timeout laeuft). Universeller Reset-Mechanismus weil
+  // NVIC_SystemReset auf T1000-E nicht greift.
+  void armWdtReset();
+#endif
+
   // Wunschliste 53 Phase 7 (2026-06-14): Boot-Log Public-API.
   // /boot_log.txt in LittleFS, Ring-Buffer 10 Eintraege, plain-text.
   // Eintrags-Schema: "<unixsec> <cause>[ uptime=<dur>]\n"
@@ -1202,6 +1217,13 @@ private:
   // sonst enterUf2Dfu (Default UF2 = drag-and-drop USB-Mass-Storage).
   unsigned long _pending_dfu_at    = 0;
   bool          _pending_dfu_serial = false;
+  // 2026-06-15 T1000-E-Workaround: NVIC_SystemReset() feuert auf T1000-E
+  // nicht zuverlaessig (auch nicht via Adafruit reset_mcu Pattern). WDT
+  // ist die einzige verlaessliche Reset-Quelle. Wenn watchdog_mode == 1,
+  // setzen reboot/dfu CLI dieses Flag -> petWatchdog() in main.cpp pet
+  // nicht mehr -> WDT feuert in <=90s -> Hardware-Reset. Fuer DFU wird
+  // vorher GPREGRET-Magic gesetzt -- bleibt ueber WDT-Reset erhalten.
+  bool          _wdt_let_fire = false;
 #endif
   // Detail-Statistik-Counter (RAM-only, reset bei Reboot).
   // Indizes: ADV_TYPE_* (0..4) bzw. PAYLOAD_TYPE_* (0..0x0F).

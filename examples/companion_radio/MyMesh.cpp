@@ -10,6 +10,7 @@
   #include <nrf_soc.h>
   #include <nrf_sdm.h>
   #include <nrf_nvic.h>
+  #include "nrf_wdt.h"   // armWdtReset() WDT-direct-trigger Workaround
 #endif
                      // transitiv ueber Arduino.h rein (ESP32 schon). Fix
                      // 2026-06-14 nach nrf52-Audit (alle 75 Companion-
@@ -7582,22 +7583,31 @@ void MyMesh::loop() {
   // 2026-06-15: Deferred DFU-Entry (NRF52). Sentinel _pending_dfu_at = 0
   // bedeutet 'nichts pending'. enterUf2Dfu/enterSerialDfu setzen GPREGRET
   // + NVIC_SystemReset -> Bootloader bleibt im DFU-Mode.
-#if defined(NRF52_PLATFORM)
-  if (_pending_dfu_at != 0 && (long)(millis() - _pending_dfu_at) >= 0) {
-    // 2026-06-15 RE-FIX: Adafruit enterUf2Dfu/enterSerialDfu nutzen --
-    // diese machen vor NVIC_SystemReset einen sd_softdevice_disable() +
-    // disable ALL interrupts (NVIC->ICER/ICPR = 0xFFFFFFFF). DAS ist
-    // der entscheidende Schritt der den Reset zuverlaessig macht.
-    // Mein vorheriger "SD-aware" Fix hat das uebersprungen und nur
-    // sd_nvic_SystemReset() gerufen (= NVIC_SystemReset() wrapper) --
-    // ohne SD-Disable greift Reset auf T1000-E nicht. User-Hinweis:
-    // 'meshtastic macht dfu uf2 via enterUf2Dfu zuverlaessig 20 mal'.
-    if (_pending_dfu_serial) enterSerialDfu();
-    else                     enterUf2Dfu();
-    // returns not.
-  }
-#endif
+  // 2026-06-15 NRF52 T1000-E: Deferred reboot/DFU via NVIC_SystemReset
+  // entfernt. Statt dessen WDT-Reset (armWdtReset im CLI-Handler) weil
+  // NVIC_SystemReset() auch via Adafruit reset_mcu Pattern auf T1000-E
+  // nicht zuverlaessig feuert. WDT als Reset-Mechanismus garantiert
+  // Hardware-Reset.
 }
+
+#if defined(NRF52_PLATFORM)
+void MyMesh::armWdtReset() {
+  // Wenn unser App-WDT bereits laeuft (watchdog_mode == 1):
+  //   nichts an WDT-Config tun, einfach flag setzen -> petWatchdog()
+  //   in main.cpp stoppt -> WDT timeout (Default 90s) -> Reset.
+  // Wenn nicht laeuft: frischen WDT mit kurzem 5s Timeout starten.
+  // NRF52 WDT ist nach Start nicht stoppbar, macht aber nichts weil
+  // wir gleich resetten. CRV-Register kann NUR vor TASK_START
+  // gesetzt werden.
+  if ((NRF_WDT->RUNSTATUS & 1) == 0) {
+    nrf_wdt_behaviour_set(NRF_WDT, NRF_WDT_BEHAVIOUR_PAUSE_SLEEP_HALT);
+    nrf_wdt_reload_value_set(NRF_WDT, 5UL * 32768UL);  // 5s
+    nrf_wdt_reload_request_enable(NRF_WDT, NRF_WDT_RR0);
+    nrf_wdt_task_trigger(NRF_WDT, NRF_WDT_TASK_START);
+  }
+  _wdt_let_fire = true;
+}
+#endif
 
 bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
 #if ENV_INCLUDE_GPS == 1
@@ -19249,22 +19259,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
   // ---------- reboot ----------------------------------------------------
   if (starts_with_word(cmd, "reboot")) {
-    pushCompanionMessage("Rebooting now..");
-    // Wunschliste 53 Phase 7 (2026-06-14): Pre-Reboot Boot-Log-Entry
-    // mit EXAKTER Uptime + WARM(cli)-Marker. Beim naechsten Boot
-    // erkennt bootLogAppend den Marker innerhalb 30s und vermeidet
-    // doppelten Eintrag. Wir schreiben hier sofort, damit der Eintrag
-    // im Flash sitzt bevor der naechste Schritt (board.reboot()) ihn
-    // potentiell unterbrechen koennte.
+#if defined(NRF52_PLATFORM)
+    // 2026-06-15 T1000-E: NVIC_SystemReset() greift hier nicht zuverlaessig.
+    // Workaround: WDT als Reset-Mechanismus -- garantiert Hardware-Reset
+    // in <=5s (oder ≤90s wenn unser App-WDT bereits mit Default-Timeout
+    // laeuft). Sauberer und reliable.
+    pushCompanionMessage("Reset via WDT (<=5s)..");
     bootLogWritePreReboot();
-    // DEFERRED reboot: blockierendes delay() hier wuerde die loop()
-    // pausieren — Push-Frame-Auslieferung (PUSH_CODE_MSG_WAITING-Tickle
+    armWdtReset();
+#else
+    pushCompanionMessage("Rebooting now..");
+    bootLogWritePreReboot();
+    // DEFERRED reboot (ESP32): blockierendes delay() hier wuerde die loop()
+    // pausieren -- Push-Frame-Auslieferung (PUSH_CODE_MSG_WAITING-Tickle
     // + App-CMD_SYNC_NEXT_MSG-Round-Trip) UND der OK-Frame zur App
     // koennten in der Zeit nicht stattfinden. Stattdessen Flag mit
     // Zielzeit setzen, loop() prueft und triggert den reboot ohne die
     // Frame-Verarbeitung zu blockieren.
     _pending_reboot_at = millis() + 3000;
-    if (_pending_reboot_at == 0) _pending_reboot_at = 1;  // 0 = sentinel "nichts pending"
+    if (_pending_reboot_at == 0) _pending_reboot_at = 1;
+#endif
     return;
   }
 
@@ -19297,17 +19311,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     pushCompanionMessage(serial_mode
-      ? "Entering Serial-DFU in 3s.."
-      : "Entering UF2-DFU in 3s..");
+      ? "Reset via WDT (<=5s) -> Serial-DFU.."
+      : "Reset via WDT (<=5s) -> UF2-DFU..");
     // Pre-DFU Boot-Log Eintrag. Marker '(' damit naechster Boot
     // bootLogAppend den Eintrag erkennt + nicht doppelt loggt
     // (analog Pre-Reboot-Pfad in 'reboot' CLI).
     bootLogWritePreReboot(serial_mode ? "DFU(serial)" : "DFU(uf2)");
-    // Deferred-Trigger (analog reboot-CLI) -- Frame muss noch
-    // ausgeliefert werden bevor wir die App verlassen.
-    _pending_dfu_at     = millis() + 3000;
-    if (_pending_dfu_at == 0) _pending_dfu_at = 1;
-    _pending_dfu_serial = serial_mode;
+    // 2026-06-15 T1000-E: NVIC_SystemReset via Adafruit enterUf2Dfu
+    // greift nicht zuverlaessig. Statt dessen: GPREGRET-Magic SD-safe
+    // setzen (persistiert ueber WDT-Reset) und WDT als Reset-Trigger.
+    // Magic-Werte siehe wiring.c (0x57 UF2, 0x4E Serial).
+    {
+      const uint32_t magic = serial_mode ? 0x4E : 0x57;
+      uint8_t sd_enabled = 0;
+      sd_softdevice_is_enabled(&sd_enabled);
+      if (sd_enabled) {
+        sd_power_gpregret_clr(0, 0xFF);
+        sd_power_gpregret_set(0, magic);
+      } else {
+        NRF_POWER->GPREGRET = magic;
+      }
+    }
+    armWdtReset();
 #else
     pushCompanionMessage("dfu: nur auf NRF52 verfuegbar.");
 #endif
