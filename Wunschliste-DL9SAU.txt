@@ -5474,3 +5474,45 @@ Quelle Revision 2026-06-15: User-Hinweis abends nach Test von
 MeshCom auf Lilygo T-Beam ('wifi firmware upgrade ist sowas von
 schick einfach'). Anschliessend Discovery von 'start ota' in
 upstream MeshCore docs + Source-Inspektion.
+
+================================================================
+WDT-HANDLING BEI OTA (User-Hinweis 2026-06-15 abends):
+================================================================
+
+ESP32 (Wunschliste 68):
+  WDT MUSS waehrend OTA disabled werden -- Flash-Writes koennen
+  laenger dauern als WDT-Timeout (90s Default), wuerden Reset
+  triggern.
+  Implementation: in 'start ota' Handler:
+    if (_prefs.watchdog_mode == 1) {
+      esp_task_wdt_delete(NULL);  // remove from watchlist
+      pushDebugLog("WDT temporarily disabled during OTA\n");
+    }
+  Nach erfolgreichem Update: ESP.restart() macht's eh egal --
+  WDT wird neu konfiguriert beim Boot.
+  Bei OTA-Cancel oder Timeout: WDT wieder re-arming via
+    esp_task_wdt_add(NULL);
+
+NRF52 (Wunschliste 67):
+  WDT auf NRF52 ist NICHT stoppbar (Hardware-Limit). Daher
+  kann 'start ota' bei aktivem WDT NICHT einfach durchgefuehrt
+  werden -- BLE-DFU-Transfer braucht Minuten, WDT Default 90s.
+
+  User-Instruction-Pfad:
+    'start ota' Handler prueft _prefs.watchdog_mode:
+      if (watchdog_mode == 1) {
+        reply = "WDT aktiv. Bitte:\n"
+                "1. 'set watchdog off'\n"
+                "2. 'reboot'\n"
+                "3. 'start ota' erneut\n"
+                "4. Nach Update: 'set watchdog on' + 'reboot'";
+        return false;
+      }
+    Sonst: normal weiter mit BLE-DFU-Setup.
+
+  Alternative-Idee (spaeter): WDT-Timeout temporaer auf max
+  hochsetzen statt disablen. Aber CRV ist nach Start locked --
+  geht nur ueber neuen Boot.
+
+  Boot-Log-Eintrag: 'OTA(start)' Pre-Reboot-Marker damit klar
+  ist warum WDT ausgelassen wurde.
