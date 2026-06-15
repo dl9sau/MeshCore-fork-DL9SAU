@@ -534,6 +534,19 @@ void setup() {
 
 void loop() {
   petWatchdog();   // No-op wenn nicht ACTIVE
+
+  // DL9SAU 2026-06-15 DEBUG: Heartbeat alle 30s auf USB-Serial. Soll
+  // klaeren ob die App bei OTAFIX-Bootloader ueberhaupt loop() erreicht
+  // (User-Symptom: 'echo aber kein Prompt' -- moegliche setup()-Haenge).
+  // Nach Diagnose wieder entfernen.
+  {
+    static uint32_t _hb_next_ms = 0;
+    uint32_t _now_ms = millis();
+    if ((int32_t)(_now_ms - _hb_next_ms) >= 0) {
+      Serial.println("Ich bin da ;)");
+      _hb_next_ms = _now_ms + 30UL * 1000UL;
+    }
+  }
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
