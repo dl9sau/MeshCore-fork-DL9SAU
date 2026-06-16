@@ -5822,3 +5822,33 @@ Empfehlung: zuerst A (sauber + kein Stall mehr), B als Fallback.
 
 Test-Case (Heltec Wireless Tracker, USB-Full-Speed):
   paste alle 3 Bloecke nahtlos. HASHTAG kommt nicht durch.
+
+
+--------------------------------------------------------------------------------
+72. TODO: WiFi-OTA HTTP-Basic-Auth mit ADMIN_PASSWORD testen
+--------------------------------------------------------------------------------
+
+Status: TODO. Plan A (Reboot-into-OTA, Commit 5c279fe2) ist
+        End-to-End funktional, aber AUTH-Pfad nicht ausgereizt.
+
+User-Wahl 2026-06-16 'Auth: offen wie Upstream'. AsyncElegantOTA
+unterstuetzt setAuth(user, pass) -- aktuell rufen wir das nicht.
+
+Wenn ADMIN_PASSWORD im Build definiert ist, koennten wir
+automatisch HTTP-Basic-Auth aktivieren ('admin' + ADMIN_PASSWORD).
+Repeater-Build hat ADMIN_PASSWORD eh, Companion-Build koennte
+optional setzen.
+
+Code-Stelle: src/helpers/ESP32Board.cpp startOTAUpdate:
+  AsyncElegantOTA.setID(id_buf);
+  // hier zukuenftig:
+  // #ifdef ADMIN_PASSWORD
+  // AsyncElegantOTA.begin(s_ota_server, "admin", ADMIN_PASSWORD);
+  // #else
+  AsyncElegantOTA.begin(s_ota_server);
+  // #endif
+
+Test-Pfad: build mit ADMIN_PASSWORD, start ota, /update verlangt
+Auth-Dialog.
+
+Quelle: User-Notiz 2026-06-16 'Web-Auth mit Passwort: nicht getestet.'
