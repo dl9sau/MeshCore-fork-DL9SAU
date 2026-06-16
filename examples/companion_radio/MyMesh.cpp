@@ -5039,7 +5039,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 #endif
 
 void MyMesh::begin(bool has_display) {
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10a in the_mesh.begin"); Serial.flush();
+#endif
   BaseChatMesh::begin();
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10b post BaseChatMesh::begin"); Serial.flush();
+#endif
 
   if (!_store->loadMainIdentity(self_id)) {
     self_id = radio_new_identity(); // create new random identity
@@ -5050,6 +5056,9 @@ void MyMesh::begin(bool has_display) {
     }
     _store->saveMainIdentity(self_id);
   }
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10c post loadMainIdentity"); Serial.flush();
+#endif
 
 // if name is provided as a build flag, use that as default node name instead
 #ifdef ADVERT_NAME
@@ -5185,7 +5194,13 @@ void MyMesh::begin(bool has_display) {
   memset(_prefs.time_sync_sources, 0, sizeof(_prefs.time_sync_sources));
 
   // load persisted prefs
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10d pre loadPrefs"); Serial.flush();
+#endif
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10e post loadPrefs"); Serial.flush();
+#endif
 
   // Migration: alter auto_advert_enabled=1 (= "on" mit beiden Adverts) zu
   // dem neuen Bitmask-Schema (3 = AUTO_ADV_ZEROHOP | AUTO_ADV_NIGHTLY).
@@ -5507,7 +5522,13 @@ void MyMesh::begin(bool has_display) {
   }
 
   resetContacts();
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10f pre loadContacts"); Serial.flush();
+#endif
   _store->loadContacts(this);
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10g post loadContacts"); Serial.flush();
+#endif
   bootstrapRTCfromContacts();
   // Reise-Fix 2026-06-08: nach contacts-Bootstrap die Sync-State-Marker
   // initialisieren. clock-Display nutzt die pubkey-Sentinels:
@@ -5556,7 +5577,13 @@ void MyMesh::begin(bool has_display) {
     }
   }
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10h pre loadChannels"); Serial.flush();
+#endif
   _store->loadChannels(this);
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] M10i post loadChannels"); Serial.flush();
+#endif
   // Companion-Channel (lokal, kein RF) anlegen oder Index aus persistiertem
   // Eintrag übernehmen. Muss VOR jedem pushCompanionMessage() laufen — daher
   // hier, NACH loadChannels() aber vor dem Boot-Geo-Push weiter unten.

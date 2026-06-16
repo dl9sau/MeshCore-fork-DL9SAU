@@ -358,10 +358,26 @@ void setup() {
 #endif
   Serial.begin(115200);
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-  // 2s warten damit USB-CDC enumerate kann (sonst gehen erste Bytes
-  // verloren bevor Host das Device gesehen hat).
-  delay(2000);
-  DIAG_MARK("M0 serial up");
+  // 2026-06-16 (User-Wunsch): bis zu 20 s auf USB-CDC-Connect warten,
+  // dabei langsamen LED-Heartbeat (1 Hz) damit User sieht 'Geraet
+  // wartet, jetzt connecten'. Ohne dieses Warten gingen Trace-Marker
+  // verloren bevor das Terminal verbunden war.
+  {
+    unsigned long t0 = millis();
+    pinMode(LED_PIN, OUTPUT);
+    while (!Serial && (millis() - t0) < 20000UL) {
+      digitalWrite(LED_PIN, HIGH); delay(100);
+      digitalWrite(LED_PIN, LOW);  delay(900);
+    }
+    // Zusaetzlich 500 ms damit Host CDC-Stream-Read bereit hat.
+    delay(500);
+  }
+  // Marker 3x wiederholen damit ein Connect mit kleinem Lag sicher
+  // mindestens eine Zeile sieht.
+  for (int i = 0; i < 3; i++) {
+    DIAG_MARK("M0 serial up");
+    delay(300);
+  }
 #endif
   // DL9SAU 2026-06-01 v2: USB-CDC TX-Timeout sehr klein halten. Verhindert
   // loop()-Stalls wenn das Geraet ohne USB-Host laeuft (z.B. Powerbank) und
@@ -456,6 +472,20 @@ void setup() {
       DIAG_MARK("M8 pre ExtraFS.begin");
       ExtraFS.begin();
       DIAG_MARK("M8 post ExtraFS.begin");
+   #if defined(NRF52_FORMAT_EXTRAFS_ONCE)
+      // DL9SAU 2026-06-16: T1000-E hatte Meshtastic-Garbage in der
+      // ExtraFS-Partition. UF2-Upload ersetzt nur die App-Partition,
+      // FS-Partition bleibt mit alten Inhalten -- LFS mountet das
+      // 'ok', aber file.read haengt im LFS-Layer.
+      // Mit diesem Flag wird ExtraFS einmalig formatiert.
+      // Nach erfolgreichem Boot DIESEN BUILD-FLAG WIEDER ENTFERNEN
+      // damit kein Endless-Format passiert.
+      DIAG_MARK("FX1 pre ExtraFS.format (one-shot)");
+      ExtraFS.format();
+      DIAG_MARK("FX2 post ExtraFS.format");
+      ExtraFS.begin();
+      DIAG_MARK("FX3 post ExtraFS.begin (re-mount)");
+   #endif
   #endif
   #endif
   DIAG_MARK("M9 pre store.begin");

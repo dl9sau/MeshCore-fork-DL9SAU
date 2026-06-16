@@ -645,15 +645,37 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
 }
 
 void DataStore::loadContacts(DataStoreHost* host) {
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] LC1 pre openRead /contacts3"); Serial.flush();
+#endif
 File file = openRead(_getContactsChannelsFS(), "/contacts3");
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  bool file_ok = (bool)file;
+  Serial.print("\r\n# [T1000-E diag] LC2 post openRead, file="); Serial.println(file_ok ? "ok" : "null"); Serial.flush();
+  Serial.print("# [T1000-E diag] LC2b file.size="); Serial.println((unsigned long)file.size()); Serial.flush();
+#endif
     if (file) {
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+      Serial.println("# [T1000-E diag] LC2c entered if(file)"); Serial.flush();
+#endif
       bool full = false;
+      int rec = 0;
       while (!full) {
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+        if (rec < 5) { Serial.print("# [T1000-E diag] LC3 rec="); Serial.println(rec); Serial.flush(); }
+        rec++;
+#endif
         ContactInfo c;
         uint8_t pub_key[32];
         uint8_t unused;
 
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+        if (rec <= 1) { Serial.println("# [T1000-E diag] LC4 pre file.read(pub_key,32)"); Serial.flush(); }
+#endif
         bool success = (file.read(pub_key, 32) == 32);
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+        if (rec <= 1) { Serial.print("# [T1000-E diag] LC5 post file.read pub_key success="); Serial.println(success ? "y" : "n"); Serial.flush(); }
+#endif
         success = success && (file.read((uint8_t *)&c.name, 32) == 32);
         success = success && (file.read(&c.type, 1) == 1);
         success = success && (file.read(&c.flags, 1) == 1);
