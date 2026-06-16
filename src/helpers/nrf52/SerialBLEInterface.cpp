@@ -1,4 +1,5 @@
 #include "SerialBLEInterface.h"
+#include "../BleNameHelper.h"
 #include <stdio.h>
 #include <string.h>
 #include "ble_gap.h"
@@ -163,7 +164,13 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   }
   
   Bluefruit.setTxPower(BLE_TX_POWER);
-  Bluefruit.setName(dev_name);
+  // DL9SAU 2026-06-16: BLE-Name sanitisieren via Helper. SoftDevice
+  // GAP-Device-Name scheitert bei zu langen / non-ASCII Namen, der
+  // Bootloader-Default ('T1000-E-BOOT' bei T1000-E) bleibt.
+  // _prefs.node_name (Chat/Advert) bleibt unveraendert mit Original.
+  char clean[32];
+  sanitizeBleName(dev_name, clean, sizeof(clean), 28);
+  Bluefruit.setName(clean);
 
   Bluefruit.Security.setMITM(true);
   Bluefruit.Security.setPIN(charpin);

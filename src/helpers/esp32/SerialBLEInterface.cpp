@@ -1,4 +1,5 @@
 #include "SerialBLEInterface.h"
+#include "../BleNameHelper.h"
 #include "esp_mac.h"
 // Wunschliste 58 Phase F Retry 2026-06-14: esp_bt_controller_disable
 // schaltet das BT-Radio echt aus (1. Versuch in Commit 8ae3b492 fuhrte
@@ -33,56 +34,19 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   char dev_name[32+16];
   sprintf(dev_name, "%s%s", prefix, name);
 
-  // DL9SAU 2026-06-01: BLE-Name sanitisieren.
+  // DL9SAU 2026-06-01 / 2026-06-16: BLE-Name sanitisieren via Helper.
   // esp_ble_gap_set_device_name() lehnt Namen mit Non-ASCII-Bytes ab
   // (UTF-8-Multibyte, Steuerzeichen) und schlaegt mit ESP_ERR_INVALID_ARG
   // (rc=258) fehl -- das Geraet erscheint dann generisch als "ESP32".
-  // Empirisch zusaetzlich eine (nicht formal dokumentierte) Laengen-
-  // Obergrenze. "MeshCore-Thomas-Test" (20 chars) funktioniert sicher,
-  // volle 32-Byte node_name kann scheitern.
-  //
-  // Vorgehen:
-  //   1) Sanitize: nur druckbares ASCII (0x20..0x7E) durchlassen.
-  //   2) Word-boundary-Truncate: wenn > BLE_NAME_MAX, am letzten Space
-  //      <= BLE_NAME_MAX abschneiden statt mid-word -- vermeidet das
-  //      angeschnittene 3. Wort wie "MeshCore-Foo Bar Ba" -> "...Bar".
-  //      Kein Space im Bereich? -> hartes Truncate.
-  //   3) Trailing Spaces trimmen (sonst "MeshCore-Foo " im BT-Listing).
-  //   4) Wenn nach Filter+Truncate nur der Prefix uebrig ist (z.B. User-
-  //      Name war komplett UTF-8): MAC-basiertes Fallback.
+  // BLE-Name-Helper macht Sanitize + Word-boundary-Truncate + Trim.
   // Aenderung wirkt nur fuer BLE -- _prefs.node_name (Chat, Advert) bleibt
-  // unveraendert mit User-Originalstring inklusive UTF-8 / Sonderzeichen.
-  static const size_t BLE_NAME_MAX = 28;
-  char clean[64];  // gross genug fuer Pre-Truncate-Filter
-  size_t cn = 0;
-  for (size_t i = 0; dev_name[i] && cn < sizeof(clean) - 1; i++) {
-    unsigned char c = (unsigned char)dev_name[i];
-    if (c >= 0x20 && c < 0x7F) {
-      clean[cn++] = (char)c;
-    }
-  }
-  clean[cn] = 0;
-
-  if (cn > BLE_NAME_MAX) {
-    // Letzten Space im Bereich [0..BLE_NAME_MAX-1] suchen.
-    int cut = -1;
-    for (int i = (int)BLE_NAME_MAX - 1; i >= 0; i--) {
-      if (clean[i] == ' ') { cut = i; break; }
-    }
-    if (cut > 0) {
-      clean[cut] = 0;
-    } else {
-      clean[BLE_NAME_MAX] = 0;
-    }
-    cn = strlen(clean);
-  }
-  // Trailing-Space-Trim (Name kann auch ohne Truncate auf Space enden)
-  while (cn > 0 && clean[cn - 1] == ' ') {
-    clean[--cn] = 0;
-  }
+  // unveraendert mit User-Originalstring inklusive UTF-8.
+  char clean[64];
+  size_t cn = sanitizeBleName(dev_name, clean, sizeof(clean), 28);
 
   if (cn <= strlen(prefix)) {
-    // Name-Teil komplett rausgefiltert. Fallback.
+    // Name-Teil komplett rausgefiltert (User-Name war voll-UTF-8).
+    // MAC-Fallback damit Geraet nicht generisch 'ESP32' wird.
     snprintf(clean, sizeof(clean), "%sNode-%02X%02X",
              prefix, addr[1], addr[0]);
   }
