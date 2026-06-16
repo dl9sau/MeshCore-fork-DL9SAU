@@ -9557,7 +9557,11 @@ void MyMesh::backupRestoreParseBlock() {
     // Dispatch
     if (strcmp(key, "_meta") == 0 && val_type == 'o') {
       brApplyMeta(val_start, val_len);
-    } else if (_br_block_type == 1 || _br_block_type == 2) {
+    } else if (_br_block_type >= 1 && _br_block_type <= 3) {
+      // Bug 1 Fix 2026-06-16: HASHTAG CHANNELS (block_type 3) wurde nie
+      // dispatched -- vorher nur 1+2. Der Handler in brApplyField ab
+      // Z 10007 ('===== HASHTAG CHANNELS =====') existiert seit jeher,
+      // wurde aber wegen des fehlenden Dispatchs nie gerufen.
       brApplyField(_br_block_type, key, val_start, val_len, val_type);
     }
   }
@@ -9697,7 +9701,17 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       _br_applied++;
       return;
     }
-    // Wunschliste 46 Filter Restore (2026-06-10).
+    _br_skipped++;
+    return;
+  }
+
+  if (block_type == 2) {
+    // ===== NODE MAIN =====
+    // Bug 2 Fix 2026-06-16: Filter-Handler aus block_type==1 (DL9SAU PREFS)
+    // hierher verschoben. Save schreibt filter_unknown_channel_repeat +
+    // filter_sender_* + filter_text_* + filter_scope_* in NODE MAIN block,
+    // Handler waren faelschlich in DL9SAU PREFS block -> wurden beim
+    // Restore nie erreicht, _br_skipped fuer alle Filter-Keys.
     if (val_type == 'n' && strcmp(key, "filter_unknown_channel_repeat") == 0) {
       _prefs.filter_unknown_channel_repeat = (uint8_t)as_uint();
       _br_applied++;
@@ -9834,12 +9848,6 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
                          sizeof(_prefs.filter_scope_keep)/sizeof(_prefs.filter_scope_keep[0]),
                          _prefs.filter_scope_keep_chan_on,
                          _prefs.filter_scope_keep_chan_ex)) return;
-    _br_skipped++;
-    return;
-  }
-
-  if (block_type == 2) {
-    // ===== NODE MAIN =====
     if (val_type == 'n') {
       // Radio-Params: Restore landet im _prefs, aber das Radio bleibt
       // auf den Boot-Werten bis radio_set_params -- daher reboot empfohlen.
@@ -9866,59 +9874,10 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "buzzer_quiet") == 0)          { _prefs.buzzer_quiet          = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0) { _prefs.interference_threshold = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "agc.reset.interval") == 0 || strcmp(key, "agc_reset_interval") == 0) { _prefs.agc_reset_interval = (uint8_t)as_uint(); _br_applied++; return; }
-      // Wunschliste 58 Phase B: cpu.clock -- 0 = Build-Default, sonst MHz.
-      // 'max' / 'default' / 'auto' im Backup ebenfalls erlaubt -> 0.
-      if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
-          || strcmp(key, "cpu.clock.mhz") == 0 || strcmp(key, "cpu_clock_mhz") == 0) {
-        char tmp[16]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
-        if (strcasecmp(tmp, "max") == 0 || strcasecmp(tmp, "default") == 0
-            || strcasecmp(tmp, "auto") == 0) {
-          _prefs.cpu_clock_mhz = 0;
-        } else {
-          int v = atoi(tmp);
-          // Safety-Floor 80 MHz (User-Lockout 2026-06-14, siehe set
-          // cpu.clock-Handler). < 80 wird stillschweigend zu 0 (= Default).
-          if (v == 240 || v == 160 || v == 80) {
-            _prefs.cpu_clock_mhz = (uint8_t)v;
-          } else {
-            _prefs.cpu_clock_mhz = 0;
-          }
-        }
-        _br_applied++;
-        return;
-      }
-      // Wunschliste 58 Phase A (2026-06-14): display_wake_mode aus
-      // Backup. String oder Number erlaubt.
-      if (strcmp(key, "display_wake_mode") == 0
-          || strcmp(key, "display") == 0
-          || strcmp(key, "display.wake") == 0
-          || strcmp(key, "display.wake.mode") == 0) {
-        char tmp[24]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
-        if (strcasecmp(tmp, "off") == 0)            _prefs.display_wake_mode = 0;
-        else if (strcasecmp(tmp, "on") == 0)        _prefs.display_wake_mode = 1;
-        else if (strcasecmp(tmp, "on-at-new-messages") == 0
-              || strcasecmp(tmp, "messages") == 0
-              || strcasecmp(tmp, "new-msgs") == 0
-              || strcasecmp(tmp, "default") == 0
-              || strcasecmp(tmp, "auto") == 0)       _prefs.display_wake_mode = 2;
-        else {
-          int v = atoi(tmp);
-          if (v >= 0 && v <= 2) _prefs.display_wake_mode = (uint8_t)v;
-        }
-        _br_applied++;
-        return;
-      }
-      // Wunschliste 53 (2026-06-14): watchdog-Pref aus Backup.
-      if (strcmp(key, "watchdog") == 0 || strcmp(key, "wdt") == 0) {
-        char tmp[8]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
-        if (strcasecmp(tmp, "on") == 0 || strcmp(tmp, "1") == 0) {
-          _prefs.watchdog_mode = 1;
-        } else {
-          _prefs.watchdog_mode = 0;
-        }
-        _br_applied++;
-        return;
-      }
+      // Bug 4 Fix 2026-06-16: cpu_clock_mhz, display_wake_mode, watchdog
+      // Handler wurden hier (val_type=='n' Branch) durch String-Werte ueber-
+      // sprungen -- alle drei werden via kv_str gespeichert. Handler nach
+      // val_type=='s' Branch verschoben (siehe weiter unten).
       if (strcmp(key, "rxdelay") == 0)               { _prefs.rx_delay_base         = as_float();        _br_applied++; return; }
       if (strcmp(key, "txdelay") == 0)               { _prefs.tx_delay_factor       = as_float();        _br_applied++; return; }
       if (strcmp(key, "direct_txdelay") == 0
@@ -9972,6 +9931,59 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       }
       if (strcmp(key, "name") == 0) { brExtractString(val_start, val_len, _prefs.node_name, sizeof(_prefs.node_name)); _br_applied++; return; }
       // Wunschliste 31: time_sync_src0/1/2 als 6-hex-string
+      // Bug 4 Fix 2026-06-16: cpu_clock_mhz, display_wake_mode, watchdog
+      // sind als Strings im Backup (kv_str), Handler hier her verschoben
+      // aus val_type=='n' Branch wo sie nie erreicht wurden.
+      // Wunschliste 58 Phase B: cpu.clock -- 0 = Build-Default, sonst MHz.
+      // 'max' / 'default' / 'auto' im Backup -> 0.
+      if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
+          || strcmp(key, "cpu.clock.mhz") == 0 || strcmp(key, "cpu_clock_mhz") == 0) {
+        char tmp[16]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
+        if (strcasecmp(tmp, "max") == 0 || strcasecmp(tmp, "default") == 0
+            || strcasecmp(tmp, "auto") == 0) {
+          _prefs.cpu_clock_mhz = 0;
+        } else {
+          int v = atoi(tmp);
+          if (v == 240 || v == 160 || v == 80) {
+            _prefs.cpu_clock_mhz = (uint8_t)v;
+          } else {
+            _prefs.cpu_clock_mhz = 0;
+          }
+        }
+        _br_applied++;
+        return;
+      }
+      // Wunschliste 58 Phase A: display_wake_mode aus Backup.
+      if (strcmp(key, "display_wake_mode") == 0
+          || strcmp(key, "display") == 0
+          || strcmp(key, "display.wake") == 0
+          || strcmp(key, "display.wake.mode") == 0) {
+        char tmp[24]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
+        if (strcasecmp(tmp, "off") == 0)            _prefs.display_wake_mode = 0;
+        else if (strcasecmp(tmp, "on") == 0)        _prefs.display_wake_mode = 1;
+        else if (strcasecmp(tmp, "on-at-new-messages") == 0
+              || strcasecmp(tmp, "messages") == 0
+              || strcasecmp(tmp, "new-msgs") == 0
+              || strcasecmp(tmp, "default") == 0
+              || strcasecmp(tmp, "auto") == 0)       _prefs.display_wake_mode = 2;
+        else {
+          int v = atoi(tmp);
+          if (v >= 0 && v <= 2) _prefs.display_wake_mode = (uint8_t)v;
+        }
+        _br_applied++;
+        return;
+      }
+      // Wunschliste 53: watchdog-Pref aus Backup.
+      if (strcmp(key, "watchdog") == 0 || strcmp(key, "wdt") == 0) {
+        char tmp[8]; brExtractString(val_start, val_len, tmp, sizeof(tmp));
+        if (strcasecmp(tmp, "on") == 0 || strcmp(tmp, "1") == 0) {
+          _prefs.watchdog_mode = 1;
+        } else {
+          _prefs.watchdog_mode = 0;
+        }
+        _br_applied++;
+        return;
+      }
       if (strncmp(key, "time_sync_src", 13) == 0 && key[13] >= '0' && key[13] <= '2' && key[14] == 0) {
         int slot = key[13] - '0';
         char hexbuf[8];
@@ -19249,6 +19261,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           }
         }
       }
+    }
+    // Bug 3 Fix 2026-06-16: 'get prv.key' / 'get prv_key' verweisen auf
+    // 'backup save'. Private-Key NICHT casually exposen (Identity-Diebstahl
+    // wenn jemand mitliest). 'backup save' ist bewusster Export-Pfad.
+    else if (strcmp(key, "prv.key") == 0 || strcmp(key, "prv_key") == 0) {
+      snprintf(r, sizeof(r),
+               "prv.key: aus Security-Gruenden nicht via 'get'.\n"
+               "Nutze 'backup save' fuer Export.");
     }
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
