@@ -5718,16 +5718,18 @@ Bug 5 (User-Report 2026-06-15 spaet abends): backup save HASHTAG CHANNELS leer
 70. Backup-Format Refactor (User-Wunsch 2026-06-16)
 --------------------------------------------------------------------------------
 
-Status: TODO. ERST wenn Backup/Restore (Wunschliste 69) komplett
-        fix ist. Keine Rueckwaerts-Kompatibilitaet zu alten Backups
-        noetig (User: 'machen wir aber erst wenn backup/restore
-        richtig funktioniert').
+Status: DONE 2026-06-16. Umgesetzt waehrend Backup/Restore noch nicht
+        fully fixed (Wunschliste 71 bleibt offen) -- User-Wunsch
+        2026-06-16: 'Ich moechte jetzt die Umbenennung'. Keine
+        Rueckwaerts-Kompatibilitaet.
 
 Aenderung 1: Section-Header umbenennen
   Vorher: '--- BACKUP DL9SAU PREFS BEGIN/END ---'
-  Nachher: '--- BACKUP PREFS BEGIN/END ---'
-  Begruendung: 'DL9SAU' im Header ist Branding-Detail. 'PREFS' ist
-    semantisch klarer und kuerzer.
+  Nachher: '--- BACKUP NODE PREFS BEGIN/END ---'
+  Begruendung: 'DL9SAU' im Header ist Branding-Detail. 'NODE PREFS'
+    parallel zu bestehendem 'NODE MAIN'.
+  Korrektur 2026-06-16: zunaechst war 'BACKUP PREFS' diskutiert,
+    User entschied dann 'NODE PREFS' -- Konsistenz mit NODE MAIN.
 
   Code-Stellen:
     - backupSaveToSerial (emit-Seite): Serial.println()-Strings

@@ -8817,7 +8817,7 @@ void MyMesh::backupSaveToSerial() {
 
   // -------- Block 1: DL9SAU prefs --------
   Serial.println();
-  Serial.println("--- BACKUP DL9SAU PREFS BEGIN ---");
+  Serial.println("--- BACKUP NODE PREFS BEGIN ---");
   Serial.println("{");
   first = true;
   emit_meta();
@@ -8849,7 +8849,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("log_flags",             _prefs.log_flags);
   Serial.println();
   Serial.println("}");
-  Serial.println("--- BACKUP DL9SAU PREFS END ---");
+  Serial.println("--- BACKUP NODE PREFS END ---");
   Serial.flush();
 
   // -------- Block 2: Node Main (App-Settings) --------
@@ -8954,7 +8954,7 @@ void MyMesh::backupSaveToSerial() {
   auto emit_filter_list = [&](const char* base, NodePrefs::FilterEntry* arr,
                               uint8_t cnt, const uint64_t* c_on, const uint64_t* c_ex) {
     char k[64];
-    snprintf(k, sizeof(k), "%s_count", base);
+    snprintf(k, sizeof(k), "%s_entries", base);
     kv_uint(k, cnt);
     for (uint8_t i = 0; i < cnt; i++) {
       snprintf(k, sizeof(k), "%s_%u_pattern", base, (unsigned)i);
@@ -8970,7 +8970,7 @@ void MyMesh::backupSaveToSerial() {
   auto emit_filter_scope_list = [&](const char* base, NodePrefs::FilterScopeEntry* arr,
                                     uint8_t cnt, const uint64_t* c_on, const uint64_t* c_ex) {
     char k[64];
-    snprintf(k, sizeof(k), "%s_count", base);
+    snprintf(k, sizeof(k), "%s_entries", base);
     kv_uint(k, cnt);
     for (uint8_t i = 0; i < cnt; i++) {
       snprintf(k, sizeof(k), "%s_%u_name", base, (unsigned)i);
@@ -9269,7 +9269,7 @@ void MyMesh::backupRestoreLoop() {
           // END bedeutet der erste Block hatte einen Korruptions-Abbruch
           // und sein teil-applied State muss zurueck. Bloecke sind so
           // strikt unabhaengig (User-Wunsch 2026-06-16).
-          bool is_begin = (strncmp(type_str, "DL9SAU PREFS BEGIN ---", 22) == 0)
+          bool is_begin = (strncmp(type_str, "NODE PREFS BEGIN ---", 20) == 0)
                         || (strncmp(type_str, "NODE MAIN BEGIN ---", 19) == 0)
                         || (strncmp(type_str, "HASHTAG CHANNELS BEGIN ---", 26) == 0);
           if (is_begin) {
@@ -9284,7 +9284,7 @@ void MyMesh::backupRestoreLoop() {
               Serial.println("\r\n# warning: prior HASHTAG block had no END -- reverted.");
             }
           }
-          if (strncmp(type_str, "DL9SAU PREFS BEGIN ---", 22) == 0) {
+          if (strncmp(type_str, "NODE PREFS BEGIN ---", 20) == 0) {
             _br_block_type = 1;
             _br_state = BR_READING_JSON;
             _br_json_len = 0;
@@ -9299,7 +9299,7 @@ void MyMesh::backupRestoreLoop() {
             // brace=0 nicht sauber erreicht).
             memcpy(&_br_prefs_snapshot, &_prefs, sizeof(_prefs));
             _br_prefs_snapshot_taken = true;
-            Serial.print("\r\n# DL9SAU PREFS block: reading JSON...\r\n");
+            Serial.print("\r\n# NODE PREFS block: reading JSON...\r\n");
             // KEIN flush() -- blockt synchron auf TX-leer; bei kleinem
             // HWCDC-TX-FIFO + setTxTimeoutMs stallt das den RX-Drain
             // gerade waehrend der Paste-Burst weiter eintrifft.
@@ -9366,7 +9366,7 @@ void MyMesh::backupRestoreLoop() {
           // END=commit, kein-END=restore via backupRestoreFinish.
           // Bloecke sind unabhaengig -- User kann z.B. nur NODE MAIN
           // pasten ohne dass HASHTAG CHANNELS angefasst wird.
-          else if (strncmp(type_str, "DL9SAU PREFS END ---", 20) == 0
+          else if (strncmp(type_str, "NODE PREFS END ---", 18) == 0
                    || strncmp(type_str, "NODE MAIN END ---", 17) == 0) {
             if (_br_block_type == 0) {
               Serial.println("\r\n# warning: END marker without matching BEGIN -- ignored.");
@@ -9839,9 +9839,10 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
                                 uint64_t* c_on, uint64_t* c_ex) -> bool {
       size_t blen = strlen(base);
       if (strncmp(key, base, blen) != 0 || key[blen] != '_') return false;
-      // Special: <base>_count
+      // Special: <base>_entries (Wunschliste 70: vorher '_count' --
+      // war irrefuehrend, klang nach Live-Paket-Zaehler).
       const char* tail = key + blen + 1;
-      if (val_type == 'n' && strcmp(tail, "count") == 0) {
+      if (val_type == 'n' && strcmp(tail, "entries") == 0) {
         *cnt_p = (uint8_t)as_uint();
         if (*cnt_p > max_slots) *cnt_p = (uint8_t)max_slots;
         _br_applied++;
@@ -9891,7 +9892,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       size_t blen = strlen(base);
       if (strncmp(key, base, blen) != 0 || key[blen] != '_') return false;
       const char* tail = key + blen + 1;
-      if (val_type == 'n' && strcmp(tail, "count") == 0) {
+      if (val_type == 'n' && strcmp(tail, "entries") == 0) {
         *cnt_p = (uint8_t)as_uint();
         if (*cnt_p > max_slots) *cnt_p = (uint8_t)max_slots;
         _br_applied++;
@@ -17528,7 +17529,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     if (strcmp(arg, "save") == 0) {
       backupSaveToSerial();
-      pushCompanionMessage("backup save: 2 JSON-Bloecke nach USB-Serial geschrieben.\n"
+      pushCompanionMessage("backup save: 3 JSON-Bloecke nach USB-Serial geschrieben.\n"
                            "Terminal-Cut+Paste in eine Datei zum Sichern.");
       return;
     }
