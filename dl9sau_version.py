@@ -2,8 +2,9 @@
 PlatformIO pre-build script: stamp the companion_radio firmware with the
 current git short-hash and today's build date.
 
-  FIRMWARE_VERSION  -> "v15-DL9SAU-<8charhash>"   (fits 20-byte wire field)
-  FIRMWARE_BUILD_DATE -> "DD Mon YYYY"            (fits 12-byte wire field)
+  FIRMWARE_VERSION       -> "v15-DL9SAU-<8charhash>"   (fits 20-byte wire field)
+  FIRMWARE_BUILD_DATE    -> "DD Mon YYYY"               (fits 12-byte wire field)
+  FIRMWARE_BUILD_TIME    -> "HH:MM"                     (CLI-only display)
 
 If the build is run outside a git checkout the hash falls back to "nogit"
 so the firmware still has a deterministic version string.
@@ -30,6 +31,7 @@ def _git_short_hash(repo_dir):
 
 git_hash = _git_short_hash(env["PROJECT_DIR"])
 build_date = datetime.now().strftime("%d %b %Y")              # 11 chars
+build_time = datetime.now().strftime("%H:%M")                 # 5 chars (CLI only)
 # Format: "v1.16.0-DL9SAU.gXXX" (19 chars). 'g'-Prefix folgt der
 # 'git describe'-Konvention; Punkt-Separator statt SemVer '+' weil
 # jede Build-Variante materielle Aenderungen mitbringt (Features /
@@ -45,7 +47,9 @@ firmware_version = "v1.16.0-DL9SAU.g{}".format(git_hash[-3:] if git_hash != "nog
 env.Append(CPPDEFINES=[
     ("FIRMWARE_VERSION", env.StringifyMacro(firmware_version)),
     ("FIRMWARE_BUILD_DATE", env.StringifyMacro(build_date)),
+    ("FIRMWARE_BUILD_TIME", env.StringifyMacro(build_time)),
 ])
 
 print("[DL9SAU] FIRMWARE_VERSION    = {}".format(firmware_version))
 print("[DL9SAU] FIRMWARE_BUILD_DATE = {}".format(build_date))
+print("[DL9SAU] FIRMWARE_BUILD_TIME = {}".format(build_time))

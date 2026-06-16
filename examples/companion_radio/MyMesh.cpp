@@ -11135,7 +11135,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     {"chatname", false}, {"reboot", true}, {"dfu", false}, {"duty", false}, {"scope", false},
     {"prefs", false}, {"neighbors", false}, {"tempradio", false},
     {"set", false}, {"get", false}, {"clock", false}, {"date", false}, {"time", false},
-    {"messages", false}, {"log", false}, {"unscoped-channelmessages", false},
+    {"messages", false}, {"log", false}, {"channels", false}, {"unscoped-channelmessages", false},
     {"clear", true},
     {"contact", false}, {"backup", false}, {"save", false}, {"discover", false},
     {"ch.hops", false},
@@ -12072,11 +12072,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // ---------- ver / version ---------------------------------------------
   // Wunschliste 56 Phase 1 (2026-06-14): Upstream-CLI-Kompat
   // 'ver' / 'version'. Einzeilig, kein Verbose-Block (das macht 'status').
-  // Format: "MeshCore <FW_VERSION>  (built <BUILD_DATE>)"
+  // Format: "MeshCore <FW_VERSION>  (built <BUILD_DATE> <BUILD_TIME>)"
+  // BUILD_TIME (HH:MM) zusaetzlich ab 2026-06-16 (User-Wunsch).
+  // Fallback wenn die dl9sau_version.py FIRMWARE_BUILD_TIME nicht setzt
+  // (z.B. anderer Build-Pfad): leeren String.
   if (starts_with_word(cmd, "ver") || starts_with_word(cmd, "version")) {
     char line[120];
+#ifdef FIRMWARE_BUILD_TIME
+    snprintf(line, sizeof(line), "MeshCore %s  (built %s %s)",
+             FIRMWARE_VERSION, FIRMWARE_BUILD_DATE, FIRMWARE_BUILD_TIME);
+#else
     snprintf(line, sizeof(line), "MeshCore %s  (built %s)",
              FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
+#endif
     pushCompanionMessage(line);
     return;
   }
@@ -13638,6 +13646,45 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   ch.hops status              -- alle aktiven Caps
   //   ch.hops clear               -- alle Caps loeschen (ausser companion)
   //   ch.hops help / ?
+  // 2026-06-16: 'channels' CLI -- listet ALLE Slots im channels[] RAM-Array
+  // ohne Filter. Diagnose-Befehl + nuetzlich generell. Format pro Zeile:
+  //   N: <name> (psk_class)
+  // psk_class: hashtag (sha256(name)[0..16]), public (s_public_psk),
+  //   companion ($companion-Magic), custom (anderes 128-bit PSK).
+  if (starts_with_word(cmd, "channels")
+      || starts_with_word(cmd, "chans")
+      || starts_with_word(cmd, "ch.list")) {
+    char buf[180];
+    int n = 0;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (!getChannel(i, ch)) continue;
+      if (ch.name[0] == 0) continue;  // leerer Slot
+      n++;
+      const char* psk_class;
+      if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) {
+        psk_class = "companion";
+      } else if (memcmp(ch.channel.secret, s_public_psk, 16) == 0) {
+        psk_class = "public";
+      } else {
+        // Pruefen ob PSK == sha256(name)[0..16] (= hashtag-deterministic)
+        uint8_t expected[32];
+        mesh::Utils::sha256(expected, 32,
+                            (const uint8_t*)ch.name, strlen(ch.name));
+        if (memcmp(ch.channel.secret, expected, 16) == 0) psk_class = "hashtag";
+        else                                              psk_class = "custom";
+      }
+      snprintf(buf, sizeof(buf), "%2d: %-30.30s (%s)", i, ch.name, psk_class);
+      pushCompanionMessage(buf);
+    }
+    if (n == 0) pushCompanionMessage("channels: (leer)");
+    else {
+      snprintf(buf, sizeof(buf), "channels: %d Slots belegt von %d.", n, MAX_GROUP_CHANNELS);
+      pushCompanionMessage(buf);
+    }
+    return;
+  }
+
   if (starts_with_word(cmd, "ch.hops")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
@@ -19262,13 +19309,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
       }
     }
-    // Bug 3 Fix 2026-06-16: 'get prv.key' / 'get prv_key' verweisen auf
-    // 'backup save'. Private-Key NICHT casually exposen (Identity-Diebstahl
-    // wenn jemand mitliest). 'backup save' ist bewusster Export-Pfad.
+    // Bug 3 Fix 2026-06-16 (revidiert): 'get prv.key' verweist auf
+    // 'set prv.key'. Private-Key NICHT casually exposen
+    // (Identity-Diebstahl wenn jemand mitliest).
+    // User-Hinweis 2026-06-16: 'backup save' enthaelt prv_key explizit
+    // NICHT (User-Wunsch 2026-06-02, siehe emit_meta Z 8794-8800), daher
+    // ist 'backup save' nicht der richtige Export-Pfad.
+    // Migration nach neuem Geraet: 'set prv.key <128 hex>' oder 'set
+    // prv.key NEW' (Schluessel-Eingabe manuell).
     else if (strcmp(key, "prv.key") == 0 || strcmp(key, "prv_key") == 0) {
       snprintf(r, sizeof(r),
-               "prv.key: aus Security-Gruenden nicht via 'get'.\n"
-               "Nutze 'backup save' fuer Export.");
+               "prv.key: privater Identity-Schluessel.\n"
+               "Nicht via 'get' exposable (Security).\n"
+               "Migration: 'set prv.key <128 hex>' auf Ziel-Geraet.");
     }
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
