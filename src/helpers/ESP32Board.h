@@ -151,6 +151,13 @@ public:
   }
 
   bool startOTAUpdate(const char* id, char reply[]) override;
+  // DL9SAU 2026-06-16: stop + tick fuer OTA-Session.
+  // stopOTAUpdate: manueller Abbruch (CLI 'stop ota'), gibt SoftAP frei.
+  // tickOTA: aus loop() periodisch -- prueft 5-min-Timeout und schliesst
+  // den AP automatisch. User-Wunsch: 'paranoid' -- 5 Minuten reichen
+  // fuer einen Upload, danach soll OTA aus sein.
+  bool stopOTAUpdate(char reply[]);
+  void tickOTA();
 
   void setInhibitSleep(bool inhibit) {
     inhibit_sleep = inhibit;

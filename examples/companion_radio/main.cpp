@@ -549,6 +549,7 @@ void loop() {
   ui_task.loop();
 #endif
   rtc_clock.tick();
+  board.tickOTA();   // DL9SAU 2026-06-16: WiFi-OTA 5-min-Timeout check
   maintainWatchdog();   // PENDING -> ACTIVE (nach 1. loop), SKIP -> ACTIVE
   delay(1);   // yield to FreeRTOS idle task; lets ESP32 idle-tick run (and, if
               // esp_pm light sleep is ever enabled, lets the CPU actually sleep)

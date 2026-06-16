@@ -17549,6 +17549,39 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
+  // ---------- start ota / stop ota -------------------------------------
+  // DL9SAU 2026-06-16: WiFi-OTA fuer Companion freigegeben (ENABLE_WIFI_OTA
+  // build-flag im Heltec_Wireless_Tracker_companion_radio_ble env).
+  // SoftAP 'MeshCore-OTA' (offen, kein PW). 5-min Timeout (User-Wunsch
+  // 'paranoid'). 'stop ota' beendet vorzeitig.
+  if (starts_with_word(cmd, "start")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    if (arg && strcmp(arg, "ota") == 0) {
+      char r[160];
+      if (board.startOTAUpdate(_prefs.node_name, r)) {
+        pushCompanionMessage(r);
+      } else {
+        pushCompanionMessage("start ota: not supported (build ohne ENABLE_WIFI_OTA?)");
+      }
+      return;
+    }
+    pushCompanionMessage("Usage: start ota");
+    return;
+  }
+  if (starts_with_word(cmd, "stop")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    if (arg && strcmp(arg, "ota") == 0) {
+      char r[80];
+      board.stopOTAUpdate(r);
+      pushCompanionMessage(r);
+      return;
+    }
+    pushCompanionMessage("Usage: stop ota");
+    return;
+  }
+
   // ---------- set <key> <value> -----------------------------------------
   // Aenderungen an persistenten Settings, analog zur Repeater-CommonCLI
   // (CMD_SET_RADIO_PARAMS / set name / set lat / set lon). Schreibt _prefs

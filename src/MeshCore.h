@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 #include <math.h>
 
 #define MAX_HASH_SIZE        8
@@ -64,6 +65,10 @@ public:
   virtual uint8_t getStartupReason() const = 0;
   virtual bool getBootloaderVersion(char* version, size_t max_len) { return false; }
   virtual bool startOTAUpdate(const char* id, char reply[]) { return false; }   // not supported
+  // DL9SAU 2026-06-16: optional Stop / Tick fuer OTA. Default no-op
+  // damit nicht-ESP32-Boards weiterhin uebersetzbar bleiben.
+  virtual bool stopOTAUpdate(char reply[]) { strcpy(reply, "Error"); return false; }
+  virtual void tickOTA() { /* no op */ }
 
   // Power management interface (boards with power management override these)
   virtual bool isExternalPowered() { return false; }
