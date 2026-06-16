@@ -5769,11 +5769,22 @@ Quelle: User-Wunsch 2026-06-16. Beide Aenderungen brauchen kein
 71. BUG: backup restore Multi-Block-Paste droppt HASHTAG-Block (Input-Overflow)
 --------------------------------------------------------------------------------
 
-Status: OFFEN -- nicht reproduzierbar gefixt 2026-06-16 nach mehreren
-        Versuchen. Atomic-Refactor (Wunschliste 69, BEGIN=snapshot,
-        END=commit, kein-END=revert) FAENGT den Schaden ab -- HASHTAG-
-        Channels gehen NICHT verloren (loadChannels aus /channels2),
-        aber Restore ist NICHT komplett.
+Status: OFFEN auf ESP32-S3 (Heltec Wireless Tracker), FUNKTIONIERT
+        auf NRF52 (T1000-E). Plattform-Unterschied -- nicht
+        Code-Bug im Restore-Pfad selbst.
+
+Update 2026-06-16 nach T1000-E-Test:
+        T1000-E (NRF52 mit Adafruit USB-CDC) hat 3-Block-Paste
+        sauber durchgenommen: applied=131 skipped=0 errors=0,
+        identische Baudrate 115200. -> Stack-Architektur-Unterschied:
+         - ESP32-S3 HWCDC: kleiner Default RX-FIFO + synchron-
+           blockierender Tx-Timeout = Overflow waehrend parseBlock.
+         - NRF52 Adafruit USBCDC: groesserer Ring-Buffer, Tx und Rx
+           weniger gekoppelt, kein Overflow auch bei langem Parse-Stall.
+        Atomic-Refactor (Wunschliste 69, BEGIN=snapshot, END=commit,
+        kein-END=revert) FAENGT den Schaden auf ESP32-S3 ab --
+        HASHTAG-Channels gehen NICHT verloren (loadChannels aus
+        /channels2), aber Restore ist NICHT komplett.
 
 Symptom: '--- BACKUP DL9SAU PREFS / NODE MAIN / HASHTAG CHANNELS' in
   einem zusammenhaengenden Paste:
