@@ -734,6 +734,22 @@ private:
   // True wenn restorerte Felder einen Reboot empfehlen (Radio-Params,
   // prv_key). Wird in der End-Statusmeldung gehinted, kein auto-action.
   bool     _br_reboot_recommended;
+  // User-Hinweis 2026-06-16: Pre-Clear war direkt zu saveChannels(),
+  // bei Korruption permanent verloren. Jetzt deferred -- _br_pre_clear_dirty
+  // = true wenn channels[] geclearted aber noch nicht persistiert.
+  // saveChannels() erst nach erfolgreichem Block-Apply (brace_depth=0
+  // erreicht). Bei Timeout/Abort: Reboot bringt alte Channels via
+  // loadChannels() zurueck (channels[] in RAM wurde aber clearted --
+  // bis Reboot sind sie temporaer weg).
+  bool     _br_pre_clear_dirty;
+  // User-Hinweis 2026-06-16: Snapshot von _prefs damit bei Korruption
+  // (Paste-Byte-Loss + zufaelliges schliessendes } in den verlorenen
+  // Bytes) der teil-applied State rueckgaengig gemacht werden kann.
+  // Snapshot bei BEGIN-Marker fuer block_type 1+2 (DL9SAU PREFS / NODE
+  // MAIN). Commit (clear taken-flag) bei END-Marker. Restore bei
+  // timeout/abort wenn taken-flag noch true.
+  NodePrefs _br_prefs_snapshot;
+  bool      _br_prefs_snapshot_taken;
   // CLI-Einstieg
   void backupRestoreStart();
   // In loop() pollen

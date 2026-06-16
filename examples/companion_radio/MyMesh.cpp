@@ -4919,6 +4919,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _br_errors = 0;
   _br_error_log[0] = 0;
   _br_reboot_recommended = false;
+  _br_pre_clear_dirty = false;
+  _br_prefs_snapshot_taken = false;
   // Wunschliste 27: CTL_TYPE_NODE_DISCOVER state
   _discover_active = false;
   _discover_count = 0;
@@ -9111,6 +9113,8 @@ void MyMesh::backupRestoreStart() {
   _br_errors = 0;
   _br_error_log[0] = 0;
   _br_reboot_recommended = false;
+  _br_pre_clear_dirty = false;
+  _br_prefs_snapshot_taken = false;
   _br_timeout_at = futureMillis(60000);  // 60 s
   // RX-Buffer aufstocken damit ein 3-4 KB Paste-Burst nicht im
   // USB-CDC-FIFO ueberlaeuft bevor wir drain'en koennen.
@@ -9143,6 +9147,26 @@ void MyMesh::brRecordError(const char* token) {
 }
 
 void MyMesh::backupRestoreFinish(const char* reason) {
+  // User-Hinweis 2026-06-16: Wenn pre-clear lief aber kein erfolgreicher
+  // Apply -> channels[] RAM ist leer aber /channels2 disk hat noch alte
+  // Daten. Reload disk -> RAM, damit User nicht bis Reboot ohne Channels
+  // dasteht. Bei Ctrl-D-done: pre_clear_dirty wurde bereits beim Block-
+  // Apply geclear'ed, daher nichts zu tun. Bei timeout: dirty bleibt
+  // true -> Reload triggern.
+  if (_br_pre_clear_dirty) {
+    Serial.println("\r\n# backup restore aborted: reloading channels from disk...");
+    _store->loadChannels(this);
+    _br_pre_clear_dirty = false;
+  }
+  // User-Hinweis 2026-06-16: Wenn _prefs-Snapshot noch nicht commited
+  // (= END-Marker fuer den letzten DL9SAU PREFS / NODE MAIN Block kam
+  // nie), war der Block korrupt -> _prefs aus Snapshot wiederherstellen.
+  // Bei sauberem Ablauf wurde taken-flag bei END-Marker geclear'ed.
+  if (_br_prefs_snapshot_taken) {
+    Serial.println("\r\n# backup restore aborted: prefs snapshot restored (block END missing).");
+    memcpy(&_prefs, &_br_prefs_snapshot, sizeof(_prefs));
+    _br_prefs_snapshot_taken = false;
+  }
   // End-Statusmeldung. Bei reboot-relevanten Feldern (Radio-Params,
   // prv_key) wird zusaetzlich ein Reboot-Hinweis angehaengt -- kein
   // auto-Reboot, User entscheidet.
@@ -9205,17 +9229,18 @@ void MyMesh::backupRestoreLoop() {
     // Reset Timeout bei jedem byte (User schreibt aktiv).
     _br_timeout_at = futureMillis(60000);
 
-    // Echo fuer User-Feedback waehrend cut+paste. Druckbare ASCII
-    // direkt zurueck; CR/LF als \r\n damit Terminal sauber umbricht.
-    // Wir tracken nicht ob CRLF / LF / CR -- alle line-ends werden zu
-    // \r\n, was harmlos doppelt wirken kann aber nie fehlt.
+    // Echo fuer User-Feedback waehrend cut+paste -- WICHTIG fuer
+    // Diagnose (User-Hinweis 2026-06-16: 'hier hilft uebrigens das
+    // Echo - sonst haette ich es gar nicht gesehen!').
+    // Trade-off: bei sehr langen Pastes kann der CDC-RX-FIFO ueberlaufen
+    // weil echo per-Byte blockiert. Loesung wenn das wichtig wird:
+    // groesseren TX-Buffer oder non-blocking echo. Atomaren Apply
+    // (Wunschliste-Eintrag 2026-06-16) macht Korruptionen harmlos.
     if (c == '\r' || c == '\n') {
       Serial.write('\r'); Serial.write('\n');
     } else if (c >= 0x20 && c < 0x7F) {
       Serial.write(c);
     }
-    // Steuerzeichen ausser \r\n nicht echoen (z.B. paste mit \x... wuerde
-    // unleserlich werden).
 
     if (_br_state == BR_WAIT_MARKER) {
       // Zeilen-Ende-Erkennung -- akzeptieren ALLE Conventions:
@@ -9231,6 +9256,26 @@ void MyMesh::backupRestoreLoop() {
         // Marker erkennen
         if (strncmp(_br_line, "--- BACKUP ", 11) == 0) {
           const char* type_str = _br_line + 11;
+          // User-Hinweis 2026-06-16: vor jedem BEGIN-Marker noch offene
+          // Snapshots reverten -- zwei BEGIN ohne dazwischen-liegendes
+          // END bedeutet der erste Block hatte einen Korruptions-Abbruch
+          // und sein teil-applied State muss zurueck. Bloecke sind so
+          // strikt unabhaengig (User-Wunsch 2026-06-16).
+          bool is_begin = (strncmp(type_str, "DL9SAU PREFS BEGIN ---", 22) == 0)
+                        || (strncmp(type_str, "NODE MAIN BEGIN ---", 19) == 0)
+                        || (strncmp(type_str, "HASHTAG CHANNELS BEGIN ---", 26) == 0);
+          if (is_begin) {
+            if (_br_prefs_snapshot_taken) {
+              memcpy(&_prefs, &_br_prefs_snapshot, sizeof(_prefs));
+              _br_prefs_snapshot_taken = false;
+              Serial.println("\r\n# warning: prior PREFS/NODE block had no END -- reverted.");
+            }
+            if (_br_pre_clear_dirty) {
+              _store->loadChannels(this);
+              _br_pre_clear_dirty = false;
+              Serial.println("\r\n# warning: prior HASHTAG block had no END -- reverted.");
+            }
+          }
           if (strncmp(type_str, "DL9SAU PREFS BEGIN ---", 22) == 0) {
             _br_block_type = 1;
             _br_state = BR_READING_JSON;
@@ -9238,6 +9283,14 @@ void MyMesh::backupRestoreLoop() {
             _br_brace_depth = 0;
             _br_in_string = false;
             _br_escape_next = false;
+            // User-Hinweis 2026-06-16: Snapshot von _prefs damit bei
+            // Korruption (Paste-Byte-Loss + zufaelliges schliessendes
+            // } in den verlorenen Bytes) der teil-applied State
+            // rueckgaengig gemacht werden kann. Backup-Restore-Finish
+            // restored bei aufgehobener Snapshot-Flagge (= Block hat
+            // brace=0 nicht sauber erreicht).
+            memcpy(&_br_prefs_snapshot, &_prefs, sizeof(_prefs));
+            _br_prefs_snapshot_taken = true;
             Serial.print("\r\n# DL9SAU PREFS block: reading JSON...\r\n");
             Serial.flush();
           } else if (strncmp(type_str, "NODE MAIN BEGIN ---", 19) == 0) {
@@ -9247,6 +9300,9 @@ void MyMesh::backupRestoreLoop() {
             _br_brace_depth = 0;
             _br_in_string = false;
             _br_escape_next = false;
+            // Snapshot (siehe DL9SAU PREFS-Begruendung oben)
+            memcpy(&_br_prefs_snapshot, &_prefs, sizeof(_prefs));
+            _br_prefs_snapshot_taken = true;
             Serial.print("\r\n# NODE MAIN block: reading JSON...\r\n");
             Serial.flush();
           } else if (strncmp(type_str, "HASHTAG CHANNELS BEGIN ---", 26) == 0) {
@@ -9263,6 +9319,15 @@ void MyMesh::backupRestoreLoop() {
             // nur additiv zu sein. NICHT angefasst: companion (PSK-magic,
             // wird beim Boot eh wieder erzeugt) und random-private (PSK
             // nicht im Backup, Loeschen wuerde User-Channel verlieren).
+            // User-Hinweis 2026-06-16: Pre-Clear SOFORT zu saveChannels()
+            // war destruktiv -- wenn die JSON-Daten danach korrupt waren
+            // (z.B. Paste-Byte-Loss), blieben die Channels permanent
+            // weg, auch ohne jeglichen Restore-Erfolg.
+            // Fix: Pre-Clear NUR in RAM (channels[] Array via setChannel),
+            // saveChannels() erst NACH erfolgreichem Block-Apply
+            // (siehe brace_depth=0 Pfad). Bei Timeout oder Korruption
+            // bleibt /channels2 unveraendert -- nach Reboot kommen die
+            // alten Channels via loadChannels zurueck.
             int br_cleared = 0;
             for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
               ChannelDetails ch;
@@ -9276,15 +9341,35 @@ void MyMesh::backupRestoreLoop() {
               memset(&empty, 0, sizeof(empty));
               if (setChannel(i, empty)) br_cleared++;
             }
-            if (br_cleared > 0) saveChannels();
+            // NICHT saveChannels() hier -- defer bis nach Block-Apply
+            _br_pre_clear_dirty = (br_cleared > 0);
             char dbg[80];
             snprintf(dbg, sizeof(dbg),
-                     "\r\n# HASHTAG CHANNELS block: pre-clear (%d slots), reading JSON...\r\n",
+                     "\r\n# HASHTAG CHANNELS block: pre-clear (%d slots in RAM), reading JSON...\r\n",
                      br_cleared);
             Serial.print(dbg);
             Serial.flush();
           }
-          // andere Marker (z.B. END) ignorieren, bleiben in WAIT_MARKER
+          // User-Hinweis 2026-06-16: END-Marker ist der einzige
+          // Commit-Trigger. brace_depth=0 ist nur Parse-Ende, persistiert
+          // nichts. Symmetrisch fuer alle 3 Bloecke: BEGIN=snapshot,
+          // END=commit, kein-END=restore via backupRestoreFinish.
+          // Bloecke sind unabhaengig -- User kann z.B. nur NODE MAIN
+          // pasten ohne dass HASHTAG CHANNELS angefasst wird.
+          else if (strncmp(type_str, "DL9SAU PREFS END ---", 20) == 0
+                   || strncmp(type_str, "NODE MAIN END ---", 17) == 0) {
+            _br_prefs_snapshot_taken = false;  // commit _prefs
+            _br_block_type = 0;
+            Serial.println("\r\n# block committed.");
+          }
+          else if (strncmp(type_str, "HASHTAG CHANNELS END ---", 24) == 0) {
+            if (_br_pre_clear_dirty) {
+              saveChannels();
+              _br_pre_clear_dirty = false;
+            }
+            _br_block_type = 0;
+            Serial.println("\r\n# block committed.");
+          }
         }
         _br_line_len = 0;
       } else if (_br_line_len < sizeof(_br_line) - 1) {
@@ -9322,16 +9407,25 @@ void MyMesh::backupRestoreLoop() {
             uint16_t before_applied = _br_applied;
             uint16_t before_errors  = _br_errors;
             backupRestoreParseBlock();
+            // User-Hinweis 2026-06-16: brace_depth=0 ist NUR Parse-Ende.
+            // KEIN saveChannels(), KEIN snapshot-clear hier. Commit
+            // passiert erst am END-Marker (siehe WAIT_MARKER state).
+            // Bei dazwischenliegender Korruption (kein END-Marker)
+            // bleibt snapshot_taken/pre_clear_dirty erhalten und
+            // backupRestoreFinish kann rollbacken.
+            // _br_block_type NICHT auf 0 setzen -- sonst weiss der
+            // END-Marker nicht mehr, welchen Block er commited.
+            // Reset von block_type passiert am END-Marker selber.
             char dbg[80];
             snprintf(dbg, sizeof(dbg),
-                     "\r\n# block parsed: applied+%u errors+%u\r\n",
+                     "\r\n# block parsed: applied+%u errors+%u (waiting for END marker to commit)\r\n",
                      (unsigned)(_br_applied - before_applied),
                      (unsigned)(_br_errors - before_errors));
             Serial.print(dbg);
             Serial.flush();
-            // Zurueck in Marker-Such-Modus fuer naechsten Block
+            // Zurueck in Marker-Such-Modus fuer END-Marker oder
+            // naechsten Block
             _br_state = BR_WAIT_MARKER;
-            _br_block_type = 0;
             _br_line_len = 0;
           }
         }

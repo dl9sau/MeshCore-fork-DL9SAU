@@ -5712,3 +5712,52 @@ Bug 5 (User-Report 2026-06-15 spaet abends): backup save HASHTAG CHANNELS leer
     Untersuchen nach Bug 1-4 fixen.
 
   Quelle: User-Report 2026-06-15 spaet abends.
+
+
+--------------------------------------------------------------------------------
+70. Backup-Format Refactor (User-Wunsch 2026-06-16)
+--------------------------------------------------------------------------------
+
+Status: TODO. ERST wenn Backup/Restore (Wunschliste 69) komplett
+        fix ist. Keine Rueckwaerts-Kompatibilitaet zu alten Backups
+        noetig (User: 'machen wir aber erst wenn backup/restore
+        richtig funktioniert').
+
+Aenderung 1: Section-Header umbenennen
+  Vorher: '--- BACKUP DL9SAU PREFS BEGIN/END ---'
+  Nachher: '--- BACKUP PREFS BEGIN/END ---'
+  Begruendung: 'DL9SAU' im Header ist Branding-Detail. 'PREFS' ist
+    semantisch klarer und kuerzer.
+
+  Code-Stellen:
+    - backupSaveToSerial (emit-Seite): Serial.println()-Strings
+    - Restore-Marker-Erkennung: strncmp-Vergleiche
+
+Aenderung 2: 'count' -> 'entries' bei Filter-Listen
+  Vorher:
+    filter_sender_drop_count: 0
+    filter_sender_keep_count: 0
+    filter_text_drop_count: 0
+    filter_text_keep_count: 0
+    filter_scope_drop_count: 9
+    filter_scope_keep_count: 0
+  Nachher:
+    filter_sender_drop_entries: 0
+    filter_sender_keep_entries: 0
+    filter_text_drop_entries: 0
+    filter_text_keep_entries: 0
+    filter_scope_drop_entries: 9
+    filter_scope_keep_entries: 0
+
+  Begruendung User: 'das irritiert, weil man denkt er wuerde Live-
+    Paket-Zaehler mit backupen'. 'entries' ist semantisch klarer als
+    Anzahl-Slot-Eintraege.
+
+  Code-Stellen:
+    - kv_uint() im Save (emit_filter_list / emit_filter_scope_list)
+    - try_filter_field / try_scope_field im Restore: '_count' suffix
+    - Pref-Variable-Namen bleiben (filter_sender_drop_count im
+      _prefs-Struct ist intern -- nur der JSON-Key wird umbenannt)
+
+Quelle: User-Wunsch 2026-06-16. Beide Aenderungen brauchen kein
+  Rueckwaerts-Kompat -- Reset des Backup-Format zu sauberer Form.
