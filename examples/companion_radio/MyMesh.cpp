@@ -19610,13 +19610,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // ---------- reboot ----------------------------------------------------
   if (starts_with_word(cmd, "reboot")) {
 #if defined(NRF52_PLATFORM)
-    // 2026-06-15 T1000-E: NVIC_SystemReset() greift hier nicht zuverlaessig.
-    // Workaround: WDT als Reset-Mechanismus -- garantiert Hardware-Reset
-    // in <=5s (oder ≤90s wenn unser App-WDT bereits mit Default-Timeout
-    // laeuft). Sauberer und reliable.
-    pushCompanionMessage("Reset via WDT (<=5s)..");
+    // 2026-06-16 T1000-E: NVIC_SystemReset() funktioniert doch -- das
+    // frueher beobachtete 'nicht zuverlaessig'-Verhalten war eine
+    // Konsequenz des ExtraFS-Hangs (LFS-Lock kam beim Aufruf nie zum
+    // Reset-Aufruf durch). Mit sauberem ExtraFS klappt der Adafruit-
+    // Standard-Reset. SoftDevice sauber abschalten + NVIC-Reset.
+    pushCompanionMessage("Rebooting via NVIC..");
     bootLogWritePreReboot();
-    armWdtReset();
+    {
+      uint8_t sd_enabled = 0;
+      sd_softdevice_is_enabled(&sd_enabled);
+      if (sd_enabled) sd_softdevice_disable();
+      delay(200);   // damit pushCompanionMessage rausgeht
+      NVIC_SystemReset();
+    }
 #else
     pushCompanionMessage("Rebooting now..");
     bootLogWritePreReboot();
@@ -19650,39 +19657,49 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (!arg || !*arg) {
       pushCompanionMessage(
         "dfu: NRF52 in Bootloader-Mode.\n"
-        "  dfu uf2      drag-drop UF2\n"
-        "  dfu serial   nrfutil/adafruit-nrfutil");
+        "  dfu uf2      drag-drop UF2 (Mass-Storage)\n"
+        "  dfu serial   nrfutil/adafruit-nrfutil\n"
+        "  dfu ota      BLE-DFU (Bootloader-Abhaengig)");
       return;
     }
-    if (topic_prefix_match(arg, "serial"))     serial_mode = true;
-    else if (topic_prefix_match(arg, "uf2"))   serial_mode = false;
+    uint32_t magic = 0;
+    const char* mode_label = NULL;
+    if (topic_prefix_match(arg, "serial"))     { magic = 0x4E; mode_label = "Serial"; }
+    else if (topic_prefix_match(arg, "uf2"))   { magic = 0x57; mode_label = "UF2"; }
+    else if (topic_prefix_match(arg, "ota"))   { magic = 0xA8; mode_label = "OTA"; }
     else {
-      pushCompanionMessage("dfu: uf2 | serial");
+      pushCompanionMessage("dfu: uf2 | serial | ota");
       return;
     }
-    pushCompanionMessage(serial_mode
-      ? "Reset via WDT (<=5s) -> Serial-DFU.."
-      : "Reset via WDT (<=5s) -> UF2-DFU..");
+    char dfu_reply[80];
+    snprintf(dfu_reply, sizeof(dfu_reply),
+             "Reset via NVIC -> %s-DFU (T1000-E)..", mode_label);
+    pushCompanionMessage(dfu_reply);
     // Pre-DFU Boot-Log Eintrag. Marker '(' damit naechster Boot
-    // bootLogAppend den Eintrag erkennt + nicht doppelt loggt
-    // (analog Pre-Reboot-Pfad in 'reboot' CLI).
-    bootLogWritePreReboot(serial_mode ? "DFU(serial)" : "DFU(uf2)");
-    // 2026-06-15 T1000-E: NVIC_SystemReset via Adafruit enterUf2Dfu
-    // greift nicht zuverlaessig. Statt dessen: GPREGRET-Magic SD-safe
-    // setzen (persistiert ueber WDT-Reset) und WDT als Reset-Trigger.
-    // Magic-Werte siehe wiring.c (0x57 UF2, 0x4E Serial).
+    // bootLogAppend den Eintrag erkennt + nicht doppelt loggt.
+    bootLogWritePreReboot(mode_label);
+    // 2026-06-16 T1000-E Re-Test: WDT-Reset hatte das Geraet zwar
+    // resetet, aber Bootloader landete im Normal-Boot statt DFU-Mode.
+    // Vermutung: WDT-Reset wird vom Bootloader als 'unexpected reset'
+    // gewertet, GPREGRET wird ignoriert. Test mit Adafruit-Standard:
+    // GPREGRET setzen + NVIC_SystemReset() (= das was reset_mcu() macht).
+    // Wenn das auch nicht greift, ist Bootloader inkompatibel
+    // (Wunschliste 67: OTAFIX-Bootloader flashen).
     {
-      const uint32_t magic = serial_mode ? 0x4E : 0x57;
       uint8_t sd_enabled = 0;
       sd_softdevice_is_enabled(&sd_enabled);
       if (sd_enabled) {
         sd_power_gpregret_clr(0, 0xFF);
         sd_power_gpregret_set(0, magic);
+        // SoftDevice soll sauber runter -- sonst SoC-State undefiniert
+        sd_softdevice_disable();
       } else {
         NRF_POWER->GPREGRET = magic;
       }
+      // Kurze Pause damit pushCompanionMessage rausgeht.
+      delay(200);
+      NVIC_SystemReset();
     }
-    armWdtReset();
 #else
     pushCompanionMessage("dfu: nur auf NRF52 verfuegbar.");
 #endif
