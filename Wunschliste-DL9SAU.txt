@@ -5937,3 +5937,110 @@ Diagnose-Vorschlaege:
     Diagnose.
 
 User-Wunsch: TODO bleibt offen bis Pruefung + ggf Sanity-Guard.
+
+
+--------------------------------------------------------------------------------
+75. Buzzer-Profile: per-Event-Mute + Connect-Aware (User-Wunsch 2026-06-16)
+--------------------------------------------------------------------------------
+
+Status: TODO. T1000-E User berichten dass Buzzer bei jeder Channel-Message
+        piept, "nervt und nicht abschaltbar". Aktuell gibt's nur global
+        'buzzer_quiet' (alles aus / alles an). Boot+shutdown bleiben
+        immer hoerbar -- das ist nuetzlich.
+
+User-Anforderung 2026-06-16:
+  "buzzer default kann man lassen. buzzer abschaltbar (ausser boot und
+   shutdown signal). buzzer on-when-app-disconn. und flags profile:
+   on DM, on channel, on ACK, on private-channel-messages"
+
+Design-Vorschlag:
+
+Neue Pref 'buzzer_profile' (uint8_t Bitmask) zusaetzlich zum existierenden
+'buzzer_quiet' (Master-Mute, bleibt als simpler Schalter erhalten).
+
+  | Bit  | Macro          | Default | Bedeutung                          |
+  |------|----------------|---------|------------------------------------|
+  | 0x01 | BUZZ_DM        | 1       | bei Direct-Message                 |
+  | 0x02 | BUZZ_CH_PUB    | 1       | Public, Hashtag, $companion        |
+  | 0x04 | BUZZ_CH_PRIV   | 1       | random-private Channel             |
+  | 0x08 | BUZZ_ACK       | 1       | bei ACK                            |
+  | 0x10 | BUZZ_APP_DISC  | 0       | NUR piepen wenn App NICHT connected|
+
+  Default = 0x0F -- matched aktuelles Verhalten.
+
+notify()-Logik (UITask.cpp Z 93+):
+  if (_node_prefs->buzzer_quiet) return;                  // Master mute
+  if ((profile & BUZZ_APP_DISC) && app_connected()) return;
+  switch(t) {
+    case channelMessage:
+      if (channel_is_private && !(profile & BUZZ_CH_PRIV)) return;
+      if (!channel_is_private && !(profile & BUZZ_CH_PUB)) return;
+      break;
+    case contactMessage: if (!(profile & BUZZ_DM)) return; break;
+    case ack:            if (!(profile & BUZZ_ACK)) return; break;
+  }
+  buzzer.play(...);
+
+Channel-Type-Discriminator: MyMesh.cpp:3129 ruft aktuell
+  notify(UIEventType::channelMessage) ohne Channel-Index. Erweitern:
+  - notify(channelMessageOnPublic) bzw. notify(channelMessageOnPrivate),
+    je nach Channel-PSK (s_public_psk / Hashtag-derived = public,
+    random = private).
+
+CLI (Bitmask-Wert via 'set buzzer_profile <hex>' geht, aber unbequem):
+  set buzzer.dm on|off
+  set buzzer.channel on|off          # public + hashtag + companion
+  set buzzer.private on|off          # random-private
+  set buzzer.ack on|off
+  set buzzer.app_disc on|off
+  get buzzer_profile                  # zeigt z.B. "DM PRIVATE (app-disc-only=off)"
+
+backup save/restore + Migration:
+  - Pref im NodePrefs struct, default 0x0F.
+  - Sentinel-Pattern wie watchdog_mode (alte Files ohne Byte -> 0x0F).
+  - kv_uint + brExtractString analog buzzer_quiet.
+
+Aufwand: ~150 Zeilen, all-in-one Commit.
+
+Quelle: User-Wunsch 2026-06-16, T1000-E Community-Feedback.
+
+
+--------------------------------------------------------------------------------
+76. CR-Wert bei backup save/restore -- vermeintliche Inkonsistenz
+--------------------------------------------------------------------------------
+
+Status: User-Beobachtung 2026-06-16 'Ich meine ich haette es schon 2x
+        gehabt dass er auf CR8 stand und in meinem letzten Backup
+        sah ich wieder CR5'. Reproduktion noch nicht bestaetigt.
+
+Was schon klar ist (Code-Scan 2026-06-16):
+  - 'set cr <5..8>' (Z 18160): Range-Check, _prefs.cr = v, savePrefs,
+    applyRadioPolicy. OK.
+  - boot constrain Z 5406: _prefs.cr = constrain(_prefs.cr, 5, 8). OK.
+  - backup save Z 8865: kv_uint("cr", _prefs.cr). Schreibt aktuellen Wert. OK.
+  - backup restore Z 9978: _prefs.cr = (uint8_t)as_uint(). KEIN Range-Check
+    -- aber boot-constrain wuerde es bei Reboot fangen.
+  - PKT_TX_FORCE_CR5 Z 5738: bei REPEAT-Packets temporaer setParams CR5,
+    ABER aendert _prefs.cr NICHT (nur Radio-State).
+
+Verdaechtige Stellen die zu pruefen sind:
+  a) Gibt es einen Pfad wo radio_driver.setParams nach PKT_TX_FORCE_CR5
+     NICHT auf _prefs.cr zurueckgesetzt wird -> nur Radio-State haengt
+     auf CR5, _prefs.cr ist intakt aber 'get cr' zeigt was anderes als
+     der reale Radio macht?
+  b) App-Set-Cmd-Pfad (CMD_SET_RADIO_PARAMS): wird _prefs.cr dort ggf
+     ueberschrieben?
+  c) Migration in begin() oder savePrefs() die cr unter bestimmten
+     Bedingungen zurueck auf 5 setzt?
+
+Reproduktion noetig:
+  1) 'get cr' -> 5
+  2) 'set cr 8' -> "OK - cr = 8"
+  3) 'get cr' -> 8
+  4) Reboot
+  5) 'get cr' -> 8 oder zurueck zu 5?
+  6) backup save -> "cr": 8 oder 5?
+
+Falls Schritt 4 oder 6 unerwartet -> Bug klar lokalisierbar.
+
+Quelle: User-Beobachtung 2026-06-16.
