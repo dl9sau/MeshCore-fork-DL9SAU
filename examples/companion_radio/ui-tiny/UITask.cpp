@@ -470,23 +470,33 @@ void UITask::showAlert(const char* text, int duration_millis) {
 
 void UITask::notify(UIEventType t) {
 #if defined(PIN_BUZZER)
-switch(t){
-  case UIEventType::contactMessage:
-    // gemini's pick
-    buzzer.play("MsgRcv3:d=4,o=6,b=200:32e,32g,32b,16c7");
-    break;
-  case UIEventType::channelMessage:
-    buzzer.play("kerplop:d=16,o=6,b=120:32g#,32c#");
-    break;
-  case UIEventType::ack:
-    buzzer.play("ack:d=32,o=8,b=120:c");
-    break;
-  case UIEventType::roomMessage:
-  case UIEventType::newContactMessage:
-  case UIEventType::none:
-  default:
-    break;
-}
+  // DL9SAU 2026-06-17 (Wunschliste 75): siehe ui-orig/UITask.cpp.
+  if (_node_prefs->buzzer_quiet) return;
+  if ((_node_prefs->buzzer_profile & 0x10)
+      && _serial && _serial->isConnected()) return;
+  switch(t){
+    case UIEventType::contactMessage:
+      if (!(_node_prefs->buzzer_profile & 0x01)) return;
+      buzzer.play("MsgRcv3:d=4,o=6,b=200:32e,32g,32b,16c7");
+      break;
+    case UIEventType::channelMessage:  // = channelMessagePublic
+      if (!(_node_prefs->buzzer_profile & 0x02)) return;
+      buzzer.play("kerplop:d=16,o=6,b=120:32g#,32c#");
+      break;
+    case UIEventType::channelMessagePrivate:
+      if (!(_node_prefs->buzzer_profile & 0x04)) return;
+      buzzer.play("kerplop:d=16,o=6,b=120:32g#,32c#");
+      break;
+    case UIEventType::ack:
+      if (!(_node_prefs->buzzer_profile & 0x08)) return;
+      buzzer.play("ack:d=32,o=8,b=120:c");
+      break;
+    case UIEventType::roomMessage:
+    case UIEventType::newContactMessage:
+    case UIEventType::none:
+    default:
+      break;
+  }
 #endif
 
 #ifdef PIN_VIBRATION

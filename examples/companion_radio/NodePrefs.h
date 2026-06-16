@@ -651,6 +651,14 @@ struct NodePrefs {  // persisted to file
   // an/aus zu schalten ist zu riskant). 0xFF im File = EOF-Sentinel ->
   // Migration zu 0 (off).
   uint8_t        watchdog_mode;
+  // DL9SAU 2026-06-17 (Wunschliste 75): Buzzer-Profile Bitmask.
+  // Bit 0x01 DM, 0x02 CH_PUB (Public+Hashtag+$companion),
+  // 0x04 CH_PRIV (random-private), 0x08 ACK, 0x10 APP_DISC_ONLY.
+  // Default 0x0F = alle Events an, app_disc-only off (= current behavior).
+  // 0xFF im File = EOF-Sentinel -> Migration zu 0x0F.
+  // buzzer_quiet bleibt als Master-Mute -- wenn quiet=1 ist alles aus
+  // ausser boot/shutdown.
+  uint8_t        buzzer_profile;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim

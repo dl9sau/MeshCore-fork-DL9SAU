@@ -450,6 +450,11 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.watchdog_mode));
     if (_prefs.watchdog_mode == 0xFF) _prefs.watchdog_mode = 0;
 
+    // DL9SAU 2026-06-17 (Wunschliste 75): Buzzer-Profile Bitmask.
+    file.read((uint8_t *)&_prefs.buzzer_profile,
+              sizeof(_prefs.buzzer_profile));
+    if (_prefs.buzzer_profile == 0xFF) _prefs.buzzer_profile = 0x0F;
+
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
     // NRF52 nutzt DFU-Pfad statt WiFi-OTA).
@@ -658,6 +663,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Wunschliste 53 Phase 1+2 (2026-06-14): Hardware-Watchdog Pref.
     file.write((uint8_t *)&_prefs.watchdog_mode,
                sizeof(_prefs.watchdog_mode));
+
+    // DL9SAU 2026-06-17 (Wunschliste 75): Buzzer-Profile.
+    file.write((uint8_t *)&_prefs.buzzer_profile,
+               sizeof(_prefs.buzzer_profile));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).

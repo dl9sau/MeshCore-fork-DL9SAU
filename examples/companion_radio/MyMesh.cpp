@@ -3126,7 +3126,20 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     _serial->writeFrame(frame, 1);
   } else {
 #ifdef DISPLAY_CLASS
-    if (_ui) _ui->notify(UIEventType::channelMessage);
+    // DL9SAU 2026-06-17 (Wunschliste 75): Channel-Type-Discriminator
+    // fuer buzzer_profile. ChannelDetails brauchen wir fuer den Namen
+    // (Hashtag-Pruefung) -- GroupChannel hat nur hash+secret.
+    //  Public  = Public-PSK, Hashtag-Channel (name[0]=='#'), $companion.
+    //  Private = sonstige (User-named random-PSK).
+    bool is_private = false;
+    ChannelDetails chd;
+    if (channel_idx != 0xFF && getChannel(channel_idx, chd)) {
+      is_private = (chd.name[0] != '#')
+                && memcmp(chd.channel.secret, s_public_psk, 16) != 0
+                && memcmp(chd.channel.secret, s_companion_psk_magic, 16) != 0;
+    }
+    if (_ui) _ui->notify(is_private ? UIEventType::channelMessagePrivate
+                                    : UIEventType::channelMessage);
 #endif
   }
 #ifdef DISPLAY_CLASS
@@ -5095,6 +5108,10 @@ void MyMesh::begin(bool has_display) {
   // explizit 0xFF im File: DataStore mapped 0xFF -> 0 (safeguard fuer
   // Migration-Value-Collision).
   _prefs.watchdog_mode = 0;
+  // DL9SAU 2026-06-17 (Wunschliste 75): Sentinel fuer Migration. Bei
+  // Legacy-File ohne dieses Byte: file.read 0 Bytes -> bleibt 0xFF ->
+  // DataStore loadPrefs mapped 0xFF -> 0x0F (= alles an, default).
+  _prefs.buzzer_profile = 0xFF;
 #ifdef ESP_PLATFORM
   _prefs.ota_pending = 0;
 #endif
@@ -8879,6 +8896,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint ("telemetry_mode_loc",   _prefs.telemetry_mode_loc);
   kv_uint ("telemetry_mode_env",   _prefs.telemetry_mode_env);
   kv_uint ("buzzer_quiet",         _prefs.buzzer_quiet);
+  kv_uint ("buzzer_profile",       _prefs.buzzer_profile);
   kv_uint ("messages_append_scope_to_name", _prefs.messages_append_scope_to_name);
   kv_float("rxdelay",              _prefs.rx_delay_base, 3);
   kv_float("txdelay",              _prefs.tx_delay_factor, 3);
@@ -9993,6 +10011,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "telemetry_mode_loc") == 0)    { _prefs.telemetry_mode_loc    = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "telemetry_mode_env") == 0)    { _prefs.telemetry_mode_env    = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "buzzer_quiet") == 0)          { _prefs.buzzer_quiet          = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "buzzer_profile") == 0)        { _prefs.buzzer_profile        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0) { _prefs.interference_threshold = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "agc.reset.interval") == 0 || strcmp(key, "agc_reset_interval") == 0) { _prefs.agc_reset_interval = (uint8_t)as_uint(); _br_applied++; return; }
       // Bug 4 Fix 2026-06-16: cpu_clock_mhz, display_wake_mode, watchdog
@@ -11727,9 +11746,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "App: name manual_add_contacts multi_acks\n"
           "  autoadd_config autoadd_max_hops\n"
-          "  path_hash_mode buzzer_quiet\n"
+          "  path_hash_mode\n"
           "  messages_append_scope_to_name (on|off)\n"
           "  owner_info (max 119, '|' -> Newline)");
+        pushCompanionMessage(
+          "Buzzer: buzzer_quiet (on|off, Master-Mute)\n"
+          "  buzzer.dm/channel/private/ack/app_disc on|off\n"
+          "  get buzzer_profile -- aktueller Bitmask");
         pushCompanionMessage(
           "Auth (passwd_admin/_guest, max 31):\n"
           "  set passwd_admin <pw>   (alias: password)\n"
@@ -18933,6 +18956,49 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // DL9SAU 2026-06-17 (Wunschliste 75): Buzzer-Profile + buzzer_quiet.
+    // 'buzzer_quiet' war im SET-Pfad nicht erreichbar (Bug 2026-06-17).
+    if (strcmp(key, "buzzer_quiet") == 0 || strcmp(key, "buzzer.quiet") == 0) {
+      uint8_t v;
+      if (strcasecmp(value_lc, "on") == 0 || strcmp(value_lc, "1") == 0) v = 1;
+      else if (strcasecmp(value_lc, "off") == 0 || strcmp(value_lc, "0") == 0) v = 0;
+      else { pushCompanionMessage("buzzer_quiet: on | off"); return; }
+      _prefs.buzzer_quiet = v;
+      savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - buzzer_quiet = %s", v ? "on" : "off");
+      pushCompanionMessage(r);
+      return;
+    }
+    // Per-Event-Bits via 'set buzzer.<bit> on|off'.
+    // Bit-Macros: DM=0x01, CH_PUB=0x02, CH_PRIV=0x04, ACK=0x08, APP_DISC=0x10.
+    {
+      uint8_t bit_mask = 0;
+      const char* bit_name = NULL;
+      if (strcmp(key, "buzzer.dm") == 0)        { bit_mask = 0x01; bit_name = "dm"; }
+      else if (strcmp(key, "buzzer.channel") == 0
+            || strcmp(key, "buzzer.ch") == 0)   { bit_mask = 0x02; bit_name = "channel"; }
+      else if (strcmp(key, "buzzer.private") == 0
+            || strcmp(key, "buzzer.priv") == 0) { bit_mask = 0x04; bit_name = "private"; }
+      else if (strcmp(key, "buzzer.ack") == 0)  { bit_mask = 0x08; bit_name = "ack"; }
+      else if (strcmp(key, "buzzer.app_disc") == 0
+            || strcmp(key, "buzzer.appdisc") == 0
+            || strcmp(key, "buzzer.disc") == 0) { bit_mask = 0x10; bit_name = "app_disc"; }
+      if (bit_mask) {
+        uint8_t v;
+        if (strcasecmp(value_lc, "on") == 0 || strcmp(value_lc, "1") == 0) v = 1;
+        else if (strcasecmp(value_lc, "off") == 0 || strcmp(value_lc, "0") == 0) v = 0;
+        else { char r[80]; snprintf(r, sizeof(r), "buzzer.%s: on | off", bit_name); pushCompanionMessage(r); return; }
+        if (v) _prefs.buzzer_profile |= bit_mask;
+        else   _prefs.buzzer_profile &= ~bit_mask;
+        savePrefs();
+        char r[80];
+        snprintf(r, sizeof(r), "OK - buzzer.%s = %s (profile=0x%02X)",
+                 bit_name, v ? "on" : "off", (unsigned)_prefs.buzzer_profile);
+        pushCompanionMessage(r);
+        return;
+      }
+    }
+
     if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
         || strcmp(key, "cpu.clock.mhz") == 0
         || strcmp(key, "cpu_clock_mhz") == 0) {
@@ -19357,6 +19423,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "telemetry_mode_loc") == 0) snprintf(r, sizeof(r), "telemetry_mode_loc = %u", (unsigned)_prefs.telemetry_mode_loc);
     else if (strcmp(key, "telemetry_mode_env") == 0) snprintf(r, sizeof(r), "telemetry_mode_env = %u", (unsigned)_prefs.telemetry_mode_env);
     else if (strcmp(key, "buzzer_quiet") == 0)      snprintf(r, sizeof(r), "buzzer_quiet = %u", (unsigned)_prefs.buzzer_quiet);
+    else if (strcmp(key, "buzzer_profile") == 0 || strcmp(key, "buzzer.profile") == 0) {
+      uint8_t p = _prefs.buzzer_profile;
+      snprintf(r, sizeof(r),
+               "buzzer_profile = 0x%02X (%s%s%s%s%sapp_disc=%s)",
+               (unsigned)p,
+               (p & 0x01) ? "DM " : "",
+               (p & 0x02) ? "CHANNEL " : "",
+               (p & 0x04) ? "PRIVATE " : "",
+               (p & 0x08) ? "ACK " : "",
+               (p & 0x1F) ? "" : "none ",
+               (p & 0x10) ? "on" : "off");
+    }
     else if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
              || strcmp(key, "cpu.clock.mhz") == 0
              || strcmp(key, "cpu_clock_mhz") == 0) {

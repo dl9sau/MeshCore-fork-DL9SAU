@@ -6133,3 +6133,22 @@ Aufwand: 2-4h. Risk: low (rein lokale Buffer-Groessen-Aenderungen).
 
 Quelle: User-Vorfall 2026-06-16/17 ('$companion'-Hang + 'backup save'-
 Crash auf T1000-E).
+
+
+--------------------------------------------------------------------------------
+79. TODO: 'sensors' CLI-Befehl (read/list)
+--------------------------------------------------------------------------------
+
+Status: User-Wunsch 2026-06-17.
+
+T1000-E hat AHT20 (Temp + Humidity), OPT3001 (Helligkeit), Battery-
+Voltage. App zeigt das unter 'Telemetrie' (z.B. Akku 96%/4.16V,
+Temperatur 19.6 C, Helligkeit 0 lux).
+
+Vorschlag: 'sensors' (oder 'sensors read' / 'sensors list')
+CLI-Befehl der die aktuellen Sensor-Werte ausgibt. Quick-Win:
+sensors_loop() liest schon -- nur Display-Pfad fuer CLI fehlt.
+
+on/off macht User-Aussage nach kaum Sinn (Sensoren laufen passiv).
+
+Aufwand: ~30 Zeilen.

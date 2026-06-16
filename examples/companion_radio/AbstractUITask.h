@@ -17,6 +17,11 @@ enum class UIEventType {
     none,
     contactMessage,
     channelMessage,
+    // DL9SAU 2026-06-17 (Wunschliste 75): Channel-Type-Discriminator
+    // fuer buzzer_profile. channelMessage bleibt als Alias fuer
+    // channelMessagePublic (Default-Behavior bei alten Callsites).
+    channelMessagePublic  = channelMessage,
+    channelMessagePrivate,
     roomMessage,
     newContactMessage,
     ack
