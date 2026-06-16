@@ -561,6 +561,13 @@ private:
   // scope or unscoped packet).
   void initRegionKeys();
   const char* lookupRegionByTransportCode(const mesh::Packet* packet) const;
+  // DL9SAU 2026-06-16: Berechnet Scope-Hash + befuellt scope_buf mit
+  // dem displayfaehigen Scope-Label ("#name" / "#?" / "#*"). 2 Stellen
+  // hatten denselben 15-Zeiler inline (Z 2074-2089 + 3086-3101).
+  // scope_buf min 36 Byte.
+  void computeScopeLabel(const mesh::Packet* pkt,
+                         uint32_t& scope_h,
+                         char* scope_buf, size_t scope_buf_sz) const;
   // Format a debug line, write it to Serial AND push it to the app as a
   // PUSH_CODE_DEBUG_LOG frame (so the user can inspect logs in the app's
   // Debug-Protokolle view when no USB-Serial is attached, e.g. mobile).

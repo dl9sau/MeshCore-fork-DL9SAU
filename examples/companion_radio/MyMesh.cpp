@@ -2070,23 +2070,9 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
       && _prefs.messages_append_scope_to_name) {
     uint32_t name_h = fnv1a32((const char*)from.id.pub_key, 6);
     uint32_t scope_h;
-    const char* scope_label = NULL;
     char scope_buf[36];
-    if (pkt->hasTransportCodes()) {
-      const char* scope_name = lookupRegionByTransportCode(pkt);
-      if (scope_name) {
-        scope_h = fnv1a32_cstr(scope_name);
-        if (scope_h == 0xFFFFFFFEUL || scope_h == 0xFFFFFFFFUL) scope_h ^= 0x12345678UL;
-        snprintf(scope_buf, sizeof(scope_buf), "#%s", scope_name);
-      } else {
-        scope_h = 0xFFFFFFFEUL;
-        snprintf(scope_buf, sizeof(scope_buf), "#?");
-      }
-      scope_label = scope_buf;
-    } else {
-      scope_h = 0xFFFFFFFFUL;
-      scope_label = "#*";
-    }
+    computeScopeLabel(pkt, scope_h, scope_buf, sizeof(scope_buf));
+    const char* scope_label = scope_buf;
     uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
     // DM-Pfad: channel_hash=0 (kein Channel-Bezug). User-Wunsch 2026-06-08:
     // wenn ein Sender seinen scope aendert, soll die '[#scope, direct]'-
@@ -3082,24 +3068,9 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     //   0xFFFFFFFE = '#?' (scoped aber Region unbekannt)
     //   0xFFFFFFFF = '#*' (unscoped)
     uint32_t scope_h;
-    const char* scope_label = NULL;
     char scope_buf[36];
-    if (pkt->hasTransportCodes()) {
-      const char* scope_name = lookupRegionByTransportCode(pkt);
-      if (scope_name) {
-        scope_h = fnv1a32_cstr(scope_name);
-        // Kollision mit Sentinel-Werten extrem unwahrscheinlich aber sicher:
-        if (scope_h == 0xFFFFFFFEUL || scope_h == 0xFFFFFFFFUL) scope_h ^= 0x12345678UL;
-        snprintf(scope_buf, sizeof(scope_buf), "#%s", scope_name);
-      } else {
-        scope_h = 0xFFFFFFFEUL;
-        snprintf(scope_buf, sizeof(scope_buf), "#?");
-      }
-      scope_label = scope_buf;
-    } else {
-      scope_h = 0xFFFFFFFFUL;
-      scope_label = "#*";
-    }
+    computeScopeLabel(pkt, scope_h, scope_buf, sizeof(scope_buf));
+    const char* scope_label = scope_buf;
     uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
     // User-Wunsch 2026-06-08: per-Channel-Separation. 4 Bytes aus dem
     // GroupChannel-Hash als channel-Identifier. Derselbe Sender in
@@ -3949,8 +3920,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
         // und Diagnose-Hinweise bekommt.
         const uint8_t* pk = _regions_pending[i].pubkey;
         char prefix6[7];
-        for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", pk[j]);
-        prefix6[6] = 0;
+        mesh::Utils::toHex(prefix6, pk, 3);
         size_t csv_len = (len > 8) ? (size_t)(len - 8) : 0;
         // Trace: in TRACE_DISCOVER sichtbar wenn 'trace on discover' aktiv.
         traceCompanion(TRACE_DISCOVER,
@@ -3997,8 +3967,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
         if (_regions_pending[i].name[0]) {
           StrHelper::strzcpy(id_str, _regions_pending[i].name, sizeof(id_str));
         } else {
-          for (int j = 0; j < 8; j++) snprintf(id_str + j*2, 3, "%02x", _regions_pending[i].pubkey[j]);
-          id_str[16] = 0;
+          mesh::Utils::toHex(id_str, _regions_pending[i].pubkey, 8);
         }
         char buf[220];
         if (rt == ANON_REQ_TYPE_REGIONS && len > 8) {
@@ -4471,8 +4440,7 @@ void MyMesh::printRepeaterLegendEntry(const DiscoverEntry& e,
                                        const CompletedRegionsEntry* csv_or_null,
                                        bool verbose) {
   char prefix6[7];
-  for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", e.pub_key[j]);
-  prefix6[6] = 0;
+  mesh::Utils::toHex(prefix6, e.pub_key, 3);
   ContactInfo* known = lookupContactByPubKey(
       (const uint8_t*)e.pub_key, e.full_pubkey ? PUB_KEY_SIZE : 8);
   const char* role = (e.adv_type == ADV_TYPE_REPEATER) ? "REP"
@@ -4580,8 +4548,7 @@ void MyMesh::finalizeRegionsChain() {
   for (uint8_t i = 0; i < _regions_completed_count; i++) {
     CompletedRegionsEntry& ce = _regions_completed[i];
     char prefix6[7];
-    for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", ce.pubkey[j]);
-    prefix6[6] = 0;
+    mesh::Utils::toHex(prefix6, ce.pubkey, 3);
     const char* p = ce.csv;
     while (*p) {
       while (*p && (*p == ' ' || *p == ',')) p++;
@@ -13654,8 +13621,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Augmentation unten. So steht der Hex-Stempel immer an gleicher
       // Position, egal ob Kontakt-Name bekannt oder nicht.
       char prefix6[7];
-      for (int j = 0; j < 3; j++) snprintf(prefix6 + j*2, 3, "%02x", c.id.pub_key[j]);
-      prefix6[6] = 0;
+      mesh::Utils::toHex(prefix6, c.id.pub_key, 3);
       char idstr[64];
       snprintf(idstr, sizeof(idstr), "%s %s", prefix6, c.name);
       // UTF-8 visuell trunkieren auf 25 Codepoints (User-Bug 2026-06-14
@@ -13761,8 +13727,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         // 8 Byte Pub-Key (short-discover) bzw. 32 Byte (full); die ersten
         // 3 Byte (6 hex chars) genuegen fuer Visual-Identifikation.
         char dprefix6[7];
-        for (int j = 0; j < 3; j++) snprintf(dprefix6 + j*2, 3, "%02x", e.pub_key[j]);
-        dprefix6[6] = 0;
+        mesh::Utils::toHex(dprefix6, e.pub_key, 3);
         char did[40];
         snprintf(did, sizeof(did), "%s (unknown)", dprefix6);
 
@@ -18019,7 +17984,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       self_id = new_id;
       char hexbuf[17];
-      for (int i = 0; i < 8; i++) snprintf(hexbuf + i*2, 3, "%02x", self_id.pub_key[i]);
+      mesh::Utils::toHex(hexbuf, self_id.pub_key, 8);
       char r[160];
       snprintf(r, sizeof(r),
                "OK - prv.key gesetzt + saveIdentity.\n"
@@ -22764,6 +22729,29 @@ bool MyMesh::advert() {
     return true;
   } else {
     return false;
+  }
+}
+
+// DL9SAU 2026-06-16: Helper extrahiert aus dem 15-Zeiler der in
+// Z 2074-2089 + 3086-3101 doppelt war. Befuellt scope_h und scope_buf
+// (Letzteres direkt nutzbar als scope_label).
+void MyMesh::computeScopeLabel(const mesh::Packet* pkt,
+                               uint32_t& scope_h,
+                               char* scope_buf, size_t scope_buf_sz) const {
+  if (pkt->hasTransportCodes()) {
+    const char* scope_name = lookupRegionByTransportCode(pkt);
+    if (scope_name) {
+      scope_h = fnv1a32_cstr(scope_name);
+      // Kollision mit Sentinel-Werten extrem unwahrscheinlich aber sicher:
+      if (scope_h == 0xFFFFFFFEUL || scope_h == 0xFFFFFFFFUL) scope_h ^= 0x12345678UL;
+      snprintf(scope_buf, scope_buf_sz, "#%s", scope_name);
+    } else {
+      scope_h = 0xFFFFFFFEUL;
+      snprintf(scope_buf, scope_buf_sz, "#?");
+    }
+  } else {
+    scope_h = 0xFFFFFFFFUL;
+    snprintf(scope_buf, scope_buf_sz, "#*");
   }
 }
 
