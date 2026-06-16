@@ -651,4 +651,13 @@ struct NodePrefs {  // persisted to file
   // an/aus zu schalten ist zu riskant). 0xFF im File = EOF-Sentinel ->
   // Migration zu 0 (off).
   uint8_t        watchdog_mode;
+#ifdef ESP_PLATFORM
+  // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
+  // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim
+  // Boot, clear's das Flag, und skipt BLE-Init -> max. freier Heap fuer
+  // AsyncElegantOTA's 53 KB Response. 0/EOF-Sentinel = kein OTA-Reboot.
+  // NRF52 (T1000-E) hat eigenen DFU-Mechanismus (SoftDevice +
+  // adafruit-nrf-util), nicht WiFi-basiert -- daher hier ifdef-fenced.
+  uint8_t        ota_pending;
+#endif
 };

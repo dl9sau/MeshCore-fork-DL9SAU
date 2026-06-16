@@ -310,6 +310,14 @@ void halt() {
   unsigned long last_wifi_reconnect_attempt = 0;
 #endif
 
+// DL9SAU 2026-06-16 OTA: Boot-Mode-Flag (RAM-only). Wird in setup()
+// gesetzt wenn _prefs.ota_pending != 0. Dann wird BLE-Init geskippt
+// und nach setup() direkt board.startOTAUpdate gerufen. NRF52 hat
+// keinen WiFi-OTA-Pfad -- daher ESP_PLATFORM-fenced.
+#ifdef ESP_PLATFORM
+static bool g_ota_boot_mode = false;
+#endif
+
 void setup() {
   // DL9SAU 2026-06-16: USB-CDC RX-Buffer hochsetzen BEVOR Serial.begin().
   // Auf ESP32-S3 HWCDC ist setRxBufferSize NACH begin() vielfach
@@ -477,6 +485,19 @@ void setup() {
     // else: Pref ungueltig oder 0 -> Build-Default behalten.
   }
 
+#ifdef ESP_PLATFORM
+  // DL9SAU 2026-06-16 OTA Plan A: Pending-Flag aus Prefs lesen.
+  // Wenn gesetzt: clear + savePrefs sofort (commit-Clear), damit ein
+  // crash im OTA-Mode keinen Endless-OTA-Loop ausloest. Dann RAM-flag
+  // setzen und unten BLE-Init skippen.
+  if (the_mesh.getNodePrefs()->ota_pending != 0) {
+    g_ota_boot_mode = true;
+    the_mesh.getNodePrefs()->ota_pending = 0;
+    the_mesh.savePrefs();
+    Serial.println("\r\n# OTA boot mode -- skipping BLE init.");
+  }
+#endif
+
 #ifdef WIFI_SSID
   board.setInhibitSleep(true);   // prevent sleep when WiFi is active
   WiFi.setAutoReconnect(true);
@@ -493,16 +514,23 @@ void setup() {
 
   WiFi.begin(WIFI_SSID, WIFI_PWD);
   serial_interface.begin(TCP_PORT);
+  the_mesh.startInterface(serial_interface);
 #elif defined(BLE_PIN_CODE)
-  serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  // DL9SAU 2026-06-16 OTA Plan A: BLE-Stack-Init nur wenn KEIN
+  // OTA-Boot-Mode (sonst ist der Heap nicht frei fuer WiFi+OTA).
+  if (!g_ota_boot_mode) {
+    serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+    the_mesh.startInterface(serial_interface);
+  }
 #elif defined(SERIAL_RX)
   companion_serial.setPins(SERIAL_RX, SERIAL_TX);
   companion_serial.begin(115200);
   serial_interface.begin(companion_serial);
+  the_mesh.startInterface(serial_interface);
 #else
   serial_interface.begin(Serial);
-#endif
   the_mesh.startInterface(serial_interface);
+#endif
 #else
   #error "need to define filesystem"
 #endif
@@ -518,6 +546,18 @@ void setup() {
 #endif
 
   board.onBootComplete();
+
+#ifdef ESP_PLATFORM
+  // DL9SAU 2026-06-16 OTA Plan A: Im OTA-Boot-Mode direkt nach
+  // setup-Abschluss den AsyncWebServer + ElegantOTA starten.
+  // Heap ist jetzt frei (kein BLE-Init), 5-min Timeout, auto-Reboot.
+  if (g_ota_boot_mode) {
+    char r[160];
+    board.startOTAUpdate(the_mesh.getNodePrefs()->node_name, r);
+    Serial.print("\r\n# ");
+    Serial.println(r);
+  }
+#endif
 
   // Wunschliste 53 (2026-06-14): Reset-Reason auslesen + an MyMesh
   // weitergeben fuer stats-core 'last_reset'-Anzeige + Boot-Log.
@@ -543,6 +583,18 @@ void setup() {
 
 void loop() {
   petWatchdog();   // No-op wenn nicht ACTIVE
+#ifdef ESP_PLATFORM
+  // DL9SAU 2026-06-16 OTA Plan A: im OTA-Boot-Mode KEIN the_mesh.loop()
+  // (sonst checkSerialInterface() crasht auf _serial=NULL). Auch
+  // sensors/ui sind irrelevant -- nur tickOTA fuer Timeout + Watchdog
+  // bedienen.
+  if (g_ota_boot_mode) {
+    board.tickOTA();
+    maintainWatchdog();
+    delay(10);
+    return;
+  }
+#endif
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS

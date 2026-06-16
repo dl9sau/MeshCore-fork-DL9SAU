@@ -5119,6 +5119,9 @@ void MyMesh::begin(bool has_display) {
   // explizit 0xFF im File: DataStore mapped 0xFF -> 0 (safeguard fuer
   // Migration-Value-Collision).
   _prefs.watchdog_mode = 0;
+#ifdef ESP_PLATFORM
+  _prefs.ota_pending = 0;
+#endif
 
   // Wunschliste 46 Phase 2 (2026-06-10): channel-filter Masks
   // Pre-Init: alle Masks = 0 -> global (alle Channels).
@@ -7242,6 +7245,9 @@ void MyMesh::checkCLIRescueCmd() {
 }
 
 void MyMesh::checkSerialInterface() {
+  // 2026-06-16: OTA-Boot-Mode skipt startInterface() -> _serial=NULL.
+  // checkSerialInterface() wird trotzdem aus loop() gerufen.
+  if (!_serial) return;
   size_t len = _serial->checkRecvFrame(cmd_frame);
   if (len > 0) {
     handleCmdFrame(len);
@@ -10466,6 +10472,12 @@ void MyMesh::setBleEnabled(bool en) {
 }
 
 void MyMesh::manageBlePower() {
+  // DL9SAU 2026-06-16: Waehrend WiFi-OTA aktiv ist, darf BLE nicht
+  // re-enabled werden -- esp_bt_mem_release im OTA-Start hat den
+  // Controller-Heap an WiFi gegeben, esp_bt_controller_enable
+  // wuerde scheitern und potentiell crashen. Bis Reboot bleibt
+  // BLE garantiert aus.
+  if (board.isOTAActive()) return;
   // Heartbeat-Trace (Wunschliste 43 Diagnose, User-Beobachtung
   // 2026-06-11: 'nichts passiert nach Boot-Grace'). Alle 30s ein
   // pushDebugLog mit aktuellem State -- damit wir sicher wissen
@@ -17558,13 +17570,36 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
     if (arg && strcmp(arg, "ota") == 0) {
-      char r[160];
-      if (board.startOTAUpdate(_prefs.node_name, r)) {
-        pushCompanionMessage(r);
-      } else {
-        pushCompanionMessage("start ota: not supported (build ohne ENABLE_WIFI_OTA?)");
-      }
+#ifdef ESP_PLATFORM
+      // DL9SAU 2026-06-16 Plan A (Reboot-into-OTA-Mode, ESP32-only):
+      // direkter BLE-Teardown + WiFi-Start im laufenden Geraet war zu
+      // fragil (Heap-Korruption beim cleanup, /update-Endpoint hing
+      // weil free heap nach BLE-mem-release nur 26 KB war,
+      // AsyncWebServer braucht aber ~53 KB fuer ElegantOTA-Response).
+      // Stattdessen: Pref-Flag setzen + Reboot. Beim naechsten Boot
+      // skipt setup() die BLE-Init komplett -> deutlich mehr freier
+      // Heap fuer OTA. User-App-Verbindung geht durch den Reboot weg,
+      // hat aber die URL vorher als pushCompanionMessage erhalten.
+      // NRF52 (T1000-E) hat eigenen DFU-Pfad, hier nicht aktiv.
+      pushCompanionMessage(
+        "OTA: Reboot in 2s in OTA-Modus.\n"
+        "1) App-Verbindung wird abreissen (kein BLE im OTA-Modus).\n"
+        "2) WLAN 'MeshCore-OTA' (offen) joinen.\n"
+        "3) Browser auf http://192.168.4.1/update\n"
+        "4) Firmware-.bin hochladen, Geraet rebootet danach normal\n"
+        "   (App reconnected automatisch).\n"
+        "5 min Timeout -> auto-Reboot zurueck in Normal-Modus.");
+      _prefs.ota_pending = 1;
+      savePrefs();
+      Serial.println("\r\n# start ota: pref set, reboot in 2s...");
+      delay(2000);
+      ESP.restart();
+      return;  // unreachable
+#else
+      pushCompanionMessage("start ota: nicht verfuegbar auf dieser Platform "
+                           "(NRF52 nutzt DFU statt WiFi-OTA).");
       return;
+#endif
     }
     pushCompanionMessage("Usage: start ota");
     return;
@@ -17574,8 +17609,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
     if (arg && strcmp(arg, "ota") == 0) {
       char r[80];
-      board.stopOTAUpdate(r);
-      pushCompanionMessage(r);
+      bool ok = board.stopOTAUpdate(r);
+      Serial.print("\r\n# ");
+      Serial.println(r);
+      if (ok) {
+        delay(200);
+        ESP.restart();
+      } else {
+        pushCompanionMessage(r);
+      }
       return;
     }
     pushCompanionMessage("Usage: stop ota");

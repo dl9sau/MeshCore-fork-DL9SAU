@@ -425,6 +425,17 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.watchdog_mode));
     if (_prefs.watchdog_mode == 0xFF) _prefs.watchdog_mode = 0;
 
+#ifdef ESP_PLATFORM
+    // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
+    // NRF52 nutzt DFU-Pfad statt WiFi-OTA).
+    // 'start ota' setzt das Flag + savePrefs + reboot. setup() liest
+    // hier, clear's es sofort wieder via savePrefs, und routed in den
+    // OTA-Boot-Mode. Alte Datei ohne dieses Byte: file.read = 0 -> 0.
+    file.read((uint8_t *)&_prefs.ota_pending,
+              sizeof(_prefs.ota_pending));
+    if (_prefs.ota_pending == 0xFF) _prefs.ota_pending = 0;
+#endif
+
     file.close();
   }
 }
@@ -622,6 +633,12 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // Wunschliste 53 Phase 1+2 (2026-06-14): Hardware-Watchdog Pref.
     file.write((uint8_t *)&_prefs.watchdog_mode,
                sizeof(_prefs.watchdog_mode));
+
+#ifdef ESP_PLATFORM
+    // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).
+    file.write((uint8_t *)&_prefs.ota_pending,
+               sizeof(_prefs.ota_pending));
+#endif
 
     file.close();
   }

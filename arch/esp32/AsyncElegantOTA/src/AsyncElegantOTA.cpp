@@ -100,6 +100,9 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 Update.printError(Serial);
                 return request->send(400, "text/plain", "Could not end OTA");
             }
+            // DL9SAU 2026-06-16: Erfolgs-Hinweis auf USB-Serial damit
+            // User am Terminal sieht warum der Reboot gleich kommt.
+            Serial.println("\r\n# firmware upload successful. Rebooting...");
         }else{
             return;
         }
