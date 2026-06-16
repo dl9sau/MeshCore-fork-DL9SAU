@@ -19559,6 +19559,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                "Nicht via 'get' exposable (Security).\n"
                "Migration: 'set prv.key <128 hex>' auf Ziel-Geraet.");
     }
+    // DL9SAU 2026-06-17 (Wunschliste 74): pub.key ist NICHT secret -- der
+    // dient als Identitaets-Anker. Zur Verifikation nach flash-erase /
+    // restore: User vergleicht 'get pub.key' mit dem '_meta.pubkey' im
+    // backup save. Stimmt es ueberein -> Identity ist erhalten geblieben.
+    else if (strcmp(key, "pub.key") == 0 || strcmp(key, "pub_key") == 0
+             || strcmp(key, "pubkey") == 0) {
+      char hex[65];
+      mesh::Utils::toHex(hex, self_id.pub_key, PUB_KEY_SIZE);
+      snprintf(r, sizeof(r), "pub.key = %s", hex);
+    }
     else {
       snprintf(r, sizeof(r), "Unbekannter key '%s'. 'get all' fuer Liste.", key);
     }
