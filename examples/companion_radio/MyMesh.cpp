@@ -10536,14 +10536,12 @@ void MyMesh::manageBlePower() {
   if (ble_real != state_expects_on) {
     if (ble_real) {
       // externes ON -> HOT_START (5min an, dann zurueck in Cycle)
-      logBleTransition(BLE_PWR_HOT_START, "ext-on");
-      _ble_pwr_state = BLE_PWR_HOT_START;
+      bleSetState(BLE_PWR_HOT_START, "ext-on");
       _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
       pushDebugLog("[ble] external toggle on -> hot-start\n");
     } else {
       // externes OFF -> TMP_OFF (runtime aus, nicht persistent)
-      logBleTransition(BLE_PWR_TMP_OFF, "ext-off");
-      _ble_pwr_state = BLE_PWR_TMP_OFF;
+      bleSetState(BLE_PWR_TMP_OFF, "ext-off");
       _ble_pwr_state_until = 0;
       pushDebugLog("[ble] external toggle off -> tmp-off\n");
     }
@@ -10562,8 +10560,7 @@ void MyMesh::manageBlePower() {
     // nicht als always-on (sonst stehender state=BOOT-Verwirrung
     // bei User-Diagnose -- 2026-06-11).
     if (_ble_pwr_state != BLE_PWR_AWAKE) {
-      logBleTransition(BLE_PWR_AWAKE, "mode-on");
-      _ble_pwr_state = BLE_PWR_AWAKE;
+      bleSetState(BLE_PWR_AWAKE, "mode-on");
       _ble_pwr_state_until = 0;
       setBleEnabled(true);
     }
@@ -10634,8 +10631,7 @@ void MyMesh::manageBlePower() {
                    (unsigned long)_ble_pwr_state_until);
     }
     if (connected) {
-      logBleTransition(BLE_PWR_AWAKE, "boot-conn");
-      _ble_pwr_state = BLE_PWR_AWAKE;
+      bleSetState(BLE_PWR_AWAKE, "boot-conn");
       _ble_pwr_state_until = 0;
       pushDebugLog("[ble] BOOT -> AWAKE (connected)\n");
     } else if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
@@ -10646,14 +10642,12 @@ void MyMesh::manageBlePower() {
       // Repeater bei "User connectet nie waehrend BOOT" im Cycle gelandet,
       // obwohl HOT_START->TMP_OFF-Pfad permanent macht.
       if (_prefs.repeater_profile == 1) {
-        logBleTransition(BLE_PWR_TMP_OFF, "boot-perm");
-        _ble_pwr_state = BLE_PWR_TMP_OFF;
+        bleSetState(BLE_PWR_TMP_OFF, "boot-perm");
         _ble_pwr_state_until = 0;
         setBleEnabled(false);
         pushDebugLog("[ble] BOOT grace expired (profile=normal) -> TMP_OFF (perm)\n");
       } else {
-        logBleTransition(BLE_PWR_SLEEP, "boot-exp");
-        _ble_pwr_state = BLE_PWR_SLEEP;
+        bleSetState(BLE_PWR_SLEEP, "boot-exp");
         _ble_pwr_state_until = now + 180UL * 1000;
         setBleEnabled(false);
         pushDebugLog("[ble] BOOT grace expired -> SLEEP\n");
@@ -10669,8 +10663,7 @@ void MyMesh::manageBlePower() {
   if (_ble_pwr_state == BLE_PWR_HOT_START) {
     setBleEnabled(true);
     if (connected) {
-      logBleTransition(BLE_PWR_AWAKE, "hot-conn");
-      _ble_pwr_state = BLE_PWR_AWAKE;
+      bleSetState(BLE_PWR_AWAKE, "hot-conn");
       _ble_pwr_state_until = 0;
       return;
     }

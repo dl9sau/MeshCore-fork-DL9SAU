@@ -876,6 +876,12 @@ private:
   uint8_t     _ble_log_head = 0;
   uint8_t     _ble_log_count = 0;
   void logBleTransition(BlePwrState to_state, const char* reason);
+  // DL9SAU 2026-06-16: 16 Stellen hatten 'logBleTransition(X, reason);
+  // _ble_pwr_state = X;'-Paar inline. Helper macht beides atomic.
+  inline void bleSetState(BlePwrState to_state, const char* reason) {
+    logBleTransition(to_state, reason);
+    _ble_pwr_state = to_state;
+  }
   // Deferred-disable analog _pending_reboot_at: bei 'bluetooth off'-CLI
   // bekommt die App noch 5s Zeit den OK-Frame ueber BLE zu empfangen
   // bevor wir den Chip abschalten. Plus periodisch tickle nach unten
