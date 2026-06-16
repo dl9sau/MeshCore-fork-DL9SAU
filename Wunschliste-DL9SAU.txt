@@ -6044,3 +6044,92 @@ Reproduktion noetig:
 Falls Schritt 4 oder 6 unerwartet -> Bug klar lokalisierbar.
 
 Quelle: User-Beobachtung 2026-06-16.
+
+
+--------------------------------------------------------------------------------
+77. EXTERNAL: NRF52 LOOP_STACK_SZ Library-Patch (Adafruit nRF52 Core)
+--------------------------------------------------------------------------------
+
+Status: DONE auf User-Mac 2026-06-17. NICHT im Repo (Library-Patch).
+
+Problem (2026-06-16/17): T1000-E (NRF52840 + Adafruit-Bluefruit-Stack)
+hat default loopTask-Stack 4 KB. Companion-Code mit 'char r[200]'-
+Buffern in handleCompanionCommand + Sub-Calls hat Peak ~4 KB. Bei
+'backup save' aus dem CLI -> Stack-Overflow -> Hard-Fault -> Watchdog-
+Reset. Symptom 'Output ok dann Freeze'.
+
+Empirisch nach Patch:
+  Boot     ?     -> 5400 byte free
+  ?              -> 4540 byte
+  backup save    -> 4540 byte (lief durch)
+  2x backup+x    -> 3980 byte
+
+Patch (DL9SAU 2026-06-17):
+  FILE=~/.platformio/packages/framework-arduinoadafruitnrf52/cores/nRF5/main.cpp
+  sed -i .bak 's/#define LOOP_STACK_SZ.*\\((256\\*4)\\).*/#define LOOP_STACK_SZ (512*4)/' $FILE
+  oder manuell:
+  -#define LOOP_STACK_SZ       (256*4)
+  +#define LOOP_STACK_SZ       (512*4)
+
+Backup wird als .bak im selben Verzeichnis abgelegt.
+
+Wichtig:
+  - PIO clean nach dem Patch noetig (sonst Cache des alten main.o)
+  - Bei jedem Adafruit-nRF52-Library-Update wieder erneut anwenden
+  - User-Mac-Status 2026-06-17: gepatcht, 8 KB Stack
+  - Idealfall waere ueber PR upstream einreichen 'add #ifndef around
+    LOOP_STACK_SZ define' damit -DLOOP_STACK_SZ=... als Build-Flag wirkt
+
+Alternative ohne Patch: -DLOOP_STACK_SZ=2048 als build_flag funktioniert
+NICHT, weil das #define in main.cpp keine #ifndef-Guard hat -- die
+.cpp-Definition gewinnt last-wins.
+
+Mittelfristige sauberere Loesung: Wunschliste 78 (Buffer-Reduce).
+
+
+--------------------------------------------------------------------------------
+78. Buffer-Reduce-Sweep in handleCompanionCommand + backupSaveToSerial
+--------------------------------------------------------------------------------
+
+Status: TODO. Mittelfristig sauberer als Library-Patch (Wunschliste 77).
+
+Problem (2026-06-17): NRF52 hat knappen Task-Stack (4 KB default).
+Companion-Code hat >20 lokale Buffer mit 200+ Byte in
+handleCompanionCommand:
+
+  char r[220]   (1x)
+  char r[200]   (mehrere)
+  char prefs_buf[200], char lower[200], char head[200], char gb[200],
+  char buf[200], char block[200] x7
+  char r[180]   (mehrere)
+
+Plus backupSaveToSerial mit emit_meta/kv_*-Lambdas die lokale char[N]
+in jeder Lambda-Aufruf allokieren.
+
+Ansatz fuer Reduce-Sweep:
+
+1) **Buffer-Audit**: jeden 'char X[N]' mit N >= 100 anschauen, fragen:
+   - Wird wirklich N Byte gebraucht? (oft N=200, aber max-Output < 100)
+   - Kann durch kleinere Buffer ersetzt werden (z.B. r[80]/r[120])
+
+2) **Static-Move wo safe**: wenn Funktion nur aus loop-Task gerufen
+   wird (NICHT aus Bluefruit-Callback-Task), kann lokales
+   'char buf[200]' zu 'static char buf[200]' werden.
+   - backupSaveToSerial: nur aus loop-Task (USB-CLI) bzw. companion-CLI
+     (Bluefruit-Task) -- KOLLISION potentiell. Hier vorsicht.
+
+3) **Lambda-Buffer-Pool**: in backupSaveToSerial ein einzelner outer-
+   buffer den alle Lambdas durch Pointer-Param teilen.
+
+4) **Stack-Watermark-Diagnose** im Production-Build optional als
+   NRF52_STACK_DIAG behalten -- aber NICHT bei jedem Befehl loggen
+   (Spam), nur bei Boot/grossen Operationen.
+
+Ziel: Peak-Stack-Verbrauch von ~4 KB auf ~2 KB druecken, dann ist
+auch der ungepatchte 4-KB-Loop-Task-Stack ausreichend (= Library-
+Patch nicht mehr noetig).
+
+Aufwand: 2-4h. Risk: low (rein lokale Buffer-Groessen-Aenderungen).
+
+Quelle: User-Vorfall 2026-06-16/17 ('$companion'-Hang + 'backup save'-
+Crash auf T1000-E).
