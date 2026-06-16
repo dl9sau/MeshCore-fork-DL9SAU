@@ -10600,16 +10600,14 @@ void MyMesh::manageBlePower() {
   bool connected = _serial->isConnected();
   // Edge: Connect (any state with BLE on)
   if (connected && !_ble_was_connected) {
-    logBleTransition(BLE_PWR_AWAKE, "connect");
+    bleSetState(BLE_PWR_AWAKE, "connect");
     pushDebugLog("[ble] connect -> AWAKE\n");
-    _ble_pwr_state = BLE_PWR_AWAKE;
     _ble_pwr_state_until = 0;
   }
   // Edge: Disconnect (war AWAKE)
   if (!connected && _ble_was_connected) {
-    logBleTransition(BLE_PWR_HOT_START, "disconn");
+    bleSetState(BLE_PWR_HOT_START, "disconn");
     pushDebugLog("[ble] disconnect -> HOT_START 5min\n");
-    _ble_pwr_state = BLE_PWR_HOT_START;
     _ble_pwr_state_until = now + 5UL * 60 * 1000;
     // Recency-Bonus-Window 10min ab Disconnect (User-Wunsch 2026-06-11):
     // inkludiert die HOT_START-Phase. Danach kommt ggf. ca. 5min schnellerer
@@ -10679,16 +10677,14 @@ void MyMesh::manageBlePower() {
       // den uint32-millis-Wrap nach 49.7d (User-Punkt 2026-06-11:
       // 'nicht nach 43 Tagen wieder an gehen').
       if (mode == 2) {
-        logBleTransition(BLE_PWR_OFF, "hot-off");
+        bleSetState(BLE_PWR_OFF, "hot-off");
         pushDebugLog("[ble] HOT expired (pref=off) -> OFF\n");
-        _ble_pwr_state = BLE_PWR_OFF;
         _ble_pwr_state_until = 0;
         setBleEnabled(false);
       } else if (_prefs.repeater_profile == 1) {
         // profile=normal: kein Cycle, permanent aus mit Wake-Triggern.
-        logBleTransition(BLE_PWR_TMP_OFF, "hot-perm");
+        bleSetState(BLE_PWR_TMP_OFF, "hot-perm");
         pushDebugLog("[ble] HOT expired (profile=normal) -> TMP_OFF (perm)\n");
-        _ble_pwr_state = BLE_PWR_TMP_OFF;
         _ble_pwr_state_until = 0;
         setBleEnabled(false);
       } else {
@@ -10696,11 +10692,10 @@ void MyMesh::manageBlePower() {
         bool recency = (_ble_disconnect_at != 0)
                        && ((now - _ble_disconnect_at) < 10UL * 60 * 1000);
         uint32_t sleep_ms = recency ? 20UL * 1000 : 40UL * 1000;
-        logBleTransition(BLE_PWR_SLEEP, recency ? "hot-exp-rec" : "hot-exp");
+        bleSetState(BLE_PWR_SLEEP, recency ? "hot-exp-rec" : "hot-exp");
         pushDebugLog("[ble] HOT expired -> SLEEP %us%s\n",
                      (unsigned)(sleep_ms / 1000),
                      recency ? " (recency)" : "");
-        _ble_pwr_state = BLE_PWR_SLEEP;
         _ble_pwr_state_until = now + sleep_ms;
         setBleEnabled(false);
       }
@@ -10710,9 +10705,8 @@ void MyMesh::manageBlePower() {
   if (_ble_pwr_state == BLE_PWR_SLEEP) {
     setBleEnabled(false);
     if ((int32_t)(now - _ble_pwr_state_until) >= 0) {
-      logBleTransition(BLE_PWR_WAIT, "sleep-exp");
+      bleSetState(BLE_PWR_WAIT, "sleep-exp");
       pushDebugLog("[ble] SLEEP -> WAIT 20s\n");
-      _ble_pwr_state = BLE_PWR_WAIT;
       _ble_pwr_state_until = now + 20UL * 1000;
       setBleEnabled(true);
     }
@@ -10721,9 +10715,8 @@ void MyMesh::manageBlePower() {
   if (_ble_pwr_state == BLE_PWR_WAIT) {
     setBleEnabled(true);
     if (connected) {
-      logBleTransition(BLE_PWR_AWAKE, "wait-conn");
+      bleSetState(BLE_PWR_AWAKE, "wait-conn");
       pushDebugLog("[ble] WAIT -> AWAKE (connect)\n");
-      _ble_pwr_state = BLE_PWR_AWAKE;
       _ble_pwr_state_until = 0;
       return;
     }
@@ -10731,11 +10724,10 @@ void MyMesh::manageBlePower() {
       bool recency = (_ble_disconnect_at != 0)
                      && ((now - _ble_disconnect_at) < 10UL * 60 * 1000);
       uint32_t sleep_ms = recency ? 20UL * 1000 : 40UL * 1000;
-      logBleTransition(BLE_PWR_SLEEP, recency ? "wait-exp-rec" : "wait-exp");
+      bleSetState(BLE_PWR_SLEEP, recency ? "wait-exp-rec" : "wait-exp");
       pushDebugLog("[ble] WAIT expired -> SLEEP %us%s\n",
                    (unsigned)(sleep_ms / 1000),
                    recency ? " (recency)" : "");
-      _ble_pwr_state = BLE_PWR_SLEEP;
       _ble_pwr_state_until = now + sleep_ms;
       setBleEnabled(false);
     }
