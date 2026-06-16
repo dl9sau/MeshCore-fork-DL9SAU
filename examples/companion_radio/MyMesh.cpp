@@ -9790,7 +9790,23 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       _br_applied++;
       return;
     }
-    // Wunschliste 43 BLE-Power-Mode.
+    // Bluetooth + TZ Handler 2026-06-16: nach block_type==2 (NODE MAIN)
+    // verschoben -- Save schreibt sie dort. Vorher hier in NODE PREFS
+    // -> wurden im realen Restore nie erreicht (skipped++ in NODE MAIN).
+    // Gleicher Bug-Pattern wie Filter-Handler bei Bug 2 (2026-06-16).
+    _br_skipped++;
+    return;
+  }
+
+  if (block_type == 2) {
+    // ===== NODE MAIN =====
+    // Bug 2 Fix 2026-06-16: Filter-Handler aus block_type==1 (DL9SAU PREFS)
+    // hierher verschoben. Save schreibt filter_unknown_channel_repeat +
+    // filter_sender_* + filter_text_* + filter_scope_* in NODE MAIN block,
+    // Handler waren faelschlich in DL9SAU PREFS block -> wurden beim
+    // Restore nie erreicht, _br_skipped fuer alle Filter-Keys.
+    // Bluetooth + TZ Handler 2026-06-16 (skipped=4 Debug): selbiges
+    // Schicksal -- Save in NODE MAIN, Handler waren in NODE PREFS.
     if (val_type == 'n' && strcmp(key, "bluetooth_profile") == 0) {
       _prefs.bluetooth_profile = (uint8_t)as_uint();
       _br_applied++;
@@ -9801,7 +9817,6 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       _br_applied++;
       return;
     }
-    // Wunschliste 50 Phase 1 (2026-06-11): Timezone-Override Restore.
     if (val_type == 'n' && strcmp(key, "tz_mode") == 0) {
       uint8_t v = (uint8_t)as_uint();
       if (v > 2) v = 0;  // invalid -> auto-eu
@@ -9817,17 +9832,6 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       _br_applied++;
       return;
     }
-    _br_skipped++;
-    return;
-  }
-
-  if (block_type == 2) {
-    // ===== NODE MAIN =====
-    // Bug 2 Fix 2026-06-16: Filter-Handler aus block_type==1 (DL9SAU PREFS)
-    // hierher verschoben. Save schreibt filter_unknown_channel_repeat +
-    // filter_sender_* + filter_text_* + filter_scope_* in NODE MAIN block,
-    // Handler waren faelschlich in DL9SAU PREFS block -> wurden beim
-    // Restore nie erreicht, _br_skipped fuer alle Filter-Keys.
     if (val_type == 'n' && strcmp(key, "filter_unknown_channel_repeat") == 0) {
       _prefs.filter_unknown_channel_repeat = (uint8_t)as_uint();
       _br_applied++;
@@ -10139,7 +10143,11 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
     // PSK wird hier deterministisch aus dem Namen rekonstruiert:
     // erste 16 Byte von SHA-256(name). Format-Konvention dokumentiert
     // in docs/companion_protocol.md.
-    if (val_type == 's' && key[0] == 'c' && key[1] == 'h') {
+    // 2026-06-16: pattern auf 'chN' verschaerft (key[2] muss Digit sein).
+    // Vorher matched 'ch' allein -- 'ch_pub_0' fiel in diesen Branch,
+    // 'Public' (kein '#') wurde skipped++, der ch_pub_-Handler darunter
+    // wurde nie erreicht.
+    if (val_type == 's' && key[0] == 'c' && key[1] == 'h' && key[2] >= '0' && key[2] <= '9') {
       char chname[32];
       brExtractString(val_start, val_len, chname, sizeof(chname));
       if (chname[0] != '#') {
