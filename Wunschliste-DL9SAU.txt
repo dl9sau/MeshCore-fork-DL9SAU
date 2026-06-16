@@ -5891,3 +5891,49 @@ OFFEN: tatsaechliche Firmware-Upload via 'dfu serial' und 'dfu ota':
 Bonus-Idee: PR #2323-Pfad (bledfu im normalen BLE-Stack registriert)
   ist schon aktiv. Paired BLE-Client kann DFU triggern ohne 'dfu ota'.
   Testen ob das mit nrfConnect aus paired Verbindung klappt.
+
+
+--------------------------------------------------------------------------------
+74. TODO: prv_key-Verhalten nach flash-erase / fresh-boot pruefen + dokumentieren
+--------------------------------------------------------------------------------
+
+Status: TODO. Erstmals diskutiert 2026-06-16 nach User-Vorfall T1000-E
+        (Meshtastic-Versuch + Recovery auf MeshCore).
+
+Kontext:
+  - 'backup save' enthaelt explizit KEINEN prv_key (Sicherheits-Entscheidung
+    Wunschliste 69 / commit b9cfa26d; emit_meta-Kommentar Z 8796-8802).
+    Migration auf neues Geraet ueber 'set prv.key <128 hex>' geplant.
+  - Smartphone-App-Backup enthaelt vermutlich den prv_key (Pairing-State).
+  - ABER: Nach flash-erase + Boot ohne irgendein Backup, was passiert mit
+    prv_key in /main_identity?
+    * MyMesh::begin Z 5044: !_store->loadMainIdentity(self_id) -> radio_new_identity()
+    * Random wuerfeln + check pub_key[0] != 0x00 && != 0xFF
+    * saveMainIdentity persistiert
+  - User-Sorge 2026-06-16: 'mein Geraet war ja flash erased nach
+    meshtastic-firmware-Versuch. Dann habe ich das backup eingespielt. Das
+    enthaelt aber keinen priv key. Ich befuerchte nun, der ist leer (0x00).
+    Das waere ein security gau'
+  - Empirisch geklaert (06-16): bei T1000-E war pub_key vor+nach restore
+    identisch -> prv_key war erhalten (flash-erase hat Identity-Partition
+    nicht angetastet). Aber das ist Glueckssache.
+
+Konkrete Pruefpunkte:
+  1) Wenn loadMainIdentity FAILS (= /main_identity nicht da), wird neue
+     Identity gewuerfelt. Bei welchem flash-State scheitert loadMainIdentity?
+  2) Falls /main_identity korrupt-aber-da: liest loadMainIdentity ggf
+     halb-leeren prv_key (alle 0x00) ohne dass das Geraet das erkennt?
+  3) NRF52 vs ESP32: unterschiedliche flash-erase-Konsequenzen?
+  4) Was wenn esptool erase_flash GENUTZT wurde (ESP32) -- alles weg.
+     vs reines flash (nur App-Slot ueberschrieben) -- Identity bleibt.
+
+Diagnose-Vorschlaege:
+  - In loadMainIdentity nach erfolgreichem read: sanity-check
+    sum(prv_key) != 0 && sum(prv_key) != 32 * 0xFF -- sonst neu wuerfeln
+    + warnen + saveMainIdentity.
+  - 'get pub.key' / 'get pubkey' CLI-Befehl (analog 'get prv.key'
+    Diagnose) damit User SCHNELL pruefen kann ob Identity ok.
+  - Boot-Log-Eintrag 'Identity loaded' vs 'Identity NEW (random)' fuer
+    Diagnose.
+
+User-Wunsch: TODO bleibt offen bis Pruefung + ggf Sanity-Guard.
