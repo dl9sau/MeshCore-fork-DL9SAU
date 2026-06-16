@@ -9230,16 +9230,24 @@ void MyMesh::backupRestoreLoop() {
     _br_timeout_at = futureMillis(60000);
 
     // Echo fuer User-Feedback waehrend cut+paste -- WICHTIG fuer
-    // Diagnose (User-Hinweis 2026-06-16: 'hier hilft uebrigens das
-    // Echo - sonst haette ich es gar nicht gesehen!').
-    // Trade-off: bei sehr langen Pastes kann der CDC-RX-FIFO ueberlaufen
-    // weil echo per-Byte blockiert. Loesung wenn das wichtig wird:
-    // groesseren TX-Buffer oder non-blocking echo. Atomaren Apply
-    // (Wunschliste-Eintrag 2026-06-16) macht Korruptionen harmlos.
-    if (c == '\r' || c == '\n') {
-      Serial.write('\r'); Serial.write('\n');
-    } else if (c >= 0x20 && c < 0x7F) {
-      Serial.write(c);
+    // Marker-Diagnose (User-Hinweis 2026-06-16: 'hier hilft uebrigens
+    // das Echo - sonst haette ich es gar nicht gesehen!').
+    // ABER: per-byte echo waehrend BR_READING_JSON drosselt RX-Drain
+    // weil setTxTimeoutMs(50) bei TX-FIFO-Voll wartet -- in dieser Zeit
+    // overflowt der CDC-RX-FIFO mit dem laufenden Paste-Burst.
+    // Symptom: NODE MAIN JSON mid-block mit Byte-Salat.
+    // Fix 2026-06-16: Echo NUR in WAIT_MARKER state (Diagnose-Mehrwert)
+    // -- in JSON-state direkt buffern ohne TX-Overhead.
+    // Echo nur in WAIT_MARKER (Marker-Diagnose) -- in JSON-state
+    // wuerde per-byte echo die RX-Drainage durch setTxTimeoutMs(50)
+    // bei TX-FIFO-Voll auf ~ 5KB pro 100ms drosseln und CDC-RX
+    // overflow ausloesen.
+    if (_br_state == BR_WAIT_MARKER) {
+      if (c == '\r' || c == '\n') {
+        Serial.write('\r'); Serial.write('\n');
+      } else if (c >= 0x20 && c < 0x7F) {
+        Serial.write(c);
+      }
     }
 
     if (_br_state == BR_WAIT_MARKER) {
@@ -9358,17 +9366,25 @@ void MyMesh::backupRestoreLoop() {
           // pasten ohne dass HASHTAG CHANNELS angefasst wird.
           else if (strncmp(type_str, "DL9SAU PREFS END ---", 20) == 0
                    || strncmp(type_str, "NODE MAIN END ---", 17) == 0) {
-            _br_prefs_snapshot_taken = false;  // commit _prefs
-            _br_block_type = 0;
-            Serial.println("\r\n# block committed.");
+            if (_br_block_type == 0) {
+              Serial.println("\r\n# warning: END marker without matching BEGIN -- ignored.");
+            } else {
+              _br_prefs_snapshot_taken = false;  // commit _prefs
+              _br_block_type = 0;
+              Serial.println("\r\n# block committed.");
+            }
           }
           else if (strncmp(type_str, "HASHTAG CHANNELS END ---", 24) == 0) {
-            if (_br_pre_clear_dirty) {
-              saveChannels();
-              _br_pre_clear_dirty = false;
+            if (_br_block_type == 0) {
+              Serial.println("\r\n# warning: END marker without matching BEGIN -- ignored.");
+            } else {
+              if (_br_pre_clear_dirty) {
+                saveChannels();
+                _br_pre_clear_dirty = false;
+              }
+              _br_block_type = 0;
+              Serial.println("\r\n# block committed.");
             }
-            _br_block_type = 0;
-            Serial.println("\r\n# block committed.");
           }
         }
         _br_line_len = 0;
@@ -22401,21 +22417,17 @@ void MyMesh::serialCliLoop() {
       Serial.write("\r\n> ");
       continue;
     }
-    if (c == 0x04) {  // Ctrl-D: CLI suspendieren (RAM, kein Persist)
+    if (c == 0x04) {  // Ctrl-D: nur Buffer-Reset (analog Ctrl-U).
+      // 2026-06-16 (User-Wunsch): vorher hat Ctrl-D persist_on=0 + savePrefs
+      // ausgeloest -- ein einzelnes 0x04 in einem versehentlichen Paste
+      // hat die USB-Console UEBER REBOOT UND REFLASH HINAUS verloren
+      // gemacht, weil die pref-Datei den Off-Zustand persistiert hatte.
+      // Reaktivierung war nur ueber BLE moeglich (Companion-App).
+      // 'Das geht gar nicht.' Jetzt: Ctrl-D = harmlos. Wer CLI persistent
+      // aus will, nutzt explizit 'serial-cli off'.
       _serial_cli_pos = 0;
-      _serial_cli_temp_on = false;
-      if (_prefs.serial_cli_persist_on != 0) {
-        // Persistent on -- temp override RAM-only abschalten reicht nicht;
-        // damit CLI wirklich aus bleibt, persistent off setzen.
-        _prefs.serial_cli_persist_on = 0;
-        savePrefs();
-        Serial.write("\r\n# CLI suspended (Ctrl-D) -- persistent off.\r\n"
-                     "  Reaktivieren: 'serial-cli on' per BLE-App.\r\n");
-      } else {
-        Serial.write("\r\n# CLI suspended (Ctrl-D).\r\n"
-                     "  Reaktivieren: 'serial-cli on' per BLE-App.\r\n");
-      }
-      return;
+      Serial.write("\r\n> ");
+      continue;
     }
     if (c == '\r' || c == '\n') {
       Serial.write("\r\n");
