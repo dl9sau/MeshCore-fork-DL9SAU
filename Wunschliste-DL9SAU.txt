@@ -5863,3 +5863,31 @@ Test-Pfad: build mit ADMIN_PASSWORD, start ota, /update verlangt
 Auth-Dialog.
 
 Quelle: User-Notiz 2026-06-16 'Web-Auth mit Passwort: nicht getestet.'
+
+
+--------------------------------------------------------------------------------
+73. TODO: T1000-E dfu serial + dfu ota end-to-end Firmware-Upload testen
+--------------------------------------------------------------------------------
+
+Status: TODO. Commit 39d10958 hat die 3 dfu-Modi (uf2/serial/ota)
+        + reboot via NVIC_SystemReset stabilisiert. 'dfu uf2' wurde
+        2026-06-16 erfolgreich getestet (/Volumes/T1000-E mit
+        CURRENT.UF2 erscheint, drag-drop fertig).
+
+OFFEN: tatsaechliche Firmware-Upload via 'dfu serial' und 'dfu ota':
+
+'dfu serial' (Magic 0x4E):
+  - Bootloader im Adafruit-Serial-DFU-Mode bestaetigt 2026-06-16:
+    USB-CDC erscheint, spricht aber nrfutil-Protokoll statt CLI.
+  - Aktuell ungetestet: adafruit-nrfutil dfu serial -pkg <fw.zip>
+    -p /dev/cu.usbmodem... -b 115200
+
+'dfu ota' (Magic 0xA8):
+  - Bootloader im BLE-DFU-Mode bestaetigt 2026-06-16: advertiset als
+    't1ke_dfu' im BLE-Scanner.
+  - Aktuell ungetestet: nrfConnect / Nordic Secure-DFU-Tools mit
+    Firmware-ZIP draufuploaden, App startet danach mit neuer FW.
+
+Bonus-Idee: PR #2323-Pfad (bledfu im normalen BLE-Stack registriert)
+  ist schon aktiv. Paired BLE-Client kann DFU triggern ohne 'dfu ota'.
+  Testen ob das mit nrfConnect aus paired Verbindung klappt.
