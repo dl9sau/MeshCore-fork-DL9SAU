@@ -11210,6 +11210,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage("(leerer Befehl - 'help' zeigt verfügbare Kommandos)");
     return;
   }
+#if defined(NRF52_PLATFORM) && defined(NRF52_STACK_DIAG)
+  // DL9SAU 2026-06-16 T1000-E $companion-Hang Diagnose:
+  // FreeRTOS-API: minimaler freier Stack-Watermark fuer aktuellen Task.
+  // Wenn das ueber Eingaben hinweg abnimmt -> Stack-Overflow als
+  // Hang-Ursache wahrscheinlich. Konstant -> woanders. Einheit Words (4B).
+  UBaseType_t wm = uxTaskGetStackHighWaterMark(NULL);
+  Serial.printf("\r\n# [stack] CLI-task free=%u words (~%u byte). cmd=%.20s\r\n",
+                (unsigned)wm, (unsigned)(wm * 4), cmd);
+#endif
 
   // Smartphone-Tastaturen capitalisieren oft das erste Zeichen automatisch
   // ("Help" statt "help"). Lokale lowercase-Kopie für case-insensitive

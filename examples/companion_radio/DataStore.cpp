@@ -196,8 +196,33 @@ bool DataStore::saveMainIdentity(const mesh::LocalIdentity &identity) {
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) {
+#if defined(NRF52_PLATFORM) && defined(NRF52_REMOVE_PREFS_ONCE)
+  // DL9SAU 2026-06-16: T1000-E InternalFS-prefs-Recovery. Wenn die
+  // prefs-Datei korrupt ist (nach gescheitertem dfu serial Versuch
+  // hing loadPrefsInt im LFS-read), loescht dieser Flag /new_prefs
+  // und /node_prefs einmalig. Identity in /main_identity bleibt.
+  // Nach erfolgreichem Boot diesen Flag wieder rausnehmen, sonst
+  // werden bei JEDEM Boot prefs auf Default zurueckgesetzt.
+  Serial.println("\r\n# [T1000-E diag] RP1 remove /new_prefs (one-shot)"); Serial.flush();
+  _fs->remove("/new_prefs");
+  _fs->remove("/node_prefs");
+  Serial.println("# [T1000-E diag] RP2 done"); Serial.flush();
+#endif
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] LP1 in loadPrefs"); Serial.flush();
+  bool ex_new = _fs->exists("/new_prefs");
+  Serial.print("# [T1000-E diag] LP2 /new_prefs exists="); Serial.println(ex_new ? "y" : "n"); Serial.flush();
+  bool ex_old = _fs->exists("/node_prefs");
+  Serial.print("# [T1000-E diag] LP3 /node_prefs exists="); Serial.println(ex_old ? "y" : "n"); Serial.flush();
+#endif
   if (_fs->exists("/new_prefs")) {
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("# [T1000-E diag] LP4 pre loadPrefsInt(/new_prefs)"); Serial.flush();
+#endif
     loadPrefsInt("/new_prefs", prefs, node_lat, node_lon); // new filename
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("# [T1000-E diag] LP5 post loadPrefsInt"); Serial.flush();
+#endif
   } else if (_fs->exists("/node_prefs")) {
     loadPrefsInt("/node_prefs", prefs, node_lat, node_lon);
     savePrefs(prefs, node_lat, node_lon);                // save to new filename
