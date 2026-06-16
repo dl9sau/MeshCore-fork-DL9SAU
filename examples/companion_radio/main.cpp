@@ -318,7 +318,35 @@ void halt() {
 static bool g_ota_boot_mode = false;
 #endif
 
+// DL9SAU 2026-06-16 T1000-E Boot-Hang Diagnose:
+// LED-Marker VOR Serial.begin() damit wir sehen ob setup() ueberhaupt
+// erreicht wird -- USB-CDC kommt manchmal nicht zustande aber LED
+// koennen wir auch ohne Host sehen. Plus: Trace-Marker nach jedem
+// Setup-Schritt. Build mit -D NRF52_BOOT_TRACE aktivieren.
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+static void diag_led_pulse(int count) {
+  pinMode(LED_PIN, OUTPUT);
+  for (int i = 0; i < count; i++) {
+    digitalWrite(LED_PIN, HIGH); delay(80);
+    digitalWrite(LED_PIN, LOW);  delay(120);
+  }
+}
+static void diag_marker(const char* m) {
+  Serial.print("\r\n# [T1000-E diag] ");
+  Serial.println(m);
+  Serial.flush();
+}
+ #define DIAG_LED(n)  diag_led_pulse(n)
+ #define DIAG_MARK(s) diag_marker(s)
+#else
+ #define DIAG_LED(n)
+ #define DIAG_MARK(s)
+#endif
+
 void setup() {
+  // T1000-E Diag: 3 Blinks VOR Serial.begin. Wenn diese kommen,
+  // sind wir im setup() angekommen, C++-Constructors waren ok.
+  DIAG_LED(3);
   // DL9SAU 2026-06-16: USB-CDC RX-Buffer hochsetzen BEVOR Serial.begin().
   // Auf ESP32-S3 HWCDC ist setRxBufferSize NACH begin() vielfach
   // unwirksam -- ein nachtraegliches Set-im-backup-restore-Start
@@ -329,6 +357,12 @@ void setup() {
   Serial.setRxBufferSize(8192);
 #endif
   Serial.begin(115200);
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  // 2s warten damit USB-CDC enumerate kann (sonst gehen erste Bytes
+  // verloren bevor Host das Device gesehen hat).
+  delay(2000);
+  DIAG_MARK("M0 serial up");
+#endif
   // DL9SAU 2026-06-01 v2: USB-CDC TX-Timeout sehr klein halten. Verhindert
   // loop()-Stalls wenn das Geraet ohne USB-Host laeuft (z.B. Powerbank) und
   // der TX-FIFO sich fuellt -- ohne diesen Hint koennte Serial.write() bis
@@ -379,7 +413,9 @@ void setup() {
   esp_wifi_deinit();
 #endif
 
+  DIAG_MARK("M1 pre board.begin");
   board.begin();
+  DIAG_MARK("M2 post board.begin");
 
 #ifdef DISPLAY_CLASS
   DisplayDriver* disp = NULL;
@@ -394,25 +430,37 @@ void setup() {
   }
 #endif
 
+  DIAG_MARK("M3 pre radio_init");
   if (!radio_init()) { halt(); }
+  DIAG_MARK("M4 post radio_init");
 
   fast_rng.begin(radio_driver.getRngSeed());
+  DIAG_MARK("M5 post fast_rng.begin");
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  DIAG_MARK("M6 pre InternalFS.begin");
   InternalFS.begin();
+  DIAG_MARK("M7 post InternalFS.begin");
   #if defined(QSPIFLASH)
+    DIAG_MARK("M8 pre QSPIFlash.begin");
     if (!QSPIFlash.begin()) {
       // debug output might not be available at this point, might be too early. maybe should fall back to InternalFS here?
       MESH_DEBUG_PRINTLN("CustomLFS_QSPIFlash: failed to initialize");
+      DIAG_MARK("M8b QSPIFlash FAILED");
     } else {
       MESH_DEBUG_PRINTLN("CustomLFS_QSPIFlash: initialized successfully");
+      DIAG_MARK("M8c QSPIFlash ok");
     }
   #else
   #if defined(EXTRAFS)
+      DIAG_MARK("M8 pre ExtraFS.begin");
       ExtraFS.begin();
+      DIAG_MARK("M8 post ExtraFS.begin");
   #endif
   #endif
+  DIAG_MARK("M9 pre store.begin");
   store.begin();
+  DIAG_MARK("M10 pre the_mesh.begin");
   the_mesh.begin(
     #ifdef DISPLAY_CLASS
         disp != NULL
@@ -421,12 +469,19 @@ void setup() {
     #endif
   );
 
+  DIAG_MARK("M11 post the_mesh.begin");
 #ifdef BLE_PIN_CODE
+  DIAG_MARK("M12 pre serial_interface.begin(BLE)");
   serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  DIAG_MARK("M13 post serial_interface.begin(BLE)");
 #else
+  DIAG_MARK("M12 pre serial_interface.begin(Serial)");
   serial_interface.begin(Serial);
+  DIAG_MARK("M13 post serial_interface.begin(Serial)");
 #endif
+  DIAG_MARK("M14 pre the_mesh.startInterface");
   the_mesh.startInterface(serial_interface);
+  DIAG_MARK("M15 post the_mesh.startInterface");
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
   store.begin();
@@ -552,6 +607,9 @@ void setup() {
   // setup-Abschluss den AsyncWebServer + ElegantOTA starten.
   // Heap ist jetzt frei (kein BLE-Init), 5-min Timeout, auto-Reboot.
   if (g_ota_boot_mode) {
+    // 2026-06-16 (Wunschliste 72): passwd_admin -> HTTP-Basic-Auth.
+    // Wenn pref leer ist, bleibt OTA offen.
+    board.setOTAAuth("admin", the_mesh.getNodePrefs()->passwd_admin);
     char r[160];
     board.startOTAUpdate(the_mesh.getNodePrefs()->node_name, r);
     Serial.print("\r\n# ");

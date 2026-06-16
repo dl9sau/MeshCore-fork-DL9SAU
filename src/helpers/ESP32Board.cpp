@@ -27,6 +27,9 @@
 static AsyncWebServer* s_ota_server = NULL;
 static unsigned long   s_ota_timeout_at = 0;
 static bool            s_ota_active     = false;
+// HTTP-Basic-Auth (User-Wunsch 2026-06-16). Wenn s_ota_passwd[0] != 0,
+// fordert AsyncElegantOTA Basic-Auth mit User 'admin'.
+static char            s_ota_passwd[32] = {0};
 
 static void ota_cleanup() {
   if (s_ota_server) {
@@ -84,7 +87,11 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[]) {
   });
 
   AsyncElegantOTA.setID(id_buf);
-  AsyncElegantOTA.begin(s_ota_server);    // Start ElegantOTA
+  if (s_ota_passwd[0] != 0) {
+    AsyncElegantOTA.begin(s_ota_server, "admin", s_ota_passwd);  // Basic-Auth
+  } else {
+    AsyncElegantOTA.begin(s_ota_server);    // Start ElegantOTA (offen)
+  }
   s_ota_server->begin();
 
   s_ota_active = true;
@@ -129,6 +136,18 @@ void ESP32Board::tickOTA() {
 
 bool ESP32Board::isOTAActive() { return s_ota_active; }
 
+void ESP32Board::setOTAAuth(const char* user, const char* pass) {
+  // User wird derzeit ignoriert ('admin' hardcoded), Pref-Naming
+  // passwd_admin -> User=admin macht das eindeutig.
+  (void)user;
+  if (pass && pass[0]) {
+    strncpy(s_ota_passwd, pass, sizeof(s_ota_passwd) - 1);
+    s_ota_passwd[sizeof(s_ota_passwd) - 1] = 0;
+  } else {
+    s_ota_passwd[0] = 0;
+  }
+}
+
 #else
 bool ESP32Board::startOTAUpdate(const char* id, char reply[]) {
   return false; // not supported
@@ -139,6 +158,7 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
 }
 void ESP32Board::tickOTA() { /* no op */ }
 bool ESP32Board::isOTAActive() { return false; }
+void ESP32Board::setOTAAuth(const char* user, const char* pass) { (void)user; (void)pass; }
 #endif
 
 #endif

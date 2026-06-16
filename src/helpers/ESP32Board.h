@@ -160,6 +160,7 @@ public:
   bool stopOTAUpdate(char reply[]) override;
   void tickOTA() override;
   bool isOTAActive() override;
+  void setOTAAuth(const char* user, const char* pass) override;
 
   void setInhibitSleep(bool inhibit) {
     inhibit_sleep = inhibit;

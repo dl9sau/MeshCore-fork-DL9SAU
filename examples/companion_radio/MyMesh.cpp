@@ -11741,9 +11741,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  autoadd_config autoadd_max_hops\n"
           "  path_hash_mode buzzer_quiet\n"
           "  messages_append_scope_to_name (on|off)\n"
-          "  owner_info (max 119, '|' -> Newline)\n"
-          "  passwd_admin/_guest (max 31,\n"
-          "    'set passwd_admin clear' -> remote-CLI off)");
+          "  owner_info (max 119, '|' -> Newline)");
+        pushCompanionMessage(
+          "Auth (passwd_admin/_guest, max 31):\n"
+          "  set passwd_admin <pw>   (alias: password)\n"
+          "  set passwd_guest <pw>   (alias: guest.password)\n"
+          "  set passwd_admin        (leer = clear)\n"
+          "  OTA-WLAN nutzt passwd_admin als HTTP-Basic-Auth.");
         pushCompanionMessage(
           "Identity (Reboot noetig!):\n"
           "  set prv.key <128 hex chars>\n"
@@ -17608,6 +17612,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
     if (arg && strcmp(arg, "ota") == 0) {
+#ifdef ESP_PLATFORM
       char r[80];
       bool ok = board.stopOTAUpdate(r);
       Serial.print("\r\n# ");
@@ -17619,6 +17624,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r);
       }
       return;
+#else
+      pushCompanionMessage("stop ota: nicht verfuegbar (NRF52 nutzt DFU statt WiFi-OTA).");
+      return;
+#endif
     }
     pushCompanionMessage("Usage: stop ota");
     return;
@@ -17862,6 +17871,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Siehe auch: 'ch.hops status' / 'ch.hops clear'");
         return;
       }
+      // DL9SAU 2026-06-16: 'set passwd_admin' / 'set passwd_guest' ohne
+      // value muss clearen koennen (doku-aligned). Vorher fiel das in
+      // den generischen 'Usage'-Branch durch und der Handler weiter
+      // unten (Z 17980+) wurde nie erreicht.
+      // Doku-Aliase: 'password' / 'guest.password' (laut meshcore.io
+      // docs/cli_commands).
+      if (strcmp(key, "passwd_admin") == 0
+          || strcmp(key, "passwd.admin") == 0
+          || strcmp(key, "password") == 0
+          || strcmp(key, "passwd") == 0           // Kurz-Alias = admin
+          || strcmp(key, "admin.password") == 0
+          || strcmp(key, "admin.passwd") == 0) {
+        memset(_prefs.passwd_admin, 0, sizeof(_prefs.passwd_admin));
+        savePrefs();
+        pushCompanionMessage("OK - passwd_admin cleared.");
+        return;
+      }
+      if (strcmp(key, "passwd_guest") == 0
+          || strcmp(key, "passwd.guest") == 0
+          || strcmp(key, "guest.password") == 0
+          || strcmp(key, "guest.passwd") == 0) {
+        memset(_prefs.passwd_guest, 0, sizeof(_prefs.passwd_guest));
+        savePrefs();
+        pushCompanionMessage("OK - passwd_guest cleared.");
+        return;
+      }
       char r[100]; snprintf(r, sizeof(r), "Usage: set %s <value>", key);
       pushCompanionMessage(r);
       return;
@@ -17980,9 +18015,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (strcmp(key, "passwd_admin") == 0
         || strcmp(key, "passwd_guest") == 0
         || strcmp(key, "passwd.admin") == 0
-        || strcmp(key, "passwd.guest") == 0) {
+        || strcmp(key, "passwd.guest") == 0
+        || strcmp(key, "password") == 0           // doc-alias
+        || strcmp(key, "passwd") == 0             // Kurz-Alias = admin
+        || strcmp(key, "admin.password") == 0     // doc-alias
+        || strcmp(key, "admin.passwd") == 0
+        || strcmp(key, "guest.password") == 0     // doc-alias
+        || strcmp(key, "guest.passwd") == 0) {
       bool is_admin = (strcmp(key, "passwd_admin") == 0
-                       || strcmp(key, "passwd.admin") == 0);
+                       || strcmp(key, "passwd.admin") == 0
+                       || strcmp(key, "password") == 0
+                       || strcmp(key, "passwd") == 0
+                       || strcmp(key, "admin.password") == 0
+                       || strcmp(key, "admin.passwd") == 0);
       char* dst = is_admin ? _prefs.passwd_admin : _prefs.passwd_guest;
       size_t dst_sz = is_admin ? sizeof(_prefs.passwd_admin)
                                 : sizeof(_prefs.passwd_guest);
@@ -19414,10 +19459,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned)_prefs.flood_max_unscoped_companions);
     }
     else if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) snprintf(r, sizeof(r), "owner_info = %s", _prefs.owner_info[0] ? _prefs.owner_info : "(leer)");
-    else if (strcmp(key, "passwd_admin") == 0 || strcmp(key, "passwd.admin") == 0)
+    else if (strcmp(key, "passwd_admin") == 0
+             || strcmp(key, "passwd.admin") == 0
+             || strcmp(key, "password") == 0
+             || strcmp(key, "admin.password") == 0)
       snprintf(r, sizeof(r), "passwd_admin = %s",
                _prefs.passwd_admin[0] ? "(gesetzt)" : "(leer)");
-    else if (strcmp(key, "passwd_guest") == 0 || strcmp(key, "passwd.guest") == 0)
+    else if (strcmp(key, "passwd_guest") == 0
+             || strcmp(key, "passwd.guest") == 0
+             || strcmp(key, "guest.password") == 0)
       snprintf(r, sizeof(r), "passwd_guest = %s",
                _prefs.passwd_guest[0] ? "(gesetzt)" : "(leer)");
     else if (strcmp(key, "loop_detect") == 0 || strcmp(key, "loop.detect") == 0) {

@@ -70,6 +70,7 @@ public:
   virtual bool stopOTAUpdate(char reply[]) { strcpy(reply, "Error"); return false; }
   virtual void tickOTA() { /* no op */ }
   virtual bool isOTAActive() { return false; }
+  virtual void setOTAAuth(const char* user, const char* pass) { (void)user; (void)pass; }
 
   // Power management interface (boards with power management override these)
   virtual bool isExternalPowered() { return false; }
