@@ -9300,7 +9300,9 @@ void MyMesh::backupRestoreLoop() {
             memcpy(&_br_prefs_snapshot, &_prefs, sizeof(_prefs));
             _br_prefs_snapshot_taken = true;
             Serial.print("\r\n# DL9SAU PREFS block: reading JSON...\r\n");
-            Serial.flush();
+            // KEIN flush() -- blockt synchron auf TX-leer; bei kleinem
+            // HWCDC-TX-FIFO + setTxTimeoutMs stallt das den RX-Drain
+            // gerade waehrend der Paste-Burst weiter eintrifft.
           } else if (strncmp(type_str, "NODE MAIN BEGIN ---", 19) == 0) {
             _br_block_type = 2;
             _br_state = BR_READING_JSON;
@@ -9312,7 +9314,7 @@ void MyMesh::backupRestoreLoop() {
             memcpy(&_br_prefs_snapshot, &_prefs, sizeof(_prefs));
             _br_prefs_snapshot_taken = true;
             Serial.print("\r\n# NODE MAIN block: reading JSON...\r\n");
-            Serial.flush();
+            // KEIN flush (siehe DL9SAU PREFS-Zweig).
           } else if (strncmp(type_str, "HASHTAG CHANNELS BEGIN ---", 26) == 0) {
             _br_block_type = 3;
             _br_state = BR_READING_JSON;
@@ -9356,7 +9358,7 @@ void MyMesh::backupRestoreLoop() {
                      "\r\n# HASHTAG CHANNELS block: pre-clear (%d slots in RAM), reading JSON...\r\n",
                      br_cleared);
             Serial.print(dbg);
-            Serial.flush();
+            // KEIN flush (siehe DL9SAU PREFS-Zweig).
           }
           // User-Hinweis 2026-06-16: END-Marker ist der einzige
           // Commit-Trigger. brace_depth=0 ist nur Parse-Ende, persistiert
@@ -9438,7 +9440,11 @@ void MyMesh::backupRestoreLoop() {
                      (unsigned)(_br_applied - before_applied),
                      (unsigned)(_br_errors - before_errors));
             Serial.print(dbg);
-            Serial.flush();
+            // KEIN flush() -- entscheidender Fall: hier am brace=0
+            // beginnt direkt der Marker-Erwartungs-Burst und der
+            // User pastet ohne Pause weiter; ein synchron blockendes
+            // flush stallt den RX-Drain und liefert HASHTAG END im
+            // 8KB-FIFO eventuell zu spaet.
             // Zurueck in Marker-Such-Modus fuer END-Marker oder
             // naechsten Block
             _br_state = BR_WAIT_MARKER;

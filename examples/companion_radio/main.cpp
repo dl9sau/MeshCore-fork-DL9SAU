@@ -311,6 +311,15 @@ void halt() {
 #endif
 
 void setup() {
+  // DL9SAU 2026-06-16: USB-CDC RX-Buffer hochsetzen BEVOR Serial.begin().
+  // Auf ESP32-S3 HWCDC ist setRxBufferSize NACH begin() vielfach
+  // unwirksam -- ein nachtraegliches Set-im-backup-restore-Start
+  // bringt nichts wenn die Default-Allokation (~256 byte) schon
+  // steht. 8 KB sind komfortabel fuer 'backup restore' Pastes mit
+  // Multi-Block-Buffer + Parse-Stall (~50 ms) bei USB-Full-Speed.
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  Serial.setRxBufferSize(8192);
+#endif
   Serial.begin(115200);
   // DL9SAU 2026-06-01 v2: USB-CDC TX-Timeout sehr klein halten. Verhindert
   // loop()-Stalls wenn das Geraet ohne USB-Host laeuft (z.B. Powerbank) und

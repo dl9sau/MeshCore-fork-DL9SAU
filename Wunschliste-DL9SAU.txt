@@ -5761,3 +5761,62 @@ Aenderung 2: 'count' -> 'entries' bei Filter-Listen
 
 Quelle: User-Wunsch 2026-06-16. Beide Aenderungen brauchen kein
   Rueckwaerts-Kompat -- Reset des Backup-Format zu sauberer Form.
+
+
+--------------------------------------------------------------------------------
+71. BUG: backup restore Multi-Block-Paste droppt HASHTAG-Block (Input-Overflow)
+--------------------------------------------------------------------------------
+
+Status: OFFEN -- nicht reproduzierbar gefixt 2026-06-16 nach mehreren
+        Versuchen. Atomic-Refactor (Wunschliste 69, BEGIN=snapshot,
+        END=commit, kein-END=revert) FAENGT den Schaden ab -- HASHTAG-
+        Channels gehen NICHT verloren (loadChannels aus /channels2),
+        aber Restore ist NICHT komplett.
+
+Symptom: '--- BACKUP DL9SAU PREFS / NODE MAIN / HASHTAG CHANNELS' in
+  einem zusammenhaengenden Paste:
+   - DL9SAU PREFS: applied+24 ok
+   - NODE MAIN:    applied+83 ok
+   - HASHTAG CHANNELS BEGIN sauber empfangen
+   - pre-clear lief (19 slots in RAM)
+   - DANACH: kein '{' Anfang vom JSON empfangen -- HASHTAG-JSON
+     wird gar nicht 'gesehen', kein 'block parsed' fuer ch0..ch18,
+     kein HASHTAG-END-marker
+   - User druckt Ctrl-D -> loadChannels aus disk = revert (gut!)
+
+Vermutete Ursachen (alle zumindest teilweise mitigated, reicht
+nicht):
+  - USB-CDC RX-FIFO-Overflow zwischen NODE MAIN END marker und
+    HASHTAG CHANNELS BEGIN marker.
+  - synchronous backupRestoreParseBlock() fuer NODE MAINs 83 fields
+    blockiert ~50-100 ms; in dieser Zeit pastet das Terminal nahtlos
+    weiter und der HASHTAG-Anfang verschwindet im FIFO-Overflow.
+
+Bereits unternommene Gegenmassnahmen (alle drin, reichen nicht):
+  - JSON-state echo OFF (Commit 81b3dff9)
+  - Serial.flush() im 4 hot-paths entfernt (Commit dieser)
+  - setRxBufferSize(8192) VOR Serial.begin() (Commit dieser)
+
+Workarounds fuer User bis Fix:
+  - Bloecke EINZELN pasten, je einmal 'backup restore' starten.
+  - DL9SAU PREFS isoliert, NODE MAIN isoliert, HASHTAG CHANNELS
+    isoliert -- jeder einzelne Block geht zuverlaessig.
+
+Verbleibende Loesungs-Ideen:
+  A. Inkrementelles Apply -- key:value pro ',' parsen, kein
+     monolithischer parseBlock() am '}'. Eliminiert den Parse-Stall.
+     Aufwand: nontrivial.
+  B. XON/XOFF Flow-Control simulieren: bei naehernderm FIFO-Voll
+     ein '\x13' (XOFF) senden, nach Drain '\x11' (XON). Erfordert
+     terminal-Cooperation, viele Terminals respektieren das.
+  C. backupRestoreParseBlock zerlegen in mehrere FreeRTOS-Yields,
+     waehrend wir kontinuierlich RX drain'en (rx-Bytes in Backup-
+     Buffer schieben statt verarbeiten -- separate Worker-State).
+  D. Robustere Marker-Erkennung mit 'gucken auf BACKUP HASHTAG'
+     auch wenn die Zeile durch FIFO-Loss weniger Bytes hatte;
+     Auto-Resync via Such-fenster im Stream.
+
+Empfehlung: zuerst A (sauber + kein Stall mehr), B als Fallback.
+
+Test-Case (Heltec Wireless Tracker, USB-Full-Speed):
+  paste alle 3 Bloecke nahtlos. HASHTAG kommt nicht durch.
