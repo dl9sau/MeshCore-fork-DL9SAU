@@ -12580,6 +12580,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(r, sizeof(r), "gps_lat=%.6f", sensors.node_lat);
       else if (strcmp(key, "gps_lon") == 0 || strcmp(key, "lon") == 0)
         snprintf(r, sizeof(r), "gps_lon=%.6f", sensors.node_lon);
+      // DL9SAU 2026-06-17: 'sensor get gps' als Alias fuer beide Werte
+      // (User-Hinweis: GPS wird in upstream-Doku als SensorManager-Quelle
+      // referenziert, also 'gps' allein sollte was zurueckgeben).
+      else if (strcmp(key, "gps") == 0)
+        snprintf(r, sizeof(r), "gps_lat=%.6f\ngps_lon=%.6f",
+                 sensors.node_lat, sensors.node_lon);
       else snprintf(r, sizeof(r), "sensor: unknown key '%s'. try 'sensor list'", key);
       pushCompanionMessage(r);
       return;
