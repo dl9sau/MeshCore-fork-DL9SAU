@@ -4853,6 +4853,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _gps_woke_at_millis = 0;
   _gps_off_at_millis = 0;
   _gps_fix_seen_this_wake = false;
+  _gps_last_fix_at_millis = 0;
   _gps_user_override_until_advert = false;
   _tx_advert_count = 0;
   _tx_digi_count = 0;
@@ -8259,6 +8260,11 @@ void MyMesh::updateMotionTracking() {
   // Mark this wake cycle as having seen a real position fix — manageGpsPower()
   // uses this to decide if it's safe to power the module down again.
   _gps_fix_seen_this_wake = true;
+  // DL9SAU 2026-06-17: Timestamp fuer 'age of last fix' Diagnose.
+  {
+    unsigned long now = millis();
+    _gps_last_fix_at_millis = (now == 0) ? 1 : now;
+  }
 
   if (!_gps_had_fix_ever) {
     _gps_had_fix_ever = true;
@@ -12522,8 +12528,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Photocell-Helligkeit (0-100%). Anwendung: schnelle Hardware-
   // Diagnose ohne App, paralleler Wert-Check zur Telemetrie.
   if (starts_with_word(cmd, "sensors") || starts_with_word(cmd, "sens")) {
-    char r[240];
+    char r[300];
     uint16_t bmv = (uint16_t)board.getBattMilliVolts();
+    // GPS-Source-Discriminator: sensors.node_lat/lon ist EINE Variable,
+    // die entweder den prefs-Wert (set lat/lon) oder den Live-GPS-Fix
+    // haelt. _gps_fix_seen_this_wake markiert aktuell-frisch (Power-
+    // Cycle hat Fix gesehen), _gps_had_fix_ever fuer Session-Historie.
+    const char* gps_src;
+    if (!_prefs.gps_enabled)        gps_src = "PREFS (gps off)";
+    else if (_gps_fix_seen_this_wake) gps_src = "LIVE";
+    else if (_gps_had_fix_ever)     gps_src = "LAST-FIX";
+    else                            gps_src = "PREFS (no fix yet)";
+    // Age des letzten Live-Fixes ('-' wenn nie).
+    char age_buf[24];
+    if (_gps_last_fix_at_millis == 0) {
+      snprintf(age_buf, sizeof(age_buf), "-");
+    } else {
+      unsigned long age_s = (millis() - _gps_last_fix_at_millis) / 1000UL;
+      if (age_s >= 86400) snprintf(age_buf, sizeof(age_buf), "%lud%luh ago",
+                                   age_s / 86400, (age_s % 86400) / 3600);
+      else if (age_s >= 3600) snprintf(age_buf, sizeof(age_buf), "%luh%lum ago",
+                                       age_s / 3600, (age_s % 3600) / 60);
+      else if (age_s >= 60) snprintf(age_buf, sizeof(age_buf), "%lum%lus ago",
+                                     age_s / 60, age_s % 60);
+      else snprintf(age_buf, sizeof(age_buf), "%lus ago", age_s);
+    }
 #ifdef T1000_E
     extern uint32_t t1000e_get_light();
     extern float    t1000e_get_temperature();
@@ -12534,17 +12563,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              "  battery = %u mV\n"
              "  temp    = %.1f C (NTC heater-sensor)\n"
              "  light   = %lu (Photocell 0-100, app zeigt als lux)\n"
-             "  gps     = %.6f, %.6f",
+             "  gps     = %.6f, %.6f\n"
+             "    src=%s  last_fix=%s",
              (unsigned)bmv, (double)tmp,
              (unsigned long)lux,
-             sensors.node_lat, sensors.node_lon);
+             sensors.node_lat, sensors.node_lon, gps_src, age_buf);
 #else
     snprintf(r, sizeof(r),
              "sensors:\n"
              "  battery = %u mV\n"
-             "  gps     = %.6f, %.6f",
+             "  gps     = %.6f, %.6f\n"
+             "    src=%s  last_fix=%s",
              (unsigned)bmv,
-             sensors.node_lat, sensors.node_lon);
+             sensors.node_lat, sensors.node_lon, gps_src, age_buf);
 #endif
     pushCompanionMessage(r);
     return;
@@ -12860,11 +12891,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                state, (int)_gps_had_fix_ever, loc_valid, time_valid,
                (int)_is_moving, pmode, (unsigned)lead, interval_str);
       pushCompanionMessage(block1);
-      char block2[120];
+      // DL9SAU 2026-06-17: Source-Hinweis ob pos LIVE / LAST-FIX /
+      // PREFS ist (User-Frage aus sensors-Refactor).
+      const char* pos_src;
+      if (!_prefs.gps_enabled)        pos_src = "PREFS-set";
+      else if (loc_valid)             pos_src = "LIVE";
+      else if (_gps_had_fix_ever)     pos_src = "LAST-FIX";
+      else                            pos_src = "PREFS (no fix yet)";
+      char age_buf[24];
+      if (_gps_last_fix_at_millis == 0) {
+        snprintf(age_buf, sizeof(age_buf), "-");
+      } else {
+        unsigned long age_s = (millis() - _gps_last_fix_at_millis) / 1000UL;
+        if (age_s >= 86400) snprintf(age_buf, sizeof(age_buf), "%lud%luh",
+                                     age_s / 86400, (age_s % 86400) / 3600);
+        else if (age_s >= 3600) snprintf(age_buf, sizeof(age_buf), "%luh%lum",
+                                         age_s / 3600, (age_s % 3600) / 60);
+        else if (age_s >= 60) snprintf(age_buf, sizeof(age_buf), "%lum%lus",
+                                       age_s / 60, age_s % 60);
+        else snprintf(age_buf, sizeof(age_buf), "%lus", age_s);
+      }
+      char block2[200];
       snprintf(block2, sizeof(block2),
-               "pos=%s  alt=%.1fm\n"
+               "pos=%s  alt=%.1fm  src=%s\n"
+               "last_fix_age=%s\n"
                "time=%s",
-               ll, sensors.node_altitude, rtc_str);
+               ll, sensors.node_altitude, pos_src, age_buf, rtc_str);
       pushCompanionMessage(block2);
       return;
     }

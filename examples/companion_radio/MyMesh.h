@@ -1187,6 +1187,10 @@ private:
   unsigned long _gps_woke_at_millis;         // when we last (re-)enabled GPS; 0 = currently off (or never managed)
   unsigned long _gps_off_at_millis;          // when we last switched GPS off; 0 = currently on (or never managed)
   bool          _gps_fix_seen_this_wake;     // a position fix arrived since last wakeup — OK to sleep again
+  // DL9SAU 2026-06-17: Zeitstempel des letzten Live-GPS-Fix.
+  //  0 = noch nie gesehen. millis()-basiert -> bei 49-Tage-Wrap
+  //  ggf. Sentinel oder uint64 noetig, fuer Diagnose reicht aber 32-bit.
+  unsigned long _gps_last_fix_at_millis;
   bool          _gps_user_override_until_advert;  // user toggled GPS on via app — keep on until next advert
   uint32_t      _last_millis_seen;           // for wrap detection of millis()
   uint32_t      _millis_wraps;               // how many times millis() has wrapped since boot
