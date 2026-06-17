@@ -5027,6 +5027,14 @@ void MyMesh::begin(bool has_display) {
   Serial.println("\r\n# [T1000-E diag] M10b post BaseChatMesh::begin"); Serial.flush();
 #endif
 
+  // DL9SAU 2026-06-17 (Wunschliste 74): Identity-Sanity-Guard.
+  //  identity_status: 0=loaded, 1=loaded-but-broken-regenerated, 2=NEW.
+  // Symptom-Vorbeugung: nach Meshtastic-Versuch + flash-erase koennte
+  // /main_identity halb-leer / 0x00 / 0xFF gelesen werden. Ohne Check
+  // wuerde der prv_key auf reserved-Wert zeigen (Identity-Diebstahl-
+  // Risiko bzw. ungueltiges KeyPair). Wir pruefen sum() der prv_key,
+  // 0 oder 32*0xFF -> Indikator fuer korrupten/leeren Load.
+  uint8_t identity_status = 0;
   if (!_store->loadMainIdentity(self_id)) {
     self_id = radio_new_identity(); // create new random identity
     int count = 0;
@@ -5035,6 +5043,39 @@ void MyMesh::begin(bool has_display) {
       count++;
     }
     _store->saveMainIdentity(self_id);
+    identity_status = 2;  // brand-new (file fehlte oder load failed)
+  } else {
+    // Loaded OK -- pub_key Sanity-Check. prv_key bleibt opaque (Adafruit-
+    // mesh::LocalIdentity hat keinen direkten Getter), pub_key reicht
+    // als Indikator weil er aus prv_key abgeleitet wird.
+    uint32_t pk_sum = 0, pk_xor = 0;
+    for (int i = 0; i < PUB_KEY_SIZE; i++) {
+      pk_sum += self_id.pub_key[i];
+      pk_xor ^= self_id.pub_key[i];
+    }
+    bool corrupt = (pk_sum == 0)                       // alle 0x00
+                || (pk_sum == 32 * 0xFF && pk_xor == 0); // alle 0xFF
+    if (corrupt) {
+      // Neu wuerfeln, persistieren, identity_status auf 1
+      self_id = radio_new_identity();
+      int count = 0;
+      while (count < 10 && (self_id.pub_key[0] == 0x00 || self_id.pub_key[0] == 0xFF)) {
+        self_id = radio_new_identity();
+        count++;
+      }
+      _store->saveMainIdentity(self_id);
+      identity_status = 1;
+    }
+  }
+  // Identity-Status-Warnung: bei NEW oder REGEN auf USB-Serial + in
+  // den persistenten Debug-Log. So sieht der User bei einem Boot
+  // nach Meshtastic-Versuch / flash-erase sofort dass eine NEUE
+  // Identity erzeugt wurde -- bevor er erst beim 'get pub.key' mit
+  // Backup-pubkey vergleicht und sich wundert.
+  if (identity_status == 1) {
+    pushDebugLog("[id] WARNING: stored pub_key was all-0x00/0xFF, regenerated.\n");
+  } else if (identity_status == 2) {
+    pushDebugLog("[id] Note: no stored identity, generated NEW random one.\n");
   }
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10c post loadMainIdentity"); Serial.flush();
@@ -12203,7 +12244,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Prefix, effektiv ~145 Bytes). Output wurde bei 'time' abgeschnitten.
     // -> in 3 BLE-Messages gesplittet (mit stats-Varianten Sichtbarkeit).
     pushCompanionMessage(
-      "Befehle: help [topic], status, uptime, neighbors,\n"
+      "Befehle: help [topic], status, uptime, sensors, neighbors,\n"
       "  advert, autoadv, repeater, duty, scope, gps,"
     );
     pushCompanionMessage(
@@ -12472,6 +12513,40 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       (unsigned)ESP.getMinFreeHeap());
     pushCompanionMessage(line);
 #endif
+    return;
+  }
+
+  // ---------- sensors ---------------------------------------------------
+  // DL9SAU 2026-06-17 (Wunschliste 79): aktuelle Sensor-Werte ausgeben.
+  // Battery (mV), GPS (lat/lon), plus T1000-E NTC-Temperatur und
+  // Photocell-Helligkeit (0-100%). Anwendung: schnelle Hardware-
+  // Diagnose ohne App, paralleler Wert-Check zur Telemetrie.
+  if (starts_with_word(cmd, "sensors") || starts_with_word(cmd, "sens")) {
+    char r[240];
+    uint16_t bmv = (uint16_t)board.getBattMilliVolts();
+#ifdef T1000_E
+    extern uint32_t t1000e_get_light();
+    extern float    t1000e_get_temperature();
+    uint32_t lux = t1000e_get_light();
+    float    tmp = t1000e_get_temperature();
+    snprintf(r, sizeof(r),
+             "sensors:\n"
+             "  battery = %u mV\n"
+             "  temp    = %.1f C (NTC heater-sensor)\n"
+             "  light   = %lu (Photocell 0-100, app zeigt als lux)\n"
+             "  gps     = %.6f, %.6f",
+             (unsigned)bmv, (double)tmp,
+             (unsigned long)lux,
+             sensors.node_lat, sensors.node_lon);
+#else
+    snprintf(r, sizeof(r),
+             "sensors:\n"
+             "  battery = %u mV\n"
+             "  gps     = %.6f, %.6f",
+             (unsigned)bmv,
+             sensors.node_lat, sensors.node_lon);
+#endif
+    pushCompanionMessage(r);
     return;
   }
 
