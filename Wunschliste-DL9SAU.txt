@@ -6152,3 +6152,71 @@ sensors_loop() liest schon -- nur Display-Pfad fuer CLI fehlt.
 on/off macht User-Aussage nach kaum Sinn (Sensoren laufen passiv).
 
 Aufwand: ~30 Zeilen.
+
+
+--------------------------------------------------------------------------------
+80. GPS-Advert-Policy 3-state: none|share|prefs (Upstream-Doku-Alignment)
+--------------------------------------------------------------------------------
+
+Status: TODO. Upstream-Dokumentation 2026-06-17:
+  https://docs.meshcore.io/cli_commands/
+  'gps advert <none|share|prefs>' wobei default = prefs.
+
+Aktueller Stand:
+  ADVERT_LOC_NONE  = 0 (kein loc im advert)
+  ADVERT_LOC_SHARE = 1 (live-GPS-Position oder prefs als fallback,
+                        de facto 'auto')
+  -> wir haben kein 'pure prefs'-Modus. SHARE ist quasi-auto.
+
+User-Wunsch (DL9SAU 2026-06-17): trennen, damit Repeater GPS nur fuer
+Zeit-Sync nutzen kann ohne live-Position im Advert preiszugeben.
+
+Vorschlag:
+  ADVERT_LOC_NONE  = 0  -- keine Position
+  ADVERT_LOC_SHARE = 1  -- live-GPS-Position falls vorhanden, sonst
+                          prefs (= aktueller SHARE-Modus, default)
+  ADVERT_LOC_PREFS = 2  -- IMMER nur prefs.lat/lon, live-GPS ignoriert
+                          fuer Advert (Live-GPS bleibt fuer Zeit-Sync ok)
+
+CLI:
+  gps advert            -> aktueller Wert
+  gps advert none|share|prefs
+
+Pref-Migration: 0/1 bleiben, 2 ist neuer Wert. Backup-Restore-Range
+0..2.
+
+Aufwand: ~50 Zeilen.
+
+
+--------------------------------------------------------------------------------
+81. GPS-Profile: time-only | position-only | full (User-Idee 2026-06-17)
+--------------------------------------------------------------------------------
+
+Status: TODO. User-Idee von DL9SAU 2026-06-17.
+
+Hintergrund: Repeater an festem Standort braucht meist KEINE
+Live-Position (lat/lon fest konfiguriert), aber sehr wohl die GPS-
+Zeit (Mesh-Time-Sync-Quelle). Aktuell: GPS-Modul laeuft im
+'cycle' Power-Mode (15 min wake, etc.) und liefert lat/lon UND time.
+
+Vorschlag: 'gps profile <full|position-only|time-only>'
+  full           Default. Aktuelles Verhalten -- Power-Cycle, lat/lon
+                 + time + Advert je nach advert_loc_policy.
+  position-only  GPS liefert lat/lon, KEIN time-sync. Sinnvoll wenn
+                 RTC anderweitig gesynct wird (App, NTP via WiFi).
+  time-only      GPS nur einmal pro <interval> aufwecken bis Zeit
+                 valid ist, dann bis zum naechsten Tick wieder schlafen.
+                 lat/lon werden NICHT gespeichert/verwendet. Repeater-
+                 Default candidate.
+
+Plus: 'gps power lead <N>[m|h|d]' Unit-Erweiterung (aktuell nur min).
+  gps power lead 24h
+  gps power lead 7d (1x pro Woche aufwecken)
+  Sentinel max 60d (= 2 Monate, mehr braucht keiner).
+
+Aufwand: ~120 Zeilen (Profile-Bitmask + Lead-Unit-Parser +
+manageGpsPower Logik-Anpassung + Migration). Test-intensiv weil das
+in den Power-State-Maschinen sitzt.
+
+Quelle: User-Idee 2026-06-17. Default-Wert ist 'full' (Backward-
+Compat).

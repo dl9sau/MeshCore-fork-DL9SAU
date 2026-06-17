@@ -12527,6 +12527,74 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // Battery (mV), GPS (lat/lon), plus T1000-E NTC-Temperatur und
   // Photocell-Helligkeit (0-100%). Anwendung: schnelle Hardware-
   // Diagnose ohne App, paralleler Wert-Check zur Telemetrie.
+  // 'sensor list/get/set' Doku-Aligned-Aliase (docs.meshcore.io/cli_commands).
+  //   sensor list      -> alle Werte als 'var=value' pro Zeile (Doku-Format)
+  //   sensor get <key> -> ein Wert (var=value)
+  //   sensor set       -> derzeit read-only fuer alle Sensoren (Note)
+  //   sensors / sens   -> Companion-Sicht-Dump (alle Werte, mehrzeilig)
+  if (starts_with_word(cmd, "sensor") && !starts_with_word(cmd, "sensors")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    if (!arg || *arg == 0) {
+      pushCompanionMessage(
+        "sensor list\nsensor get <key>\nsensor set <key> <value> (read-only)");
+      return;
+    }
+    // Daten-Snapshot
+    uint16_t bmv = (uint16_t)board.getBattMilliVolts();
+#ifdef T1000_E
+    extern uint32_t t1000e_get_light();
+    extern float    t1000e_get_temperature();
+    uint32_t lux = t1000e_get_light();
+    float    tmp = t1000e_get_temperature();
+#endif
+    char r[260];
+    if (starts_with_word(arg, "list")) {
+      // Doku-Format: var=value pro Zeile.
+#ifdef T1000_E
+      snprintf(r, sizeof(r),
+               "battery_mv=%u\ntemp_c=%.1f\nlight=%lu\ngps_lat=%.6f\ngps_lon=%.6f",
+               (unsigned)bmv, (double)tmp, (unsigned long)lux,
+               sensors.node_lat, sensors.node_lon);
+#else
+      snprintf(r, sizeof(r),
+               "battery_mv=%u\ngps_lat=%.6f\ngps_lon=%.6f",
+               (unsigned)bmv, sensors.node_lat, sensors.node_lon);
+#endif
+      pushCompanionMessage(r);
+      return;
+    }
+    if (starts_with_word(arg, "get")) {
+      const char* key = strchr(arg, ' ');
+      if (key) { while (*key == ' ') key++; }
+      if (!key || !*key) { pushCompanionMessage("sensor get <key>"); return; }
+      if (strcmp(key, "battery_mv") == 0 || strcmp(key, "battery") == 0)
+        snprintf(r, sizeof(r), "battery_mv=%u", (unsigned)bmv);
+#ifdef T1000_E
+      else if (strcmp(key, "temp_c") == 0 || strcmp(key, "temp") == 0)
+        snprintf(r, sizeof(r), "temp_c=%.1f", (double)tmp);
+      else if (strcmp(key, "light") == 0)
+        snprintf(r, sizeof(r), "light=%lu", (unsigned long)lux);
+#endif
+      else if (strcmp(key, "gps_lat") == 0 || strcmp(key, "lat") == 0)
+        snprintf(r, sizeof(r), "gps_lat=%.6f", sensors.node_lat);
+      else if (strcmp(key, "gps_lon") == 0 || strcmp(key, "lon") == 0)
+        snprintf(r, sizeof(r), "gps_lon=%.6f", sensors.node_lon);
+      else snprintf(r, sizeof(r), "sensor: unknown key '%s'. try 'sensor list'", key);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (starts_with_word(arg, "set")) {
+      pushCompanionMessage(
+        "sensor set: read-only.\n"
+        "  GPS-Position: 'set lat <v>' / 'set lon <v>' (prefs-Modus).\n"
+        "  Battery/Temp/Light: nur lesbar.");
+      return;
+    }
+    pushCompanionMessage("sensor: list | get <key> | set <key> <value>");
+    return;
+  }
+
   if (starts_with_word(cmd, "sensors") || starts_with_word(cmd, "sens")) {
     char r[300];
     uint16_t bmv = (uint16_t)board.getBattMilliVolts();
