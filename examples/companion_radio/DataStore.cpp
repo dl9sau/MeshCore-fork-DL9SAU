@@ -455,6 +455,11 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.buzzer_profile));
     if (_prefs.buzzer_profile == 0xFF) _prefs.buzzer_profile = 0x0F;
 
+    // DL9SAU 2026-06-17 (Wunschliste 81): GPS-Profile.
+    file.read((uint8_t *)&_prefs.gps_profile,
+              sizeof(_prefs.gps_profile));
+    if (_prefs.gps_profile == 0xFF) _prefs.gps_profile = 0;  // full
+
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
     // NRF52 nutzt DFU-Pfad statt WiFi-OTA).
@@ -667,6 +672,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // DL9SAU 2026-06-17 (Wunschliste 75): Buzzer-Profile.
     file.write((uint8_t *)&_prefs.buzzer_profile,
                sizeof(_prefs.buzzer_profile));
+
+    // DL9SAU 2026-06-17 (Wunschliste 81): GPS-Profile.
+    file.write((uint8_t *)&_prefs.gps_profile,
+               sizeof(_prefs.gps_profile));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).

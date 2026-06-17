@@ -5154,6 +5154,7 @@ void MyMesh::begin(bool has_display) {
   // Legacy-File ohne dieses Byte: file.read 0 Bytes -> bleibt 0xFF ->
   // DataStore loadPrefs mapped 0xFF -> 0x0F (= alles an, default).
   _prefs.buzzer_profile = 0xFF;
+  _prefs.gps_profile    = 0xFF;  // -> Migration zu 0 (full) wenn Legacy-File
 #ifdef ESP_PLATFORM
   _prefs.ota_pending = 0;
 #endif
@@ -8907,6 +8908,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("trace_flags_persistent",_prefs.trace_flags_persistent);
   kv_uint("gps_power_mode",        _prefs.gps_power_mode);
   kv_uint("gps_lead_min",          _prefs.gps_lead_min);
+  kv_uint("gps_profile",           _prefs.gps_profile);
   kv_uint("repeat_scope_mode",     _prefs.repeat_scope_mode);
   kv_uint("msg_store_flash",       _prefs.msg_store_flash);
   kv_arr_uint8("msg_store_limit",  _prefs.msg_store_limit, 5);
@@ -9836,6 +9838,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "trace_flags_persistent") == 0){ _prefs.trace_flags_persistent= (uint16_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_power_mode") == 0)        { _prefs.gps_power_mode        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_lead_min") == 0)          { _prefs.gps_lead_min          = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "gps_profile") == 0)           { _prefs.gps_profile           = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "repeat_scope_mode") == 0)     { _prefs.repeat_scope_mode     = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "msg_store_flash") == 0)       { _prefs.msg_store_flash       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "log_flags") == 0)             { _prefs.log_flags             = (uint8_t)as_uint(); _br_applied++; return; }
@@ -11436,6 +11439,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "  gps power reset\n"
           "    Power-Mode auf Default zurueck (cycle, lead=5).");
+        pushCompanionMessage(
+          "gps profile <full|position-only|time-only>\n"
+          "  full: lat/lon+time. position-only: nur lat/lon.\n"
+          "  time-only: nur time-sync, lat/lon ignoriert.");
         return;
       }
       if (topic_prefix_match(topic, "advert")) {
@@ -12992,6 +12999,44 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                "time=%s",
                ll, sensors.node_altitude, pos_src, age_buf, rtc_str);
       pushCompanionMessage(block2);
+      return;
+    }
+    // ---- gps profile [full|position-only|time-only] -- Wunschliste 81 ----
+    if (starts_with_word(arg, "profile") || starts_with_word(arg, "prof")) {
+      const char* val = strchr(arg, ' ');
+      if (val) { while (*val == ' ') val++; }
+      if (!val || *val == 0) {
+        const char* nm = (_prefs.gps_profile == 1) ? "position-only"
+                       : (_prefs.gps_profile == 2) ? "time-only"
+                       : "full";
+        char r[120];
+        snprintf(r, sizeof(r),
+                 "gps profile = %s\n"
+                 "  full          (Default, lat/lon + time)\n"
+                 "  position-only (lat/lon, kein time-sync)\n"
+                 "  time-only     (nur time-sync, lat/lon ignoriert)",
+                 nm);
+        pushCompanionMessage(r);
+        return;
+      }
+      uint8_t newp;
+      if (strcasecmp(val, "full") == 0)                newp = 0;
+      else if (strcasecmp(val, "position-only") == 0
+            || strcasecmp(val, "pos") == 0
+            || strcasecmp(val, "position") == 0)       newp = 1;
+      else if (strcasecmp(val, "time-only") == 0
+            || strcasecmp(val, "time") == 0)           newp = 2;
+      else {
+        pushCompanionMessage("gps profile: full | position-only | time-only");
+        return;
+      }
+      _prefs.gps_profile = newp;
+      savePrefs();
+      const char* nm = (newp == 1) ? "position-only"
+                     : (newp == 2) ? "time-only"
+                     : "full";
+      char r[80]; snprintf(r, sizeof(r), "OK - gps profile = %s", nm);
+      pushCompanionMessage(r);
       return;
     }
     // ---- gps power [...] - Power-Management-Konfig ----

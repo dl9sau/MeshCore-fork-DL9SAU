@@ -659,6 +659,13 @@ struct NodePrefs {  // persisted to file
   // buzzer_quiet bleibt als Master-Mute -- wenn quiet=1 ist alles aus
   // ausser boot/shutdown.
   uint8_t        buzzer_profile;
+  // DL9SAU 2026-06-17 (Wunschliste 81): GPS-Profile.
+  //   0 = full          Default. Lat/lon UND time von Live-GPS.
+  //   1 = position-only Live-GPS-Position, kein time-sync (RTC anders).
+  //   2 = time-only     GPS nur fuer Zeit-Sync, lat/lon-Updates ignoriert
+  //                     (Position aus _prefs.lat/lon, statischer Repeater).
+  // 0xFF im File = EOF-Sentinel -> Migration zu 0 (full).
+  uint8_t        gps_profile;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim

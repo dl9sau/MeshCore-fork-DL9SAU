@@ -6192,7 +6192,23 @@ Aufwand: ~50 Zeilen.
 81. GPS-Profile: time-only | position-only | full (User-Idee 2026-06-17)
 --------------------------------------------------------------------------------
 
-Status: TODO. User-Idee von DL9SAU 2026-06-17.
+Status: Phase 1 DONE 2026-06-17 -- Pref + CLI + Backup-Migration.
+        Phase 2+3 TODO -- Logik-Anpassung + Lead-Unit-Erweiterung.
+
+Phase 1 (DONE):
+  - NodePrefs.gps_profile + Sentinel-Migration
+  - CLI 'gps profile <full|position-only|time-only>' get/set
+  - Backup save/restore
+  - Default 0 = full (backward compat)
+
+Phase 2+3 (TODO):
+  - profile=time-only: sensors.node_lat/lon-Update unterdruecken
+    (Upstream-Code in EnvironmentSensorManager.cpp Z 901-910 macht den
+    Live-Update -- Anpassung in MyMesh::applyGpsPrefs / manageGpsPower).
+  - profile=position-only: time-sync skippen.
+  - 'gps power lead <N>[m|h|d]' Unit-Erweiterung (Typ-Hochstufung noetig).
+
+------------ original Diskussion 2026-06-17 ------------
 
 Hintergrund: Repeater an festem Standort braucht meist KEINE
 Live-Position (lat/lon fest konfiguriert), aber sehr wohl die GPS-
