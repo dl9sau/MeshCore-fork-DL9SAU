@@ -10951,10 +10951,14 @@ void MyMesh::manageBlePower() {
         setBleEnabled(false);
         pushDebugLog("[ble] BOOT grace expired (profile=normal) -> TMP_OFF (perm)\n");
       } else {
+        // 2026-06-18 Bug-Fix (User-Befund): 180s war asymmetrische
+        // historische Konstante -- der restliche Cycle ist 20/40s.
+        // Nach BOOT-Grace gibt's keinen Recency-Bonus (nie connected
+        // gewesen), deshalb der Default 40s wie HOT_START-expired.
         bleSetState(BLE_PWR_SLEEP, "boot-exp");
-        _ble_pwr_state_until = now + 180UL * 1000;
+        _ble_pwr_state_until = now + 40UL * 1000;
         setBleEnabled(false);
-        pushDebugLog("[ble] BOOT grace expired -> SLEEP\n");
+        pushDebugLog("[ble] BOOT grace expired -> SLEEP 40s\n");
       }
     }
     return;
