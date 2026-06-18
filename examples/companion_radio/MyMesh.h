@@ -345,6 +345,13 @@ protected:
   void sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis=0) override;
   void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 
+  // DL9SAU Wunschliste 82: zentraler TX-Choke-Point. Wenn _tx_blocked
+  // gesetzt ist, wird das Paket sofort an den Pool zurueckgegeben statt
+  // queueOutbound zu rufen. Alle send-Pfade (sendFlood/Direct/ZeroHop/
+  // ACK + Repeat in Mesh.cpp) muenden hier ein -- Dispatcher::sendPacket
+  // ist seit 2026-06-18 dafuer virtual.
+  void sendPacket(mesh::Packet* packet, uint8_t priority, uint32_t delay_millis=0) override;
+
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
   bool isAutoAddEnabled() const override;
   bool shouldAutoAddContactType(uint8_t type) const override;
@@ -1038,6 +1045,10 @@ private:
   void updateMotionTracking();
   unsigned long computeNextAdvertIntervalMs() const;
   void manageGpsPower();
+  // DL9SAU Wunschliste 83: RX-Sleep-Manager. Loop-tick. Bestimmt aus
+  // Pref + Repeater-Modus + Boot/Wake-Windows ob RX an oder im Sleep
+  // sein soll, und ruft entsprechend radio_driver.setRxSuspended().
+  void manageRxPower();
 
   // Dispatcher hooks: per-packet TX-param override (CR5 / reduced power) used
   // for repeated packets and our automatic adverts. Eigene Direct-Messages
@@ -1183,6 +1194,13 @@ private:
   double        _boot_lat;                   // persisted position at boot, before GPS overwrites it
   double        _boot_lon;
   bool          _boot_pos_known;             // true if loadPrefs gave us a non-zero position
+  // DL9SAU 2026-06-17 (Wunschliste 80): "Heimat"-Position fuer ADVERT_LOC_PREFS.
+  // Initialisiert in begin() aus sensors.node_lat/lon (= geladener Pref-Wert);
+  // bei 'set lat/lon' und CMD_SET_RADIO_PARAMS aktualisiert. Live-GPS-Fix
+  // ueberschreibt _adv_prefs_* nicht -- so kann GPS fuer Zeit-Sync laufen,
+  // waehrend der Advert eine stabile fixe Position traegt.
+  double        _adv_prefs_lat;
+  double        _adv_prefs_lon;
   bool          _gps_had_fix_ever;           // true once GPS reported a valid fix this session
   unsigned long _gps_woke_at_millis;         // when we last (re-)enabled GPS; 0 = currently off (or never managed)
   unsigned long _gps_off_at_millis;          // when we last switched GPS off; 0 = currently on (or never managed)
@@ -1194,6 +1212,26 @@ private:
   bool          _gps_user_override_until_advert;  // user toggled GPS on via app — keep on until next advert
   uint32_t      _last_millis_seen;           // for wrap detection of millis()
   uint32_t      _millis_wraps;               // how many times millis() has wrapped since boot
+
+  // DL9SAU 2026-06-18 (Wunschliste 82): TX-Block fuer Wartung.
+  // _tx_blocked     -- harter Schalter; alle sendPacket-Aufrufe werden
+  //                    direkt verworfen (Packet freigegeben statt queued).
+  //                    NICHT persistent -- nach Reboot wieder enabled,
+  //                    sonst koennte der User sich aussperren.
+  // _tx_blocked_until_millis -- 0 = kein Timer (hartes disable); sonst
+  //                    Auto-Reenable wenn millis() den Wert erreicht.
+  //                    'tx suspend <N>' setzt Timer; 'tx disable' = 0.
+  bool          _tx_blocked;
+  unsigned long _tx_blocked_until_millis;
+
+  // DL9SAU 2026-06-18 (Wunschliste 83): RX-Sleep-State (RAM, abgeleitet
+  // aus _prefs.rx_disabled + Repeater-Modus + Boot-Window + Wake-Window).
+  // _rx_wake_until_millis  -- 0 = kein post-TX Window aktiv; sonst Millis
+  //                          bis zu denen RX nach TX wach bleibt (5min).
+  // _rx_currently_suspended -- aktueller Hardware-Status, damit
+  //                          manageRxPower() keine Redundant-Calls macht.
+  unsigned long _rx_wake_until_millis;
+  bool          _rx_currently_suspended;
 
   // Pre-computed TransportKeys for every region in dl9sau_regions[]. Built
   // once in begin() via SHA-256 over "#name". Lookup at packet receive time

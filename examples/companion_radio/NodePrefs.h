@@ -20,6 +20,10 @@
 
 #define ADVERT_LOC_NONE       0
 #define ADVERT_LOC_SHARE      1
+// DL9SAU 2026-06-17 (Wunschliste 80): PREFS-Mode -- Advert traegt eine
+// stabile "Heimat"-Position (Snapshot beim Boot bzw. set lat/lon), Live-GPS
+// kann parallel fuer Zeit-Sync laufen ohne den Advert-Standort zu veraendern.
+#define ADVERT_LOC_PREFS      2
 
 // Scope-Registry: Liste A — bekannte Scopes (Region-Name + 16-Byte
 // TransportKey = SHA-256("#name") + optionale Geo-Bbox). Pre-populated
@@ -666,6 +670,32 @@ struct NodePrefs {  // persisted to file
   //                     (Position aus _prefs.lat/lon, statischer Repeater).
   // 0xFF im File = EOF-Sentinel -> Migration zu 0 (full).
   uint8_t        gps_profile;
+  // DL9SAU 2026-06-18 (Wunschliste 83): RX permanent ausschalten zum
+  // Stromsparen. 0 = RX an (Default, Companion empfaengt normal).
+  // 1 = RX im Sleep-Mode, nur kurzes Wake fuer Send + 5min RX-Window
+  // danach (User-Communication-Fenster). EFFEKTIV nur bei
+  // !client_repeat -- ein Repeater muss zwingend RX halten. Bei
+  // 'repeater on' wird RX automatisch wieder aktiv ohne diesen
+  // Pref-Wert zu aendern; bei 'repeater off' greift er wieder.
+  // Boot-Window (bis zum ersten geplanten Advert -- 5 oder 10min)
+  // bleibt RX an damit RTC-Sync via signierter Adverts moeglich ist.
+  // 0xFF im File = EOF-Sentinel -> Migration zu 0 (RX an).
+  uint8_t        rx_disabled;
+  // DL9SAU 2026-06-18 (Wunschliste 81 Phase 3): GPS-Lead in Sekunden.
+  // Erweitert gps_lead_min (uint8_t, 1..14 min) auf bis zu 90 Tage,
+  // sodass time-only-Repeater mit langem Cycle moeglich sind
+  // ('gps power lead 1d', '7d', ...).
+  // Semantik je nach Wert:
+  //   1..900s    (== 1..15min): pre-advert wake-lead, alter Cycle-Mode
+  //                              (15-min-Cycle, advert-Lead). gps_lead_min
+  //                              bleibt fuer Backward-Compat aktiv.
+  //   > 900s:    Long-Cycle-Mode -- gps_lead_secs ist die volle Cycle-
+  //              Laenge zwischen GPS-Wakes. wake-Dauer = bis time-sync
+  //              done (oder Position-Fix bei full/position-only).
+  // 0 = Sentinel "noch nicht gesetzt" -> migrate from gps_lead_min in
+  //     begin() (gps_lead_min * 60). 0xFFFFFFFF im File = EOF/Legacy.
+  // CLI 'gps power lead <N>[s|m|h|d]' -- Default-Suffix m.
+  uint32_t       gps_lead_secs;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim

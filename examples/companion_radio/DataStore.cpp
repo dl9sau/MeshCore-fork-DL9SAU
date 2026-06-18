@@ -460,6 +460,21 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.gps_profile));
     if (_prefs.gps_profile == 0xFF) _prefs.gps_profile = 0;  // full
 
+    // DL9SAU 2026-06-18 (Wunschliste 83): RX-Disabled (Companion-Stromsparen).
+    file.read((uint8_t *)&_prefs.rx_disabled,
+              sizeof(_prefs.rx_disabled));
+    if (_prefs.rx_disabled == 0xFF) _prefs.rx_disabled = 0;  // rx an
+
+    // DL9SAU 2026-06-18 (Wunschliste 81 Phase 3): gps_lead_secs.
+    file.read((uint8_t *)&_prefs.gps_lead_secs,
+              sizeof(_prefs.gps_lead_secs));
+    // 0xFFFFFFFF = EOF/Legacy -> Migration aus gps_lead_min (oder 0 falls
+    // auch dort nichts gesetzt). 0 selbst ist gueltiger "noch-nicht-CLI-
+    // gesetzt"-Sentinel, fuer den begin() den Default 5 min wieder herstellt.
+    if (_prefs.gps_lead_secs == 0xFFFFFFFFUL) {
+      _prefs.gps_lead_secs = 0;  // -> begin() migriert aus gps_lead_min
+    }
+
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
     // NRF52 nutzt DFU-Pfad statt WiFi-OTA).
@@ -676,6 +691,14 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // DL9SAU 2026-06-17 (Wunschliste 81): GPS-Profile.
     file.write((uint8_t *)&_prefs.gps_profile,
                sizeof(_prefs.gps_profile));
+
+    // DL9SAU 2026-06-18 (Wunschliste 83): RX-Disabled.
+    file.write((uint8_t *)&_prefs.rx_disabled,
+               sizeof(_prefs.rx_disabled));
+
+    // DL9SAU 2026-06-18 (Wunschliste 81 Phase 3): gps_lead_secs.
+    file.write((uint8_t *)&_prefs.gps_lead_secs,
+               sizeof(_prefs.gps_lead_secs));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).

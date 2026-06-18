@@ -2644,6 +2644,12 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     }
   }
 
+  // Wunschliste 82: bei tx_blocked Forward-Versuch unterdruecken, sonst
+  // wuerden _tx_digi_count und _repeat_by_ptype zaehlen obwohl der
+  // sendPacket-Override das Paket gleich freigibt. RX-Stats oben sind
+  // bereits erfasst, hier nur die TX-Seite.
+  if (decision && _tx_blocked) decision = false;
+
   if (decision) {
     _tx_digi_count++;
     if (ptype < 16 && _repeat_by_ptype[ptype] < 0xFFFF) {
@@ -2751,6 +2757,32 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
     return;
   }
   sendFloodScoped(eff_scope, pkt, delay_millis);
+}
+
+// DL9SAU Wunschliste 82: zentraler TX-Choke-Point. Alle Send-Pfade
+// (sendFlood/Direct/ZeroHop + ACK in BaseChatMesh + Repeat in Mesh.cpp)
+// muenden hier ein. Wenn _tx_blocked gesetzt ist, geben wir das Paket
+// sofort zurueck statt es zu queuen -- der TX-Pfad ist damit hart aus.
+// Wichtig: Aufrufer holen sich Packets via obtainNewPacket(); wir
+// muessen sie explizit ueber _mgr->free() zurueckgeben, sonst leakt
+// der Pool nach wenigen Calls.
+void MyMesh::sendPacket(mesh::Packet* packet, uint8_t priority, uint32_t delay_millis) {
+  if (_tx_blocked) {
+    pushDebugLog("[tx-blocked] dropped pkt type=%d prio=%u\n",
+                 (int)packet->getPayloadType(), (unsigned)priority);
+    _mgr->free(packet);
+    return;
+  }
+  // Wunschliste 83: nach jedem TX 5min RX-Wake-Window setzen (User-
+  // Kommunikations-Fenster -- ACK, Antworten). Greift nur wenn RX
+  // sonst schlafen wuerde; sonst kosten die paar millis() nichts.
+  // Wake-Up macht manageRxPower() im naechsten Loop-Tick. Auch fuer
+  // delayed sends (delay_millis) -- der Empfang davor/danach soll
+  // klappen.
+  unsigned long wake = millis() + (5UL * 60UL * 1000UL);
+  if (wake == 0) wake = 1;  // 0 ist Sentinel "kein Window"
+  _rx_wake_until_millis = wake;
+  Dispatcher::sendPacket(packet, priority, delay_millis);
 }
 
 void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
@@ -4855,6 +4887,15 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _gps_fix_seen_this_wake = false;
   _gps_last_fix_at_millis = 0;
   _gps_user_override_until_advert = false;
+  // Wunschliste 82: TX-Block ist RAM-only; nach Reboot wieder enabled.
+  _tx_blocked = false;
+  _tx_blocked_until_millis = 0;
+  // Wunschliste 83: RX-Sleep State -- Pref ist persistent, Wake-Timer
+  // RAM-only. manageRxPower() im naechsten Loop-Tick triggert den
+  // tatsaechlichen Hardware-Mode-Wechsel (kein Direct-Aufruf hier, da
+  // radio_driver erst beim ersten Loop sauber initialisiert ist).
+  _rx_wake_until_millis = 0;
+  _rx_currently_suspended = false;
   _tx_advert_count = 0;
   _tx_digi_count = 0;
   _bt_connect_count = 0;
@@ -4970,6 +5011,10 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.duty_hard_pct = 100;  // alle TX droppen bei 360s (= 10% TX/h)
   _prefs.gps_power_mode = 0;   // 0=cycle (Default), 1=always-on
   _prefs.gps_lead_min   = 5;   // 5 min Wake vor Advert (Sleep = 10 min im 15-min-Cycle)
+  // Wunschliste 81 Phase 3: 0xFFFFFFFF sentinel -> loadPrefs liest aus File,
+  // bei EOF/Legacy bleibt der Wert sentinel; nach loadPrefs migrieren wir
+  // 0 -> gps_lead_min * 60 (Default 300s = 5min).
+  _prefs.gps_lead_secs  = 0xFFFFFFFFUL;
   _prefs.airtime_factor = 1.0;
   strcpy(_prefs.node_name, "NONAME");
   _prefs.freq = LORA_FREQ;
@@ -5238,6 +5283,17 @@ void MyMesh::begin(bool has_display) {
     _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
   }
 
+  // Wunschliste 81 Phase 3: gps_lead_secs Migration. Sentinel 0xFFFFFFFF
+  // (= Pre-Init oder File-EOF/Legacy ohne dieses Feld) -> migriere aus
+  // gps_lead_min. 0 (= File hatte den Sentinel und DataStore-load setzte
+  // ihn auf 0) gilt als "noch nicht per CLI gesetzt" und nutzt ebenfalls
+  // den gps_lead_min-Wert als Quelle. Beim ersten User-Set via CLI wird
+  // ein konkreter Wert reingeschrieben.
+  if (_prefs.gps_lead_secs == 0xFFFFFFFFUL || _prefs.gps_lead_secs == 0) {
+    uint8_t lm = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
+    _prefs.gps_lead_secs = (uint32_t)lm * 60UL;
+  }
+
   // Wunschliste 43 Migration (2026-06-11, FIX 2026-06-11):
   // altes bluetooth_power_mode-Byte war 1-Wert-Enum (0=off, 1=always-on,
   // 2=cycle). Neu sind zwei Bytes: profile (Bit-Mask 0x01/0x20) + active.
@@ -5321,6 +5377,12 @@ void MyMesh::begin(bool has_display) {
   _boot_lat = sensors.node_lat;
   _boot_lon = sensors.node_lon;
   _boot_pos_known = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
+  // Wunschliste 80: "Heimat"-Position fuer ADVERT_LOC_PREFS. Initial =
+  // geladener Pref-Wert; bleibt von Live-GPS unangetastet (anders als
+  // sensors.node_lat/lon). User-Updates via 'set lat/lon' und CMD_SET_-
+  // RADIO_PARAMS fliessen unten in den Snapshot.
+  _adv_prefs_lat = sensors.node_lat;
+  _adv_prefs_lon = sensors.node_lon;
   // (Geo-Reco-Push folgt weiter unten nach setupCompanionChannel().)
 
   // One-time migration: any persisted 869.000 stands for the real EU narrow
@@ -6179,6 +6241,9 @@ void MyMesh::handleCmdFrame(size_t len) {
     if (lat <= 90 * 1E6 && lat >= -90 * 1E6 && lon <= 180 * 1E6 && lon >= -180 * 1E6) {
       sensors.node_lat = ((double)lat) / 1000000.0;
       sensors.node_lon = ((double)lon) / 1000000.0;
+      // Wunschliste 80: App-Pfad updated PREFS-Snapshot mit
+      _adv_prefs_lat = sensors.node_lat;
+      _adv_prefs_lon = sensors.node_lon;
       savePrefs();
       // User just programmed a fixed location — re-evaluate scope-recommendation
       // so the app sees the matching #region list right away.
@@ -6256,9 +6321,15 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_NOT_FOUND);
       return;
     }
+    if (_tx_blocked) {
+      writeErrFrame(ERR_CODE_NOT_FOUND);
+      return;
+    }
     mesh::Packet* pkt;
     if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
       pkt = createSelfAdvert(_prefs.node_name);
+    } else if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
+      pkt = createSelfAdvert(_prefs.node_name, _adv_prefs_lat, _adv_prefs_lon);
     } else {
       pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
     }
@@ -6350,6 +6421,8 @@ void MyMesh::handleCmdFrame(size_t len) {
       mesh::Packet* pkt;
       if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
         pkt = createSelfAdvert(_prefs.node_name);
+      } else if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
+        pkt = createSelfAdvert(_prefs.node_name, _adv_prefs_lat, _adv_prefs_lon);
       } else {
         pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
       }
@@ -6499,7 +6572,10 @@ void MyMesh::handleCmdFrame(size_t len) {
       _prefs.telemetry_mode_env = (cmd_frame[2] >> 4) & 0x03;
 
       if (len >= 4) {
-        _prefs.advert_loc_policy = cmd_frame[3];
+        // Wunschliste 80: Range 0..2 clampen (NONE/SHARE/PREFS).
+        uint8_t v = cmd_frame[3];
+        if (v > ADVERT_LOC_PREFS) v = ADVERT_LOC_SHARE;
+        _prefs.advert_loc_policy = v;
         if (len >= 5) {
           _prefs.multi_acks = cmd_frame[4];
         }
@@ -7412,9 +7488,20 @@ void MyMesh::loop() {
     _last_serial_connected = is_connected;
   }
 
+  // Wunschliste 82: TX-Suspend Timer-Check. Wenn die Suspend-Periode
+  // abgelaufen ist, automatisch wieder enable. 'tx disable' setzt
+  // until=0 -> Sentinel "kein Timer", greift hier NICHT.
+  if (_tx_blocked && _tx_blocked_until_millis != 0
+      && (long)(millis() - _tx_blocked_until_millis) >= 0) {
+    _tx_blocked = false;
+    _tx_blocked_until_millis = 0;
+    pushDebugLog("[tx] auto-enable nach suspend-timeout\n");
+  }
+
   // Adaptive zero-hop unscoped advert (3h / 1h / 15min depending on motion)
   updateMotionTracking();
   manageGpsPower();
+  manageRxPower();  // Wunschliste 83
 
   // RTC-Persistierung Periodic-Check (Bug-Fix 2026-06-14): GPS-Sync
   // setzt RTC direkt ueber _clock->setCurrentTime (in MicroNMEALocation-
@@ -8397,9 +8484,12 @@ void MyMesh::doPeriodicZeroHopAdvert() {
                    getTxAirLastHour()/1000, getDutyHardLimitMs()/1000);
     return;
   }
+  if (_tx_blocked) return;  // Wunschliste 82: stille Skip im Cron-Pfad
   mesh::Packet* pkt;
   if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
     pkt = createSelfAdvert(_prefs.node_name);
+  } else if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
+    pkt = createSelfAdvert(_prefs.node_name, _adv_prefs_lat, _adv_prefs_lon);
   } else {
     pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
   }
@@ -8429,6 +8519,7 @@ void MyMesh::doNightFloodAdvert() {
                    getTxAirLastHour()/1000, getDutyHardLimitMs()/1000);
     return;
   }
+  if (_tx_blocked) return;  // Wunschliste 82: stille Skip im Cron-Pfad
   TransportKey scope;
   if (!chooseNightFloodScope(scope)) {
     MESH_DEBUG_PRINTLN("night-flood: no scope available, skipping");
@@ -8437,6 +8528,8 @@ void MyMesh::doNightFloodAdvert() {
   mesh::Packet* pkt;
   if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
     pkt = createSelfAdvert(_prefs.node_name);
+  } else if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
+    pkt = createSelfAdvert(_prefs.node_name, _adv_prefs_lat, _adv_prefs_lon);
   } else {
     pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
   }
@@ -8491,6 +8584,39 @@ void MyMesh::doNightFloodAdvert() {
 //
 // User-controlled GPS state (CMD_SET_CUSTOM_VAR "gps") is respected:
 // when _prefs.gps_enabled is 0, we don't touch anything.
+// DL9SAU Wunschliste 83. Decides every loop tick whether the LoRa
+// chip should be in standby ("RX off") or actively receiving.
+// Wanted state = ON whenever ONE of the conditions holds:
+//   - client_repeat aktiv: ein Repeater MUSS hoeren.
+//   - !rx_disabled: User hat Sleep-Mode nicht angefordert.
+//   - millis() < next_periodic_advert_at: Boot-Window bis erster
+//     planmaessiger Advert. Faengt RTC-Lernen via signierter
+//     fremder Adverts ab.
+//   - millis() < _rx_wake_until_millis: Post-TX-Kommunikations-
+//     Window (5 Min nach jedem Send). Jeder weitere TX innerhalb
+//     verlaengert das Fenster.
+// Sonst: RX im Standby. radio_driver.setRxSuspended() macht den
+// eigentlichen Hardware-Wechsel + State-Bookkeeping im Wrapper.
+void MyMesh::manageRxPower() {
+  bool want_on = true;
+  if (!_prefs.client_repeat && _prefs.rx_disabled) {
+    unsigned long now = millis();
+    bool boot_window = (long)(now - next_periodic_advert_at) < 0;
+    bool wake_window = (_rx_wake_until_millis != 0)
+                       && ((long)(now - _rx_wake_until_millis) < 0);
+    want_on = boot_window || wake_window;
+    // Wake-Window abgelaufen? Sentinel zuruecksetzen.
+    if (_rx_wake_until_millis != 0 && !wake_window) {
+      _rx_wake_until_millis = 0;
+    }
+  }
+  bool want_suspended = !want_on;
+  if (want_suspended == _rx_currently_suspended) return;  // nix zu tun
+  radio_driver.setRxSuspended(want_suspended);
+  _rx_currently_suspended = want_suspended;
+  pushDebugLog("[rx] %s\n", want_suspended ? "sleep" : "wake");
+}
+
 void MyMesh::manageGpsPower() {
 #if ENV_INCLUDE_GPS == 1
   if (!_prefs.gps_enabled) return;   // user disabled GPS entirely
@@ -8514,6 +8640,58 @@ void MyMesh::manageGpsPower() {
       _gps_fix_seen_this_wake = false;
       pushDebugLog("[GPS-DBG] wake (always-on mode) at millis=%lu\n", now);
       traceCompanion(TRACE_GPS, "[gps] wake (always-on)");
+    }
+    return;
+  }
+
+  // DL9SAU 2026-06-18 (Wunschliste 81 Phase 2 + User-Wunsch):
+  // time-only-Profile -- live lat/lon werden ignoriert. Wir
+  // ueberschreiben sensors.node_lat/lon JEDEN Tick mit dem PREFS-
+  // Snapshot, sodass eventuelle Updates aus dem Upstream-Sensor-Loop
+  // (EnvironmentSensorManager.cpp ~Z 901-910) keinen Effekt haben.
+  // Snapshot wird in begin() initialisiert und bei 'set lat/lon' /
+  // 'gps setloc' / CMD_SET_ADVERT_LATLON aktualisiert.
+  if (_prefs.gps_profile == 2) {
+    sensors.node_lat = _adv_prefs_lat;
+    sensors.node_lon = _adv_prefs_lon;
+  }
+
+  // Wunschliste 81 Phase 2: position-only -- LocationProvider weiss
+  // ob er den setCurrentTime-Aufruf skippen soll. Setzen wir per
+  // Tick (idempotent, kein Schaden bei gleichem Wert).
+  {
+    LocationProvider* lp_cfg = sensors.getLocationProvider();
+    if (lp_cfg) lp_cfg->setSkipTimeSync(_prefs.gps_profile == 1);
+  }
+
+  // DL9SAU 2026-06-18 (Wunschliste 81 Phase 2, User-Klarstellung 2026-06-18 II):
+  // GPS-Skip-Gate. Nur AKTIV wenn die Konfig GPS effektiv fuer NICHTS
+  // braucht. Beispiele wann NICHT skippen:
+  //   - Companion-Mode (client_repeat=0): App will eigene Position anzeigen.
+  //   - Repeater-defensive (profile=0): User-Use-Case, ggf. App connected.
+  //   - Repeater-normal + advert=SHARE: Adverts brauchen Live-Position.
+  //   - Repeater-normal + profile=full/time-only: Zeit interessiert.
+  // Skip-Konjunktion:
+  //   client_repeat=1 (Repeater) UND repeater_profile=1 (normal) UND
+  //   advert_loc_policy != SHARE (= NONE oder PREFS, Position fix oder weg)
+  //   UND gps_profile=position-only (= Zeit ignorieren).
+  // In dieser Spezifik-Kombi ist GPS reine Stromverbrennung.
+  bool profile_time_only = (_prefs.gps_profile == 2);
+  bool gps_no_use = (_prefs.client_repeat == 1)
+                 && (_prefs.repeater_profile == 1)
+                 && (_prefs.advert_loc_policy != ADVERT_LOC_SHARE)
+                 && (_prefs.gps_profile == 1);
+  if (gps_no_use) {
+    if (gps_is_on) {
+      sensors.setSettingValue("gps", "0");
+#if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
+      Serial1.end();
+#endif
+      _gps_woke_at_millis = 0;
+      _gps_off_at_millis = (now == 0 ? 1 : now);
+      _gps_fix_seen_this_wake = false;
+      pushDebugLog("[GPS-DBG] sleep (repeater-normal+advert-fix+position-only)\n");
+      traceCompanion(TRACE_GPS, "[gps] sleep (no-use config)");
     }
     return;
   }
@@ -8560,10 +8738,13 @@ void MyMesh::manageGpsPower() {
     return;
   }
 
-  // Lead-Zeit aus _prefs.gps_lead_min (Minuten). Backward-compat: wenn der
-  // gespeicherte Wert 0 ist (z.B. alte Datei ohne Feld), nutze Default 5.
-  uint8_t lead_min = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
-  unsigned long lead_ms = (unsigned long)lead_min * 60UL * 1000UL;
+  // Lead-Zeit. Wunschliste 81 Phase 3: gps_lead_secs (uint32, Sekunden)
+  // ersetzt gps_lead_min (uint8). Wenn 0: Default 300s (5 min).
+  // > 840s (= 14 min) bedeutet "Long-Cycle" -- lead ist dann auch die
+  // Cycle-Laenge (sleep <- lead, statt 15-min-Cycle).
+  uint32_t lead_s = (_prefs.gps_lead_secs == 0) ? 300UL : _prefs.gps_lead_secs;
+  unsigned long lead_ms = (unsigned long)lead_s * 1000UL;
+  bool long_cycle = (lead_s > 14UL * 60UL);
 
   // distance to next advert (signed; can be negative if we're past schedule)
   long until_advert = (long)(next_periodic_advert_at - now);
@@ -8578,12 +8759,23 @@ void MyMesh::manageGpsPower() {
   // just a long-interval wake to keep RTC and last-known-position warm.
   if (_gps_off_at_millis != 0) {
     unsigned long off_for = now - _gps_off_at_millis;
-    unsigned long check_interval = (_prefs.advert_loc_policy == ADVERT_LOC_NONE)
-                                     ? CR_GPS_TIME_SYNC_INTERVAL_MS
-                                     : CR_GPS_MOTION_CHECK_INTERVAL_MS;
-    // wake lead_ms earlier so a fix has time to lock
-    if (off_for + lead_ms >= check_interval) {
-      want_gps_on = true;
+    // Wunschliste 81 Phase 3: Long-Cycle -- check_interval = lead_ms.
+    // Wake passiert genau alle lead_ms; wake-Dauer regelt sich ueber
+    // time-only-Path (sleep nach time-sync) bzw. fix-Path.
+    unsigned long check_interval;
+    if (long_cycle) {
+      check_interval = lead_ms;
+    } else if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
+      check_interval = CR_GPS_TIME_SYNC_INTERVAL_MS;
+    } else {
+      check_interval = CR_GPS_MOTION_CHECK_INTERVAL_MS;
+    }
+    // Im Long-Cycle ist lead_ms == check_interval, wake-pre-lead == 0;
+    // im Short-Cycle wake lead_ms vor naechstem check.
+    if (long_cycle) {
+      if (off_for >= check_interval) want_gps_on = true;
+    } else {
+      if (off_for + lead_ms >= check_interval) want_gps_on = true;
     }
   }
 
@@ -8598,6 +8790,19 @@ void MyMesh::manageGpsPower() {
     if (awake_for < CR_GPS_MIN_AWAKE_MS) {
       // hysteresis: don't thrash the GPS_EN pin
       want_gps_on = true;
+    } else if (profile_time_only) {
+      // Wunschliste 81 Phase 2: time-only -- wir warten NICHT auf
+      // Position-Fix; sobald time-sync nicht mehr noetig ist, sleep.
+      // waitingTimeSync()==false heisst: RTC ist gerade frisch
+      // gesynct (oder noch nie). Letzteres hat _time_sync_needed=true
+      // bei Boot, also wartet hier sicher auf den ersten Sync. Wenn
+      // gesynct: einschlafen sparen statt auf Position warten.
+      LocationProvider* lp = sensors.getLocationProvider();
+      bool time_done = (lp != NULL) && !lp->waitingTimeSync();
+      if (!time_done) {
+        want_gps_on = true;
+      }
+      // sonst: want_gps_on bleibt false (Sleep-Pfad unten greift).
     } else if (!_gps_fix_seen_this_wake) {
       // We woke GPS up but haven't seen a real position fix this cycle yet
       // (NMEA time-sync alone is not enough). Keep trying so the next advert
@@ -8607,6 +8812,18 @@ void MyMesh::manageGpsPower() {
   }
 
   if (want_gps_on && !gps_is_on) {
+    // Wunschliste 84 Hebel B (Peripherie-Re-Init): Serial1 wurde beim
+    // letzten Sleep-Uebergang via Serial1.end() abgeschaltet (Strom
+    // sparen waehrend GPS-off-Phase). Vor setSettingValue("gps","1")
+    // wieder hochfahren, sonst kommen keine NMEA-Frames durch.
+    // Gilt fuer Boards mit GPS am Serial1 (PIN_GPS_RX gesetzt).
+#if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
+#ifdef GPS_BAUD_RATE
+    Serial1.begin(GPS_BAUD_RATE);
+#else
+    Serial1.begin(9600);
+#endif
+#endif
     sensors.setSettingValue("gps", "1");
     _gps_woke_at_millis = (now == 0 ? 1 : now);   // 0 means "never managed"
     _gps_off_at_millis = 0;
@@ -8635,6 +8852,14 @@ void MyMesh::manageGpsPower() {
     LocationProvider* loc = sensors.getLocationProvider();
     if (loc) loc->syncTime();
     sensors.setSettingValue("gps", "0");
+    // Wunschliste 84 Hebel B (Peripherie-Deinit): GPS-Modul ist jetzt
+    // physisch aus (PIN_GPS_EN low oder setSettingValue-Pfad). Serial1
+    // wuerde im Hintergrund weiterlaufen und ein paar mA fuer die UART-
+    // Hardware verbrennen. Im Sleep-Zyklus (10/15min off) ist das
+    // sichtbar -- end() hier, begin() beim naechsten wake.
+#if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
+    Serial1.end();
+#endif
     _gps_woke_at_millis = 0;
     _gps_off_at_millis = (now == 0 ? 1 : now);
     _gps_fix_seen_this_wake = false;
@@ -8690,7 +8915,11 @@ void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
   // gegated -- bei 'logging channel off' wird die Info-Push unterdrueckt
   // (vorher kam sie auch bei trace-off + logging-usb-off durch).
   if (!(_prefs.log_flags & 0x02)) {
-    char chat[256];
+    // Wunschliste 78 Buffer-Audit: "GEO-SCOPE @ %s: %s" mit ll (~24B
+    // formatLatLonDM) + buf (Scope-Name max ~30B) + Praefix ~14B = max
+    // ~70B. pushCompanionMessage cappt eh bei 145; 160 reicht mit
+    // Sicherheit. Vorher 256 -- 96 Byte Stack-Gewinn.
+    char chat[160];
     snprintf(chat, sizeof(chat), "GEO-SCOPE @ %s: %s", ll, buf);
     pushCompanionMessage(chat);
   }
@@ -8908,7 +9137,9 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("trace_flags_persistent",_prefs.trace_flags_persistent);
   kv_uint("gps_power_mode",        _prefs.gps_power_mode);
   kv_uint("gps_lead_min",          _prefs.gps_lead_min);
+  kv_uint("gps_lead_secs",         _prefs.gps_lead_secs);   // Wunschliste 81 Phase 3
   kv_uint("gps_profile",           _prefs.gps_profile);
+  kv_uint("rx_disabled",           _prefs.rx_disabled);   // Wunschliste 83
   kv_uint("repeat_scope_mode",     _prefs.repeat_scope_mode);
   kv_uint("msg_store_flash",       _prefs.msg_store_flash);
   kv_arr_uint8("msg_store_limit",  _prefs.msg_store_limit, 5);
@@ -9838,7 +10069,9 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "trace_flags_persistent") == 0){ _prefs.trace_flags_persistent= (uint16_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_power_mode") == 0)        { _prefs.gps_power_mode        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_lead_min") == 0)          { _prefs.gps_lead_min          = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "gps_lead_secs") == 0)         { _prefs.gps_lead_secs         = (uint32_t)as_uint(); _br_applied++; return; }  // Wunschliste 81 Phase 3
       if (strcmp(key, "gps_profile") == 0)           { _prefs.gps_profile           = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "rx_disabled") == 0)           { _prefs.rx_disabled           = (uint8_t)as_uint() ? 1 : 0; _br_applied++; return; }   // Wunschliste 83
       if (strcmp(key, "repeat_scope_mode") == 0)     { _prefs.repeat_scope_mode     = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "msg_store_flash") == 0)       { _prefs.msg_store_flash       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "log_flags") == 0)             { _prefs.log_flags             = (uint8_t)as_uint(); _br_applied++; return; }
@@ -10048,7 +10281,11 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "repeat") == 0)                { _prefs.client_repeat         = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps") == 0)                   { _prefs.gps_enabled           = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_interval") == 0)          { _prefs.gps_interval          = as_uint();          _br_applied++; return; }
-      if (strcmp(key, "advert_loc_policy") == 0)     { _prefs.advert_loc_policy     = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "advert_loc_policy") == 0)     {
+        // Wunschliste 80: Range 0..2 clampen, ungueltige Werte -> SHARE (Default).
+        uint8_t v = (uint8_t)as_uint();
+        if (v > ADVERT_LOC_PREFS) v = ADVERT_LOC_SHARE;
+        _prefs.advert_loc_policy     = v; _br_applied++; return; }
       if (strcmp(key, "airtime_factor") == 0)        { _prefs.airtime_factor        = as_float();        _br_applied++; return; }
       if (strcmp(key, "rx_boosted_gain") == 0)       { _prefs.rx_boosted_gain       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "manual_add_contacts") == 0)   { _prefs.manual_add_contacts   = (uint8_t)as_uint(); _br_applied++; return; }
@@ -10080,8 +10317,8 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "flood_max_unscoped_companions") == 0){ _prefs.flood_max_unscoped_companions = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "messages_append_scope_to_name") == 0){ _prefs.messages_append_scope_to_name = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "time_sync_mode") == 0)         { _prefs.time_sync_mode         = (uint8_t)as_uint(); _br_applied++; return; }
-      if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start);   _br_applied++; return; }
-      if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start);   _br_applied++; return; }
+      if (strcmp(key, "lat") == 0)                   { sensors.node_lat            = atof(val_start); _adv_prefs_lat = sensors.node_lat; _br_applied++; return; }
+      if (strcmp(key, "lon") == 0)                   { sensors.node_lon            = atof(val_start); _adv_prefs_lon = sensors.node_lon; _br_applied++; return; }
     }
     if (val_type == 's') {
       // Wunschliste 39: cap-Vars koennen als String ("follow"/"off"/
@@ -10889,7 +11126,11 @@ void MyMesh::pushCompanionMessage(const char* text) {
   bool async_mirror = (_serial_cli_async_expiry_ms != 0
                        && (int32_t)(millis() - _serial_cli_async_expiry_ms) < 0);
   if ((_serial_cli_active || async_mirror) && Serial) {
-    char out[400];
+    // Wunschliste 78: Buffer-Audit. Eingangs-text ist max 145 Byte
+    // (Companion-Msg-Limit). Worst case bei \n -> \r\n Konvertierung
+    // ergibt 145 * 2 = 290 + 4 trailing = 294. 320 mit Sicherheits-
+    // marge. Vorher 400 -- 80 Byte Stack-Gewinn pro Aufruf.
+    char out[320];
     int oi = 0;
     size_t tl = strlen(text);
     for (size_t k = 0; k < tl && oi < (int)sizeof(out) - 2; k++) {
@@ -11134,6 +11375,54 @@ static bool topic_prefix_match(const char* input, const char* keyword) {
   }
   if (tlen == 0) return false;
   return strncmp(input, keyword, tlen) == 0;
+}
+
+// ---------- Time-Wert Parser + Compact-Formatter ----------------------
+// Wunschliste 87 (2026-06-18): Konsolidierung der s/m/h/d-Logik.
+// Benutzt von tx suspend, gps power lead, plus diverse Status-Anzeigen.
+
+// Parser: "5", "5m", "1h", "7d" -> Sekunden.
+//   default_unit: Suffix-Default wenn kein Char angehaengt ist.
+//     's' = Sekunden, 'm' = Minuten, 'h' = Stunden, 'd' = Tage.
+//   accept_d: ob 'd' (Tage) erlaubt ist -- bei kurzen Delays (z.B. tx
+//     suspend Max 24h) wuerde 'd' irrefuehrend sein.
+//   Rueckgabe: Sekunden bei Erfolg, -1 bei Parse-Fehler/Unit-unbekannt.
+static long parseTimeWithUnit(const char* s, char default_unit, bool accept_d) {
+  if (!s || !(s[0] >= '0' && s[0] <= '9')) return -1;
+  unsigned long n = (unsigned long)atoi(s);
+  while (*s >= '0' && *s <= '9') s++;
+  char u = (*s == 0 || *s == ' ' || *s == '\r' || *s == '\n') ? default_unit : *s;
+  unsigned long mult;
+  switch (u) {
+    case 's': case 'S': mult = 1UL; break;
+    case 'm': case 'M': mult = 60UL; break;
+    case 'h': case 'H': mult = 3600UL; break;
+    case 'd': case 'D': if (!accept_d) return -1; mult = 86400UL; break;
+    default: return -1;
+  }
+  return (long)(n * mult);
+}
+
+// Compact-Formatter: 30 -> "30s", 90 -> "1m30s", 3700 -> "1h2m", 90061 -> "1d1h".
+// Buffer-Bedarf: 16 Byte reicht. Greift "die groesste sinnvolle Unit" und
+// haengt ggf. den naechst kleineren Rest dran (nur wenn != 0). Verhindert
+// "0m" / "0h" Rest-Artefakte.
+static void formatDurationCompact(char* out, size_t out_size, unsigned long secs) {
+  if (secs < 60) {
+    snprintf(out, out_size, "%lus", secs);
+  } else if (secs < 3600) {
+    unsigned long m = secs / 60, s = secs % 60;
+    if (s) snprintf(out, out_size, "%lum%lus", m, s);
+    else   snprintf(out, out_size, "%lum", m);
+  } else if (secs < 86400) {
+    unsigned long h = secs / 3600, m = (secs % 3600) / 60;
+    if (m) snprintf(out, out_size, "%luh%lum", h, m);
+    else   snprintf(out, out_size, "%luh", h);
+  } else {
+    unsigned long d = secs / 86400, h = (secs % 86400) / 3600;
+    if (h) snprintf(out, out_size, "%lud%luh", d, h);
+    else   snprintf(out, out_size, "%lud", d);
+  }
 }
 
 // ---------- Duty-Cycle Sliding-Window ---------------------------------
@@ -11418,10 +11707,55 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       while (*topic == ' ') topic++;
     }
     if (topic && *topic) {
+      if (topic_prefix_match(topic, "tx")) {
+        pushCompanionMessage(
+          "tx: Sender-Hartblock (Wartung, Antenne ab).\n"
+          "  ohne Arg: Status\n"
+          "  suspend <N>[s|m|h]: Timer, auto-enable.\n"
+          "    Min 5s, Max 24h, Default-Suffix m.");
+        pushCompanionMessage(
+          "  disable: hart aus, kein Timer\n"
+          "  enable:  Block aufheben\n"
+          "RAM-only -- Reboot setzt auf enabled zurueck.");
+        return;
+      }
+      if (topic_prefix_match(topic, "rx")) {
+        pushCompanionMessage(
+          "rx: LoRa-RX-Sleep, Companion-Stromsparen.\n"
+          "  ohne Arg: Status (Pref + Hardware)\n"
+          "  disable: Sleep aktiv (persistent)\n"
+          "  enable:  RX permanent an");
+        pushCompanionMessage(
+          "Greift nur wenn 'repeater off'. Pref wird dann\n"
+          "uebergangen.");
+        pushCompanionMessage(
+          "Wake-Phasen wenn aktiv:\n"
+          "  - Boot-Window bis erster Advert (5/10 min)\n"
+          "  - 5 min nach jedem TX (User-Kommunikation)");
+        return;
+      }
+      if (topic_prefix_match(topic, "sensors")) {
+        pushCompanionMessage(
+          "sensors / sens: Companion-Sicht-Dump aller Sensorwerte.\n"
+          "sensor list: Doku-Format 'var=value' pro Zeile.");
+        pushCompanionMessage(
+          "sensor get <key>: einzelner Sensorwert.\n"
+          "  keys: battery_mv, temp_c, light, gps_lat,\n"
+          "        gps_lon, gps (= lat+lon zusammen)");
+        pushCompanionMessage(
+          "sensor set: read-only.\n"
+          "  GPS-Position via 'set lat <v>' / 'set lon <v>'.");
+        return;
+      }
       if (topic_prefix_match(topic, "gps")) {
         pushCompanionMessage(
-          "gps on/off: Modul ein/aus. Off behaelt letzte Position im Advert. "
-          "Ohne Arg -> Status. gps sync: einmaliger Wake-Trigger (RTC/Position).");
+          "gps\n"
+          "  ohne Arg: Status\n"
+          "  on/off: Modul ein/aus.\n"
+          "    Off behaelt letzte Position im Advert.");
+        pushCompanionMessage(
+          "  sync: einmaliger Wake-Trigger (RTC/Position).\n"
+          "  setloc: aktuelle Position als persistente Heimat speichern.");
         // D6: Hilfe fuer 'gps power' klarer (User-Feedback: 'lead' ist
         // Teil des cycle-Modus, nicht ein eigener Mode).
         pushCompanionMessage(
@@ -11443,6 +11777,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "gps profile <full|position-only|time-only>\n"
           "  full: lat/lon+time. position-only: nur lat/lon.\n"
           "  time-only: nur time-sync, lat/lon ignoriert.");
+        pushCompanionMessage(
+          "gps advert <none|share|prefs>\n"
+          "  none = kein Standort im Advert.\n"
+          "  share = Live-GPS-Position (Default).\n"
+          "  prefs = gespeicherte Heimat-Position.");
         return;
       }
       if (topic_prefix_match(topic, "advert")) {
@@ -12538,13 +12877,71 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   sensor list      -> alle Werte als 'var=value' pro Zeile (Doku-Format)
   //   sensor get <key> -> ein Wert (var=value)
   //   sensor set       -> derzeit read-only fuer alle Sensoren (Note)
-  //   sensors / sens   -> Companion-Sicht-Dump (alle Werte, mehrzeilig)
-  if (starts_with_word(cmd, "sensor") && !starts_with_word(cmd, "sensors")) {
+  //   sensors / sens   -> ohne arg: Companion-Sicht-Dump (alle Werte,
+  //                       mehrzeilig). MIT arg: identisch zu sensor X
+  //                       -- 'sens g <key>' funktioniert (User-Feedback
+  //                       2026-06-17, Prefix-Match-Konsistenz).
+  if (starts_with_word(cmd, "sensor") || starts_with_word(cmd, "sensors")
+      || starts_with_word(cmd, "sens")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
     if (!arg || *arg == 0) {
-      pushCompanionMessage(
-        "sensor list\nsensor get <key>\nsensor set <key> <value> (read-only)");
+      // Kein Subcommand -> DL9SAU-Companion-Sicht-Dump (mehrzeilig).
+      char rd[300];
+      uint16_t bmv_d = (uint16_t)board.getBattMilliVolts();
+      const char* gps_src;
+      if (!_prefs.gps_enabled)          gps_src = "PREFS (gps off)";
+      else if (_gps_fix_seen_this_wake) gps_src = "LIVE";
+      else if (_gps_had_fix_ever)       gps_src = "LAST-FIX";
+      else                              gps_src = "PREFS (no fix yet)";
+      // Wunschliste 87 Refactor: formatDurationCompact + " ago" Suffix.
+      char age_buf[24];
+      if (_gps_last_fix_at_millis == 0) {
+        snprintf(age_buf, sizeof(age_buf), "-");
+      } else {
+        unsigned long age_s = (millis() - _gps_last_fix_at_millis) / 1000UL;
+        char d[16];
+        formatDurationCompact(d, sizeof(d), age_s);
+        snprintf(age_buf, sizeof(age_buf), "%s ago", d);
+      }
+#ifdef T1000_E
+      extern uint32_t t1000e_get_light();
+      extern float    t1000e_get_temperature();
+      uint32_t lux_d = t1000e_get_light();
+      float    tmp_d = t1000e_get_temperature();
+      snprintf(rd, sizeof(rd),
+               "sensors:\n"
+               "  battery = %u mV\n"
+               "  temp    = %.1f C (NTC heater-sensor)\n"
+               "  light   = %lu (Photocell 0-100, app zeigt als lux)\n"
+               "  gps     = %.6f, %.6f\n"
+               "    src=%s  last_fix=%s",
+               (unsigned)bmv_d, (double)tmp_d, (unsigned long)lux_d,
+               sensors.node_lat, sensors.node_lon, gps_src, age_buf);
+#else
+      snprintf(rd, sizeof(rd),
+               "sensors:\n"
+               "  battery = %u mV\n"
+               "  gps     = %.6f, %.6f\n"
+               "    src=%s  last_fix=%s",
+               (unsigned)bmv_d,
+               sensors.node_lat, sensors.node_lon, gps_src, age_buf);
+#endif
+      pushCompanionMessage(rd);
+      return;
+    }
+    // Subcommand-Dispatch (User-Memory feedback_keyword_prefix_abbreviation):
+    // 'sensor l' / 'sensor g' / 'sensor s' muessen funktionieren.
+    static const CompanionChoice sensor_subs[] = {
+      { "list", false },   // 0
+      { "get",  false },   // 1
+      { "set",  false },   // 2
+    };
+    char sens_ambig[64];
+    int sens_idx = match_choice(arg, sensor_subs, 3, sens_ambig, sizeof(sens_ambig));
+    if (sens_idx == -1) {
+      char r[120]; snprintf(r, sizeof(r), "Mehrdeutig: %s", sens_ambig);
+      pushCompanionMessage(r);
       return;
     }
     // Daten-Snapshot
@@ -12556,7 +12953,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     float    tmp = t1000e_get_temperature();
 #endif
     char r[260];
-    if (starts_with_word(arg, "list")) {
+    if (sens_idx == 0) {
       // Doku-Format: var=value pro Zeile.
 #ifdef T1000_E
       snprintf(r, sizeof(r),
@@ -12571,7 +12968,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    if (starts_with_word(arg, "get")) {
+    if (sens_idx == 1) {
       const char* key = strchr(arg, ' ');
       if (key) { while (*key == ' ') key++; }
       if (!key || !*key) { pushCompanionMessage("sensor get <key>"); return; }
@@ -12597,68 +12994,183 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    if (starts_with_word(arg, "set")) {
+    if (sens_idx == 2) {
       pushCompanionMessage(
         "sensor set: read-only.\n"
         "  GPS-Position: 'set lat <v>' / 'set lon <v>' (prefs-Modus).\n"
         "  Battery/Temp/Light: nur lesbar.");
       return;
     }
+    // sens_idx == -2 / -3: Subcommand unbekannt
     pushCompanionMessage("sensor: list | get <key> | set <key> <value>");
     return;
   }
 
-  if (starts_with_word(cmd, "sensors") || starts_with_word(cmd, "sens")) {
-    char r[300];
-    uint16_t bmv = (uint16_t)board.getBattMilliVolts();
-    // GPS-Source-Discriminator: sensors.node_lat/lon ist EINE Variable,
-    // die entweder den prefs-Wert (set lat/lon) oder den Live-GPS-Fix
-    // haelt. _gps_fix_seen_this_wake markiert aktuell-frisch (Power-
-    // Cycle hat Fix gesehen), _gps_had_fix_ever fuer Session-Historie.
-    const char* gps_src;
-    if (!_prefs.gps_enabled)        gps_src = "PREFS (gps off)";
-    else if (_gps_fix_seen_this_wake) gps_src = "LIVE";
-    else if (_gps_had_fix_ever)     gps_src = "LAST-FIX";
-    else                            gps_src = "PREFS (no fix yet)";
-    // Age des letzten Live-Fixes ('-' wenn nie).
-    char age_buf[24];
-    if (_gps_last_fix_at_millis == 0) {
-      snprintf(age_buf, sizeof(age_buf), "-");
-    } else {
-      unsigned long age_s = (millis() - _gps_last_fix_at_millis) / 1000UL;
-      if (age_s >= 86400) snprintf(age_buf, sizeof(age_buf), "%lud%luh ago",
-                                   age_s / 86400, (age_s % 86400) / 3600);
-      else if (age_s >= 3600) snprintf(age_buf, sizeof(age_buf), "%luh%lum ago",
-                                       age_s / 3600, (age_s % 3600) / 60);
-      else if (age_s >= 60) snprintf(age_buf, sizeof(age_buf), "%lum%lus ago",
-                                     age_s / 60, age_s % 60);
-      else snprintf(age_buf, sizeof(age_buf), "%lus ago", age_s);
+  // ---------- tx (Wunschliste 82) ---------------------------------------
+  // Hart-Block des Sender-Pfads waehrend Wartung (Antenne ab, SWR-Check,
+  // Kabel umstecken). Wirkt zentral ueber MyMesh::sendPacket -- alle
+  // sendFlood/Direct/ZeroHop/ACK landen dort und werden bei _tx_blocked
+  // direkt freigegeben. RAM-only damit ein Reboot den User nicht
+  // aussperrt.
+  //
+  //   tx                        Status
+  //   tx suspend <N>[s|m|h]     Timer (Default Minuten), auto-enable nach Ablauf
+  //   tx disable                hart aus ohne Timer
+  //   tx enable                 aufheben (Flag + Timer clear)
+  if (starts_with_word(cmd, "tx")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    if (!arg || *arg == 0) {
+      // Status. Wunschliste 87 Refactor: formatDurationCompact fuer 'left'.
+      char r[160];
+      if (!_tx_blocked) {
+        snprintf(r, sizeof(r), "tx: enabled");
+      } else if (_tx_blocked_until_millis == 0) {
+        snprintf(r, sizeof(r), "tx: disabled (kein Timer)\n  'tx enable' zum Aufheben.");
+      } else {
+        unsigned long left = (_tx_blocked_until_millis - millis()) / 1000UL;
+        char left_buf[16];
+        formatDurationCompact(left_buf, sizeof(left_buf), left);
+        snprintf(r, sizeof(r), "tx: suspended (%s left)\n  'tx enable' bricht vorzeitig ab.",
+                 left_buf);
+      }
+      pushCompanionMessage(r);
+      return;
     }
-#ifdef T1000_E
-    extern uint32_t t1000e_get_light();
-    extern float    t1000e_get_temperature();
-    uint32_t lux = t1000e_get_light();
-    float    tmp = t1000e_get_temperature();
-    snprintf(r, sizeof(r),
-             "sensors:\n"
-             "  battery = %u mV\n"
-             "  temp    = %.1f C (NTC heater-sensor)\n"
-             "  light   = %lu (Photocell 0-100, app zeigt als lux)\n"
-             "  gps     = %.6f, %.6f\n"
-             "    src=%s  last_fix=%s",
-             (unsigned)bmv, (double)tmp,
-             (unsigned long)lux,
-             sensors.node_lat, sensors.node_lon, gps_src, age_buf);
-#else
-    snprintf(r, sizeof(r),
-             "sensors:\n"
-             "  battery = %u mV\n"
-             "  gps     = %.6f, %.6f\n"
-             "    src=%s  last_fix=%s",
-             (unsigned)bmv,
-             sensors.node_lat, sensors.node_lon, gps_src, age_buf);
-#endif
-    pushCompanionMessage(r);
+    static const CompanionChoice tx_subs[] = {
+      { "suspend", false },   // 0
+      { "disable", false },   // 1
+      { "enable",  false },   // 2
+    };
+    char tx_ambig[64];
+    int tx_idx = match_choice(arg, tx_subs, 3, tx_ambig, sizeof(tx_ambig));
+    if (tx_idx == -1) {
+      char r[120]; snprintf(r, sizeof(r), "Mehrdeutig: %s", tx_ambig);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (tx_idx == 0) {  // suspend
+      const char* nstr = strchr(arg, ' ');
+      if (nstr) { while (*nstr == ' ') nstr++; }
+      if (!nstr || !(nstr[0] >= '0' && nstr[0] <= '9')) {
+        pushCompanionMessage("Usage: tx suspend <N>[s|m|h]\n  Default = Minuten. Beispiele: 30s, 5m, 1h.");
+        return;
+      }
+      // Wunschliste 87 Refactor: parseTimeWithUnit (kein 'd' bei tx --
+      // 24h Max waere mit '1d' irrefuehrend).
+      long parsed = parseTimeWithUnit(nstr, 'm', /*accept_d=*/false);
+      if (parsed < 0) {
+        pushCompanionMessage("Suffix unbekannt. Nur s/m/h erlaubt.");
+        return;
+      }
+      unsigned long secs = (unsigned long)parsed;
+      if (secs < 5)                { pushCompanionMessage("Min 5s.");  return; }
+      if (secs > 24UL * 3600UL)    { pushCompanionMessage("Max 24h."); return; }
+      _tx_blocked = true;
+      _tx_blocked_until_millis = millis() + secs * 1000UL;
+      if (_tx_blocked_until_millis == 0) _tx_blocked_until_millis = 1;  // 0 ist Sentinel
+      char r[100];
+      snprintf(r, sizeof(r), "OK - tx suspended %lus (auto-enable danach).", secs);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (tx_idx == 1) {  // disable
+      _tx_blocked = true;
+      _tx_blocked_until_millis = 0;
+      pushCompanionMessage("OK - tx disabled (kein Auto-Reenable).");
+      return;
+    }
+    if (tx_idx == 2) {  // enable
+      bool was_blocked = _tx_blocked;
+      _tx_blocked = false;
+      _tx_blocked_until_millis = 0;
+      pushCompanionMessage(was_blocked ? "OK - tx enabled." : "tx war bereits enabled.");
+      return;
+    }
+    pushCompanionMessage("Usage: tx [suspend <N>[s|m|h] | disable | enable]");
+    return;
+  }
+
+  // ---------- rx (Wunschliste 83) ---------------------------------------
+  // Stromsparen ohne Repeater-Funktion: LoRa-Chip schlaeft, Wake nur
+  // kurz fuer Send + 5min RX-Window. Persistent (sonst Boot-Spike).
+  // Bei client_repeat=on inaktiv (Repeater muss hoeren) -- Pref bleibt
+  // gesetzt, greift wieder sobald repeater off.
+  //
+  //   rx                Status (Pref + aktueller Hardware-Modus)
+  //   rx disable        Pref setzen (Sleep-Mode aktivieren)
+  //   rx enable         Pref clear (RX bleibt permanent an)
+  if (starts_with_word(cmd, "rx")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ') arg++; }
+    if (!arg || *arg == 0) {
+      // Status
+      const char* pref_str = _prefs.rx_disabled ? "disabled" : "enabled";
+      const char* hw_str   = _rx_currently_suspended ? "sleep" : "wake";
+      bool repeater_override = _prefs.rx_disabled && _prefs.client_repeat;
+      char r[200];
+      if (repeater_override) {
+        snprintf(r, sizeof(r),
+                 "rx pref: %s\n"
+                 "  Hardware: %s\n"
+                 "  (Repeater on -> Pref uebergangen, greift\n"
+                 "   wieder bei repeater off.)",
+                 pref_str, hw_str);
+      } else if (_prefs.rx_disabled && _rx_wake_until_millis != 0) {
+        unsigned long left = (_rx_wake_until_millis - millis()) / 1000UL;
+        // Wunschliste 87 Refactor: formatDurationCompact.
+        char left_buf[16];
+        formatDurationCompact(left_buf, sizeof(left_buf), left);
+        snprintf(r, sizeof(r),
+                 "rx pref: %s\n"
+                 "  Hardware: %s (post-TX window %s left)",
+                 pref_str, hw_str, left_buf);
+      } else {
+        snprintf(r, sizeof(r),
+                 "rx pref: %s\n"
+                 "  Hardware: %s",
+                 pref_str, hw_str);
+      }
+      pushCompanionMessage(r);
+      return;
+    }
+    static const CompanionChoice rx_subs[] = {
+      { "disable", false },   // 0
+      { "enable",  false },   // 1
+    };
+    char rx_ambig[64];
+    int rx_idx = match_choice(arg, rx_subs, 2, rx_ambig, sizeof(rx_ambig));
+    if (rx_idx == -1) {
+      char r[120]; snprintf(r, sizeof(r), "Mehrdeutig: %s", rx_ambig);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (rx_idx == 0) {   // disable
+      if (_prefs.client_repeat) {
+        pushCompanionMessage(
+          "Repeater ist aktiv -- RX bleibt zwingend an.\n"
+          "Pref wird trotzdem gespeichert und greift sobald\n"
+          "'repeater off' gesetzt wird.");
+        // Trotzdem persistieren, damit der "sobald off"-Effekt wirkt.
+        _prefs.rx_disabled = 1;
+        savePrefs();
+        return;
+      }
+      _prefs.rx_disabled = 1;
+      savePrefs();
+      pushCompanionMessage(
+        "OK - rx disabled (Sleep-Mode).\n"
+        "  Boot-Window + 5min nach jedem TX bleibt RX wach.");
+      return;
+    }
+    if (rx_idx == 1) {   // enable
+      _prefs.rx_disabled = 0;
+      _rx_wake_until_millis = 0;
+      savePrefs();
+      pushCompanionMessage("OK - rx enabled (permanent).");
+      return;
+    }
+    pushCompanionMessage("Usage: rx [disable | enable]");
     return;
   }
 
@@ -12932,7 +13444,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // D2: power-Mode mit anzeigen (User-Wunsch -- mode ist sonst nur
       // unter 'gps power' sichtbar).
       const char* pmode = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
-      uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
+      // Wunschliste 87 Refactor: formatDurationCompact.
+      uint32_t lead_s = (_prefs.gps_lead_secs == 0) ? 300UL : _prefs.gps_lead_secs;
+      char lead_buf[16];
+      formatDurationCompact(lead_buf, sizeof(lead_buf), lead_s);
       // Live-Validity-Flags aus dem LocationProvider (User-Wunsch
       // 2026-05-29 -- hilft NMEA-stale-time-Bug-Symptome zu erkennen):
       //   loc_valid  = aktueller Position-Fix gueltig (RMC 'A')
@@ -12968,9 +13483,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char block1[200];
       snprintf(block1, sizeof(block1),
                "gps=%s  fix_ever=%d  loc_valid=%d  time_valid=%d  moving=%d\n"
-               "power=%s  lead=%u min  app-poll-interval=%s",
+               "power=%s  lead=%s  app-poll-interval=%s",
                state, (int)_gps_had_fix_ever, loc_valid, time_valid,
-               (int)_is_moving, pmode, (unsigned)lead, interval_str);
+               (int)_is_moving, pmode, lead_buf, interval_str);
       pushCompanionMessage(block1);
       // DL9SAU 2026-06-17: Source-Hinweis ob pos LIVE / LAST-FIX /
       // PREFS ist (User-Frage aus sensors-Refactor).
@@ -12979,18 +13494,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else if (loc_valid)             pos_src = "LIVE";
       else if (_gps_had_fix_ever)     pos_src = "LAST-FIX";
       else                            pos_src = "PREFS (no fix yet)";
-      char age_buf[24];
+      // Wunschliste 87 Refactor: formatDurationCompact statt 4 if-Zweige.
+      char age_buf[16];
       if (_gps_last_fix_at_millis == 0) {
         snprintf(age_buf, sizeof(age_buf), "-");
       } else {
         unsigned long age_s = (millis() - _gps_last_fix_at_millis) / 1000UL;
-        if (age_s >= 86400) snprintf(age_buf, sizeof(age_buf), "%lud%luh",
-                                     age_s / 86400, (age_s % 86400) / 3600);
-        else if (age_s >= 3600) snprintf(age_buf, sizeof(age_buf), "%luh%lum",
-                                         age_s / 3600, (age_s % 3600) / 60);
-        else if (age_s >= 60) snprintf(age_buf, sizeof(age_buf), "%lum%lus",
-                                       age_s / 60, age_s % 60);
-        else snprintf(age_buf, sizeof(age_buf), "%lus", age_s);
+        formatDurationCompact(age_buf, sizeof(age_buf), age_s);
       }
       char block2[200];
       snprintf(block2, sizeof(block2),
@@ -12999,10 +13509,50 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                "time=%s",
                ll, sensors.node_altitude, pos_src, age_buf, rtc_str);
       pushCompanionMessage(block2);
+      // DL9SAU 2026-06-17: aktiver advert-Mode + profile in Status zeigen.
+      const char* adv_nm = (_prefs.advert_loc_policy == ADVERT_LOC_NONE)  ? "none"
+                         : (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) ? "prefs"
+                         : "share";
+      const char* prof_nm = (_prefs.gps_profile == 1) ? "position-only"
+                          : (_prefs.gps_profile == 2) ? "time-only"
+                          : "full";
+      char block3[140];
+      if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
+        snprintf(block3, sizeof(block3),
+                 "advert=%s  profile=%s\n"
+                 "prefs-pos=%.6f, %.6f",
+                 adv_nm, prof_nm, _adv_prefs_lat, _adv_prefs_lon);
+      } else {
+        snprintf(block3, sizeof(block3),
+                 "advert=%s  profile=%s",
+                 adv_nm, prof_nm);
+      }
+      pushCompanionMessage(block3);
+      return;
+    }
+    // ---- Subcommand-Dispatch mit Prefix-Match-Aware Ambiguity-Check ----
+    // User-Memory (feedback_keyword_prefix_abbreviation): CLI-Tokens
+    // muessen abkuerzbar sein. Ein zentraler match_choice meldet
+    // Mehrdeutigkeiten ("gps p" -> "Mehrdeutig: profile, power") statt
+    // wortlos auf den Usage-Hinweis zu fallen.
+    static const CompanionChoice gps_subs[] = {
+      { "on",      false },   // 0
+      { "off",     false },   // 1
+      { "sync",    false },   // 2
+      { "setloc",  false },   // 3
+      { "advert",  false },   // 4
+      { "profile", false },   // 5
+      { "power",   false },   // 6
+    };
+    char gps_ambig[64];
+    int gps_idx = match_choice(arg, gps_subs, 7, gps_ambig, sizeof(gps_ambig));
+    if (gps_idx == -1) {
+      char r[120]; snprintf(r, sizeof(r), "Mehrdeutig: %s", gps_ambig);
+      pushCompanionMessage(r);
       return;
     }
     // ---- gps profile [full|position-only|time-only] -- Wunschliste 81 ----
-    if (starts_with_word(arg, "profile") || starts_with_word(arg, "prof")) {
+    if (gps_idx == 5) {
       const char* val = strchr(arg, ' ');
       if (val) { while (*val == ' ') val++; }
       if (!val || *val == 0) {
@@ -13039,26 +13589,82 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    // ---- gps power [...] - Power-Management-Konfig ----
-    // Prefix-Match (B2): 'gps pow' soll auch funktionieren.
-    bool is_power_kw = false;
-    {
-      static const CompanionChoice gps_subs[] = { { "power", false } };
-      char ambig[32];
-      int m = match_choice(arg, gps_subs, 1, ambig, sizeof(ambig));
-      is_power_kw = (m == 0);
+    // ---- gps advert [none|share|prefs] -- Wunschliste 80 ----
+    // 'share' = aktueller GPS-Fix; 'prefs' = persistierte Heimat-Position
+    // (Snapshot von lat/lon beim Boot bzw. nach 'set lat/lon'). Live-GPS
+    // laeuft im 'prefs'-Modus weiter fuer Zeit-Sync, ohne den Advert-
+    // Standort zu veraendern.
+    if (gps_idx == 4) {
+      const char* val = strchr(arg, ' ');
+      if (val) { while (*val == ' ') val++; }
+      if (!val || *val == 0) {
+        const char* nm = (_prefs.advert_loc_policy == ADVERT_LOC_NONE)  ? "none"
+                       : (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) ? "prefs"
+                       : "share";
+        char r[160];
+        if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
+          snprintf(r, sizeof(r),
+                   "gps advert:\n"
+                   "  active: %s\n"
+                   "  prefs-pos: %.6f, %.6f",
+                   nm, _adv_prefs_lat, _adv_prefs_lon);
+        } else {
+          snprintf(r, sizeof(r),
+                   "gps advert:\n"
+                   "  active: %s",
+                   nm);
+        }
+        pushCompanionMessage(r);
+        pushCompanionMessage(
+          "  none  = kein Standort im Advert\n"
+          "  share = Live-GPS-Position (Default)\n"
+          "  prefs = gespeicherte Heimat-Position");
+        return;
+      }
+      uint8_t newp;
+      if      (strcasecmp(val, "none")  == 0
+            || strcasecmp(val, "off")   == 0)   newp = ADVERT_LOC_NONE;
+      else if (strcasecmp(val, "share") == 0
+            || strcasecmp(val, "live")  == 0
+            || strcasecmp(val, "on")    == 0)   newp = ADVERT_LOC_SHARE;
+      else if (strcasecmp(val, "prefs") == 0
+            || strcasecmp(val, "fixed") == 0
+            || strcasecmp(val, "home")  == 0)   newp = ADVERT_LOC_PREFS;
+      else {
+        pushCompanionMessage("gps advert: none | share | prefs");
+        return;
+      }
+      _prefs.advert_loc_policy = newp;
+      savePrefs();
+      const char* nm = (newp == ADVERT_LOC_NONE)  ? "none"
+                     : (newp == ADVERT_LOC_PREFS) ? "prefs"
+                     : "share";
+      char r[80]; snprintf(r, sizeof(r), "OK - gps advert = %s", nm);
+      pushCompanionMessage(r);
+      return;
     }
-    if (is_power_kw) {
+    // ---- gps power [...] - Power-Management-Konfig ----
+    if (gps_idx == 6) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) {
-        // Status
-        char block[200];
+        // Status. Wunschliste 87 Refactor: formatDurationCompact.
+        char block[160];
         const char* mode_str = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
-        uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
-        snprintf(block, sizeof(block),
-                 "gps power:\n  mode = %s\n  lead = %u min (sleep = %u min im 15-min-Cycle)",
-                 mode_str, (unsigned)lead, (unsigned)(15 - lead));
+        uint32_t lead_s = _prefs.gps_lead_secs;
+        if (lead_s == 0) lead_s = 300;
+        char lead_buf[16];
+        formatDurationCompact(lead_buf, sizeof(lead_buf), lead_s);
+        if (lead_s <= 14UL * 60UL) {
+          snprintf(block, sizeof(block),
+                   "gps power:\n  mode = %s\n  lead = %s\n  sleep = %lu min im 15-min-Cycle",
+                   mode_str, lead_buf, (unsigned long)(15 - lead_s/60));
+        } else {
+          // Long-Cycle -- formatDurationCompact zeigt bereits passende Unit.
+          snprintf(block, sizeof(block),
+                   "gps power:\n  mode = %s\n  lead = %s (Long-Cycle)\n  cycle-Laenge = lead",
+                   mode_str, lead_buf);
+        }
         pushCompanionMessage(block);
         return;
       }
@@ -13086,23 +13692,41 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         const char* num = strchr(sub, ' ');
         if (num) { while (*num == ' ') num++; }
         if (!num || !(num[0] >= '0' && num[0] <= '9')) {
-          pushCompanionMessage("Usage: gps power lead <N>\nN = 1..14 Minuten");
+          pushCompanionMessage("Usage: gps power lead <N>[s|m|h|d]\nDefault-Suffix m. Range 30s..90d.");
           return;
         }
-        int n = atoi(num);
-        if (n < 1 || n > 14) {
-          pushCompanionMessage("lead muss 1..14 sein (kleiner als 15-min-Cycle).");
+        // Wunschliste 87 Refactor: parseTimeWithUnit (mit 'd' fuer Long-Cycle).
+        long parsed = parseTimeWithUnit(num, 'm', /*accept_d=*/true);
+        if (parsed < 0) {
+          pushCompanionMessage("Suffix unbekannt. Nur s/m/h/d erlaubt.");
           return;
         }
-        _prefs.gps_lead_min = (uint8_t)n;
+        unsigned long secs = (unsigned long)parsed;
+        if (secs < 30UL)            { pushCompanionMessage("Min 30s."); return; }
+        if (secs > 90UL * 86400UL)  { pushCompanionMessage("Max 90d."); return; }
+        _prefs.gps_lead_secs = (uint32_t)secs;
+        // Backward-compat: bei <= 14 min halten wir auch gps_lead_min aktuell.
+        if (secs <= 14UL * 60UL) _prefs.gps_lead_min = (uint8_t)(secs / 60UL);
+        else                     _prefs.gps_lead_min = 14;  // cap, da uint8_t Range
         savePrefs();
-        char r[80]; snprintf(r, sizeof(r), "OK - gps power lead = %d min (sleep = %d min).", n, 15 - n);
+        // Wunschliste 87 Refactor: formatDurationCompact + Cycle-Mode-Hinweis.
+        char dur[16];
+        formatDurationCompact(dur, sizeof(dur), secs);
+        char r[120];
+        bool short_cycle = (secs <= 14UL * 60UL);
+        if (short_cycle) {
+          snprintf(r, sizeof(r), "OK - gps power lead = %s (Short-Cycle, sleep = %lu min im 15-min-Cycle).",
+                   dur, (unsigned long)(15 - secs/60));
+        } else {
+          snprintf(r, sizeof(r), "OK - gps power lead = %s (Long-Cycle, cycle-Laenge = lead).", dur);
+        }
         pushCompanionMessage(r);
         return;
       }
       if (strcmp(sub, "reset") == 0) {
         _prefs.gps_power_mode = 0;
         _prefs.gps_lead_min   = 5;
+        _prefs.gps_lead_secs  = 300;  // 5 min
         savePrefs();
         pushCompanionMessage("OK - gps power reset: mode=cycle, lead=5 min.");
         return;
@@ -13111,12 +13735,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    int m = match_on_off(arg);
-    if (m == -1) {
-      pushCompanionMessage("Mehrdeutig: on off");
-      return;
-    }
-    if (m == 1) {
+    if (gps_idx == 0) {           // on
       _prefs.gps_enabled = 1;
       savePrefs();
       reevaluateRepeaterBbox();  // Reise-Fix 2026-06-08
@@ -13124,6 +13743,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // (analog App-Pfad CMD_SET_RADIO_PARAMS). Vorher musste man auf
       // den naechsten manageGpsPower-Tick warten -- und wenn
       // !gps_had_fix_ever, returnte der frueh und schaltete nie ein.
+      // Wunschliste 84 Hebel B: Serial1 koennte vom letzten Sleep-
+      // Cycle .end()'d sein -- vor setSettingValue wieder hoch.
+#if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
+#ifdef GPS_BAUD_RATE
+      Serial1.begin(GPS_BAUD_RATE);
+#else
+      Serial1.begin(9600);
+#endif
+#endif
       sensors.setSettingValue("gps", "1");
       _gps_woke_at_millis = millis();
       if (_gps_woke_at_millis == 0) _gps_woke_at_millis = 1;
@@ -13132,25 +13760,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // D3: informativer als nur "OK - GPS enabled". Zeige aktuelle
       // power-Konfig damit User direkt sieht was greift.
       const char* pmode = (_prefs.gps_power_mode == 1) ? "always-on" : "cycle";
-      uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
+      // Wunschliste 87 Refactor: formatDurationCompact.
+      uint32_t lead_s = (_prefs.gps_lead_secs == 0) ? 300UL : _prefs.gps_lead_secs;
+      char lead_buf[16];
+      formatDurationCompact(lead_buf, sizeof(lead_buf), lead_s);
       char r[120];
-      snprintf(r, sizeof(r), "OK - GPS enabled.\n  power=%s  lead=%u min",
-               pmode, (unsigned)lead);
+      snprintf(r, sizeof(r), "OK - GPS enabled.\n  power=%s  lead=%s",
+               pmode, lead_buf);
       pushCompanionMessage(r);
-    } else if (m == 0) {
+    } else if (gps_idx == 1) {    // off
       _prefs.gps_enabled = 0;
       savePrefs();
       reevaluateRepeaterBbox();  // Reise-Fix 2026-06-08
       // GPS-Modul sofort physisch ausschalten.
       sensors.setSettingValue("gps", "0");
+      // Wunschliste 84 Hebel B: Serial1 auch deinit.
+#if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
+      Serial1.end();
+#endif
       _gps_user_override_until_advert = false;
       pushCompanionMessage("OK - GPS disabled.");
-    } else if (strcmp(arg, "sync") == 0) {
+    } else if (gps_idx == 2) {    // sync
       // Einmaliger Wake-Trigger - GPS bleibt wach bis zum naechsten Advert
       // (gleicher Mechanismus wie der app-toggle-Override). Nicht-persistent.
       _gps_user_override_until_advert = true;
       pushCompanionMessage("OK - GPS sync request (wach bis naechster Advert).");
-    } else if (strcmp(arg, "setloc") == 0) {
+    } else if (gps_idx == 3) {    // setloc
       // Aktuelle GPS-Position in sensors.node_lat/lon persistieren. Sinn:
       // EnvironmentSensorManager schreibt zwar laufend node_lat/lon aus
       // dem Live-Fix, savePrefs wird dabei aber nicht getriggert. Bei
@@ -13165,6 +13800,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       sensors.node_lat = cur_lat;
       sensors.node_lon = cur_lon;
+      // Wunschliste 80: setloc ist semantisch eine User-explizite Position --
+      // PREFS-Snapshot mit aktualisieren, sonst weicht 'gps advert prefs'
+      // nach Reboot wieder ab.
+      _adv_prefs_lat = cur_lat;
+      _adv_prefs_lon = cur_lon;
       savePrefs();
       char line[100];
       snprintf(line, sizeof(line), "OK - position persistiert: %.6f, %.6f",
@@ -13173,7 +13813,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Geo-Recommendation neu auswerten (analog CMD_SET_ADVERT_LATLON)
       maybePushGeoRecommendation(cur_lat, cur_lon);
     } else {
-      pushCompanionMessage("Usage: gps <on | off | sync | setloc | power ...>\n"
+      pushCompanionMessage("Usage: gps <on|off|sync|setloc|advert|profile|power ...>\n"
                            "ohne Arg -> Status");
     }
     return;
@@ -14466,13 +15106,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.gps_power_mode != 0) non_default_count++;
     }
-    if (show_all || (_prefs.gps_lead_min != 0 && _prefs.gps_lead_min != 5)) {
-      uint8_t lead = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
-      snprintf(tmp, sizeof(tmp), "  gps_lead_min = %u%s",
-               (unsigned)lead,
-               lead == 5 ? " [default]" : " (default: 5)");
+    if (show_all || (_prefs.gps_lead_secs != 0 && _prefs.gps_lead_secs != 300)) {
+      uint32_t ls = (_prefs.gps_lead_secs == 0) ? 300UL : _prefs.gps_lead_secs;
+      snprintf(tmp, sizeof(tmp), "  gps_lead_secs = %lu%s",
+               (unsigned long)ls,
+               ls == 300 ? " [default]" : " (default: 300)");
       add_line(tmp);
-      if (lead != 5) non_default_count++;
+      if (ls != 300) non_default_count++;
     }
     // repeat_scope_mode (Liste B Policy). Reise-Fix 2026-06-08:
     // Default ist jetzt 'allowlist' (sicher, User entscheidet).
@@ -14686,7 +15326,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
              loc.tm_year + 1900, loc.tm_mon + 1, loc.tm_mday,
              loc.tm_hour, loc.tm_min, loc.tm_sec,
              tzname, (long)tz_off);
-    char block[200];
+    // Wunschliste 78 Buffer-Audit: Output ~130 chars, 160 reicht.
+    char block[160];
     snprintf(block, sizeof(block),
              "clock:\n  unix = %lu\n  utc  = %s\n  loc  = %s",
              (unsigned long)now, utc_str, loc_str);
@@ -15031,7 +15672,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // nicht nur eins. Lesen erneut bis MAX.
       char all[BOOT_LOG_MAX_ENTRIES][96];
       cnt = bootLogLoad(all, BOOT_LOG_MAX_ENTRIES);
-      char block[200];
+      // Wunschliste 78: Output ~120 chars, 160 reicht.
+      char block[160];
       snprintf(block, sizeof(block),
                "log:\n"
                "  usb     = %s   (default: off)\n"
@@ -18371,6 +19013,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       sensors.node_lat = v;
+      _adv_prefs_lat = v;   // Wunschliste 80: User-Position folgt in PREFS-Snapshot
       savePrefs();
       char r[80]; snprintf(r, sizeof(r), "OK - lat = %.6f", v);
       pushCompanionMessage(r);
@@ -18383,6 +19026,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       sensors.node_lon = v;
+      _adv_prefs_lon = v;   // Wunschliste 80: User-Position folgt in PREFS-Snapshot
       savePrefs();
       char r[80]; snprintf(r, sizeof(r), "OK - lon = %.6f", v);
       pushCompanionMessage(r);
@@ -20816,7 +21460,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       unsigned long soft_ms = getDutySoftLimitMs();
       unsigned long hard_ms = getDutyHardLimitMs();
       unsigned long cur_pct = hard_ms > 0 ? (cur * 100UL / hard_ms) : 0;
-      char block[200];
+      // Wunschliste 78: Output ~100 chars, 160 reicht.
+      char block[160];
       snprintf(block, sizeof(block),
                "duty:\n"
                "  stats=%lus/%lus (%lu%%)\n"
@@ -23043,9 +23688,12 @@ const char* MyMesh::lookupRegionByTransportCode(const mesh::Packet* packet) cons
 }
 
 bool MyMesh::advert() {
+  if (_tx_blocked) return false;   // Wunschliste 82
   mesh::Packet* pkt;
   if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
     pkt = createSelfAdvert(_prefs.node_name);
+  } else if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
+    pkt = createSelfAdvert(_prefs.node_name, _adv_prefs_lat, _adv_prefs_lon);
   } else {
     pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
   }
@@ -23085,5 +23733,13 @@ void MyMesh::computeScopeLabel(const mesh::Packet* pkt,
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
-  return _mgr->getOutboundTotal() > 0 || dirty_contacts_expiry != 0;
+  // DL9SAU 2026-06-18 (Wunschliste 84 Hebel A1): dirty_contacts_expiry
+  // wurde fuer LAZY_CONTACTS_WRITE_DELAY in die Zukunft gesetzt. Echte
+  // Arbeit faellt erst wenn der Timer abgelaufen ist; bis dahin keine
+  // CPU benoetigt -- damit kann board.sleep(0) (sd_app_evt_wait) auch
+  // im Lazy-Write-Fenster greifen. Spart Strom waehrend der Wartezeit.
+  if (_mgr->getOutboundTotal() > 0) return true;
+  if (dirty_contacts_expiry != 0
+      && (long)(millis() - dirty_contacts_expiry) >= 0) return true;
+  return false;
 }
