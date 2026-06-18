@@ -196,7 +196,7 @@ public:
 
   Packet* obtainNewPacket();
   void releasePacket(Packet* packet);
-  void sendPacket(Packet* packet, uint8_t priority, uint32_t delay_millis=0);
+  virtual void sendPacket(Packet* packet, uint8_t priority, uint32_t delay_millis=0);
 
   unsigned long getTotalAirTime() const { return total_air_time; }
   unsigned long getReceiveAirTime() const {return rx_air_time; }

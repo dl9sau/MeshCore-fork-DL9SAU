@@ -135,7 +135,7 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
     state = STATE_IDLE;   // need another startReceive()
   }
 
-  if (state != STATE_RX) {
+  if (state != STATE_RX && !_rx_suspended) {
     int err = _radio->startReceive();
     if (err == RADIOLIB_ERR_NONE) {
       state = STATE_RX;
@@ -144,6 +144,20 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
     }
   }
   return len;
+}
+
+// DL9SAU Wunschliste 83
+void RadioLibWrapper::setRxSuspended(bool s) {
+  if (s == _rx_suspended) return;
+  _rx_suspended = s;
+  if (s) {
+    // Radio jetzt in Standby. State zwingen, sonst koennte ein
+    // pendender STATE_RX im naechsten Loop weiterlaufen.
+    _radio->standby();
+    state = STATE_IDLE;
+  }
+  // Bei s=false braucht's keinen aktiven startReceive() -- der
+  // naechste recvRaw() macht das automatisch.
 }
 
 uint32_t RadioLibWrapper::getEstAirtimeFor(int len_bytes) {

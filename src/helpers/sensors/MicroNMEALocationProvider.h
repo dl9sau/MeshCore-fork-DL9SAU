@@ -46,6 +46,11 @@ class MicroNMEALocationProvider : public LocationProvider {
     long time_valid = 0;
     unsigned long _last_time_sync = 0;
     static const unsigned long TIME_SYNC_INTERVAL = 1800000; // Re-sync every 30 minutes
+    // DL9SAU 2026-06-18 (Wunschliste 81 Phase 2): position-only Profile.
+    // Bei true: NMEA-Loop laeuft normal weiter (Position-Update, Sat-Count
+    // etc.), aber das tatsaechliche _clock->setCurrentTime im Block unten
+    // wird unterdrueckt. Defaults false. Setter im public-Bereich.
+    bool _skip_time_sync = false;
 
 public :
     MicroNMEALocationProvider(Stream& ser, mesh::RTCClock* clock = NULL, int pin_reset = GPS_RESET, int pin_en = GPS_EN,RefCountedDigitalPin* peripher_power=NULL) :
@@ -124,6 +129,11 @@ public :
     }
 
     void syncTime() override { nmea.clear(); LocationProvider::syncTime(); }
+
+    // DL9SAU Wunschliste 81 Phase 2: bei position-only Profile setzen wir
+    // hier true -- der NMEA-Loop unten skippt dann den setCurrentTime-Call.
+    void setSkipTimeSync(bool s) override { _skip_time_sync = s; }
+    bool getSkipTimeSync() const override { return _skip_time_sync; }
     long getLatitude() override { return nmea.getLatitude(); }
     long getLongitude() override { return nmea.getLongitude(); }
     long getAltitude() override { 
@@ -177,8 +187,16 @@ public :
                     bool reject = (cur > 1500000000L)
                                && (ts > cur + ONE_YEAR_SECS
                                 || ts < cur - ONE_YEAR_SECS);
-                    if (!reject) {
+                    if (!reject && !_skip_time_sync) {
                         _clock->setCurrentTime(ts);
+                    } else if (_skip_time_sync) {
+                        // Wunschliste 81 Phase 2: position-only -- Sync
+                        // bewusst weggelassen. _time_sync_needed bleibt
+                        // gesetzt, _last_time_sync wird trotzdem markiert
+                        // damit der TIME_SYNC_INTERVAL-Re-Trigger nicht
+                        // bei jedem Frame neu greift.
+                        _last_time_sync = millis();
+                        _time_sync_needed = false;
                     } else {
                         // Verwerfungs-Log (User-Wunsch 2026-05-30): rare
                         // Diagnose-Event, ungueltige Sync-Versuche sichtbar

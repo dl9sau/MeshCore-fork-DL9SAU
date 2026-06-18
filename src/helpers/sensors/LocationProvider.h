@@ -10,6 +10,12 @@ protected:
 public:
     virtual void syncTime() { _time_sync_needed = true; }
     virtual bool waitingTimeSync() { return _time_sync_needed; }
+    // DL9SAU 2026-06-18 (Wunschliste 81 Phase 2): position-only Profile.
+    // Wenn true, ueberspringt der konkrete Provider den
+    // setCurrentTime-Aufruf. Default-Impl ist no-op (Provider ohne
+    // Time-Sync ignorieren das ohnehin).
+    virtual void setSkipTimeSync(bool /*s*/) { }
+    virtual bool getSkipTimeSync() const { return false; }
     virtual long getLatitude() = 0;
     virtual long getLongitude() = 0;
     virtual long getAltitude() = 0;

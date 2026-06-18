@@ -12,6 +12,12 @@ protected:
   uint16_t _num_floor_samples;
   int32_t _floor_sample_sum;
   uint8_t _preamble_sf;
+  // DL9SAU 2026-06-18 (Wunschliste 83): RX-Sleep-Hook. Wenn true,
+  // unterdrueckt recvRaw() den automatischen startReceive()-Re-arm
+  // -- der Radio bleibt nach idle()/TX im Standby statt sofort
+  // wieder in RX zurueckzugehen. Sender-Pfad ist unbeeintraechtigt.
+  // Default false = aktuelles Verhalten.
+  bool _rx_suspended = false;
 
   void idle();
   void startRecv();
@@ -65,6 +71,13 @@ public:
 
   virtual void setRxBoostedGainMode(bool) { }
   virtual bool getRxBoostedGainMode() const { return false; }
+
+  // DL9SAU Wunschliste 83. Bei true: Wrapper unterdrueckt
+  // startReceive()-Re-arm in recvRaw und stellt den Radio in idle()
+  // (= standby). Bei false: wieder normales Verhalten, naechster
+  // recvRaw() ruft startReceive() wenn state != STATE_RX.
+  void setRxSuspended(bool s);
+  bool getRxSuspended() const { return _rx_suspended; }
 };
 
 /**
