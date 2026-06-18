@@ -6775,6 +6775,148 @@ Quellen:
     Cycle) + Phase F-LOCKUP-Erkenntnisse (Z 4667-4697).
 
 
+=== ANMERKUNG 2026-06-18 abend ===
+Dieser Eintrag dokumentiert eine Aufgabe AUSSERHALB des MeshCore-Trees.
+Der Code lebt in /Users/thomas/meshtastic-firmware-src-github/firmware,
+nicht hier. Die Notiz bleibt als TODO-Tracker im DL9SAU-Workflow, aber
+die Implementierung ist ein separater Repo + eigene Commits dort.
+
+
+=== RECHERCHE-ERGEBNIS Meshtastic-Tree 2026-06-18 (Sub-Agent Explore) ===
+
+Aktivierungs-Pattern (User-Wunsch 2026-06-18): compile-define
+**BLUETOOTH_MAY_SLEEP**. Wenn nicht gesetzt: Default-Meshtastic-Verhalten
+(via PowerFSM). Wenn gesetzt: unser Cycler greift. Damit keine CLI-
+Aenderung, keine Setting-Aenderung, sauber per Build-Flag aktivierbar.
+
+Konkrete Integration-Points:
+
+1) Plattform-uebergreifender setBluetoothEnable(bool) Hook -- EXISTIERT.
+   ESP32: src/platform/esp32/main-esp32.cpp:33-54  ruft
+          nimbleBluetooth->setup() bei enable=true. Shutdown nicht
+          funktional dokumentiert (Kommentar: "no way to recover
+          without reboot").
+   NRF52: src/platform/nrf52/main-nrf52.cpp:190-229  Setup ODER
+          resumeAdvertising bei enable, shutdown() funktional bei
+          disable.
+   -> Unser Cycler ruft diesen zentralen Hook periodisch.
+
+2) Connect/Disconnect-Callbacks -- EXISTIERT als Trigger-Points.
+   NRF52: src/platform/nrf52/NRF52Bluetooth.cpp:60-100
+          onConnect/onDisconnect mit BluetoothStatus Observer-Update.
+   ESP32: src/nimble/NimbleBluetooth.cpp:658-737  analog.
+   -> Hier `lastConnectAt`/`lastDisconnectAt = millis()` einklinken.
+
+3) Loop-Hooks -- EXISTIEREN beide Plattformen.
+   ESP32: src/platform/esp32/main-esp32.cpp:187   esp32Loop()
+   NRF52: src/platform/nrf52/main-nrf52.cpp:331   nrf52Loop()
+   -> Cycler-Tick-Logik hier reinhaengen.
+
+4) Connection-Status-API -- EXISTIERT.
+   ESP32: bleServer->getConnectedCount() > 0    (NimbleBluetooth.cpp:785)
+   NRF52: Bluefruit.connected(connectionHandle) (NRF52Bluetooth.cpp:52)
+
+5) PowerFSM-Integration -- KOLLISIONS-Gefahr.
+   src/PowerFSM.cpp:85+  nbEnter()/darkEnter() rufen aktuell selbst
+   setBluetoothEnable(false/true). Wenn unser Cycler aktiv ist UND
+   PowerFSM gleichzeitig steuert, kommt es zum Pingpong.
+   -> Im BLUETOOTH_MAY_SLEEP-Build: PowerFSM-Calls zu setBluetoothEnable
+      muessen geguarded werden (im PowerFSM-Code via #ifdef oder Hook).
+      Pattern: PowerFSM uebergibt Hoheit an den Cycler komplett.
+
+6) Persistierung & Settings-Change.
+   config.bluetooth.enabled (Protobuf, persistent) ist die User-Toggle-
+   Quelle (App, Display/Button). KEIN zentraler onSettingsChanged-Hook
+   -- Aenderungen wirken ueber den naechsten setBluetoothEnable-Call.
+   Unser Cycler muss VOR JEDEM on/off-Toggle pruefen:
+     if (!config.bluetooth.enabled) bleibe permanent aus, kein Cycle.
+   Das ist exakt die User-Vorgabe "greift nur wenn BT-Setting=on".
+
+7) Live BT-Toggle via Button/Display -- beruecksichtigt durch (6) UND
+   einen zusaetzlichen periodischen Poll von config.bluetooth.enabled
+   im Cycler-Loop (alle 1-2s reicht). Wenn der User waehrend des
+   Cycles BT ausschaltet, sehen wir das beim naechsten Tick.
+
+8) ESP32 esp_bt_controller_disable -- NICHT in Meshtastic verwendet.
+   Bei uns 70 mA Spar (Wunschliste 58 Phase F). Vorsichtig einbauen
+   weil Recovery-Pfad in Meshtastic nicht etabliert. Erstmal nur
+   nimbleBluetooth->disable equivalent nutzen; controller-disable
+   als optionale Phase 2 nach Erfolgs-Test.
+
+Implementierungs-Plan (Skizze, Pseudocode):
+
+  // Build-Time Aktivierung
+  #ifdef BLUETOOTH_MAY_SLEEP
+
+  // Neue Datei: src/bluetooth/BLEPowerCycler.cpp/h
+  // Hardcoded Werte (keine Settings):
+  static const uint32_t BOOT_GRACE_MS    = 10UL * 60 * 1000;  // 10 min
+  static const uint32_t HOT_START_MS     =  5UL * 60 * 1000;  // 5 min
+  static const uint32_t WAKE_MS          = 20UL * 1000;       // 20s
+  static const uint32_t SLEEP_RECENCY_MS = 20UL * 1000;       // 20s recency
+  static const uint32_t SLEEP_DEFAULT_MS = 40UL * 1000;       // 40s default
+  static const uint32_t RECENCY_WINDOW_MS = 10UL * 60 * 1000; // 10 min
+
+  enum BleCycState { BOOT, AWAKE, HOT_START, WAKE, SLEEP, PERMANENT_OFF };
+
+  // In Loop (esp32Loop/nrf52Loop):
+  void tick() {
+    if (!config.bluetooth.enabled) {
+      ensure_off(); state = PERMANENT_OFF; return;
+    }
+    // Mode normal repeater -> permanent_off Variante (analog DL9SAU).
+    if (config.device.role == ROUTER && repeaterProfile == NORMAL) {
+      if (state != HOT_START && state != AWAKE) {
+        ensure_off(); state = PERMANENT_OFF; return;
+      }
+    }
+    // BOOT-Phase
+    if (state == BOOT && now < boot_grace_until) {
+      ensure_on(); return;
+    }
+    // ... weiter: AWAKE/HOT_START/WAKE/SLEEP Transitions analog
+    // unserem MyMesh::manageBlePower (siehe Z 10654+ in MyMesh.cpp).
+  }
+
+  // In onConnect (Bluetooth-Callback):
+  void onConnect() { state = AWAKE; lastConnectAt = millis(); }
+  // In onDisconnect:
+  void onDisconnect() {
+    state = HOT_START; lastDisconnectAt = millis();
+    hot_start_until = millis() + HOT_START_MS;
+  }
+
+  // Im setBluetoothEnable-Pfad (wenn unser Cycler ON ruft):
+  void ensure_on() { /* call setBluetoothEnable(true) wenn nicht schon */ }
+  void ensure_off() { /* call setBluetoothEnable(false) wenn nicht schon */ }
+
+  #endif // BLUETOOTH_MAY_SLEEP
+
+PowerFSM-Guard (auch via #ifdef BLUETOOTH_MAY_SLEEP):
+
+  static void nbEnter() {
+  #ifndef BLUETOOTH_MAY_SLEEP
+    setBluetoothEnable(false);
+  #endif
+    // Cycler uebernimmt
+  }
+  // analog darkEnter() / lsEnter()
+
+Aufwand-Schaetzung mit Define-Gate:
+  - Phase 1 (BOOT/HOT_START/WAKE/SLEEP-FSM): 4-6h. Test 2-3h.
+  - Phase 2 (controller_disable): 2-3h zusaetzlich, mit Recovery-
+    Pruefung.
+
+Quellen:
+  - User-Wunsch 2026-06-18 abend + BLUETOOTH_MAY_SLEEP-Define-Vorschlag
+    (2026-06-18 spaeter abend).
+  - Sub-Agent Recherche im Meshtastic-Tree 2026-06-18.
+  - Unsere DL9SAU manageBlePower-Logik: MyMesh.cpp Z 10654-10920+
+    (State-Machine BOOT/AWAKE/HOT_START/SLEEP/WAIT/TMP_OFF/OFF).
+
+=== ENDE RECHERCHE-ERGEBNIS ===
+
+
 --------------------------------------------------------------------------------
 86. ESP32-S3 esp_light_sleep_start() im Idle (Hebel A aus Wunschliste 84)
 --------------------------------------------------------------------------------
