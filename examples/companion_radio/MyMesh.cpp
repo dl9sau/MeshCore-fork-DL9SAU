@@ -4896,6 +4896,14 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   // radio_driver erst beim ersten Loop sauber initialisiert ist).
   _rx_wake_until_millis = 0;
   _rx_currently_suspended = false;
+  // Wunschliste 89/90/91: Battery + USB State -- alles RAM, kein
+  // Persist. Erste Messung erfolgt sofort beim ersten Tick.
+  _usb_lost_at_millis            = 0;
+  _batt_last_sample_millis       = 0;
+  _batt_low_burst_until_millis   = 0;
+  _batt_low_consecutive          = 0;
+  _batt_last_mv                  = 0;
+  _batt_last_pct                 = 0xFF;
   _tx_advert_count = 0;
   _tx_digi_count = 0;
   _bt_connect_count = 0;
@@ -5015,6 +5023,10 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   // bei EOF/Legacy bleibt der Wert sentinel; nach loadPrefs migrieren wir
   // 0 -> gps_lead_min * 60 (Default 300s = 5min).
   _prefs.gps_lead_secs  = 0xFFFFFFFFUL;
+  // Wunschliste 89/90/91: Sentinel-Pre-Init.
+  _prefs.batt_chemistry        = 0xFF;
+  _prefs.batt_min_mv           = 0xFFFF;
+  _prefs.usb_loss_shutdown_min = 0xFF;
   _prefs.airtime_factor = 1.0;
   strcpy(_prefs.node_name, "NONAME");
   _prefs.freq = LORA_FREQ;
@@ -5293,6 +5305,19 @@ void MyMesh::begin(bool has_display) {
     uint8_t lm = (_prefs.gps_lead_min == 0) ? 5 : _prefs.gps_lead_min;
     _prefs.gps_lead_secs = (uint32_t)lm * 60UL;
   }
+
+  // Wunschliste 89/90/91: Battery-Chemistry-Default je Plattform.
+  // T1000-E hat 1S Li-Po verbaut -> Default chemistry=1.
+  // Andere Boards: User muss explizit setzen, sonst disabled (=0).
+  if (_prefs.batt_chemistry == 0xFF) {
+#ifdef T1000_E
+    _prefs.batt_chemistry = 1;   // Li-Po
+#else
+    _prefs.batt_chemistry = 0;   // disabled, User-Config benoetigt
+#endif
+  }
+  if (_prefs.batt_min_mv == 0xFFFF) _prefs.batt_min_mv = 0;
+  if (_prefs.usb_loss_shutdown_min == 0xFF) _prefs.usb_loss_shutdown_min = 0;
 
   // Wunschliste 43 Migration (2026-06-11, FIX 2026-06-11):
   // altes bluetooth_power_mode-Byte war 1-Wert-Enum (0=off, 1=always-on,
@@ -7502,6 +7527,7 @@ void MyMesh::loop() {
   updateMotionTracking();
   manageGpsPower();
   manageRxPower();  // Wunschliste 83
+  manageBatteryAndUsb();  // Wunschliste 89/90/91
 
   // RTC-Persistierung Periodic-Check (Bug-Fix 2026-06-14): GPS-Sync
   // setzt RTC direkt ueber _clock->setCurrentTime (in MicroNMEALocation-
@@ -8597,6 +8623,103 @@ void MyMesh::doNightFloodAdvert() {
 //     verlaengert das Fenster.
 // Sonst: RX im Standby. radio_driver.setRxSuspended() macht den
 // eigentlichen Hardware-Wechsel + State-Bookkeeping im Wrapper.
+// Forward-Decls fuer die Battery-Helpers (Implementation weiter unten
+// zwischen den anderen static helpers).
+static uint8_t getBattChargePctForCurve(uint8_t chemistry, uint16_t mv);
+static uint16_t getBattDefaultMinMv(uint8_t chemistry);
+
+// Wunschliste 89/90/91 (2026-06-18): Battery + USB-Power State-Machine.
+// Tick alle Loop-Iterationen, leichtgewichtig (Sample nur alle 10min,
+// im Niedrig-Burst alle 10s).
+void MyMesh::manageBatteryAndUsb() {
+  unsigned long now = millis();
+  bool usb_now = board.isExternalPowered();
+
+  // --- USB-Loss-Timer (Wunschliste 90) ---
+  if (_prefs.usb_loss_shutdown_min > 0) {
+    if (!usb_now) {
+      // 10s Hysterese gegen Glitches: erste Erkennung markiert
+      // _usb_lost_at_millis, aber shutdown-Timer erst nach 10s.
+      if (_usb_lost_at_millis == 0) {
+        _usb_lost_at_millis = (now == 0) ? 1 : now;
+        pushDebugLog("[batt] USB lost, timer armed %u min\n",
+                     (unsigned)_prefs.usb_loss_shutdown_min);
+      } else {
+        unsigned long elapsed = now - _usb_lost_at_millis;
+        unsigned long limit = (unsigned long)_prefs.usb_loss_shutdown_min
+                            * 60UL * 1000UL;
+        if (elapsed >= limit) {
+          pushDebugLog("[batt] USB-loss timeout (%u min) -> powerOff\n",
+                       (unsigned)_prefs.usb_loss_shutdown_min);
+          savePrefs();
+          board.powerOff();
+          return;
+        }
+      }
+    } else if (_usb_lost_at_millis != 0) {
+      // USB wieder da -> Timer canceln.
+      _usb_lost_at_millis = 0;
+      pushDebugLog("[batt] USB restored, shutdown timer cancelled\n");
+    }
+  }
+
+  // --- Battery-Schutz (Wunschliste 91) ---
+  // Bei USB an: kein Schutz (Lade-Wave verfaelscht). Erste Messung
+  // nach Boot wartet 60s damit ADC stabilisiert. Schwelle = User-Wert
+  // oder Default-pro-Chemie.
+  if (_prefs.batt_chemistry == 0) return;        // Schutz disabled
+  if (usb_now) {
+    _batt_low_burst_until_millis = 0;
+    _batt_low_consecutive = 0;
+    // Trotzdem _batt_last_mv periodisch aktualisieren fuer Status.
+  }
+  if (now < 60UL * 1000UL) return;  // 60s Boot-Grace fuer ADC
+
+  uint16_t threshold = (_prefs.batt_min_mv == 0)
+                     ? getBattDefaultMinMv(_prefs.batt_chemistry)
+                     : _prefs.batt_min_mv;
+  if (threshold == 0) return;       // chemistry unbekannt
+
+  bool in_burst = (_batt_low_burst_until_millis != 0);
+  unsigned long interval_ms = in_burst
+                            ? 10UL * 1000UL      // 10s im Burst
+                            : 10UL * 60 * 1000;  // 10min normal
+  if (_batt_last_sample_millis != 0
+      && (now - _batt_last_sample_millis) < interval_ms) return;
+  _batt_last_sample_millis = (now == 0) ? 1 : now;
+
+  uint16_t mv = (uint16_t)board.getBattMilliVolts();
+  _batt_last_mv = mv;
+  uint8_t pct = getBattChargePctForCurve(_prefs.batt_chemistry, mv);
+  _batt_last_pct = pct;
+
+  if (usb_now) return;  // bei USB nur sample, kein Cutoff-Check
+
+  if (mv < threshold) {
+    if (!in_burst) {
+      // Niedrig-Erkennung -> wechsel in Burst-Mode (10s ueber 30s).
+      _batt_low_burst_until_millis = now + 30UL * 1000UL;
+      _batt_low_consecutive = 1;
+      pushDebugLog("[batt] LOW detected (%umV < %umV), burst-mode\n",
+                   (unsigned)mv, (unsigned)threshold);
+    } else {
+      _batt_low_consecutive++;
+      if (_batt_low_consecutive >= 3) {
+        pushDebugLog("[batt] 3x LOW confirmed -> powerOff\n");
+        savePrefs();
+        board.powerOff();
+        return;
+      }
+    }
+  } else if (in_burst) {
+    // im Burst aber Wert wieder OK -> Burst beenden.
+    pushDebugLog("[batt] LOW recovered (%umV >= %umV)\n",
+                 (unsigned)mv, (unsigned)threshold);
+    _batt_low_burst_until_millis = 0;
+    _batt_low_consecutive = 0;
+  }
+}
+
 void MyMesh::manageRxPower() {
   bool want_on = true;
   if (!_prefs.client_repeat && _prefs.rx_disabled) {
@@ -8812,19 +8935,21 @@ void MyMesh::manageGpsPower() {
   }
 
   if (want_gps_on && !gps_is_on) {
-    // Wunschliste 84 Hebel B (Peripherie-Re-Init): Serial1 wurde beim
-    // letzten Sleep-Uebergang via Serial1.end() abgeschaltet (Strom
-    // sparen waehrend GPS-off-Phase). Vor setSettingValue("gps","1")
-    // wieder hochfahren, sonst kommen keine NMEA-Frames durch.
-    // Gilt fuer Boards mit GPS am Serial1 (PIN_GPS_RX gesetzt).
+    // Wunschliste 84 Hebel B + Phantom-Power-Fix (2026-06-18):
+    // ZUERST GPS-Modul mit Strom versorgen, DANN UART. Sonst treibt
+    // der TX-Pin 3.3V auf den noch stromlosen GPS-Chip (Phantom-
+    // Powering ueber ESD-Schutzdioden). 20ms delay damit der GPS-IC
+    // seine Power-On-Sequenz abschliessen kann bevor wir mit ihm
+    // reden.
+    sensors.setSettingValue("gps", "1");
 #if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
+    delay(20);
 #ifdef GPS_BAUD_RATE
     Serial1.begin(GPS_BAUD_RATE);
 #else
     Serial1.begin(9600);
 #endif
 #endif
-    sensors.setSettingValue("gps", "1");
     _gps_woke_at_millis = (now == 0 ? 1 : now);   // 0 means "never managed"
     _gps_off_at_millis = 0;
     _gps_fix_seen_this_wake = false;              // start a fresh wake cycle
@@ -8851,15 +8976,17 @@ void MyMesh::manageGpsPower() {
     // greift aber auch wenn diese Upstream-Patches ge-reverted wuerden.
     LocationProvider* loc = sensors.getLocationProvider();
     if (loc) loc->syncTime();
-    sensors.setSettingValue("gps", "0");
-    // Wunschliste 84 Hebel B (Peripherie-Deinit): GPS-Modul ist jetzt
-    // physisch aus (PIN_GPS_EN low oder setSettingValue-Pfad). Serial1
-    // wuerde im Hintergrund weiterlaufen und ein paar mA fuer die UART-
-    // Hardware verbrennen. Im Sleep-Zyklus (10/15min off) ist das
-    // sichtbar -- end() hier, begin() beim naechsten wake.
+    // Wunschliste 84 Hebel B + Phantom-Power-Fix (2026-06-18):
+    // Reihenfolge umgedreht. Zuerst UART aus, DANN GPS-Power weg.
+    // Sonst treibt der UART-TX-Pin nach dem PIN_GPS_EN=LOW noch fuer
+    // einige Mikrosekunden 3.3V auf die RX-Leitung des bereits
+    // stromlosen GPS-Chips -- klassisches Phantom-Powering ueber die
+    // ESD-Schutzdioden. Anti-Pattern aus Meshtastic GPS_HARDSLEEP-Bug
+    // (User-Befund 2026-06-18, ~10 mA Phantom-Strom).
 #if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
     Serial1.end();
 #endif
+    sensors.setSettingValue("gps", "0");
     _gps_woke_at_millis = 0;
     _gps_off_at_millis = (now == 0 ? 1 : now);
     _gps_fix_seen_this_wake = false;
@@ -9140,6 +9267,9 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("gps_lead_secs",         _prefs.gps_lead_secs);   // Wunschliste 81 Phase 3
   kv_uint("gps_profile",           _prefs.gps_profile);
   kv_uint("rx_disabled",           _prefs.rx_disabled);   // Wunschliste 83
+  kv_uint("batt_chemistry",        _prefs.batt_chemistry);          // Wunschliste 91
+  kv_uint("batt_min_mv",           _prefs.batt_min_mv);             // Wunschliste 91
+  kv_uint("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min);   // Wunschliste 90
   kv_uint("repeat_scope_mode",     _prefs.repeat_scope_mode);
   kv_uint("msg_store_flash",       _prefs.msg_store_flash);
   kv_arr_uint8("msg_store_limit",  _prefs.msg_store_limit, 5);
@@ -10072,6 +10202,9 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "gps_lead_secs") == 0)         { _prefs.gps_lead_secs         = (uint32_t)as_uint(); _br_applied++; return; }  // Wunschliste 81 Phase 3
       if (strcmp(key, "gps_profile") == 0)           { _prefs.gps_profile           = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "rx_disabled") == 0)           { _prefs.rx_disabled           = (uint8_t)as_uint() ? 1 : 0; _br_applied++; return; }   // Wunschliste 83
+      if (strcmp(key, "batt_chemistry") == 0)        { uint8_t v=(uint8_t)as_uint(); if (v>2) v=0; _prefs.batt_chemistry=v; _br_applied++; return; }       // Wunschliste 91
+      if (strcmp(key, "batt_min_mv") == 0)           { _prefs.batt_min_mv           = (uint16_t)as_uint(); _br_applied++; return; }                       // Wunschliste 91
+      if (strcmp(key, "usb_loss_shutdown_min") == 0) { uint32_t v=as_uint(); if (v>240) v=240; _prefs.usb_loss_shutdown_min=(uint8_t)v; _br_applied++; return; }  // Wunschliste 90
       if (strcmp(key, "repeat_scope_mode") == 0)     { _prefs.repeat_scope_mode     = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "msg_store_flash") == 0)       { _prefs.msg_store_flash       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "log_flags") == 0)             { _prefs.log_flags             = (uint8_t)as_uint(); _br_applied++; return; }
@@ -11405,6 +11538,54 @@ static long parseTimeWithUnit(const char* s, char default_unit, bool accept_d) {
     default: return -1;
   }
   return (long)(n * mult);
+}
+
+// ---------- Battery: Discharge-Tabellen + Charge-% Lookup -------------
+// Wunschliste 89/90/91 (2026-06-18): pro Akku-Chemie eine Tabelle von
+// Stuetzstellen mV -> Charge-%. Linear-Interpoliert zwischen Stuetzstellen.
+// Werte sind Daumenwerte aus Datasheets (Sony, Samsung Li-Ion; Headway
+// LiFePO4) -- Lade-Zustand bei Last-freier Messung. Bei Last (LoRa-TX)
+// sinkt die Spannung kurzzeitig 50-100mV -- daher Sampling-Strategie
+// 10s ueber 30s in manageBatteryAndUsb.
+struct BattCurvePoint { uint16_t mv; uint8_t pct; };
+// Li-Ion / Li-Po 1S. Cutoff 3000mV, Lade-Ende 4200mV.
+static const BattCurvePoint BATT_CURVE_LIPO[] = {
+  { 4200, 100 }, { 4100,  90 }, { 4000, 80 }, { 3900, 70 },
+  { 3800,  60 }, { 3700,  50 }, { 3600, 40 }, { 3500, 30 },
+  { 3400,  20 }, { 3300,  10 }, { 3200,  5 }, { 3000,  0 }
+};
+// LiFePO4 1S. Cutoff 2500mV, Lade-Ende 3650mV. Flache Plateau-Phase
+// um 3.2V -- daher feinere Stuetzstellen dort.
+static const BattCurvePoint BATT_CURVE_LIFEPO4[] = {
+  { 3650, 100 }, { 3400,  90 }, { 3300, 80 }, { 3250, 60 },
+  { 3200,  50 }, { 3150,  40 }, { 3100, 30 }, { 3000, 20 },
+  { 2800,  10 }, { 2500,   0 }
+};
+// chemistry: 1=lipo, 2=lifepo4. mv: gemessen. Rueckgabe 0..100,
+// 0xFF wenn Chemistry nicht gesetzt / disabled.
+static uint8_t getBattChargePctForCurve(uint8_t chemistry, uint16_t mv) {
+  const BattCurvePoint* tab; size_t n;
+  if (chemistry == 1)      { tab = BATT_CURVE_LIPO;     n = sizeof(BATT_CURVE_LIPO)    / sizeof(BattCurvePoint); }
+  else if (chemistry == 2) { tab = BATT_CURVE_LIFEPO4;  n = sizeof(BATT_CURVE_LIFEPO4) / sizeof(BattCurvePoint); }
+  else                     return 0xFF;
+  if (mv >= tab[0].mv) return 100;
+  for (size_t i = 1; i < n; i++) {
+    if (mv >= tab[i].mv) {
+      uint16_t span_mv = tab[i-1].mv - tab[i].mv;
+      uint8_t  span_pct = tab[i-1].pct - tab[i].pct;
+      uint16_t dmv      = mv - tab[i].mv;
+      return tab[i].pct + (uint8_t)((uint32_t)dmv * span_pct / span_mv);
+    }
+  }
+  return 0;
+}
+// Default-Cutoff-Schwelle pro Chemie -- der Wert ist deutlich ueber
+// dem absoluten Cutoff (Reserve fuer Boot/Restart). User kann via
+// 'set batt_min_mv' anpassen.
+static uint16_t getBattDefaultMinMv(uint8_t chemistry) {
+  if (chemistry == 1) return 3200;  // Li-Ion/Li-Po Reserve
+  if (chemistry == 2) return 2700;  // LiFePO4 Reserve
+  return 0;
 }
 
 // Compact-Formatter: 30 -> "30s", 90 -> "1m30s", 3700 -> "1h2m", 90061 -> "1d1h".
@@ -12908,6 +13089,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         formatDurationCompact(d, sizeof(d), age_s);
         snprintf(age_buf, sizeof(age_buf), "%s ago", d);
       }
+      // Wunschliste 89/90/91: USB-Status + Charge-%.
+      bool usb_on = board.isExternalPowered();
+      uint8_t pct_d = (_prefs.batt_chemistry == 0) ? 0xFF
+                    : getBattChargePctForCurve(_prefs.batt_chemistry, bmv_d);
+      char batt_line[48];
+      if (pct_d != 0xFF) {
+        snprintf(batt_line, sizeof(batt_line), "%u mV (%u%%) %s",
+                 (unsigned)bmv_d, (unsigned)pct_d, usb_on ? "[usb]" : "");
+      } else {
+        snprintf(batt_line, sizeof(batt_line), "%u mV%s",
+                 (unsigned)bmv_d, usb_on ? " [usb]" : "");
+      }
 #ifdef T1000_E
       extern uint32_t t1000e_get_light();
       extern float    t1000e_get_temperature();
@@ -12915,20 +13108,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       float    tmp_d = t1000e_get_temperature();
       snprintf(rd, sizeof(rd),
                "sensors:\n"
-               "  battery = %u mV\n"
+               "  battery = %s\n"
                "  temp    = %.1f C (NTC heater-sensor)\n"
                "  light   = %lu (Photocell 0-100, app zeigt als lux)\n"
                "  gps     = %.6f, %.6f\n"
                "    src=%s  last_fix=%s",
-               (unsigned)bmv_d, (double)tmp_d, (unsigned long)lux_d,
+               batt_line, (double)tmp_d, (unsigned long)lux_d,
                sensors.node_lat, sensors.node_lon, gps_src, age_buf);
 #else
       snprintf(rd, sizeof(rd),
                "sensors:\n"
-               "  battery = %u mV\n"
+               "  battery = %s\n"
                "  gps     = %.6f, %.6f\n"
                "    src=%s  last_fix=%s",
-               (unsigned)bmv_d,
+               batt_line,
                sensors.node_lat, sensors.node_lon, gps_src, age_buf);
 #endif
       pushCompanionMessage(rd);
@@ -13747,16 +13940,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // (analog App-Pfad CMD_SET_RADIO_PARAMS). Vorher musste man auf
       // den naechsten manageGpsPower-Tick warten -- und wenn
       // !gps_had_fix_ever, returnte der frueh und schaltete nie ein.
-      // Wunschliste 84 Hebel B: Serial1 koennte vom letzten Sleep-
-      // Cycle .end()'d sein -- vor setSettingValue wieder hoch.
+      // Wunschliste 84 Hebel B + Phantom-Power-Fix (2026-06-18):
+      // ZUERST Power an, DANN UART, mit 20ms delay damit der GPS-IC
+      // Power-On abschliesst bevor wir reden.
+      sensors.setSettingValue("gps", "1");
 #if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
+      delay(20);
 #ifdef GPS_BAUD_RATE
       Serial1.begin(GPS_BAUD_RATE);
 #else
       Serial1.begin(9600);
 #endif
 #endif
-      sensors.setSettingValue("gps", "1");
       _gps_woke_at_millis = millis();
       if (_gps_woke_at_millis == 0) _gps_woke_at_millis = 1;
       _gps_fix_seen_this_wake = false;
@@ -13776,12 +13971,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.gps_enabled = 0;
       savePrefs();
       reevaluateRepeaterBbox();  // Reise-Fix 2026-06-08
-      // GPS-Modul sofort physisch ausschalten.
-      sensors.setSettingValue("gps", "0");
-      // Wunschliste 84 Hebel B: Serial1 auch deinit.
+      // Wunschliste 84 Hebel B + Phantom-Power-Fix (2026-06-18):
+      // ZUERST UART aus, DANN GPS-Power weg (sonst Phantom-Powering
+      // ueber UART-TX-Pin auf stromlosen Chip).
 #if ENV_INCLUDE_GPS == 1 && defined(PIN_GPS_RX)
       Serial1.end();
 #endif
+      sensors.setSettingValue("gps", "0");
       _gps_user_override_until_advert = false;
       pushCompanionMessage("OK - GPS disabled.");
     } else if (gps_idx == 2) {    // sync
@@ -19339,6 +19535,65 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // Wunschliste 91: Battery-Schutz Chemistry.
+    //   set batt_chemistry <none|lion|lipo|lifepo4>  (lion = lipo Alias)
+    if (strcmp(key, "batt_chemistry") == 0) {
+      uint8_t v;
+      if (strcasecmp(value_lc, "none") == 0 || strcmp(value_lc, "0") == 0) v = 0;
+      else if (strcasecmp(value_lc, "lion") == 0
+            || strcasecmp(value_lc, "lipo") == 0
+            || strcmp(value_lc, "1") == 0)                                v = 1;
+      else if (strcasecmp(value_lc, "lifepo4") == 0
+            || strcasecmp(value_lc, "lfp")     == 0
+            || strcmp(value_lc, "2") == 0)                                v = 2;
+      else {
+        pushCompanionMessage("Werte: none | lion | lipo | lifepo4");
+        return;
+      }
+      _prefs.batt_chemistry = v;
+      savePrefs();
+      const char* nm = (v == 1) ? "lion/lipo" : (v == 2) ? "lifepo4" : "none";
+      char r[120];
+      uint16_t def = getBattDefaultMinMv(v);
+      snprintf(r, sizeof(r),
+               "OK - batt_chemistry = %s\n  default cutoff = %u mV (set batt_min_mv fuer Override)",
+               nm, (unsigned)def);
+      pushCompanionMessage(r);
+      return;
+    }
+    // Wunschliste 91: Battery-Schutz Schwelle in mV. 0 = Default je Chemie.
+    if (strcmp(key, "batt_min_mv") == 0) {
+      int v = atoi(value_lc);
+      if (v < 0 || v > 5000) {
+        pushCompanionMessage("Wert ausserhalb 0..5000 mV");
+        return;
+      }
+      _prefs.batt_min_mv = (uint16_t)v;
+      savePrefs();
+      char r[120];
+      uint16_t eff = (v == 0) ? getBattDefaultMinMv(_prefs.batt_chemistry) : (uint16_t)v;
+      snprintf(r, sizeof(r),
+               "OK - batt_min_mv = %d (%s, effektiv %u mV)",
+               v, v == 0 ? "default" : "user", (unsigned)eff);
+      pushCompanionMessage(r);
+      return;
+    }
+    // Wunschliste 90: USB-Loss-Shutdown-Timer.
+    if (strcmp(key, "usb_loss_shutdown_min") == 0) {
+      int v = atoi(value_lc);
+      if (v < 0 || v > 240) {
+        pushCompanionMessage("Wert ausserhalb 0..240 (Minuten). 0 = disabled.");
+        return;
+      }
+      _prefs.usb_loss_shutdown_min = (uint8_t)v;
+      savePrefs();
+      char r[120];
+      if (v == 0) snprintf(r, sizeof(r), "OK - usb_loss_shutdown disabled.");
+      else        snprintf(r, sizeof(r), "OK - usb_loss_shutdown_min = %d (powerOff %d min nach USB-Loss).", v, v);
+      pushCompanionMessage(r);
+      return;
+    }
+
     // Wunschliste 24: Hop-Cap fuer Nicht-Chat-Adverts (Repeater/Sensor/
     // Room). Range 0..flood_max. 0 = deaktiviert (es gilt flood_max).
     // Plus Sondersyntax: "follow" / "max" -> Sentinel 254 = persistent
@@ -20392,6 +20647,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(r, sizeof(r), "flood_max_scope_region = %u", (unsigned)_prefs.flood_max_scope_region);
     }
     else if (strcmp(key, "flood_max") == 0 || strcmp(key, "flood.max") == 0) snprintf(r, sizeof(r), "flood_max = %u", (unsigned)_prefs.flood_max);
+    else if (strcmp(key, "batt_chemistry") == 0) {
+      const char* nm = (_prefs.batt_chemistry == 1) ? "lion/lipo"
+                     : (_prefs.batt_chemistry == 2) ? "lifepo4" : "none";
+      snprintf(r, sizeof(r), "batt_chemistry = %s", nm);
+    }
+    else if (strcmp(key, "batt_min_mv") == 0) {
+      uint16_t eff = (_prefs.batt_min_mv == 0)
+                     ? getBattDefaultMinMv(_prefs.batt_chemistry)
+                     : _prefs.batt_min_mv;
+      snprintf(r, sizeof(r), "batt_min_mv = %u (effektiv %u mV)",
+               (unsigned)_prefs.batt_min_mv, (unsigned)eff);
+    }
+    else if (strcmp(key, "usb_loss_shutdown_min") == 0) {
+      snprintf(r, sizeof(r), "usb_loss_shutdown_min = %u",
+               (unsigned)_prefs.usb_loss_shutdown_min);
+    }
     else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
       if (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW)
         snprintf(r, sizeof(r), "flood_max_infra = follow (-> %u)", (unsigned)_prefs.flood_max);
@@ -20701,10 +20972,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                 "%lud%02luh%02lum\n", up_d, up_h, up_m);
     else          n += snprintf(block+n, sizeof(block)-n,
                                 "%luh%02lum\n", up_h, up_m);
-    n += snprintf(block+n, sizeof(block)-n,
-                  "  battery   = %u mV\n"
-                  "  msg-queue = %d / %d slots\n",
-                  (unsigned)batt_mv, q_used, q_cap);
+    // Wunschliste 89/90/91: USB-Status + Charge-% (wenn chemistry set).
+    bool usb_on = board.isExternalPowered();
+    uint8_t pct = (_prefs.batt_chemistry == 0) ? 0xFF
+                : getBattChargePctForCurve(_prefs.batt_chemistry, batt_mv);
+    if (pct != 0xFF) {
+      n += snprintf(block+n, sizeof(block)-n,
+                    "  battery   = %u mV (%u%%) %s\n"
+                    "  msg-queue = %d / %d slots\n",
+                    (unsigned)batt_mv, (unsigned)pct,
+                    usb_on ? "[usb]" : "", q_used, q_cap);
+    } else {
+      n += snprintf(block+n, sizeof(block)-n,
+                    "  battery   = %u mV%s\n"
+                    "  msg-queue = %d / %d slots\n",
+                    (unsigned)batt_mv,
+                    usb_on ? " [usb]" : "", q_used, q_cap);
+    }
     // CPU-Temperatur (User-Wunsch 2026-06-14): ESP32-S3 hat internen
     // Temp-Sensor. Arduino-ESP32 temperatureRead() liefert float °C.
     // Auf NRF52/anderen Plattformen nicht verfuegbar -- daher #ifdef.
@@ -23745,5 +24029,16 @@ bool MyMesh::hasPendingWork() const {
   if (_mgr->getOutboundTotal() > 0) return true;
   if (dirty_contacts_expiry != 0
       && (long)(millis() - dirty_contacts_expiry) >= 0) return true;
+  return false;
+}
+
+// Wunschliste 86 Phase 1 (2026-06-18): ESP32-Light-Sleep darf nicht
+// laufen waehrend USB-CLI gerade aktiv ist (Output-Verlust). Async-
+// Window (z.B. nach 'discover regions' fuer Antworten) auch
+// schuetzen. Millis-wrap-safe via signed-Vergleich.
+bool MyMesh::isSerialCliActive() const {
+  if (_serial_cli_active) return true;
+  if (_serial_cli_async_expiry_ms != 0
+      && (int32_t)(millis() - _serial_cli_async_expiry_ms) < 0) return true;
   return false;
 }

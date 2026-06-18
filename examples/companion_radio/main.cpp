@@ -698,6 +698,12 @@ void loop() {
 #if defined(NRF52_PLATFORM)
     board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
 #endif
+    // Wunschliste 86 Phase 1 -- ESP32 light-sleep REVERTIERT
+    // 2026-06-19 (User-Befund: USB-CDC kommt nicht wieder, Button
+    // weckt nicht, Display bleibt schwarz nach Logo). Naechster
+    // Versuch braucht zwingend Button-GPIO als Wake-Source
+    // (PIN_USER_BTN=0 fuer Heltec WT) plus moeglicherweise USB-CDC-
+    // Wake. Siehe Wunschliste 86 mit Update-Eintrag.
   }
 
 #if defined(ESP32) && defined(WIFI_SSID)

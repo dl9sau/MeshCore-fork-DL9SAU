@@ -532,6 +532,11 @@ public:
 
   // To check if there is pending work
   bool hasPendingWork() const;
+  // Wunschliste 86 Phase 1: ESP32-Light-Sleep darf NICHT laufen
+  // waehrend der USB-Serial-CLI gerade einen Command bearbeitet
+  // (sonst geht spaeter eintreffender Output verloren). Eigentlicher
+  // Async-Async-Window auch beachtet via _serial_cli_async_expiry_ms.
+  bool isSerialCliActive() const;
 
 private:
   void writeOKFrame();
@@ -1049,6 +1054,8 @@ private:
   // Pref + Repeater-Modus + Boot/Wake-Windows ob RX an oder im Sleep
   // sein soll, und ruft entsprechend radio_driver.setRxSuspended().
   void manageRxPower();
+  // Wunschliste 89/90/91: Battery-Schutz + USB-Loss-Timer Tick.
+  void manageBatteryAndUsb();
 
   // Dispatcher hooks: per-packet TX-param override (CR5 / reduced power) used
   // for repeated packets and our automatic adverts. Eigene Direct-Messages
@@ -1232,6 +1239,22 @@ private:
   //                          manageRxPower() keine Redundant-Calls macht.
   unsigned long _rx_wake_until_millis;
   bool          _rx_currently_suspended;
+
+  // DL9SAU 2026-06-18 (Wunschliste 89/90/91): Battery + USB-Power State.
+  // _usb_lost_at_millis: 0 wenn USB an, sonst millis() der ersten USB-
+  //                      off-Erkennung. Hysterese 10s gegen Glitches.
+  // _batt_last_sample_millis: 10-min Sample-Anker. 0 = erste Messung pending.
+  // _batt_low_burst_until_millis: wenn != 0, im 10s-Sampling-Modus bis
+  //                      zu diesem millis. Bei drei Samples unter Schwelle
+  //                      -> shutdown via board.powerOff().
+  // _batt_low_consecutive: Counter im Burst-Mode (3 = shutdown).
+  // _batt_last_mv / _batt_last_pct: letzte ermittelte Werte fuer Status.
+  unsigned long _usb_lost_at_millis;
+  unsigned long _batt_last_sample_millis;
+  unsigned long _batt_low_burst_until_millis;
+  uint8_t       _batt_low_consecutive;
+  uint16_t      _batt_last_mv;
+  uint8_t       _batt_last_pct;
 
   // Pre-computed TransportKeys for every region in dl9sau_regions[]. Built
   // once in begin() via SHA-256 over "#name". Lookup at packet receive time

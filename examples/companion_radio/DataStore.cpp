@@ -475,6 +475,17 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
       _prefs.gps_lead_secs = 0;  // -> begin() migriert aus gps_lead_min
     }
 
+    // DL9SAU 2026-06-18 (Wunschliste 89/90/91): Battery + USB-Power.
+    file.read((uint8_t *)&_prefs.batt_chemistry,
+              sizeof(_prefs.batt_chemistry));
+    if (_prefs.batt_chemistry == 0xFF) _prefs.batt_chemistry = 0;  // disabled
+    file.read((uint8_t *)&_prefs.batt_min_mv,
+              sizeof(_prefs.batt_min_mv));
+    if (_prefs.batt_min_mv == 0xFFFF) _prefs.batt_min_mv = 0;       // -> Default
+    file.read((uint8_t *)&_prefs.usb_loss_shutdown_min,
+              sizeof(_prefs.usb_loss_shutdown_min));
+    if (_prefs.usb_loss_shutdown_min == 0xFF) _prefs.usb_loss_shutdown_min = 0;
+
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
     // NRF52 nutzt DFU-Pfad statt WiFi-OTA).
@@ -699,6 +710,14 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // DL9SAU 2026-06-18 (Wunschliste 81 Phase 3): gps_lead_secs.
     file.write((uint8_t *)&_prefs.gps_lead_secs,
                sizeof(_prefs.gps_lead_secs));
+
+    // DL9SAU 2026-06-18 (Wunschliste 89/90/91): Battery + USB.
+    file.write((uint8_t *)&_prefs.batt_chemistry,
+               sizeof(_prefs.batt_chemistry));
+    file.write((uint8_t *)&_prefs.batt_min_mv,
+               sizeof(_prefs.batt_min_mv));
+    file.write((uint8_t *)&_prefs.usb_loss_shutdown_min,
+               sizeof(_prefs.usb_loss_shutdown_min));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).

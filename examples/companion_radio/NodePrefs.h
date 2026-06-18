@@ -696,6 +696,22 @@ struct NodePrefs {  // persisted to file
   //     begin() (gps_lead_min * 60). 0xFFFFFFFF im File = EOF/Legacy.
   // CLI 'gps power lead <N>[s|m|h|d]' -- Default-Suffix m.
   uint32_t       gps_lead_secs;
+  // DL9SAU 2026-06-18 (Wunschliste 89/90/91): Battery + USB-Power.
+  // batt_chemistry: 0=disabled (kein Schutz, keine %-Anzeige),
+  //                 1=lion/lipo (1S, Cutoff 3000mV, Default-Schwelle 3200),
+  //                 2=lifepo4   (1S, Cutoff 2500mV, Default-Schwelle 2700).
+  // batt_min_mv: User-Cutoff-Schwelle in mV. 0 = Default je Chemie.
+  //              Wenn unterschritten -> shutdown via state-machine
+  //              (10s-Sampling-Verify ueber 30s gegen LoRa-TX-Spike).
+  //              Bei isExternalPowered() ist Schutz DEAKTIVIERT
+  //              (Lade-Wave verfaelscht Messung).
+  // usb_loss_shutdown_min: nach USB-Verlust N Minuten -> shutdown.
+  //              0 = disabled (Default). 1..240. Use-Case: Tracker
+  //              im Auto, Zuendung aus -> nach N min sauberer Off.
+  // 0xFF im File = EOF-Sentinel -> Migration in begin() zu defaults.
+  uint8_t        batt_chemistry;
+  uint16_t       batt_min_mv;
+  uint8_t        usb_loss_shutdown_min;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim
