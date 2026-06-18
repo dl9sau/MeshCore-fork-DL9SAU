@@ -7073,3 +7073,136 @@ funktional identisch sein bzw. konsistenter werden).
 Quelle: User-Wunsch 2026-06-18 nach Phase-3-Implementation.
 
 
+--------------------------------------------------------------------------------
+88. at / cron-aehnliche Befehle (User-Wunsch 2026-06-18 abend)
+--------------------------------------------------------------------------------
+
+Status: TODO. Konzept-Skizze.
+
+Motivation:
+  Zeit-getriggerte Aktionen ohne dass der User die App offen halten
+  muss. Use-Cases:
+   - Naechtlicher Reboot zur Konsolidierung
+   - GPS nur zu bestimmten Zeiten aktivieren (Tag-/Nacht-Profile)
+   - Periodische Adverts an bestimmten Wochentagen
+   - Geplante Wartungsfenster
+
+Trennung at vs cron:
+  at   = runtime-only, einmalige Ausfuehrung, kein Pref-Storage
+         (RAM, nach Reboot weg).
+  cron = persistent, wiederholt (Pref-Storage, ueberlebt Reboot).
+
+CLI-Syntax-Vorschlag:
+
+  at <zeit> <cmd>            Einmaliger Job in RAM
+  at list                    aktive at-Jobs
+  at del <id>                at-Job loeschen
+  at clear                   alle at-Jobs
+
+  cron add <intervall|wktg> <cmd>   Neuer cron-Job (persistent)
+  cron list                  aktive cron-Jobs
+  cron del <id>              cron-Job loeschen
+  cron enable <id>           re-enable
+  cron disable <id>          temporaer deaktivieren
+
+Beispiele (User-Vorschlag, 2026-06-18 abend):
+  at 20:00 reboot            absolute Uhrzeit (RTC-basiert)
+  at 21:50 gps off
+  at +10h gps on             relativ (millis-basiert, +N[m|h|d])
+  at +30m advert
+  cron add 7d gps sync       (alle 7 Tage)
+  cron add Mo,Fr advert      (Mo + Fr)
+
+Zeit-Format (User-Klarstellung 2026-06-18 abend):
+  Minute-Granularitaet reicht -- KEINE Sekunden noetig.
+
+  at HH:MM           Absolute Uhrzeit (RTC-basiert). Naechster
+                     matching Slot heute oder morgen.
+  at +<N>[m|h|d]     Relativ ab jetzt. Mit millis() einfach umsetzbar.
+                     Kein RTC noetig -- gut auch wenn RTC noch
+                     ungueltig. Max 14d (uint32 millis reicht
+                     bequem; 50d wraps brauchen wir nicht).
+  cron <N>[m|h|d]    Intervall. Analog tx suspend Parser.
+                     Min 1min, Max 90d.
+  cron Mo,Di,...     Wochentag-Liste, Komma-getrennt.
+                     Optional: 'Mo,Fr 08:00 advert' fuer Zeitfenster.
+
+Syntax-Philosophie (User-Klarstellung):
+  KEINE Unix-crontab-Komplexitaet (kein '* * * MON-FRI ...').
+  Drei klare Formen die alle Use-Cases abdecken: Intervall, Wochentag,
+  Wochentag+Zeit.
+
+Datenstruktur (Pref-Layout-Vorschlag):
+
+  struct CronEntry {
+    uint8_t  flags;          // bit 0 = enabled, bit 1 = weekday-based
+    uint8_t  weekday_mask;   // bit 0=Mo, bit 1=Di, ..., bit 6=So
+    uint16_t hour_min;       // h*60+m (0xFFFF = no time, just interval)
+    uint32_t interval_secs;  // 0 = nur weekday-based
+    uint32_t last_run_secs;  // wann zuletzt ausgefuehrt (Unix)
+    char     cmd[48];        // Befehl
+  };
+  // Pref: cron_entries[16] (Wahl-Limit). + at_entries[8] (RAM).
+
+  // at-RAM-Eintrag hat zwei Varianten je nach Form:
+  struct AtEntry {
+    uint8_t        flags;          // bit 0 = relative (millis-based)
+    union {
+      uint32_t     trigger_millis; // bei flags&1: millis()-Wert
+      struct {
+        uint16_t   hour_min;       // h*60+m
+        uint8_t    target_day;     // 0=heute, 1=morgen
+      } abs;                       // bei !flags&1: RTC-basiert
+    } when;
+    char           cmd[48];
+  };
+  // -> kompakt, RAM-only, kein Backup-Storage.
+
+Constraints (User-Wunsch):
+  - cron-Jobs werden erst NACH der 10min BOOT-Grace ausgefuehrt
+    (analog dem BLE-Boot-Grace -- vermeidet Last-Spike beim Boot,
+    plus RTC muss erst gesynct sein).
+  - at-Jobs duerfen waehrend Boot-Grace ausgefuehrt werden (User
+    hat es ja explizit gesetzt, will sofortige Wirkung).
+
+Edge-Cases:
+  - RTC ungueltig (pre-2017): cron + 'at HH:MM' blockieren bis time-
+    valid. 'at +N[m|h|d]' funktioniert ohne RTC (millis-basiert) --
+    User-Klarstellung: das ist genau der Sinn der relativen Form.
+  - millis-wrap (49 Tage): User-Klarstellung -- 'at 50d' brauchen wir
+    nicht. Cap 'at +N[m|h|d]' auf 14d, dann ist Wrap-Range nicht
+    erreichbar.
+  - cron ist Unix-time-basiert (last_run_secs), kein millis -- wegen
+    wrap und weil RTC ohnehin fuer Zeit-Trigger noetig.
+  - cron-Job loescht sich selbst: Schutz vor cmd="cron clear"
+    (sonst Loop).
+  - cmd ist text der durch handleCompanionCommand laeuft -- gleicher
+    Pfad wie User-Eingabe, evtl. Kontext-Stub (was ist 'companion
+    channel' fuer cron?).
+  - Mehrere Jobs gleichzeitig: Reihenfolge nach Index. Cmd-Ausfuehrung
+    sequentiell.
+
+Backup save/restore: cron_entries[] mit kv_bytes oder pro-Eintrag-kv.
+Eher pro-Eintrag (Listen-Layout-Wechsel sonst kritisch).
+
+Aufwand-Schaetzung:
+  - Pref-Storage + Migration: 2h
+  - CLI 'at' + 'cron' Parser: 4-6h
+  - Scheduler-Loop (Tick im manage-Ebene): 2h
+  - Edge-Cases (RTC, BOOT-Grace, wrap, recursion-Schutz): 2-3h
+  - Backup save/restore: 1h
+  - Help-Texte + Wunschliste-Doku: 1h
+  Total: 12-15h. Risk: medium (Scheduler kann subtle Bugs haben).
+
+Pre-Implementation-Check:
+  - Soll cron auch sub-day-Granularitaet haben (z.B. alle 4h)?
+    -> ja, ueber interval_secs.
+  - Soll at auch wiederholend sein ("at 20:00 reboot,Mo")?
+    -> nein, at ist immer einmalig. Wiederholung = cron.
+  - Was passiert wenn ein at-Job zur exakt gleichen Sekunde wie ein
+    cron-Job laeuft? -> beide ausfuehren, Reihenfolge by index.
+
+Quelle: User-Wunsch 2026-06-18 abend, am Ende des Tages.
+
+
+
