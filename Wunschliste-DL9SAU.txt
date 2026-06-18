@@ -7656,4 +7656,55 @@ Recherche-TODO (low-Prio, 2026-06-18 spaet):
   Wissens-Komplettierung, kein Code-Aenderungs-Trigger.
 
 
+--------------------------------------------------------------------------------
+93. Airoha AG3335 Periodic-Sleep Mode (T1000-E, User-Befund 2026-06-19)
+--------------------------------------------------------------------------------
+
+Status: TODO. Low-Prio (spaeter, parallel zu 92).
+
+Motivation:
+  Komplementaer zu Wunschliste 92 (UBLOX-Low-Power fuer Heltec WT).
+  T1000-E hat keinen UBLOX-Chip sondern Airoha AG3335 (variant.h:108
+  GNSS_AIROHA). Meshtastic spricht den nicht mit Low-Power-Modi an:
+    meshtastic firmware/src/gps/GPS.cpp:1915-1920 macht bei
+    #ifdef GNSS_AIROHA nur digitalWrite(PIN_GPS_EN, LOW) -- voll aus.
+  Der Airoha-AG3335-Datasheet beschreibt aber interne Low-Power-
+  Features (Periodic Sleep mit konfigurierbarer Wake/Sleep-Cadence).
+  Wenn wir das ansprechen, gewinnen wir Spar-Potential bei T1000-E
+  ohne den ESP32-vs-NRF52 Plattform-Vergleich zu verfaelschen.
+
+Spar-Potential:
+  Vermutete Groesse aehnlich UBLOX (25-30 mA bei GPS-on)? Unbestaetigt.
+  Datasheet-Recherche noetig fuer konkrete Stromaufnahme-Tabelle.
+  T1000-E aktuell User-Messung Idle ~30 mA (bei voller Akku-Spannung).
+  Mit GPS an erwartet zusaetzlich +20-30 mA -- mit Periodic Sleep
+  evtl. nur noch +5-10 mA.
+
+Implementierungs-Pfad:
+  Phase A:
+    - AG3335 Periodic-Sleep-Konfigurations-Strings aus Datasheet
+      identifizieren (vermutlich NMEA-proprietary $PMTK-Sentences
+      oder UBX-aehnliche Binaer-Pakete -- AG3335 ist Mediatek-basiert,
+      Mediatek-style $PMTK220 / $PMTK225 typisch).
+    - Im setSettingValue("gps","1")-Pfad nach Power-On die
+      Konfiguration senden. NMEA-Format ohne Antwort-Quittung
+      (Mediatek-typisch), Setup-Robustheit durch Wiederholung.
+
+  Phase B (optional):
+    - User-CLI 'gps power airoha-psm on|off'.
+    - Diagnose-Anzeige.
+
+Risiken:
+  - Mediatek-Doku oft luecken haft, Verhalten zwischen AG3335 und
+    aelteren MT3333/MT3339 unterscheidet sich.
+  - Periodic Sleep beeinflusst Fix-Reaktionszeit.
+  - GPS-EN-Pin-Steuerung muss harmonieren (Periodic Sleep ist
+    Software-Modus, EN-low ist Hardware-aus).
+
+Aufwand-Schaetzung: 3-5h Recherche + 2-3h Code + 2h Test pro
+Cadence-Setting.
+
+Quelle: User-Befund + Meshtastic-Code-Analyse 2026-06-19 spaet.
+Verwandt zu Wunschliste 92 (UBLOX-Aequivalent fuer Heltec WT).
+
 
