@@ -7124,8 +7124,19 @@ Zeit-Format (User-Klarstellung 2026-06-18 abend):
                      bequem; 50d wraps brauchen wir nicht).
   cron <N>[m|h|d]    Intervall. Analog tx suspend Parser.
                      Min 1min, Max 90d.
+  cron <N>[m|h]/<K>  Division-Form: N/K alle (N/K) Zeiteinheiten.
+                     Beispiel: '60m/6' = alle 10min, '24h/4' = alle 6h.
+                     Eleganter als '10m' wenn man "6x pro Stunde"
+                     ausdruecken will.
   cron Mo,Di,...     Wochentag-Liste, Komma-getrennt.
                      Optional: 'Mo,Fr 08:00 advert' fuer Zeitfenster.
+  cron min L1,L2,L3  Minuten-Slots innerhalb jeder Stunde.
+                     Beispiel: 'cron min 10,20,30 gps sync' -> feuert
+                     bei :10, :20, :30 jeder Stunde (3x pro Stunde).
+                     Liste max 12 Eintraege.
+
+Diese Formen sind nicht-Unix-crontab-kompatibel, aber im 90% der
+Use-Cases ausreichend und syntaktisch klar lesbar.
 
 Syntax-Philosophie (User-Klarstellung):
   KEINE Unix-crontab-Komplexitaet (kein '* * * MON-FRI ...').
@@ -7203,6 +7214,172 @@ Pre-Implementation-Check:
     cron-Job laeuft? -> beide ausfuehren, Reihenfolge by index.
 
 Quelle: User-Wunsch 2026-06-18 abend, am Ende des Tages.
+
+
+--------------------------------------------------------------------------------
+89. USB-Power-Detection -- Anzeige usb-charging / usb-powered (User-Wunsch 2026-06-18)
+--------------------------------------------------------------------------------
+
+Status: TODO. Recherche durchgefuehrt (Stand 2026-06-18 abend).
+
+Motivation:
+  Statusausgabe ('stats', 'gps', UI-Display etc.) soll zeigen ob
+  das Geraet gerade ueber USB versorgt wird, ggf. ob der Akku
+  geladen wird. Plus Grundlage fuer Wunschliste 90 (Powerdown nach
+  USB-Loss).
+
+Recherche-Ergebnis 2026-06-18 (Sub-Agent Explore):
+
+T1000-E (NRF52840) -- READY-TO-USE:
+  NRF52Board::isExternalPowered() existiert bereits.
+    Pfad: src/helpers/NRF52Board.cpp:240-251
+    Liest NRF_POWER->USBREGSTATUS Bit VBUSDETECT_Msk -- Hardware-
+    Register, keine Pin-Abfrage noetig. Strom-Overhead negligible
+    (~1 uA).
+  Zusatz: EXT_CHRG_DETECT Pin (P1.3 / GPIO 35) und EXT_PWR_DETECT
+    Pin (P0.5 / GPIO 5) sind in variant.h definiert + in variant.cpp
+    als INPUT initialisiert, aber im Code NICHT abgefragt. Charging-
+    Detection waere ein digitalRead(EXT_CHRG_DETECT) -- vermutlich
+    LOW = charging, HIGH = nicht ladend.
+
+Heltec Wireless Tracker (ESP32-S3) -- NEUE IMPLEMENTATION NOETIG:
+  Keine USB-Power-Detection implementiert.
+  ESP32-S3 hat IDF-API usb_serial_jtag_is_connected() verfuegbar
+    (USB-CDC-Verbindung erkennbar). Aber: das ist USB-CDC-Verbindung,
+    nicht USB-VBUS -- Funktion sagt "Host hat sich an USB-Serial
+    angemeldet", nicht "Strom liegt an". Pruefen ob das fuer
+    Use-Case ausreicht (Auto-Tracker steckt in USB-Lader -- der
+    macht kein CDC-handshake).
+  Alternativ: GPIO-Pin via Schaltplan ableiten. Heltec Tracker hat
+    USB-C Connector, USB_VBUS-Pin koennte in der Schaltung auf ein
+    GPIO geroutet sein (nicht in variant.h dokumentiert -- Schaltplan-
+    Lesen noetig).
+  Backup: ohne USB-VBUS-Erkennung kann man indirekt Battery-Spannung
+    monitoren -- liegt Vbatt ueber Voll-Ladespannung -> USB an. Aber
+    das ist ungenau bei voll-geladen.
+
+Implementierungs-Plan:
+
+  Phase 1 -- T1000-E (kostenlos):
+    Status-Anzeigen erweitern um 'usb=on/off' (board.isExternalPowered()).
+    UI-Display analog. Aufwand: ~30 min.
+
+  Phase 2 -- T1000-E Charging-Status:
+    digitalRead(EXT_CHRG_DETECT) im board.getBattMilliVolts-Sample-
+    Tick mitlesen. Charging-Flag exportieren. Aufwand: 1h.
+
+  Phase 3 -- Heltec WT:
+    Recherche im Heltec-Schaltplan ob USB_VBUS auf GPIO geroutet.
+    Wenn ja: ESP32Board::isExternalPowered() Override implementieren.
+    Wenn nein: Fallback ueber usb_serial_jtag_is_connected oder
+    Vbatt-Heuristik. Aufwand: 2-4h je nach Schaltplan-Klarheit.
+
+Quelle: User-Wunsch 2026-06-18 abend.
+
+
+--------------------------------------------------------------------------------
+90. Powerdown nach USB-Loss + Timer (Auto-Tracker Use-Case)
+--------------------------------------------------------------------------------
+
+Status: TODO. Setzt Wunschliste 89 voraus.
+
+Motivation (User-Wunsch 2026-06-18 abend):
+  Tracker im Auto an Bord-Stromversorgung. Zuendung aus -> USB-Strom
+  weg. Akku haelt noch. Aktuell laeuft das Geraet weiter bis Akku
+  leer oder Tiefentladeschutz greift (Wunschliste 91). Praktischer
+  waere: konfigurierbare Zeit (z.B. 30 min) nach USB-Loss -> sauberer
+  shutdown / deep sleep.
+
+CLI-Vorschlag:
+  set usb_loss_shutdown_min <N>
+    0  = disabled (Default)
+    N  = N Minuten nach USB-Loss -> shutdown. Range 1..240.
+
+State-Machine (RAM):
+  _usb_lost_at_millis  -- 0 wenn USB an, sonst millis der ersten
+                          USB-off-Erkennung. Hysterese: 10s USB-off
+                          muessen bestaetigt sein (gegen Glitches).
+  Loop-Tick: wenn _usb_lost_at_millis != 0 und now >=
+             _usb_lost_at_millis + N*60*1000 -> board.powerOff().
+  Bei USB-wieder-an: _usb_lost_at_millis = 0 (Timer cancel).
+
+Edge-Cases:
+  - shutdown waehrend BLE-Connected: nice-to-have GraceWarning per
+    pushDebugLog 1 min vorher.
+  - shutdown waehrend GPS-Sleep-Phase: GPS-State irrelevant.
+  - shutdown waehrend Filesystem-Write (savePrefs): block bis
+    Write fertig.
+  - User hat manuell 'gps off' / 'rx disable' gesetzt:
+    powerOff weckt erst wieder via Hardware-Button-Press.
+
+Persistenz:
+  _prefs.usb_loss_shutdown_min (uint8_t, append-only, Sentinel 0xFF).
+
+Aufwand: 2-3h (inkl. Backup save/restore + Help-Text).
+
+Quelle: User-Wunsch 2026-06-18 abend.
+
+
+--------------------------------------------------------------------------------
+91. Tiefentladeschutz fuer Li-Akkus (User-Wunsch 2026-06-18 abend)
+--------------------------------------------------------------------------------
+
+Status: TODO.
+
+Motivation:
+  Bei Geraeten ohne USB-Detection (oder allgemein als Akku-Schutz),
+  bei langem Akkubetrieb: Tiefentladung von Li-Ion / Li-Po-Akkus
+  unbedingt vermeiden -- jede Zelle unter ~3.0V einmal -> Kapazitaet
+  permanent gemindert, bei <2.5V mehrfach -> Brandgefahr beim
+  Laden.
+
+Mess-Methodik (User-Wunsch):
+  - Vbatt alle 10 min messen (low-overhead).
+  - Wenn Vbatt unter Schwelle: schnellere Messung (10s-Interval)
+    ueber 30s = 3 Samples, ALLE 3 unter Schwelle -> shutdown.
+    Verhindert false-Positive durch kurze Spannungs-Dips (z.B.
+    LoRa-TX-Spike).
+
+CLI-Vorschlag:
+  set batt_min_mv <N>      Schwelle in mV. 0 = disabled.
+  set batt_chemistry <typ>  vor-konfiguriert Default-Schwelle.
+
+Empfohlene Schwellen pro Chemie (recherche-pflichtig):
+  Li-Ion (1S)       : 3000 mV (cutoff), 3200 mV (User-empfohlen Reserve)
+  Li-Po (1S)        : 3000 mV (cutoff), 3300 mV mit Reserve
+  LiFePO4 (1S)      : 2500 mV (cutoff), 2800 mV mit Reserve
+  Default (Li-Ion)  : 3000 mV
+  Diese Werte sind Daumenwerte -- vor Implementierung kurze Recherche
+  pro Datasheet-Quelle (Sony, Samsung, Panasonic Cells) als Tabelle.
+
+State-Machine (RAM):
+  Normale 10-min Messung. Wenn Vbatt < Schwelle:
+    -> Schalte auf 10s-Sampling-Mode. 3 Samples (= 30s) ueber
+       Schwelle -> back to 10-min Mode.
+    -> 3 Samples ALLE unter Schwelle -> board.powerOff() oder
+       deep-sleep (Schalter via Pref).
+
+Pref-Layout:
+  _prefs.batt_min_mv (uint16_t, 0 = disabled)
+  _prefs.batt_chemistry (uint8_t, 0=disabled/manual, 1=lion, 2=lipo,
+                         3=lifepo4) -- setzt Default-Schwelle wenn
+                         batt_min_mv = 0 nach Migration.
+  _prefs.batt_low_action (uint8_t, 0=shutdown, 1=deep-sleep)
+
+Sicherheits-Behavior:
+  - Bei USB an (board.isExternalPowered()): Tiefentladeschutz
+    DEAKTIVIERT (User laedt gerade -- false-Positive durch Lade-
+    Wave vermeiden).
+  - Beim Boot: 60s Boot-Grace bevor erste Messung wirkt (Vbatt-
+    Sampling braucht ggf. Stabilisation).
+  - shutdown LOG ausgeben + 1min vorher Warning + savePrefs (RTC
+    persist etc.).
+
+Aufwand: 4-6h (State-Machine + Recherche-Tabelle + Backup save/
+restore + Help-Texte).
+
+Quelle: User-Wunsch 2026-06-18 abend. Verwandt zu Wunschliste 90
+(USB-Loss-Timer) -- beides Power-Off-Trigger.
 
 
 
