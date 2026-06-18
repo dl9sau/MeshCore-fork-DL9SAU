@@ -6134,6 +6134,70 @@ Aufwand: 2-4h. Risk: low (rein lokale Buffer-Groessen-Aenderungen).
 Quelle: User-Vorfall 2026-06-16/17 ('$companion'-Hang + 'backup save'-
 Crash auf T1000-E).
 
+=== STATUS 2026-06-18 abend ===
+
+Schritt 1 PARTIELL DONE -- 5 offensichtliche Wins:
+  - out[400]   -> out[320]   (-80B)  pushCompanionMessage Serial-Mirror
+  - chat[256]  -> chat[160]  (-96B)  GEO-SCOPE-Channel-Logger
+  - block[200] -> block[160] (-40B)  clock-Status
+  - block[200] -> block[160] (-40B)  logging-Status
+  - block[200] -> block[160] (-40B)  duty-Status
+  Total: ~296 Byte Stack-Spar ueber 5 haeufige Pfade.
+
+Wichtige Doku-Erkenntnis: pushCompanionMessage cappt effektiv bei
+MAX_TEXT_LEN = 160 (nicht 145 -- das ist Wire-Frame-Limit). Heisst:
+alle Buffer die einen einzelnen pushCompanionMessage-Output puffern
+brauchen nicht groesser als 160 sein. Pattern fuer Folge-Audit.
+
+OFFEN (Konzentrations-Session noetig):
+  Schritt 1 Rest: ~35 weitere >=200B Buffer. Kein klarer Audit-Win
+                  in Stichproben -- die meisten 200er sind grenzwertig
+                  bis hart angemessen.
+  Schritt 2:      static-Move. Per-Buffer Audit (Bluefruit-Race-Frage)
+                  noetig. Laut Memory der direkteste Hebel.
+  Schritt 3:      backupSaveToSerial Lambda-Buffer-Pool.
+  Schritt 4:      Stack-Watermark messen vor/nach -- Quantifizierung.
+  Schritt 5:      Stack-Watermark-Diag-Pruning ($companion-Spam).
+
+Wenn Akku-Test-Session vorbei + User fokussiert, in einem Rutsch
+durchziehen.
+
+=== ENDE STATUS ===
+
+Empfohlene Implementierungs-Reihenfolge (2026-06-18):
+
+  Schritt 1: Strategie 1 (Buffer-Audit + Schrumpfen).
+    Vorhersagbar, kein Test-Risiko -- jeder char[N>=100] anschauen,
+    typischen Output messen, N auf typical+20% reduzieren. Mechanisch.
+    Aufwand: 1-2h.
+
+  Schritt 2: Stack-Watermark messen vor + nach Schritt 1.
+    Aktuelle freie-Stack-Anzeige im $companion-Status. Damit wir
+    quantitativ wissen wie viel gewonnen wurde, und ob die naechsten
+    Schritte ueberhaupt noetig sind.
+
+  Schritt 3: Strategie 3 (backupSaveToSerial-Lambdas Pool).
+    Fokussierter Punkt -- viele Lambdas, jede mit eigenem char[N].
+    Outer-Buffer via Closure-Capture geteilt. Aufwand: 1h.
+
+  Schritt 4: Strategie 2 (static-Move) nur DORT wo 1+3 nicht reichen.
+    Pro Buffer Audit-Doku: aus welchen Task-Kontexten wird die
+    Funktion gerufen? Bluefruit-Callback? -- WENN ja, static
+    verboten (Race). WENN nur loop-Task: static OK.
+    Aufwand: variable (1h Audit + 30min Edits pro Buffer).
+
+  Schritt 5: Strategie 4 (Watermark-Diag-Pruning) zum Schluss.
+    Aktuell wird die Diag bei JEDEM $companion-Befehl geloggt --
+    auf Boot/grosse-Operationen reduzieren. Trivial. Aufwand: 15min.
+
+Kontext aus Memory [[nrf52-cli-handler-stack-limit]]:
+  "CLI-Handler-Kontext hat kleineren Task-Stack als ESP32 loopTask.
+   >256B lokal grenzwertig, >512B problematisch. Symptom: Output ok,
+   dann Freeze. Fix: static statt Stack."
+  => Strategie 2 ist semantisch der direkteste Hebel, aber teurer
+  weil per-Buffer Audit. Strategie 1 + 3 sollten zuerst die billigen
+  Gewinne abgreifen, ehe wir Strategie 2 antasten.
+
 
 --------------------------------------------------------------------------------
 79. TODO: 'sensors' CLI-Befehl (read/list)
@@ -6158,7 +6222,13 @@ Aufwand: ~30 Zeilen.
 80. GPS-Advert-Policy 3-state: none|share|prefs (Upstream-Doku-Alignment)
 --------------------------------------------------------------------------------
 
-Status: TODO. Upstream-Dokumentation 2026-06-17:
+Status: DONE 2026-06-17. ADVERT_LOC_PREFS=2 + RAM-Snapshot
+        _adv_prefs_lat/lon + CLI 'gps advert' + Range-Clamp 0..2 in
+        Backup-Restore und CMD_SET_RADIO_PARAMS. 'set lat/lon' aktualisiert
+        Snapshot mit. 4 createSelfAdvert-Stellen wissen jetzt um PREFS-Pfad.
+        Default bleibt 1 (SHARE) -- backward-compatible.
+
+Upstream-Dokumentation 2026-06-17:
   https://docs.meshcore.io/cli_commands/
   'gps advert <none|share|prefs>' wobei default = prefs.
 
@@ -6228,7 +6298,9 @@ Vorschlag: 'gps profile <full|position-only|time-only>'
 Plus: 'gps power lead <N>[m|h|d]' Unit-Erweiterung (aktuell nur min).
   gps power lead 24h
   gps power lead 7d (1x pro Woche aufwecken)
-  Sentinel max 60d (= 2 Monate, mehr braucht keiner).
+  Sentinel max 90d (= 3 Monate). KEIN 'm' fuer Monat als Unit --
+  s/m/h/d reichen; 2 Monate sind 60d, das kann man im Kopf rechnen.
+  User-Klarstellung 2026-06-18.
 
 Aufwand: ~120 Zeilen (Profile-Bitmask + Lead-Unit-Parser +
 manageGpsPower Logik-Anpassung + Migration). Test-intensiv weil das
@@ -6236,3 +6308,626 @@ in den Power-State-Maschinen sitzt.
 
 Quelle: User-Idee 2026-06-17. Default-Wert ist 'full' (Backward-
 Compat).
+
+
+--------------------------------------------------------------------------------
+82. TX suspend/disable/enable -- Wartungs-Sicherheit (User-Wunsch 2026-06-18)
+--------------------------------------------------------------------------------
+
+Status: TODO.
+
+Hintergrund: Wartungsarbeiten am Repeater (Antenne ausstecken,
+SWR-Bruecke pruefen, Kabel tauschen, ...) -- der Sender DARF in der
+Zeit nicht aufeinmal anspringen (z.B. ein Auto-Advert oder ein
+Repeat). Sonst HF-Schaden am Geraet/Verkabelung moeglich.
+
+Vorschlag-CLI:
+  tx suspend <duration>   einmaliger Timer, danach automatisch enable
+                          Units: 5m, 30m, 1h, 4h (analog gps lead)
+  tx disable              hart aus, kein Timer (User muss enable rufen)
+  tx enable               aus disable/suspend zurueck
+
+Wirkung im Code:
+  - Alle TX-Pfade pruefen ein neues _tx_blocked Flag (analog
+    duty_hard) ganz frueh.
+  - Bei suspend: timer in millis, _tx_blocked_until.
+  - Bei disable: persistent? Eher NICHT -- nach Reboot wieder enable
+    sonst kann der User sich aussperren. Aber: Boot-Marker "WARN tx
+    war disabled" beim naechsten Boot zeigen, falls der User es
+    schon vergessen hatte und Geraet weggesteckt ist.
+  - Alternativ: Pref _prefs.tx_disabled persistent, aber Boot-Warning
+    mit countdown 60s -> autoreenable. Sauber aber komplex.
+
+Subset des Plans -- Phase 1 minimum:
+  - _tx_blocked Flag im RAM (nicht persistent)
+  - _tx_blocked_until Millis (0 = bis enable)
+  - CLI 'tx suspend/disable/enable'
+  - 'status' (oder 'tx') zeigt aktuellen State + restliche Suspend-Zeit
+
+Aufwand: ~80 Zeilen + Audit aller send-Pfade dass sie das Flag
+respektieren (sendZeroHop / sendFlood / sendDirect / sendAckTo /
+createSelfAdvert + die auto-advert-Cron-Pfade).
+
+Quelle: User-Wunsch 2026-06-18 (Wartung am eigenen Repeater).
+
+
+--------------------------------------------------------------------------------
+83. RX disable/enable -- Stromsparen ohne Repeater-Funktion (User-Wunsch 2026-06-18)
+--------------------------------------------------------------------------------
+
+Status: TODO.
+
+Hintergrund: Companion-Modus (NICHT Repeater) brauchen wir nicht
+permanent zu empfangen. Wir wollen nur senden koennen (Chat-DM,
+zero-hop-Advert). Der LoRa-Chip im RX-Mode zieht den groessten Teil
+der Companion-Stromaufnahme.
+
+Vorschlag-CLI:
+  rx disable     LoRa-Chip in Sleep, Wake nur kurzzeitig zum Senden
+  rx enable      normales Verhalten (RX-on)
+
+Wichtiger Gating-Constraint:
+  - Wenn _prefs.client_repeat == ON (Repeater-Modus, egal ob
+    defensive oder normal): rx disable verweigern. Nicht-Repeater-
+    Mesh-Teilnehmer brauchen RX nicht permanent; ein aktiver Repeater
+    SCHON. Also CLI 'rx disable' soll bei Repeater-on einen Hinweis
+    geben statt zu vollstrecken.
+  - Wenn der User waehrend rx=disabled den Repeater einschaltet:
+    automatisch rx wieder hochfahren (sonst inkonsistenter Zustand).
+
+State persistent? Beim Reboot:
+  - rx-disable bleibt PERSISTENT (sonst macht Stromsparen nichts
+    Sinn -- ein Boot wuerde minutenweise RX-on geben).
+  - Repeater-Wechsel wired live ueberschrieben.
+
+Aufwand: ~60-100 Zeilen + Audit Radio-API (RadioLib) ob 'sleep'-Mode
+sauber unterstuetzt wird auf SX1262. Wahrscheinlich
+radio_driver->sleep() / standby() Wechsel im RadioLibWrappers-Pfad.
+
+Quelle: User-Wunsch 2026-06-18 (Companion-Use-Case ohne Repeat).
+
+
+--------------------------------------------------------------------------------
+84. RECHERCHE: Meshtastic Stromverbrauch-Vergleich Heltec WT
+--------------------------------------------------------------------------------
+
+Status: RESEARCH-TODO 2026-06-18.
+
+Datenpunkte (gemessen User):
+  unsere MeshCore-Fork (DL9SAU), Heltec Wireless Tracker (ESP32-S3):
+    - bluetooth on (always-on)     -> 185-195 mA  (Wunschliste-Z 4695)
+    - bluetooth off + display off  -> 125 mA      (2026-06-17 Log)
+  unsere MeshCore-Fork (DL9SAU), Seeed Tracker T1000-E (NRF52840):
+    - bluetooth off + gps off      -> ca. 95 mA   (User-Messung 2026-06-18,
+                                                   Akku voll, kurzzeitig
+                                                   92 mA gesehen, RX an)
+    - rx off + bluetooth off
+      + repeater off + gps off     -> 53-55 mA    (User-Messung 2026-06-18 nach
+                                                   Phase 2 Implementation,
+                                                   Akku noch in Lade-Phase --
+                                                   inklusive Ladelogik-Strom)
+    - rx off + bluetooth off
+      + repeater off + gps off
+      + Akku VOLL geladen          -> bis zu 30 mA  (User-Messung 2026-06-18,
+                                                   wahre Idle-Stromaufnahme
+                                                   ohne Ladelogik)
+      => RX-Disable spart ca. 40 mA -- mehr als urspruengliche Schaetzung
+         (10-15 mA fuer LoRa-RX). Erklaerung: SX1262 in Sleep-Mode + ggf.
+         AGC-Subsystem komplett aus.
+  Meshtastic-Firmware, Heltec WT:
+    - bluetooth on                 -> 152-160 mA  (User-Messung 2026-06-18)
+    - bluetooth off                -> 78-95 mA    (User-Messung 2026-06-18)
+  Anderes Geraet, LoRa-APRS-Firmware (Wunschliste-Z 4559) -> 165 mA.
+
+Interpretation:
+  Unser T1000-E (NRF52) liegt mit 95 mA EXAKT im Bereich von Meshtastic-
+  ESP32 (78-95). Differenz Heltec WT (uns) vs T1000-E (uns) = 30 mA.
+  Das ist der gleiche Bereich wie der ESP32-Hebel A esp_light_sleep --
+  bestaerkt die Hypothese: NRF52 spart via sd_app_evt_wait schon (A1
+  DONE 2026-06-18), ESP32 fehlt der CPU-Idle-Sleep. Wenn ESP32-A
+  greift, sollten beide ~95 mA erreichen.
+
+Delta BT-off: 30-47 mA -- substantiell.
+Delta BT-on:  ca. 30-40 mA -- analog (falls 195 vs 155 stimmt).
+
+Frage: was macht Meshtastic besser? Bestehende Annahmen:
+  - LoRa-Chip Sleep zwischen RX-Windows (Wunschliste 83 = Companion-
+    Kandidat. Aber Meshtastic ist ja AUCH Repeater-faehig.)
+  - CPU-Clock-Skalierung (wir haben cpu_clock_mhz, default 240 MHz)
+  - WiFi-Off explizit (esp_wifi_stop / esp_wifi_deinit?)
+  - GPS-Power-Cycling
+  - Display-Backlight wirklich off (PWM=0 vs DEEP_SLEEP)
+  - BLE controller voll abgeschaltet vs nur deinit
+  - Light-Sleep vs nur loop-yield
+
+Plan:
+  - Sourcecode-Pfad: /Users/thomas/meshtastic-firmware-src-github/firmware
+  - Suchen nach: setCpuFrequencyMhz, esp_sleep_, esp_light_sleep,
+    Radio.sleep, sx1262_sleep, esp_wifi_stop, btStop, esp_bt_*
+  - Vergleich mit unserem Boot-Sequence in main.cpp + ESP32Board.cpp
+  - Identifizieren welche Schalter wir UEBERSEHEN
+
+Erwarteter Output: Liste konkret von Codestellen "Meshtastic macht
+X, wir nicht" + Wunschliste-Eintrag pro Lever.
+
+Quelle: User-Beobachtung 2026-06-18.
+
+
+=== RECHERCHE-ERGEBNIS 2026-06-18 abend (Sub-Agent Explore) ===
+
+Antwort User-Frage "nutzt Meshtastic esp_light_sleep?": JA, ausgiebig.
+Light-Sleep ist DER Haupthebel. Drei Hebel die wir vermutlich
+nicht haben:
+
+1) esp_light_sleep_start() mit 30s-Timer + GPIO-Wake
+   Pfad: meshtastic firmware/src/sleep.cpp:462
+   Wake-Quellen: LORA_DIO1 HIGH (Z 574), BUTTON_PIN LOW (Z 430),
+   Timer (Z 455), PMU_IRQ. UART0-RX bewusst aus (USB-Leakage).
+   Modus: explizites Light-Sleep VIA PowerFSM-State (kein
+   esp_pm_configure(auto)). Z 521-543: esp_pm konfiguriert DFS
+   80-240MHz aber light_sleep_enable=FALSE; in main-esp32.cpp:161
+   ist enableModemSleep() AUSKOMMENTIERT. Sie steuern selbst per
+   doLightSleep().
+
+2) LoRa startReceiveDutyCycleAuto() statt continuous RX
+   Pfad: meshtastic firmware/src/mesh/SX126xInterface.cpp:325
+     int err = lora.startReceiveDutyCycleAuto(preambleLength, 8, ...);
+   = SX1262-Chip wechselt selbst zwischen Standby/RX, ca 12.5% RX-Anteil.
+   Chipset-gesteuert, CPU-unabhaengig. Wir machen vermutlich
+   kontinuierliches RX -> 15-20 mA Mehrverbrauch nur dadurch.
+
+3) FreeRTOS-Style loop() mit vTaskDelay
+   Pfad: meshtastic firmware/src/main.cpp:1234-1242
+     long delayMsec = mainController.runOrDelay();
+     if (!runASAP && loopCanSleep()) mainDelay.delay(delayMsec);
+   = Arduino-delay() ruft intern vTaskDelay -> FreeRTOS-Scheduler
+   kann Modem-Sleep gehen. Wenn unser loop() ein busy-loop ist
+   (kein delay/yield am Ende), bleibt CPU aktiv selbst wenn nichts
+   zu tun ist -> 30-80 mA verschwendet.
+
+Weitere Details:
+  - CPU-Skalierung: setCPUFast() toggled 80 vs 240 MHz (sleep.cpp:96,103).
+    240 wenn WiFi an oder workload aktiv, 80 sonst.
+    Bei uns: nur statisches cpu_clock_mhz Pref, keine Dynamik.
+  - BT-Off: Meshtastic ruft NimBLEDevice::deinit() NUR im Deep-Sleep,
+    nicht im Light-Sleep (Z 762-775 in nimble/NimbleBluetooth.cpp).
+    Im Light-Sleep pausiert BT nur. esp_bt_mem_release wird NICHT
+    aufgerufen -- d.h. wir sind hier eigentlich AGGRESSIVER.
+  - Display-Off: PowerFSM lsEnter() Z 85-93 ruft screen->setOn(false)
+    -> Backlight PWM=0. Klassisch.
+  - WiFi: Heltec WT hat keins, irrelevant.
+
+Was uns das fuer unsere Liste sagt:
+
+  Hebel A (groesster Gewinn, ESTIMATE 20-40 mA):
+    esp_light_sleep_start() in unseren loop() einbauen. Trigger:
+    LoRa-DIO1 (LoRa-IRQ), Button, Timer ~30s. Wake -> normale
+    loop-Iteration. Power-FSM dazu (idle/active/connected).
+
+  Hebel B (zweitgroesster Gewinn, ESTIMATE 15-20 mA):
+    LoRa startReceiveDutyCycleAuto() statt continuous RX.
+    Vermutlich in RadioLibWrapper umstellbar -- aber prefab-Tests
+    notwendig dass keine Packet-Loss-Regression eintritt.
+
+  Hebel C (variabel, ESTIMATE 10-30 mA wenn unsere loop tatsaechlich
+  busy ist):
+    loop() pruefen ob am Ende ein vTaskDelay/delay sitzt. Wenn nicht,
+    nachruesten. Schon ein delay(1) macht den Unterschied weil
+    arduino-esp32 Modem-Sleep im Hintergrund-Idle-Task macht.
+
+  Hebel D (klein, ESTIMATE 5 mA):
+    Dynamisches setCpuFrequencyMhz(80) im Idle-Zustand. Aber nur
+    relevant wenn Hebel A nicht greift (im Light-Sleep ist die CPU
+    sowieso aus).
+
+Prio-Reihenfolge fuer Wunschliste-Implementierung: A > C > B > D.
+A + C zusammen sollten den ganzen Delta erklaeren.
+
+Naechster Schritt: separater Wunschliste-Eintrag 86 "ESP32-Light-
+Sleep + PowerFSM" sobald User-GO. C ist als Quick-Check vorab
+sinnvoll -- unser loop() einmal lesen ob da ein delay/yield sitzt.
+
+=== UMSETZUNG-STATUS 2026-06-18 ===
+
+Hebel A1 (NRF52 sd_app_evt_wait):  DONE.
+  Stellte sich heraus dass main.cpp:697-701 board.sleep(0) schon
+  ruft -- via hasPendingWork()-Gate. NRF52Board::sleep() ruft
+  sd_app_evt_wait() (NRF52Board.cpp:270-271). Plus Optimierung
+  hasPendingWork() (MyMesh.cpp:23528): dirty_contacts_expiry-
+  Sentinel zaehlt jetzt erst als Pending wenn der Timer abgelaufen
+  ist -- so kann der CPU-Sleep auch waehrend des Lazy-Write-Window
+  greifen.
+
+Hebel C (BLE-Adv-Interval):  DONE.
+  NRF52: BLE_ADV_INTERVAL_MAX 244 (152ms) -> 668 (417ms) in
+  src/helpers/nrf52/SerialBLEInterface.cpp:20-26. Alter Wert als
+  Kommentar gelassen (Code-Review-Spur).
+  ESP32: setMinInterval(32) + setMaxInterval(668) explizit in
+  src/helpers/esp32/SerialBLEInterface.cpp:94+ -- analoge Werte
+  zur NRF52-Anpassung.
+
+Hebel B-GPS (Peripherie-Deinit GPS-Idle): DONE.
+  Serial1.end() in manageGpsPower() sleep-Pfad nach setSettingValue
+  ("gps","0"). Serial1.begin(GPS_BAUD_RATE) vor setSettingValue
+  ("gps","1") im wake-Pfad. Gleiche Behandlung im CLI 'gps on/off'
+  fuer Konsistenz. Gating: #if ENV_INCLUDE_GPS == 1 && defined(
+  PIN_GPS_RX) -- gilt fuer T1000-E und Heltec WT.
+
+Hebel B-BLE (BLE-Deinit im TMP_OFF-State): NICHT GEMACHT (User-
+  Entscheid 2026-06-18 (a)).
+  Begruendung: setBleEnabled(false) ruft schon
+  esp_bt_controller_disable -- 70 mA Stromspar bereits eingebaut
+  (siehe Wunschliste 58 Phase F). esp_bt_controller_deinit wuerde
+  nur 1-2 mA mehr bringen bei deutlich mehr Re-Init-Komplexitaet.
+
+Naechster Test-Termin: Stromaufnahme messen mit Heltec WT, BT off,
+RX disabled, manageGpsPower-Sleep-Phase -- erwarteter Effekt von
+B-GPS Serial1.end ist klein bis mittel (~3-10 mA?), abhaengig vom
+UART-Hardware-Restenergie-Verbrauch.
+
+=== ENDE UMSETZUNG-STATUS ===
+
+=== NRF52-RECHERCHE 2026-06-18 (T1000-E, LR1110-Variante) ===
+
+Antwort User-Frage "macht Meshtastic auf NRF52 was Aehnliches?":
+NEIN, ueberraschend wenig. CPU laeuft im Idle voll durch, keine
+Sleep-API genutzt. Nur Deep-Sleep beim Shutdown.
+
+Konkrete Findings:
+
+1) KEIN Idle-Sleep
+   sd_app_evt_wait() wird in keinem Code-Pfad gerufen (nur Header-
+   Deklaration). __WFI/__WFE auch nicht direkt. nrf_pwr_mgmt_run()
+   nicht genutzt. FreeRTOS-Tickless gibt's nicht (kein RTOS).
+   loop() macht nrf52Loop() (WDT-feed + checkSDEvents) + service->loop()
+   + mainDelay.delay(delayMsec) -- delay ist normales Arduino-delay,
+   d.h. CPU bleibt aktiv und busy-loopt auf millis().
+   Pfad: meshtastic firmware/src/main.cpp:1148,
+         meshtastic firmware/src/platform/nrf52/main-nrf52.cpp:331
+
+2) Deep-Sleep nur fuer komplettes Power-Down
+   sd_power_system_off() bei doDeepSleep()-Aufruf -- "Geraet aus
+   bis Wake-Pin". Vorher aggressives Peripherie-Deinit:
+     Wire.end(); SPI.end(); Serial1.end(); setBluetoothEnable(false);
+     variant_shutdown();
+   Pfad: meshtastic firmware/src/platform/nrf52/main-nrf52.cpp:428-461,500
+
+3) Tracker/Sensor Special-Path "is_power_saving"
+   Wenn config.device.role IN (TRACKER, SENSOR) UND
+   config.power.is_power_saving=true:
+     sd_power_mode_set(NRF_POWER_MODE_LOWPWR);
+     delay(msecToWake);
+     NVIC_SystemReset();
+   = "Light-Power-Mode" + Reset-fuer-Wake. Quick-and-dirty Ansatz,
+   verliert Session-State, nutzt nur den DC-DC-LowPower-Mode der
+   Power-Subsystem.
+   Pfad: meshtastic firmware/src/platform/nrf52/main-nrf52.cpp:469
+
+4) BLE-Advertising klassisch
+   Fast: 20 ms (32 * 0.625), Slow: 417 ms (668 * 0.625), 30s im
+   Fast dann auto-slow. Connection-Interval 15-100 ms (12..80).
+   Slave-Latency=0 (Apple-Workaround). Conn-Params durchverhandelt.
+   Pfad: meshtastic firmware/src/platform/nrf52/NRF52Bluetooth.cpp:142,319-351
+   Anmerkung: KEIN sd_softdevice_disable() im Off-Pfad -- SoftDevice
+   bleibt aktiv selbst bei BLE-disabled. Wir sind hier evtl. auch
+   aggressiver mit nrf_sdh_disable_request() Faehigkeit.
+
+5) LR1110 statt SX1262 auf T1000-E!
+   variant.h:94: #define USE_LR1110
+   = kombinierter LoRa + GNSS Chip. Hardware-Effizienz vs SX1262+
+   externem GNSS. Wenn WIR auch LR1110 nutzen (zu pruefen): kein
+   Hebel hier. Wenn wir noch SX-Pfad auf T1000-E haetten: relevant.
+
+6) GPS: T1000-E Airoha/Mediatek mit Power-Pins
+   Im normalen Idle: BLEIBT AN. Nur bei Deep-Sleep:
+     GPS_VRTC_EN low, PIN_GPS_RESET low, GPS_SLEEP_INT low,
+     GPS_RTC_INT low, GPS_RESETB_OUT low.
+   Boot setzt PIN_GPS_EN=LOW (GPS aus). Aktivierung erst nach
+   Setup. Kein Power-Cycling im Idle wie bei uns.
+   Pfad: meshtastic firmware/src/sleep.cpp:255-263,
+         meshtastic firmware/variants/nrf52840/tracker-t1000-e/variant.cpp:47
+
+7) Sensoren on-demand
+   Accelerometer QMA6100P interrupt-driven via P1.02-INT.
+   NTC/Light/Battery nur on-demand polled (PowerMon-Check).
+   Sensor-Power-Pins (3V3_EN, 3V3_ACC_EN, T1000X_SENSOR_EN_PIN)
+   beim Deep-Sleep abgeschaltet. Nichts ueberraschendes.
+
+8) CPU-Clock fix 64 MHz, kein Skaling
+   VARIANT_MCK = 64000000ul fix. Kein nrf_clock_hfclk_t Switching.
+   LFXO nur fuer RTC. NRF52 lebt mit dem Stromprofil das HFCLK gibt.
+
+Anregungen fuer unsere Fork (NRF52/T1000-E):
+
+  Hebel A1 (potentiell signifikant, NICHT in Meshtastic):
+    sd_app_evt_wait() im Idle einbauen. Das ist NORDIC-STANDARD-
+    Pattern: SoftDevice-aware WFI, Wake bei Interrupts + SD-Events.
+    Spart Strom waehrend CPU sonst busy-Loop im Arduino-delay.
+    Sie nutzen es NICHT -- wir koennen Pioneer sein.
+    Aufwand: ~10 Zeilen im loop() bzw. delay-Hook.
+
+  Hebel A2 (Quick-Win, schauen ob es passt):
+    nrf_pwr_mgmt_run() statt selber WFI -- wenn SDK in Verwendung.
+    Cleaner als A1, gleicher Effekt.
+
+  Hebel B (klein bis mittel, abhaengig wie viel ungenutzt):
+    Peripherie-Deinit-Sweep -- nicht erst beim Deep-Sleep sondern
+    bei BLE-disabled / GPS-off / idle: Wire.end(), SPI.end(),
+    Serial1.end() wo logisch. Analog Meshtastic-Pattern, aber im
+    Idle (Meshtastic macht das NUR bei Deep-Sleep).
+
+  Hebel C (sehr klein, kosmetisch):
+    BLE-Advertising-Interval pruefen. Wenn wir aktuell 100/200 ms
+    fest haben: 32/668 ms (Meshtastic-Pattern) waere sparsamer
+    aber langsame Discovery -- erst Default lassen, optional CLI.
+
+  Hebel D (Hardware-Check, kein Code):
+    Pruefen ob unser T1000-E-Build USE_LR1110 oder noch SX1262-
+    Pfad. Falls SX1262 noch im Code: LR1110 zur Hardware-Realitaet
+    auf T1000-E. (vermutlich schon korrekt -- der Tree wuerde
+    sonst nicht laufen, aber lohnt sich Doppel-Check.)
+
+Vergleich ESP32 vs NRF52 was Meshtastic angeht:
+  ESP32: aggressive light-sleep + powerFSM + duty-cycle-RX. Reift.
+  NRF52: nichts spezielles im Idle, nur aggressive Deep-Sleep-Power-
+         Down. Das Tracker/Sensor-Sub-Pattern mit NVIC_SystemReset
+         als Wake ist Quick-and-Dirty, kein Sleep-State.
+
+Implikation fuer User-Beobachtung:
+  Wir haben aktuell KEINE T1000-E Stromaufnahme-Messung im Vergleich
+  zu Meshtastic gehoert. Falls dort eine Differenz besteht, koennte
+  sie an Hebeln A1/B liegen. Falls Meshtastic AEHNLICH viel zieht
+  wie wir (oder mehr -- da sie kein Idle-Sleep machen), waere das
+  Beweis dass NRF52-Idle insgesamt OK ist und wir nicht viel
+  optimieren muessen.
+
+  Konkrete Next Steps (sobald User Aufrieben hat):
+    1) T1000-E Stromaufnahme messen (DL9SAU vs Meshtastic).
+    2) Falls Delta: Hebel A1 (sd_app_evt_wait) implementieren als
+       erster Test. ~10 Zeilen.
+
+=== ENDE NRF52-RECHERCHE ===
+
+
+--------------------------------------------------------------------------------
+85. PORTIERUNG: BLE-Power-Spar-Mechanismus zu Meshtastic (User-Wunsch 2026-06-18)
+--------------------------------------------------------------------------------
+
+Status: TODO -- WARTET auf User-"GO" (kein Datenvolumen unterwegs).
+        Quell-Pfad MeshCore: src/helpers/ESP32Board.* + MyMesh
+        manageBlePower()-Pfade + SerialBLEInterface-Guards.
+        Ziel-Pfad Meshtastic: /Users/thomas/meshtastic-firmware-src-github/firmware
+
+Implementierungs-Plan (auf User-Bestaetigung warten):
+
+Was portiert wird:
+  - esp_bt_controller_disable() / _enable()-Mechanismus aus
+    SerialBLEInterface (= unser BLE-Sleep der wirklich Strom spart,
+    nicht nur das Advertising-Off was Default-Verhalten ist).
+  - Cycle-Logik: Phasen on/off + connect-aware (verbunden ->
+    bleibt on, sonst cycle). Genaue Cycle-Timings hardcoded in der
+    Meshtastic-Portierung (kein CLI).
+  - Guard-Flag _ctrl_disabled gegen die manageBlePower-Deadlock-
+    Falle (Wunschliste-Z 4675-4689 -- Phase F-LOCKUP-Erfahrung).
+
+Was NICHT portiert wird:
+  - GPS-Power-Spar -- Meshtastic hat eigenes timing/State, das
+    ist tiefer im Stack und Konfig-orthogonal. User-Entscheid 2026-
+    06-18: erstmal nicht anfassen.
+  - CLI / Pref-Schnittstelle -- in Meshtastic gibt es kein CLI fuer
+    unsere Pref-Variablen; alle Werte HARDCODED setzen.
+
+Wichtige Constraints:
+
+1) DEFAULT AN
+   Meshtastic-User hat keine CLI um das ein-/auszuschalten. Der
+   Mechanismus muss out-of-the-box aktiv sein. Sicherheit: bei
+   Lockup hat der User keinen CLI-Recovery-Pfad -- daher Code-
+   Robustheit kritisch.
+
+2) GREIFT NUR WENN bluetooth=on
+   Wenn der User BT explizit ausgeschaltet hat (Meshtastic-Setting),
+   bleibt BT aus -- unser Cycle macht da nichts. Off ist off.
+   Aktiv-Check: vor jedem cycle->off Trigger pruefen ob BT ueberhaupt
+   noch enabled ist; sonst skippen.
+
+3) BT-OFF UEBER BUTTON/DISPLAY beruecksichtigen
+   Meshtastic-Geraete (z.B. Heltec WT) erlauben dem User, BT live
+   ueber Hardware-Menue auszuschalten. Wenn das passiert WAEHREND
+   unser Cycle laeuft, darf der Mechanismus nicht in einen
+   inkonsistenten State geraten. Notwendig:
+     - Vor jedem on-Toggle: ist BT-Setting noch =on? Wenn nicht,
+       Cycle stoppen und Mechanismus deaktivieren.
+     - Vor jedem off-Toggle: gleiche Pruefung -- sonst doppel-off
+       Aufruf (vermutlich harmlos, aber sauber ist sauber).
+   Polling-Mechanismus oder lieber Event-Hook auf Meshtastic-
+   Settings-Change-Callback? -> bei Recherche klaeren.
+
+Phase 1 -- Recherche (~1-2h):
+  - Meshtastic-Quelle nach BLE-Stack-Anker durchsuchen
+    (esp_bt_controller_*, NimBLEDevice::*, NimBLEServer::*,
+    bluetoothStatus.h, NRF52Bluetooth.cpp falls vorhanden).
+  - Identifizieren wo in Meshtastic-Code-Hierarchie der Hook fuer
+    "Stack abschalten" reinpasst. Vermutlich PhoneAPI oder
+    BluetoothCommon.h. Eigene Datei besser als invasive Edits.
+  - Settings-Change-Hook fuer BT-on/off identifizieren (RadioConfig
+    update?).
+  - Ergebnis: Mini-Design-Doc.
+
+Phase 2 -- Implementierung (~2-4h):
+  - Neue Datei z.B. blePowerCycle.cpp/.h analog ESP32Board's
+    BLE-Cycle-Helpers.
+  - Hooked ins Setup + Loop des Meshtastic-Main-Tasks.
+  - Hardcoded Timings (Vorschlag: 30s on / 90s off bei disconnected,
+    sticky on bei connected, identisch zu unserem Default).
+
+Phase 3 -- Test:
+  - Heltec WT, BT-Verbindung von Phone, Disconnect, dann Strom
+    messen ueber 5-10 min: erwartet 95mA Durchschnitt (Meshtastic-
+    Baseline) MINUS unser Cycle-Gewinn.
+  - Lockup-Test: BT mehrfach via Display-Menu togglen waehrend
+    unser Cycle laeuft.
+
+Quellen:
+  - User-Wunsch 2026-06-18 abends.
+  - Eigene BLE-Spar-Implementierung: src/helpers/ESP32Board.* +
+    MyMesh manageBlePower() + Wunschliste-Eintrag 43 (BLE-Power-
+    Cycle) + Phase F-LOCKUP-Erkenntnisse (Z 4667-4697).
+
+
+--------------------------------------------------------------------------------
+86. ESP32-S3 esp_light_sleep_start() im Idle (Hebel A aus Wunschliste 84)
+--------------------------------------------------------------------------------
+
+Status: TODO. Nicht "blind" implementieren -- User-Entscheid 2026-06-18:
+        ohne Mess-Test waehrend Implementierung kein Go.
+
+Motivation:
+  Wunschliste 84 ESP32-Recherche: Meshtastic spart auf ESP32-S3 ueber
+  esp_light_sleep_start() (src/sleep.cpp:462) gesteuert von einer
+  eigenen PowerFSM. Auto-Light-Sleep via esp_pm_configure ist bei
+  ihnen explizit DEAKTIVIERT (light_sleep_enable=false) -- sie sleepen
+  bewusst per-State statt automatisch.
+  Strom-Gewinn-Erwartung: 30-40 mA (Heltec WT 125 mA -> ~95 mA, also
+  Meshtastic-Niveau). User-Messung 2026-06-18: T1000-E (NRF52, hat
+  sd_app_evt_wait bereits aktiv) liegt bei 92-95 mA -- bestaerkt die
+  Hypothese dass die ESP32-Luecke der Idle-Sleep ist.
+
+API-Ueberblick (gradlinig):
+  esp_sleep_enable_timer_wakeup(30 * 1000 * 1000);  // 30s timer
+  esp_sleep_enable_ext0_wakeup(LORA_DIO1, 1);       // LoRa-RX-IRQ
+  esp_sleep_enable_gpio_wakeup();                   // Button
+  esp_light_sleep_start();                          // schlaeft hier
+  // wacht hier weiter auf, RAM/Stack intakt
+
+Drei nicht-triviale Stellen:
+
+  1) USB-CDC Wake
+     ESP32-S3 USB-Hardware schlaeft mit. Bei Wake-Quelle "USB activity"
+     muss man entweder einen GPIO als USB-Bus-Activity-Monitor verdrahten
+     oder den USB-Modus speziell konfigurieren. Sonst: User tippt in der
+     CLI -> kein Wake -> keine Reaktion.
+     Pragmatisch fuer Phase 1: USB-CDC wird nicht abgedeckt; User muss
+     vor CLI-Eingabe den Button druecken um zu wecken.
+
+  2) BLE-Gating
+     Light-Sleep mit aktivem BLE ist heikel. Meshtastic umgeht das:
+     BLE schlaeft mit, Wake nur via Timer/GPIO. Bei uns: wenn App
+     connected -> KEIN Sleep (zu hohe Latenz). Im disconnected-State
+     (HOT_START/TMP_OFF/SLEEP/WAIT) -> Sleep moeglich. Gating sauber an
+     _ble_pwr_state haengen.
+
+  3) LoRa-DIO1 Wake
+     Der Chip hat eine IRQ-Leitung die bei Paket-RX getoggelt wird.
+     GPIO-Wake-Konfiguration ist gradlinig. ABER nach Wake muss der
+     LoRa-RX-Status korrekt erkannt + Paket abgeholt werden (sonst
+     stuck). Das laeuft schon in Dispatcher::checkRecv() -- sollte
+     "einfach funktionieren", muss aber konkret getestet werden.
+
+Komplexitaets-Bewertung:
+  - Code-Aufwand: ~80-150 Zeilen, hauptsaechlich ESP32Board::sleep()
+    Override mit State-Gating. Plus main.cpp loop-Ende fuer NRF52-
+    analogen sleep-Aufruf.
+  - Test-Aufwand: HOCH. USB-CDC, BLE-Disconnect/Reconnect, LoRa-RX,
+    alle muessen ueber Sleep-Zyklen stabil bleiben.
+  - Risiko: MITTEL -- bei vergessener Wake-Quelle Geraet haengt, nur
+    Reset hilft (User muss USB-Stecker ziehen oder Boot-Button).
+
+Inkrementeller Phasen-Plan:
+
+  Phase 1 (Quick-Win, ungetestet bis User-GO):
+    - ESP32Board::sleep(uint32_t) Override implementieren
+    - Wake-Quellen: Timer (30s) + LoRa-DIO1
+    - Gating: nur sleep wenn !_ble_serial->isEnabled()
+      (= BLE komplett aus -- konservativ, vermeidet BLE-Komplikationen)
+    - main.cpp loop-Ende: board.sleep(0) auch fuer ESP32 ifdef-en
+    - USB-CDC explizit als TODO markieren; vorerst kein Wake fuer USB.
+    - Test-Erwartung: ~30 mA Spar bei BT=off im Idle-Status.
+
+  Phase 2 (nur falls Phase 1 stabil laeuft):
+    - GPIO-Wake fuer User-Button (Heltec hat einen)
+    - BLE-Gating verfeinern: auch bei _ble_pwr_state in HOT_START/TMP_OFF
+      sleepen erlauben (nur AWAKE blocked)
+
+  Phase 3 (optional, viel Aufwand):
+    - USB-CDC Wake. Variante a) GPIO als USB-Activity-Indicator
+      verdrahten; b) USB-CDC bewusst trennen wenn idle, User muss
+      Re-Connect machen. Beide haben UX-Probleme.
+
+Risiken / Vorbehalte:
+  - Bei vergessener Wake-Quelle Geraet im Sleep gefangen -- Reset noetig.
+  - WDT muss waehrend Sleep angehalten oder lang genug gestellt sein
+    (esp_task_wdt_*).
+  - SPI/I2C-Initialisierung: in der Regel ueberlebt Light-Sleep, aber
+    Peripheriegeraete (LoRa-Chip, Display) koennen Modus verlieren.
+  - Timing-kritische Operationen werden delayed (Sleep ist nicht
+    instant aufweckbar -- Mikrosekunden- bis Millisekunden-Wake-Latenz).
+
+Pre-Implementation-Check:
+  Vor Phase-1-Code muss der User bereit sein:
+  - Test-Setup mit Strommessgeraet
+  - Heltec WT mit USB-OTG fuer Recovery-Reflash falls Lockup
+  - Idealerweise Backup-Pfad ohne USB-Reflash (z.B. dfu-mode via Button-
+    Press zum Boot).
+
+Quellen:
+  - Wunschliste 84 ESP32-Recherche (Z ~ 6240+) -- detaillierte Code-
+    Pfade in /Users/thomas/meshtastic-firmware-src-github/firmware/.
+  - User-Stromaufnahme-Messungen 2026-06-17/18.
+  - Bestehende NRF52-Implementierung: NRF52Board::sleep() + main.cpp:
+    697-701 board.sleep(0) -- analoges Pattern fuer ESP32 zu schaffen.
+
+
+--------------------------------------------------------------------------------
+87. REFACTOR: s/m/h/d-Parser + Duration-Formatter als Helpers (User-Wunsch 2026-06-18)
+--------------------------------------------------------------------------------
+
+Status: TODO. Nach Phase-3-Test angehen, sodass Output-Aenderungen
+        nicht mit dem laufenden Test kollidieren.
+
+Motivation:
+  Wir haben das s/m/h/d-Unit-Pattern jetzt in mehreren Befehlen:
+    - tx suspend <N>[s|m|h]      (Wunschliste 82)
+    - gps power lead <N>[s|m|h|d] (Wunschliste 81 Phase 3)
+  Plus Duration-/Age-Anzeigen in mehreren Status-Befehlen:
+    - tx                 (Status mit "Xm Ys left")
+    - rx                 (5min-Window-Left)
+    - gps                (last_fix_age "%lud%luh ago" etc.)
+    - sensors            (last_fix_age dito)
+    - gps power          (lead = X min / X h / X d)
+  Duplizierter Code in if-else-Ketten ueberall. Refactor zentralisiert.
+
+Vorgeschlagene Helpers (Signaturen):
+
+  // Parser: "5", "5m", "1h", "7d" -> Sekunden
+  //   default_unit_char: 'm' fuer Minute-Default (z.B. lead),
+  //                      's' fuer Sekunden-Default (z.B. delay),
+  //                      'h' fuer Stunden-Default (selten).
+  //   returns -1 bei Fehler, sonst Sekunden.
+  long parseTimeWithUnit(const char* s, char default_unit_char);
+
+  // Formatter (smart compact):
+  //   30        -> "30s"
+  //   90        -> "1m30s"
+  //   3700      -> "1h1m"
+  //   90061     -> "1d1h"
+  //   Buffer-Bedarf: 16 Byte reicht.
+  void formatDurationCompact(char* out, size_t out_size, unsigned long secs);
+
+  // Age-Formatter: wie oben + " ago" Suffix (oder konfigurierbar).
+  void formatDurationAge(char* out, size_t out_size, unsigned long secs);
+
+Konsumenten-Liste (Stellen wo umgestellt wird):
+  - tx suspend Parse + Status               (handleCompanionCommand)
+  - gps power lead Parse + Status           (handleCompanionCommand)
+  - gps Status "last_fix_age"              (handleCompanionCommand "gps")
+  - sensors Status "last_fix_age"          (sensors Top-Level Block)
+  - rx Status "post-TX window Xs left"    (handleCompanionCommand "rx")
+  - moeglicherweise: motion-stats age-Display
+
+Aufwand: 1-2h. Risk: low (rein lokaler Refactor, Outputs sollten
+funktional identisch sein bzw. konsistenter werden).
+
+Quelle: User-Wunsch 2026-06-18 nach Phase-3-Implementation.
+
+
