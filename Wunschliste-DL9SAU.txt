@@ -6397,6 +6397,11 @@ Datenpunkte (gemessen User):
   unsere MeshCore-Fork (DL9SAU), Heltec Wireless Tracker (ESP32-S3):
     - bluetooth on (always-on)     -> 185-195 mA  (Wunschliste-Z 4695)
     - bluetooth off + display off  -> 125 mA      (2026-06-17 Log)
+    - 2026-06-19 mit BLE-Cycler aktiv + ohne BT + GPS:
+                                     -> ca. 97 mA (User-Messung 2026-06-19,
+                                                   nach Phantom-Power-Fix
+                                                   + BLE-Bug-Fix 180s->40s
+                                                   + Phase 89/90/91 builds)
   unsere MeshCore-Fork (DL9SAU), Seeed Tracker T1000-E (NRF52840):
     - bluetooth off + gps off      -> ca. 95 mA   (User-Messung 2026-06-18,
                                                    Akku voll, kurzzeitig
@@ -6417,6 +6422,12 @@ Datenpunkte (gemessen User):
   Meshtastic-Firmware, Heltec WT:
     - bluetooth on                 -> 152-160 mA  (User-Messung 2026-06-18)
     - bluetooth off                -> 78-95 mA    (User-Messung 2026-06-18)
+    - 2026-06-19 ohne BT + GPS     -> 93-94 mA    (User-Messung 2026-06-19)
+  => Vergleich 2026-06-19 ohne BT + GPS:
+     MeshCore (DL9SAU)  97 mA  vs  Meshtastic 93-94 mA  (Delta ~3-4 mA)
+     Damit liegen wir VIEL naeher beieinander als anfangs vermutet
+     (30-47 mA Spread war Messsetup-bedingt; ESP32 Hebel A Light-Sleep
+     ist weniger dringlich als angenommen).
   Anderes Geraet, LoRa-APRS-Firmware (Wunschliste-Z 4559) -> 165 mA.
 
 Interpretation:
@@ -6917,6 +6928,63 @@ Quellen:
 === ENDE RECHERCHE-ERGEBNIS ===
 
 
+=== NEGATIV-BEFUND 2026-06-19 (Meshtastic-Test des Phantom-Power-Fix) ===
+
+Verwandt zu Wunschliste 85: User hat den Phantom-Power-Reihenfolge-Fix
+fuer GPS-Sleep/Wake (heute committed bei uns) ZUSAETZLICH zum BLE-
+Cycler in den Meshtastic-Tree portiert und gemessen:
+
+  Setup:   Heltec WT, BT on + BLE-Cycler aktiv (-> 79-86 mA Baseline
+           wie in Bestaetigung unten)
+  GPS off (HARDSLEEP, Phantom-Power-Fix gepatcht): 97 mA
+  -> Differenz ~10 mA blieb stehen.
+
+Hypothesen welche Ursache statt Phantom-Powering:
+  1. ESP32-UART-Hardware-Block selbst (TX treibt auf nichts -> Error/
+     Busy-State). Diagnose-Versuch: pinMode(TX, INPUT) + pinMode(RX,
+     INPUT) vor Power-Off.
+  2. Wake-Pin-Konfiguration -- WAKE/INT-Pin des GPS floatet, loest
+     Pseudo-IRQs aus, ESP32 wacht staendig kurz auf.
+  3. I2C-PMU-Polling im HARDSLEEP-Pfad.
+  4. SPI/I2C-Bus bleibt aktiv.
+  5. Battery-Monitor oefter aktiv durch State-Change.
+
+Folgen fuer unseren Phantom-Power-Fix-Commit:
+  BLEIBT (User-Entscheid 2026-06-19). Konzeptuell richtig, sauberer
+  Code, future-proof, bei anderen Hardware-Stellen ggf. wirksam.
+  Upstream-PR-Kandidat-Status: hold, mehr Diagnose noetig.
+
+Verwandte Memory: [[upstream-pr-phantom-power-candidate]] mit Details.
+
+=== ENDE NEGATIV-BEFUND ===
+
+
+=== UMSETZUNG-BESTAETIGUNG 2026-06-18 SPAET (User-Erfolgsbericht) ===
+
+User hat unseren BLE-Sleep-Mechanismus erfolgreich in den Meshtastic-
+Tree portiert (im separaten Repo /Users/thomas/meshtastic-firmware-src-
+github/firmware) und gemessen:
+
+  Setup: Heltec WT, BT on (App kann reconnecten),
+         unser 20/40s-Cycle aktiv (im Meshtastic-Build)
+  Strom: 79-86 mA  (User-Messung 2026-06-18 spaet)
+
+Vergleichswerte (siehe Wunschliste 84 Datenpunkte):
+  Meshtastic BT on  Default :  152-160 mA
+  Meshtastic BT off Default :   78-95 mA
+  -> Spar bei BT on:  ~80-90 mA gegenueber Default
+  -> Bei aktivierter BT-Funktionalitaet sogar ~10 mA UNTER ihrem
+     BT-off-Default.
+
+Status der Portierung: erfolgreich validiert auf Hardware. Bereit
+fuer Aufraeumen + Doku + Pull-Request an Upstream Meshtastic mit
+dem BLUETOOTH_MAY_SLEEP-Compile-Gate (opt-in, kein Default-Verhalten-
+Change). Memory [[upstream-pr-phantom-power-candidate]] hat ein
+Schwester-Pendant: BLE-Cycler-PR-Kandidat.
+
+=== ENDE UMSETZUNG-BESTAETIGUNG ===
+
+
 --------------------------------------------------------------------------------
 86. ESP32-S3 esp_light_sleep_start() im Idle (Hebel A aus Wunschliste 84)
 --------------------------------------------------------------------------------
@@ -7018,6 +7086,75 @@ Quellen:
   - User-Stromaufnahme-Messungen 2026-06-17/18.
   - Bestehende NRF52-Implementierung: NRF52Board::sleep() + main.cpp:
     697-701 board.sleep(0) -- analoges Pattern fuer ESP32 zu schaffen.
+
+
+=== TEST-VERSUCH 2026-06-19 FEHLGESCHLAGEN, REVERTIERT ===
+
+Phase 1 wurde als 1-Zeiler in main.cpp eingebaut (board.sleep(30)
+nach den NRF52-Pfad Z 697+, gegated durch !isSerialCliActive()).
+ESP32Board::sleep() existierte schon und ruft esp_light_sleep_start
+mit Timer-Wake + LORA_DIO1 GPIO-Wake.
+
+User-Befund Heltec WT 2026-06-19 (gute Test-Strategie: Reset-Button
++ Reflash bereit):
+  - USB-CDC kommt nach Light-Sleep NICHT mehr zurueck. Auch nach
+    Button-Press passiert nichts auf Serial-Console.
+  - Display: kommt kurz das Logo, dann geht es aus und bleibt
+    schwarz. Light-Sleep verhindert den Display-Refresh-Loop.
+  - Insgesamt: "Ganz schlechte experience" (User-Wortlaut).
+
+Ursachen-Analyse:
+
+1. Button-GPIO ist NICHT als Wake-Source konfiguriert. ESP32Board::
+   sleep() Z 95-96 enabled NUR LORA_DIO1 GPIO-Wake. PIN_USER_BTN=0
+   (Heltec WT, GPIO0 = Boot-Pin) wuerde manuelles Wecken erlauben,
+   ist aber nicht eingehangen.
+2. USB-CDC schlaeft im Light-Sleep mit. Es gibt keinen sauberen
+   Wake-Source-Mechanismus fuer USB-CDC-RX ohne externen GPIO als
+   Hilfs-Signal.
+3. Display wird nur waehrend des normalen Loop refreshed. 30s
+   Sleep = 30s ohne Refresh -> User sieht "tot".
+
+Korrekte Phase-1-Anforderungen sind also strenger als urspruenglich
+gedacht. ZWINGEND noetig vor erneutem Versuch:
+
+  A) Button-GPIO als Wake-Source hinzufuegen.
+     ESP32Board::sleep() um folgende Zeilen erweitern:
+       esp_sleep_enable_ext1_wakeup(BIT64(PIN_USER_BTN),
+                                    ESP_EXT1_WAKEUP_ANY_LOW);
+     ODER per gpio_wakeup_enable mit GPIO_INTR_LOW_LEVEL.
+     Damit kann der User immer manuell wecken.
+
+  B) Display-State beruecksichtigen. Wenn Display gerade an ist,
+     KEIN Light-Sleep (Refresh-Loop muss durchlaufen). Erst wenn
+     Display per Timer aus ist, sleep erlauben. Hook in
+     hasPendingWork() oder eigenes Gate.
+
+  C) USB-CDC Detection: pruefen ob Host-Verbindung aktiv ist via
+     SerialUSB.dtr() / SerialUSB.connected() oder ESP-IDF API.
+     Wenn ja: kein Light-Sleep (User koennte tippen).
+
+  D) Nach jedem Wake-Up explizit Display-Refresh triggern wenn
+     Display an.
+
+  E) Erstmal mit MUCH kuerzerem Sleep testen (sleep(1) statt
+     sleep(30)) -- waere immer noch Strom-Spar aber mit 1s
+     max Lag. Dann ergaenzen.
+
+Phase-Plan-Update (Stand 2026-06-19):
+  Phase 1a = Button-Wake-Source einbauen.
+  Phase 1b = Display-Gate.
+  Phase 1c = USB-CDC-Connection-Detection.
+  Phase 1d = sleep(1) statt sleep(30), dann hochziehen.
+  ERST WENN 1a-1d sauber: zurueck zu sleep(30) als Default.
+
+Code-Revert 2026-06-19:
+  examples/companion_radio/main.cpp -- Z 697-720 ESP32-Pfad wieder
+  raus. NRF52-Pfad bleibt unveraendert. MyMesh::isSerialCliActive()
+  Helper bleibt (tot, harmlos, kann bei naechstem Versuch wieder
+  genutzt werden).
+
+=== ENDE TEST-VERSUCH 2026-06-19 ===
 
 
 --------------------------------------------------------------------------------
@@ -7317,6 +7454,34 @@ Persistenz:
 
 Aufwand: 2-3h (inkl. Backup save/restore + Help-Text).
 
+Phase 2 -- USB-VBUS Auto-Wake fuer T1000-E (User-Befund 2026-06-18 spaet):
+  PRIO: NAECHSTES nach Test der Phase 1 (User-Wunsch 2026-06-18 spaet).
+  KONFIGURIERBAR (User-Wunsch 2026-06-18 ganz spaet):
+    Neue Pref usb_wake_on_plug (uint8_t, Sentinel 0xFF).
+      0 = USB-Plug weckt NICHT auf (Tracker bleibt aus, User-
+          Button noetig). Use-Case: bewusst ruhig stellen waehrend
+          das Auto in der Garage steht und USB-Lader-Standby
+          steckt.
+      1 = USB-Plug weckt automatisch auf (Default fuer T1000-E
+          weil Auto-Tracker-Use-Case der haeufigere ist).
+    Migration: Pre-Init in begin(), bei 0xFF Sentinel setze 1.
+    CLI: set usb_wake_on_plug <0|1|on|off>.
+    Implementierung in T1000eBoard::powerOff() #ifdef-gated:
+      if (prefs.usb_wake_on_plug) nrf_power_int_enable(...);
+  Aktuell wacht T1000-E nach powerOff() (sd_power_system_off) NICHT
+  von alleine auf wenn USB wieder eingesteckt wird -- nur Button-Press
+  weckt (variants/t1000-e/T1000eBoard.h:80-89 konfiguriert nur
+  BUTTON_PIN als SENSE-Wake).
+  Fuer den Auto-Tracker-Use-Case unguenstig: Zuendung wieder an ->
+  USB-Strom da, aber Tracker bleibt aus bis User Button drueckt.
+  Loesung: vor sd_power_system_off() auch USB-VBUS als Wake-Quelle
+  enablen.
+    nrf_power_int_enable(POWER_INTENSET_USBDETECTED_Msk);
+  ODER GPIO-Konfiguration falls USB-VBUS auf einen Pin geroutet ist.
+  Heltec WT: esp_deep_sleep ohne Wake-Quelle -- USB-Reconnect macht
+  Power-Reset = automatischer Re-Boot. KEINE Aenderung noetig.
+  Aufwand: 1h + Test.
+
 Quelle: User-Wunsch 2026-06-18 abend.
 
 
@@ -7380,6 +7545,20 @@ restore + Help-Texte).
 
 Quelle: User-Wunsch 2026-06-18 abend. Verwandt zu Wunschliste 90
 (USB-Loss-Timer) -- beides Power-Off-Trigger.
+
+Recherche-TODO (low-Prio, 2026-06-18 spaet):
+  Schaltplan-Recherche T1000-E -- welcher Battery-Protection-IC ist
+  verbaut, welche Hardware-Discharge-Cutoff-Schwelle, Latch vs Auto-
+  Recovery? Quelle vermutlich Seeed Studio (seeedstudio.com Forum,
+  GitHub-Repo des Tracker-Hardware-Designs).
+  Code-Hinweise heute: EXT_CHRG_DETECT (P1.3) + EXT_PWR_DETECT (P0.5)
+  in variant.h:28-29 -> Charging-IC (TP4054/4056 wahrscheinlich) ist
+  bekannt verbaut. Battery-Protection-IC (DW01A oder aehnlich) ist
+  technisch sehr wahrscheinlich (CE/FCC-Pflicht fuer 1S-Li-Po), aber
+  Modell + Schwellen ohne Schaltplan nicht bestaetigbar.
+  Relevanz fuer uns: Software-Cutoff bei 3200mV bleibt richtig
+  (Lebensdauer-Schutz weit ueber Hardware-Notfall). Recherche ist
+  Wissens-Komplettierung, kein Code-Aenderungs-Trigger.
 
 
 
