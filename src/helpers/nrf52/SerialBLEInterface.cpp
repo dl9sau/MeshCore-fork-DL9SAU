@@ -16,8 +16,14 @@
 #define BLE_CONN_SUP_TIMEOUT       200    // 2000ms
 
 // Advertising parameters
+// DL9SAU 2026-06-18 (Wunschliste 84 Hebel C): Max-Interval von 152ms
+// auf 417ms erhoeht (analog Meshtastic NRF52Bluetooth.cpp:142). Senkt
+// den Advertising-Tx-Anteil deutlich, Discovery-Latenz im Phone-Scan
+// steigt um max ~270ms -- unter UX-Schwelle und im 20s-BLE-wake-
+// Fenster nicht spuerbar.
 #define BLE_ADV_INTERVAL_MIN       32     // 20ms (units: 0.625ms)
-#define BLE_ADV_INTERVAL_MAX       244    // 152.5ms (units: 0.625ms)
+//#define BLE_ADV_INTERVAL_MAX     244    // 152.5ms (units: 0.625ms) -- vor 2026-06-18
+#define BLE_ADV_INTERVAL_MAX       668    // 417.5ms (units: 0.625ms)
 #define BLE_ADV_FAST_TIMEOUT       30     // seconds
 
 // RX drain buffer size for overflow protection

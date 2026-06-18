@@ -91,6 +91,13 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   pRxCharacteristic->setCallbacks(this);
 
   pServer->getAdvertising()->addServiceUUID(SERVICE_UUID);
+  // DL9SAU 2026-06-18 (Wunschliste 84 Hebel C): Adv-Interval explizit
+  // setzen. arduino-esp32-BLE-Default ist ca 1280ms (= 0x0800), aber
+  // beim ersten begin() ist eher 'sehr aggressiv' (32-64). Wir setzen
+  // analog NRF52: Min 20ms, Max 417.5ms -- spart Strom im Disconnected-
+  // Advertising waehrend des 20s BLE-Wake-Cycles.
+  pServer->getAdvertising()->setMinInterval(32);    // 32 * 0.625 = 20ms
+  pServer->getAdvertising()->setMaxInterval(668);   // 668 * 0.625 = 417.5ms
 
   // DL9SAU 2026-06-13: pService->start() einmalig hier in begin()
   // statt frueher in enable() bei jedem Wake-up. Hintergrund: arduino-esp32
