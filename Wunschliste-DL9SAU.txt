@@ -6402,6 +6402,8 @@ Datenpunkte (gemessen User):
                                                    nach Phantom-Power-Fix
                                                    + BLE-Bug-Fix 180s->40s
                                                    + Phase 89/90/91 builds)
+    - 2026-06-19 mit GPS an          -> 122 mA   (+25 mA fuer Ublox-Modul,
+                                                  normal -- GPS-Modul-Strom)
   unsere MeshCore-Fork (DL9SAU), Seeed Tracker T1000-E (NRF52840):
     - bluetooth off + gps off      -> ca. 95 mA   (User-Messung 2026-06-18,
                                                    Akku voll, kurzzeitig
@@ -6423,11 +6425,36 @@ Datenpunkte (gemessen User):
     - bluetooth on                 -> 152-160 mA  (User-Messung 2026-06-18)
     - bluetooth off                -> 78-95 mA    (User-Messung 2026-06-18)
     - 2026-06-19 ohne BT + GPS     -> 93-94 mA    (User-Messung 2026-06-19)
+    - 2026-06-19 MIT GPS an        -> 85 mA       (PARADOX: weniger als
+                                                   ohne GPS! -- klassischer
+                                                   GPS_HARDSLEEP-Phantom-
+                                                   Power-Bug, User-Bestaetigung
+                                                   2026-06-19)
   => Vergleich 2026-06-19 ohne BT + GPS:
      MeshCore (DL9SAU)  97 mA  vs  Meshtastic 93-94 mA  (Delta ~3-4 mA)
      Damit liegen wir VIEL naeher beieinander als anfangs vermutet
      (30-47 mA Spread war Messsetup-bedingt; ESP32 Hebel A Light-Sleep
      ist weniger dringlich als angenommen).
+  => Vergleich 2026-06-19 MIT GPS an:
+     MeshCore  122 mA  vs  Meshtastic 85 mA
+     ACHTUNG -- nicht direkt vergleichbar! Meshtastic-Wert ist
+     KUENSTLICH zu NIEDRIG wegen Phantom-Power-Bug-Inverse (GPS-OFF
+     zieht MEHR Strom als GPS-ON). MeshCore-Wert 122 mA ist normal
+     (97 + 25 mA Ublox-Modul-Strom). Klarer Beweis: Phantom-Power-Bug
+     ist Meshtastic-spezifisch, NICHT in MeshCore.
+
+     Implikation: unser Phantom-Power-Fix (heute committed) ist
+     konzeptuell richtig + future-proof, aber bei UNS hat es keinen
+     messbaren Strom-Effekt weil das Problem schlichtweg nicht da ist.
+     Bei Meshtastic muessten zusaetzliche Bugs gefixed werden um den
+     Vorteil zu sehen (siehe Phantom-Power-Negativ-Befund + Hypothesen
+     oben).
+
+     Spar-Potential bei MeshCore: die 25 mA mit GPS an sind Ublox-
+     Modul-Strom -- nur via aggressiveres GPS-Power-Cycling sparbar
+     (wie in unserem gps power cycle Mode bereits eingebaut), oder
+     ueber Ublox-Low-Power-Modi (kein periodic-fix, on-demand -- waere
+     eigenes Feature).
   Anderes Geraet, LoRa-APRS-Firmware (Wunschliste-Z 4559) -> 165 mA.
 
 Interpretation:
