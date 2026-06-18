@@ -6436,25 +6436,29 @@ Datenpunkte (gemessen User):
      (30-47 mA Spread war Messsetup-bedingt; ESP32 Hebel A Light-Sleep
      ist weniger dringlich als angenommen).
   => Vergleich 2026-06-19 MIT GPS an:
-     MeshCore  122 mA  vs  Meshtastic 85 mA
-     ACHTUNG -- nicht direkt vergleichbar! Meshtastic-Wert ist
-     KUENSTLICH zu NIEDRIG wegen Phantom-Power-Bug-Inverse (GPS-OFF
-     zieht MEHR Strom als GPS-ON). MeshCore-Wert 122 mA ist normal
-     (97 + 25 mA Ublox-Modul-Strom). Klarer Beweis: Phantom-Power-Bug
-     ist Meshtastic-spezifisch, NICHT in MeshCore.
+     MeshCore  122 mA  vs  Meshtastic 85 mA  -- Delta ~37 mA.
 
-     Implikation: unser Phantom-Power-Fix (heute committed) ist
-     konzeptuell richtig + future-proof, aber bei UNS hat es keinen
-     messbaren Strom-Effekt weil das Problem schlichtweg nicht da ist.
-     Bei Meshtastic muessten zusaetzliche Bugs gefixed werden um den
-     Vorteil zu sehen (siehe Phantom-Power-Negativ-Befund + Hypothesen
-     oben).
+     ERKLAERUNG (User-Recherche 2026-06-19 in Meshtastic-Code):
+     Meshtastic nutzt UBLOX-Hersteller-Low-Power-Modi chipspezifisch.
+     Pfad: meshtastic firmware/src/gps/GPS.cpp:660-770. Pro UBLOX-
+     Generation eigene CFG-Calls + CFG-SAVE am Ende:
 
-     Spar-Potential bei MeshCore: die 25 mA mit GPS an sind Ublox-
-     Modul-Strom -- nur via aggressiveres GPS-Power-Cycling sparbar
-     (wie in unserem gps power cycle Mode bereits eingebaut), oder
-     ueber Ublox-Low-Power-Modi (kein periodic-fix, on-demand -- waere
-     eigenes Feature).
+       UBLOX 6 (Neo-6):           CFG-RXM mit ECO + CFG-PM2
+       UBLOX 7/8/9 (Proto >=18):  CFG-PMS + CFG-PM2  (UBX-PMS-API)
+       UBLOX 7/8/9 (Proto <18):   CFG-RXM mit PSM + CFG-PM2 (klassisches PSM)
+       UBLOX 10 (M10):            CFG-VALSET mit PM-RAM + PM-BBR
+                                   (moderne Key-Value-API, BBR-persistent)
+
+     Korrektur frueherer Annahme: war KEIN Phantom-Power-Bug bei
+     Meshtastic (paradoxer Effekt GPS-on < GPS-off ist Folge der Low-
+     Power-Mode-Aktivierung). Unser GPS Phantom-Power-Fix (heute
+     committed) bleibt konzeptuell richtig + future-proof, ist aber
+     bei keiner der zwei Firmware-Codebasen ein groesserer Spar-Hebel.
+
+     SPAR-POTENTIAL FUER MESHCORE (Hebel UBLOX-Low-Power):
+     Geschaetzt 25-37 mA Ersparnis bei GPS an basierend auf Meshtastic-
+     Crossmessung Heltec WT V1.1 2026-06-19. Implementierung als
+     eigener Wunschliste-Eintrag (siehe 92).
   Anderes Geraet, LoRa-APRS-Firmware (Wunschliste-Z 4559) -> 165 mA.
 
 Interpretation:
@@ -7510,6 +7514,70 @@ Phase 2 -- USB-VBUS Auto-Wake fuer T1000-E (User-Befund 2026-06-18 spaet):
   Aufwand: 1h + Test.
 
 Quelle: User-Wunsch 2026-06-18 abend.
+
+
+--------------------------------------------------------------------------------
+92. UBLOX-GPS Low-Power-Mode aktivieren (User-Befund 2026-06-19)
+--------------------------------------------------------------------------------
+
+Status: TODO. Geschaetzter Strom-Spar 25-37 mA bei GPS an
+        (empirisch via Meshtastic-Crossmessung Heltec WT 2026-06-19).
+
+Motivation:
+  User-Recherche im Meshtastic-Tree zeigt: Meshtastic-Crossmessung
+  Heltec WT 2026-06-19 ergab 122 mA (MeshCore) vs 85 mA (Meshtastic)
+  mit GPS an. Differenz ~37 mA. Ursache NICHT Phantom-Power-Bug,
+  sondern Meshtastic nutzt UBLOX-Hersteller-Low-Power-Modi
+  chipspezifisch (CFG-RXM/PSM/PMS/M10-VALSET) -- wir nicht.
+
+Implementierungs-Pfad:
+
+  Quelle (Meshtastic): meshtastic firmware/src/gps/GPS.cpp:660-770
+    Chipspezifische UBX-Konfigurations-Strings im Klartext im Code
+    (_message_CFG_RXM_ECO, _message_CFG_PM2, _message_PMS,
+     _message_CFG_RXM_PSM, _message_VALSET_PM_RAM/_PM_BBR), plus
+    CFG-SAVE (0x06, 0x09) am Ende fuer Power-Cycle-Persistenz.
+
+  Vorgehen fuer MeshCore (Vorschlag):
+    Phase A:
+      - UBLOX-Chip-Generation detect im setSettingValue("gps","1")-
+        Pfad. UBX-MON-VER abfragen, Antwort parsen, Generation +
+        Proto-Version festhalten.
+      - Chipspezifisches Power-Save-Setup-Tabelle (analog Meshtastic).
+      - Setup einmal nach Boot + nach jedem GPS-Power-On.
+      - CFG-SAVE (0x06, 0x09) damit's Power-Cycle ueberlebt.
+    Phase B (optional):
+      - User-CLI 'gps power ublox-psm on|off' zum An/Aus-Schalten
+        (Vorrang: Phase A reicht out-of-the-box).
+      - Diagnose-Status zeigt aktuell aktiven Low-Power-Mode an.
+
+Chip-Eingrenzung:
+  Heltec WT V1.x:    UBLOX (vermutlich M10 oder M8 -- Generation
+                     per UBX-MON-VER bestaetigen).
+  T1000-E:           AIROHA / Mediatek GPS, KEIN UBLOX. Anderer
+                     Low-Power-Pfad noetig (Airoha hat eigene
+                     UBX-aehnliche API, dokumentiert im Modul-
+                     Datasheet). Separater Wunschliste-Eintrag wenn
+                     wir das auch angehen wollen.
+  RAK WisBlock-Variants: vermischt, je Modul.
+
+Risiken / Vorbehalte:
+  - Low-Power-Mode reduziert Fix-Reaktionszeit. Bei Auto-Tracker
+    moeglicherweise spuerbar (10-30s laenger zum ersten Fix nach
+    Wake). Akzeptabel fuer Companion-Use-Case.
+  - CFG-SAVE in BBR (Battery-Backed-RAM) braucht funktionierende
+    Backup-Spannung. Bei Tiefentladung verliert sich die Konfig.
+    Setup-Routine muss idempotent + fehler-tolerant sein
+    (re-anwenden wenn Antwort nicht plausibel).
+  - Verschiedene Proto-Versionen brauchen unterschiedliche UBX-
+    Strings -- gruendlicher Test pro Generation noetig.
+
+Aufwand-Schaetzung: 4-6h Code (Chip-Detect + Tabelle), 2-3h Test
+pro UBLOX-Generation.
+
+Quelle: User-Befund 2026-06-19 + Recherche im Meshtastic-Tree.
+Verwandt zu Wunschliste 84 (Strom-Vergleichsdaten + Korrektur des
+Phantom-Power-Anti-Patterns als FALSCHE Hypothese).
 
 
 --------------------------------------------------------------------------------
