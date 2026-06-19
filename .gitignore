@@ -29,3 +29,9 @@ tmp-*.txt
 tmp/
 git-upstream-check.sh
 *.patch
+
+# Lokales Entwicklungs-Tagebuch (nicht versionieren)
+Wunschliste-DL9SAU.txt
+/.claude/
+/compile-*.sh
+/resume.txt

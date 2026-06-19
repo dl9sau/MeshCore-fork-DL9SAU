@@ -1,3 +1,20 @@
+# DL9SAU-Fork von MeshCore
+
+Dies ist eine erweiterte Version des originalen MeshCore-Projekts. Mein Fokus liegt
+auf dem Companion-Modus (Smartphone-App + Tracker-Gerät) mit zusätzlichen
+Komfort-Funktionen für den täglichen Einsatz, Stromspar-Mechanismen für mobile
+Nutzung und Diagnose-Werkzeugen für die Fehlersuche.
+
+Eine Übersicht der validierten Erweiterungen steht in [FEATURES.md](FEATURES.md).
+Die einzelnen Implementierungs-Details und Begründungen für Design-Entscheidungen
+sind in den Commit-Nachrichten dokumentiert.
+
+Aktiv getestet auf **Heltec Wireless Tracker** (ESP32) und **SenseCAP T1000-E** (NRF52).
+
+Build und Flash funktionieren wie beim Original-Projekt.
+
+---
+
 ## About MeshCore
 
 MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
