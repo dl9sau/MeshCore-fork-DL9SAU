@@ -12742,6 +12742,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "prefs reset\n  alle DL9SAU-Vars auf Default");
         return;
       }
+      if (topic_prefix_match(topic, "save")) {
+        pushCompanionMessage(
+          "save: persistiert prefs (DL9SAU-Vars + App-Mirror)\n"
+          "ins Flash. Channels/Contacts/Identity haben\n"
+          "eigene Speicherpfade.");
+        pushCompanionMessage(
+          "Normalerweise rufen 'set <key> <val>' und\n"
+          "'backup restore' savePrefs() implizit auf.");
+        pushCompanionMessage(
+          "'save' explizit hilft nach 'prefs reset'\n"
+          "(RAM-only) oder bei Diagnose-Sessions als\n"
+          "Force-Write.");
+        return;
+      }
       if (topic_prefix_match(topic, "duty")) {
         pushCompanionMessage(
           "duty: Duty-Cycle-Schutz (EU-Vorgabe 10% TX-Airtime pro\n"
