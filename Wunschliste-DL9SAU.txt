@@ -7298,7 +7298,47 @@ Quelle: User-Wunsch 2026-06-18 nach Phase-3-Implementation.
 88. at / cron-aehnliche Befehle (User-Wunsch 2026-06-18 abend)
 --------------------------------------------------------------------------------
 
-Status: TODO. Konzept-Skizze.
+Status: Phase 1 + 2 DONE (2026-06-20). Phase 2b TODO nach User-Reise.
+
+Phase 1 (CLI + Polling + Help):
+  - 'at' (RAM-only) und 'cron' Befehle, dispatchToken-basierter Sub-
+    Dispatch mit Prefix-Match (User-Memory keyword_prefix_abbreviation).
+  - Parser: relative Minuten (+N[m|h|d]), absolute HH:MM (LOCAL TZ
+    via localTzOffsetSecs), Intervalle (10m/1h/2d, 60m/6), Wochentag-
+    Listen (Mo,Fr / Wd / We / Wk / *).
+  - Unix-like Wildcards: '*' fuer alle Tage + '*' fuer jede Minute.
+  - manageCronAt() Polling jede 60s im loop. Boot-Grace 10min fuer
+    cron, at darf sofort.
+  - emitAtList/emitCronList mit Sekunden-Anzeige (+30s, +1min, due)
+    und kompakter Anzeige (Wd/We/Wk statt Volltext).
+  - 'add' als optionales Sub-Synonym fuer 'at' UND 'cron' (Konsistenz).
+  - help at + help cron Topics, Help-Overview-Liste.
+  - Output-Routing: pushCompanionMessage erweitert um Sender-Suffix
+    ('(at)' / '(cron)' in App) plus Serial-Fallback mit Zeilen-Prefix
+    ('[at]') wenn keine App connected. Sequenziell konsistent ueber
+    multi-line Output (CRLF + Prefix vor jeder Zeile).
+  - Match-Robustheit: 2-Min-Window statt strict-equality (60s-Polling-
+    Drift kann Ziel-Minute verfehlen).
+
+Phase 2a (Persistenz):
+  - File "/cron.dat" mit magic+version+count+N x CronEntry. last_run_secs
+    nicht persist (startet beim Boot bei 0). in_use implizit via Count.
+  - loadCronFromFile() in MyMesh::begin() nach loadPrefs.
+  - saveCronToFile() bei jedem cron add/del/clear/enable/disable.
+  - At-Jobs RAM-only by design (User-Konzept).
+
+Phase 2b TODO (backup save / restore Integration):
+  - cron-Eintraege in backup save JSON exportieren (Array
+    'cron_entries' mit { flags, weekday_mask, hour_min, interval_secs,
+    cmd } pro Eintrag).
+  - backup restore parsing: brApplyField fuer Array-Felder erweitern.
+  - Use-Case: Migration zwischen Geraeten, oder full-restore nach
+    factory-reset.
+  - User-Wunsch 2026-06-20: nach Reise.
+
+=== Urspruengliches Konzept (2026-06-18) ===
+
+
 
 Motivation:
   Zeit-getriggerte Aktionen ohne dass der User die App offen halten
