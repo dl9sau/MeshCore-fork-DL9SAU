@@ -5029,7 +5029,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.batt_chemistry        = 0xFF;
   _prefs.batt_min_mv           = 0xFFFF;
   _prefs.usb_loss_shutdown_min = 0xFF;
-  _prefs.usb_wake_action       = 0xFF;   // Wunschliste 90 Phase 2 (2026-06-20)
+  _prefs._reserved_usb_wake_action = 0xFF;   // Wunschliste 90 Phase 2 (entfernt 2026-06-20)
   _prefs.shutdown_pending      = 0xFF;
   _prefs.airtime_factor = 1.0;
   strcpy(_prefs.node_name, "NONAME");
@@ -5337,7 +5337,7 @@ void MyMesh::begin(bool has_display) {
 #endif
   if (_prefs.batt_min_mv == 0xFFFF) _prefs.batt_min_mv = 0;
   if (_prefs.usb_loss_shutdown_min == 0xFF) _prefs.usb_loss_shutdown_min = 0;
-  if (_prefs.usb_wake_action == 0xFF)       _prefs.usb_wake_action = 0;   // boot
+  // usb_wake_action entfernt (2026-06-20) -- reserved-Byte braucht keine Migration.
   if (_prefs.shutdown_pending == 0xFF)      _prefs.shutdown_pending = 0;
 
   // Wunschliste 43 Migration (2026-06-11, FIX 2026-06-11):
@@ -9768,7 +9768,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("batt_chemistry",        _prefs.batt_chemistry);          // Wunschliste 91
   kv_uint("batt_min_mv",           _prefs.batt_min_mv);             // Wunschliste 91
   kv_uint("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min);   // Wunschliste 90
-  kv_uint("usb_wake_action",       _prefs.usb_wake_action);         // Wunschliste 90 Phase 2
+  // usb_wake_action entfernt 2026-06-20 -- kein backup-export.
   kv_uint("repeat_scope_mode",     _prefs.repeat_scope_mode);
   kv_uint("msg_store_flash",       _prefs.msg_store_flash);
   kv_arr_uint8("msg_store_limit",  _prefs.msg_store_limit, 5);
@@ -10704,7 +10704,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "batt_chemistry") == 0)        { uint8_t v=(uint8_t)as_uint(); if (v>2) v=0; _prefs.batt_chemistry=v; _br_applied++; return; }       // Wunschliste 91
       if (strcmp(key, "batt_min_mv") == 0)           { _prefs.batt_min_mv           = (uint16_t)as_uint(); _br_applied++; return; }                       // Wunschliste 91
       if (strcmp(key, "usb_loss_shutdown_min") == 0) { uint32_t v=as_uint(); if (v>240) v=240; _prefs.usb_loss_shutdown_min=(uint8_t)v; _br_applied++; return; }  // Wunschliste 90
-      if (strcmp(key, "usb_wake_action") == 0)       { uint8_t v=(uint8_t)as_uint(); if (v>1) v=0; _prefs.usb_wake_action=v; _br_applied++; return; }              // Wunschliste 90 Phase 2
+      // usb_wake_action entfernt 2026-06-20 -- restore-ignore.
       if (strcmp(key, "repeat_scope_mode") == 0)     { _prefs.repeat_scope_mode     = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "msg_store_flash") == 0)       { _prefs.msg_store_flash       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "log_flags") == 0)             { _prefs.log_flags             = (uint8_t)as_uint(); _br_applied++; return; }
@@ -12889,8 +12889,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  batt_chemistry (none|lion|lipo|lifepo4),\n"
           "  batt_min_mv (0=Default je Chemie)");
         pushCompanionMessage(
-          "  usb_loss_shutdown_min (0=off, 1..240),\n"
-          "  usb_wake_action (boot|stay-off)");
+          "  usb_loss_shutdown_min (0=off, 1..240)");
         pushCompanionMessage(
           "Repeat:\n"
           "  repeat,\n"
@@ -19609,23 +19608,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Geraet sauber ab. USB wieder an -> Timer cancel.");
         return;
       }
-      if (strcmp(key, "usb_wake_action") == 0) {
-        pushCompanionMessage(
-          "set usb_wake_action <boot|stay-off>:\n"
-          "  Verhalten wenn NRF52 nach powerOff durch USB-\n"
-          "  VBUS-Change wieder aufwacht. Nur T1000-E.");
-        pushCompanionMessage(
-          "  boot     = heutiges Verhalten (Default).\n"
-          "    Tracker bootet voll. Aufgabe shutdown war\n"
-          "    nur kurzfristig wirksam.");
-        pushCompanionMessage(
-          "  stay-off = bei VBUS-Wake direkt wieder\n"
-          "    powerOff. Tracker bleibt aus bis Button-Press.");
-        pushCompanionMessage(
-          "    Use-Case: shutdown bleibt 'aus' auch wenn\n"
-          "    USB getrennt/gesteckt wird.");
-        return;
-      }
       if (strcmp(key, "path_hash_mode") == 0 || strcmp(key, "path.hash.mode") == 0) {
         pushCompanionMessage(
           "set path_hash_mode <0..2>:\n"
@@ -20340,31 +20322,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    // Wunschliste 90 Phase 2 (2026-06-20): USB-VBUS-Wake-Verhalten.
-    // Nur T1000-E-relevant (NRF52840 hat VBUS-Detect Hardware-aktiv).
-    if (strcmp(key, "usb_wake_action") == 0) {
-      uint8_t v;
-      if (strcmp(value_lc, "boot") == 0 || strcmp(value_lc, "0") == 0) {
-        v = 0;
-      } else if (strcmp(value_lc, "stay-off") == 0
-                 || strcmp(value_lc, "stayoff") == 0
-                 || strcmp(value_lc, "1") == 0) {
-        v = 1;
-      } else {
-        pushCompanionMessage(
-          "Wert muss boot|stay-off sein.\n"
-          "  boot     = heutiges Verhalten (Default)\n"
-          "  stay-off = bei VBUS-Wake gleich wieder powerOff");
-        return;
-      }
-      _prefs.usb_wake_action = v;
-      savePrefs();
-      pushCompanionMessage(v == 0
-        ? "OK - usb_wake_action = boot (Default)."
-        : "OK - usb_wake_action = stay-off.");
-      return;
-    }
-
     // Wunschliste 24: Hop-Cap fuer Nicht-Chat-Adverts (Repeater/Sensor/
     // Room). Range 0..flood_max. 0 = deaktiviert (es gilt flood_max).
     // Plus Sondersyntax: "follow" / "max" -> Sentinel 254 = persistent
@@ -21158,8 +21115,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 #endif
       emit_uint  ("batt_min_mv",         _prefs.batt_min_mv,           0);
       emit_uint  ("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min, 0);
-      // Wunschliste 90 Phase 2: 0=boot (Default), 1=stay-off
-      emit_uint  ("usb_wake_action",     _prefs.usb_wake_action,        0);
       // DL9SAU Wunschliste 81 Phase 1+3 / 83: GPS-Profile + Lead + RX.
       emit_uint  ("gps_profile",         _prefs.gps_profile,           0);
       emit_uint  ("gps_lead_secs",       _prefs.gps_lead_secs,         300);
@@ -21474,12 +21429,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "usb_loss_shutdown_min") == 0) {
       snprintf(r, sizeof(r), "usb_loss_shutdown_min = %u",
                (unsigned)_prefs.usb_loss_shutdown_min);
-    }
-    else if (strcmp(key, "usb_wake_action") == 0) {
-      snprintf(r, sizeof(r), "usb_wake_action = %u (%s)",
-               (unsigned)_prefs.usb_wake_action,
-               _prefs.usb_wake_action == 0 ? "boot" :
-               _prefs.usb_wake_action == 1 ? "stay-off" : "?");
     }
     else if (strcmp(key, "shutdown_pending") == 0) {
       snprintf(r, sizeof(r), "shutdown_pending = %u (RAM/Flash sentinel)",

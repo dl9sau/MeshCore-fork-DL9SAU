@@ -7542,7 +7542,64 @@ Quelle: User-Wunsch 2026-06-18 abend.
 90. Powerdown nach USB-Loss + Timer (Auto-Tracker Use-Case)
 --------------------------------------------------------------------------------
 
-Status: TODO. Setzt Wunschliste 89 voraus.
+Status: Phase 1 (usb_loss_shutdown_min) DONE 2026-06-18.
+        Phase 2 (usb_wake_action stay-off) wurde 2026-06-20 implementiert
+        und am gleichen Tag wieder ENTFERNT -- siehe Begruendung unten.
+
+=== PHASE 2 RETROSPEKTIVE 2026-06-20 (entfernt) ===
+
+Plan war: Pref `usb_wake_action` mit Werten {0=boot, 1=stay-off}.
+Bei stay-off sollte main.cpp setup() nach RESETREAS-Bits filtern --
+Wake durch VBUS-Edge / WDT / LPCOMP (= autonom) wieder powerOff,
+nur OFF-Bit (Button-Sense) / RESETPIN (User-Action) durchlassen.
+
+Implementiert, getestet, dann entfernt aus drei Gruenden:
+
+(1) **Init-Order-Falle.** RESETREAS-Filter lief VOR
+    serial_interface.begin() = VOR SoftDevice-Init. board.powerOff()
+    ruft sd_power_system_off() -- ohne aktives SoftDevice returnt das
+    mit Fehler-Code STATT in System-Off zu gehen. Code danach laeuft
+    weiter, Tracker bootet voll. Stay-off war effektiv ein no-op.
+    Plus: isExternalPowered() liest USBREGSTATUS direkt, ABER VBUS-
+    Detect-Hardware wird erst durch TinyUSB-Init in Bluefruit.begin()
+    enabled. Vorher ist VBUSDETECT-Bit nicht zuverlaessig.
+    -> Funktion war nicht funktional. 6h Bug-Jagd, siehe Memory
+       project_nrf52_softdevice_init_order.
+
+(2) **shutdown_pending-Sentinel macht das Filtering bereits.**
+    Mit dem Sentinel (NodePrefs.shutdown_pending + 50/500ms USB-
+    Sampling im applyShutdownPendingCheck NACH serial_interface.begin)
+    werden alle Phantom-Wakes (WDT-Timeout im System-Off bei USB an,
+    VBUS-Falling beim Pull, BOR durch USB-Pull-Glitch) bereits
+    unsichtbar geblockt. Plus Button-Wake-Exception fuer expliziten
+    User-Wake. RESETREAS-Filter-Pfad war Doppel-Mechanik ohne Mehrwert.
+
+(3) **Strict stay-off + Button-Defekt = unrecoverable.**
+    Wenn User strict stay-off setzt und Button hardware-defekt wird,
+    gibt es keinen Weg den Tracker zum booten. USB-Plug-In via
+    Doppelklick ins UF2-Bootloader funktioniert nur solange Button OK.
+    User-Risiko-Bewertung: zu hoch fuer den Mehrwert (= bewusst aus
+    halten waehrend laden, sehr nischige Use-Case).
+
+WDT-Phantom-Wake Erklaerung (warum Sentinel wichtig ist):
+  NRF52 WDT laeuft auf LFCLK. NRF_WDT_BEHAVIOUR_PAUSE_SLEEP_HALT
+  pausiert WDT in WFE/WFI-Sleep + Debugger, NICHT in System-Off.
+  Im System-Off Verhalten haengt's davon ab ob LFCLK an bleibt:
+   - Reiner Akku-Betrieb -> LFCLK kann pausieren -> WDT pausiert
+   - USB an (Hardware-VBUS-Detect aktiv) -> LFCLK bleibt online ->
+     WDT tickt nach 90s -> Reset = Wake mit DOG-Bit
+  Sprich: shutdown mit USB an wuerde nach 90s phantom-Reboot machen.
+  Sentinel-Mechanismus blockt das unsichtbar (0/50 USB samples beim
+  Pull / 50/50 beim Plug-In -> Action passiert nicht).
+
+Phase 2b (charge-only) bleibt im Konzept-Status. Falls je
+implementiert, MUSS Pref-Check nach serial_interface.begin() laufen
+(siehe Memory project_nrf52_softdevice_init_order). Plus: Recovery-
+Pfad expliziter Long-Press oder Reset-Sequenz noetig.
+
+=== ENDE PHASE 2 RETROSPEKTIVE ===
+
+Status urspruengliches Phase 1 (unter dieser Linie):
 
 Motivation (User-Wunsch 2026-06-18 abend):
   Tracker im Auto an Bord-Stromversorgung. Zuendung aus -> USB-Strom

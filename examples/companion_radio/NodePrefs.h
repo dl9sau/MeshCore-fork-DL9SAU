@@ -708,18 +708,15 @@ struct NodePrefs {  // persisted to file
   // usb_loss_shutdown_min: nach USB-Verlust N Minuten -> shutdown.
   //              0 = disabled (Default). 1..240. Use-Case: Tracker
   //              im Auto, Zuendung aus -> nach N min sauberer Off.
-  // usb_wake_action: Verhalten wenn NRF52 nach powerOff durch USB-
-  //              VBUS-Change (NRF52840 hat VBUS-Detect Hardware-aktiv)
-  //              wieder aufwacht. Nur T1000-E-relevant.
-  //              0 = boot      (Default, heutiges Verhalten)
-  //              1 = stay-off  Boot-Cause-Check: wenn Reset durch
-  //                            VBUS-Wake, sofort wieder powerOff()
-  //              2 = charge-only  (Phase 2b TODO, derzeit = stay-off)
   // 0xFF im File = EOF-Sentinel -> Migration in begin() zu defaults.
   uint8_t        batt_chemistry;
   uint16_t       batt_min_mv;
   uint8_t        usb_loss_shutdown_min;
-  uint8_t        usb_wake_action;
+  // DL9SAU 2026-06-20: usb_wake_action wurde nach erfolgreicher
+  // shutdown_pending-Sentinel-Implementierung entfernt (Wunschliste
+  // 90 Phase 2). Pref-Byte bleibt als 'reserved' im Layout damit
+  // bestehende NodePrefs-Dateien nicht verschoben werden muessen.
+  uint8_t        _reserved_usb_wake_action;
   // DL9SAU 2026-06-20: shutdown_pending Sentinel-Byte. Wird durch
   // setShutdownSentinel() auf 1 gesetzt + savePrefs() VOR powerOff().
   // Beim Boot prueft MyMesh::begin nach loadPrefs: wenn 1 UND USB

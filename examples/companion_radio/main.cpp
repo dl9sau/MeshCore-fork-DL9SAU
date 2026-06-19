@@ -507,42 +507,14 @@ void setup() {
   );
 
   DIAG_MARK("M11 post the_mesh.begin");
-  // DL9SAU 2026-06-20: VBUS-Plug-Out + GPREGRET-Sentinel-Checks
-  // wurden entfernt. Single Source of Truth = NodePrefs.shutdown_pending
-  // (gepruft in MyMesh::begin() nach loadPrefs). Vermeidet Race
-  // zwischen mehreren Checks mit unterschiedlicher USB-State-Sicht.
-
-  // DL9SAU Wunschliste 90 Phase 2 (2026-06-20): VBUS-Wake-Stay-Off.
-  // NRF52840 hat VBUS-Detect Hardware-aktiv -- nach board.powerOff()
-  // weckt sowohl USB-Plug als auch USB-Unplug das Geraet auf
-  // (User-Befund T1000-E 2026-06-20). Plus: NRF52 WDT pausiert NICHT
-  // in System-OFF -> triggert nach WATCHDOG_TIMEOUT_S (90s) ein
-  // Reset = Wake mit DOG-Bit. Wenn Pref usb_wake_action=1 (stay-off),
-  // muessen alle 'autonomen' Wake-Causes (VBUS, DOG, LPCOMP)
-  // wieder powerOff() rufen. Nur 'echte' User-Wakes (OFF=Button-
-  // Sense, RESETPIN) duerfen den Boot abschliessen.
-  // RESETREAS-Lesung via const-Capture s_nrf52_resetreas_captured
-  // (Constructor 101 oben, vor SystemInit) -- Memory project_nrf52_
-  // resetreas_softdevice_trap: direkter Zugriff nach SD-Init = HardFault.
-  // BLE/Display sind hier noch NICHT initialisiert -> kein Sound.
-  if (the_mesh.getNodePrefs()->usb_wake_action == 1) {
-    uint32_t r = s_nrf52_resetreas_captured;
-    uint32_t autonomous_wake_bits = POWER_RESETREAS_VBUS_Msk
-                                  | POWER_RESETREAS_DOG_Msk
-                                  | POWER_RESETREAS_LPCOMP_Msk;
-    uint32_t user_wake_bits = POWER_RESETREAS_OFF_Msk
-                            | POWER_RESETREAS_RESETPIN_Msk;
-    bool autonomous = (r & autonomous_wake_bits) != 0;
-    bool user_action = (r & user_wake_bits) != 0;
-    if (autonomous && !user_action) {
-      the_mesh.bootLogWritePreReboot(
-        (r & POWER_RESETREAS_VBUS_Msk) ? "VBUS(stay-off)" :
-        (r & POWER_RESETREAS_DOG_Msk)  ? "WDT(stay-off)"  :
-                                          "auto(stay-off)");
-      board.powerOff();
-      // returns nicht (sd_power_system_off in T1000eBoard::powerOff)
-    }
-  }
+  // DL9SAU 2026-06-20: Wunschliste 90 Phase 2 stay-off (RESETREAS-
+  // Filter) wurde komplett entfernt. shutdown_pending-Sentinel-
+  // Mechanismus (siehe applyShutdownPendingCheck nach
+  // serial_interface.begin) faengt alle Phantom-Wakes (WDT/VBUS-
+  // Falling/BOR) bereits ab. Plus stay-off-Check lief vor SD-Init
+  // -> board.powerOff() war silent no-op -> Funktion war eh tot.
+  // Plus User-Risiko: strict stay-off + Button-Defekt = unrecoverable.
+  // Siehe git log + Wunschliste 90 Phase 2 Doku.
 #ifdef BLE_PIN_CODE
   DIAG_MARK("M12 pre serial_interface.begin(BLE)");
   serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());

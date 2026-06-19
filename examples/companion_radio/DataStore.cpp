@@ -485,13 +485,11 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.usb_loss_shutdown_min,
               sizeof(_prefs.usb_loss_shutdown_min));
     if (_prefs.usb_loss_shutdown_min == 0xFF) _prefs.usb_loss_shutdown_min = 0;
-    // DL9SAU Wunschliste 90 Phase 2 (2026-06-20): usb_wake_action.
-    // Append-only: alte Datei ohne Byte -> file.read setzt 0xFF nicht
-    // (Wert kommt undefined zurueck), daher explizit auf Default 0.
-    _prefs.usb_wake_action = 0xFF;
-    file.read((uint8_t *)&_prefs.usb_wake_action,
-              sizeof(_prefs.usb_wake_action));
-    if (_prefs.usb_wake_action == 0xFF) _prefs.usb_wake_action = 0;  // boot
+    // DL9SAU 2026-06-20: usb_wake_action entfernt (Sentinel macht das).
+    // Pref-Byte bleibt als reserved damit File-Layout stabil ist.
+    _prefs._reserved_usb_wake_action = 0xFF;
+    file.read((uint8_t *)&_prefs._reserved_usb_wake_action,
+              sizeof(_prefs._reserved_usb_wake_action));
     // DL9SAU 2026-06-20: shutdown_pending Sentinel.
     _prefs.shutdown_pending = 0xFF;
     file.read((uint8_t *)&_prefs.shutdown_pending,
@@ -730,9 +728,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.batt_min_mv));
     file.write((uint8_t *)&_prefs.usb_loss_shutdown_min,
                sizeof(_prefs.usb_loss_shutdown_min));
-    // DL9SAU Wunschliste 90 Phase 2 (2026-06-20): usb_wake_action
-    file.write((uint8_t *)&_prefs.usb_wake_action,
-               sizeof(_prefs.usb_wake_action));
+    // DL9SAU 2026-06-20: usb_wake_action entfernt, reserved-Byte bleibt.
+    file.write((uint8_t *)&_prefs._reserved_usb_wake_action,
+               sizeof(_prefs._reserved_usb_wake_action));
     // DL9SAU 2026-06-20: shutdown_pending Sentinel.
     file.write((uint8_t *)&_prefs.shutdown_pending,
                sizeof(_prefs.shutdown_pending));
