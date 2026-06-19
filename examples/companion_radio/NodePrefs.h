@@ -720,6 +720,12 @@ struct NodePrefs {  // persisted to file
   uint16_t       batt_min_mv;
   uint8_t        usb_loss_shutdown_min;
   uint8_t        usb_wake_action;
+  // DL9SAU 2026-06-20: shutdown_pending Sentinel-Byte. Wird durch
+  // setShutdownSentinel() auf 1 gesetzt + savePrefs() VOR powerOff().
+  // Beim Boot prueft MyMesh::begin nach loadPrefs: wenn 1 UND USB
+  // nicht da -> wieder powerOff. Robuster als GPREGRET (BOR loescht)
+  // und File-Sentinel (LittleFS-Cache-Race). Sentinel 0xFF -> 0.
+  uint8_t        shutdown_pending;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim

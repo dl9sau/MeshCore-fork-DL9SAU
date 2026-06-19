@@ -5030,6 +5030,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.batt_min_mv           = 0xFFFF;
   _prefs.usb_loss_shutdown_min = 0xFF;
   _prefs.usb_wake_action       = 0xFF;   // Wunschliste 90 Phase 2 (2026-06-20)
+  _prefs.shutdown_pending      = 0xFF;
   _prefs.airtime_factor = 1.0;
   strcpy(_prefs.node_name, "NONAME");
   _prefs.freq = LORA_FREQ;
@@ -5285,6 +5286,10 @@ void MyMesh::begin(bool has_display) {
   Serial.println("\r\n# [T1000-E diag] M10d pre loadPrefs"); Serial.flush();
 #endif
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  loadCronFromFile();   // Wunschliste 88 Phase 2: Cron-Persistenz
+  // Hinweis: shutdown-pending-Check wird in main.cpp NACH
+  // serial_interface.begin() gemacht -- da ist USB-PHY initialisiert
+  // und isExternalPowered() liest stable VBUS-State.
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10e post loadPrefs"); Serial.flush();
 #endif
@@ -5333,6 +5338,7 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.batt_min_mv == 0xFFFF) _prefs.batt_min_mv = 0;
   if (_prefs.usb_loss_shutdown_min == 0xFF) _prefs.usb_loss_shutdown_min = 0;
   if (_prefs.usb_wake_action == 0xFF)       _prefs.usb_wake_action = 0;   // boot
+  if (_prefs.shutdown_pending == 0xFF)      _prefs.shutdown_pending = 0;
 
   // Wunschliste 43 Migration (2026-06-11, FIX 2026-06-11):
   // altes bluetooth_power_mode-Byte war 1-Wert-Enum (0=off, 1=always-on,
@@ -7412,6 +7418,7 @@ void MyMesh::checkCLIRescueCmd() {
       else     board.reboot();  // doesn't return
     } else if (strcmp(cli_command, "shutdown") == 0) {
       // DL9SAU Wunschliste 94 (2026-06-19): Pseudo-Powerloss via Serial-CLI.
+      setShutdownSentinel();
       if (_ui) _ui->shutdown(false);
       else     board.powerOff();
     } else {
@@ -7551,6 +7558,7 @@ void MyMesh::loop() {
   manageGpsPower();
   manageRxPower();  // Wunschliste 83
   manageBatteryAndUsb();  // Wunschliste 89/90/91
+  manageCronAt();         // Wunschliste 88 Phase 1
 
   // RTC-Persistierung Periodic-Check (Bug-Fix 2026-06-14): GPS-Sync
   // setzt RTC direkt ueber _clock->setCurrentTime (in MicroNMEALocation-
@@ -7785,6 +7793,7 @@ void MyMesh::loop() {
   // aber Endzustand ist powerOff(). _ui->shutdown(false) spielt erst
   // den Buzzer-Shutdown-Sound, dann _board->powerOff().
   if (_pending_shutdown_at != 0 && (long)(millis() - _pending_shutdown_at) >= 0) {
+    setShutdownSentinel();
     if (_ui) _ui->shutdown(false);
     else     board.powerOff();
     _pending_shutdown_at = 0;  // returns not normally; safety reset
@@ -8695,6 +8704,7 @@ void MyMesh::manageBatteryAndUsb() {
           savePrefs();
           // Wunschliste 94: Shutdown-Piep via UITask. Fallback auf
           // stilles board.powerOff() wenn kein UI initialisiert.
+          setShutdownSentinel();
           if (_ui) _ui->shutdown(false);
           else     board.powerOff();
           return;
@@ -8752,6 +8762,7 @@ void MyMesh::manageBatteryAndUsb() {
         pushDebugLog("[batt] 3x LOW confirmed -> powerOff\n");
         savePrefs();
         // Wunschliste 94: Shutdown-Piep via UITask.
+        setShutdownSentinel();
         if (_ui) _ui->shutdown(false);
         else     board.powerOff();
         return;
@@ -8764,6 +8775,432 @@ void MyMesh::manageBatteryAndUsb() {
     _batt_low_burst_until_millis = 0;
     _batt_low_consecutive = 0;
   }
+}
+
+// =====================================================================
+// DL9SAU Wunschliste 88 Phase 1 (2026-06-20): at / cron CLI-Skelett.
+// RAM-only. Persistenz (cron auf Flash) ist Phase 2 nach User-Reise.
+// =====================================================================
+
+// Polling-Loop: jede ~60s ein Tick. Pruefen welcher at/cron-Job
+// jetzt feuern muss.
+void MyMesh::manageCronAt() {
+  unsigned long now = millis();
+  // Throttle auf 60s -- Minute-Granularitaet reicht (User-Wunsch).
+  if (_cron_at_last_check_ms != 0
+      && (now - _cron_at_last_check_ms) < 60UL * 1000UL) return;
+  _cron_at_last_check_ms = (now == 0) ? 1 : now;
+
+  uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
+  bool rtc_valid = (now_secs >= 1500000000UL);
+  // DL9SAU 2026-06-20: Time-Vergleich in LOCAL TZ -- User-Eingabe
+  // HH:MM ist als Local-Time gemeint, nicht UTC. Sonst kein Trigger
+  // wenn die Schwellzeit lokal in der Zukunft, UTC aber schon erreicht
+  // (oder umgekehrt). Wunschliste 50 (localTzOffsetSecs) liefert das.
+  int32_t tz_off = rtc_valid ? localTzOffsetSecs(now_secs) : 0;
+  uint32_t now_local = now_secs + (uint32_t)tz_off;
+
+  // --- at-Jobs ---
+  for (uint8_t i = 0; i < AT_MAX_ENTRIES; i++) {
+    AtEntry& e = _at_entries[i];
+    if (!e.in_use) continue;
+    bool fire = false;
+    if (e.flags & 0x01) {  // relative (millis)
+      if ((int32_t)(now - e.when.trigger_millis) >= 0) fire = true;
+    } else {                // absolute (RTC, local time)
+      if (!rtc_valid) continue;
+      // Berechne aktuelle hour_min in LOCAL TZ
+      uint32_t day_secs = now_local % 86400UL;
+      uint16_t cur_hour_min = (uint16_t)(day_secs / 60UL);
+      // Day-Tag: 0=heute, 1=morgen -- bei target_day=0 + cur > Ziel
+      // hat sich's erledigt (war fuer "heute"), markieren als overdue.
+      if (e.when.abs.target_day == 0 && cur_hour_min >= e.when.abs.hour_min) {
+        fire = true;
+      } else if (e.when.abs.target_day == 1) {
+        // Pruefen ob Mitternacht-Uebergang schon passiert ist.
+        // Vereinfachung: target_day wird 1 wenn HH:MM heute schon vorbei
+        // war beim Add. Nach Mitternacht ist day_secs < hour_min*60.
+        // Eigentlich: target_day=1 heisst "morgen frueh um HH:MM" --
+        // wir feuern wenn aktuelle Stunde >= Ziel UND wir sind nach
+        // Mitternacht (day_secs < 12h Hysterese).
+        if (cur_hour_min >= e.when.abs.hour_min
+            && day_secs < 12UL * 3600UL) {
+          fire = true;
+        }
+      }
+    }
+    if (fire) {
+      executeScheduledCmd(e.cmd, "at");
+      e.in_use = 0;  // at = einmalig
+    }
+  }
+
+  // --- cron-Jobs ---
+  // Boot-Grace: 10min nach Boot keine cron-Jobs (User-Wunsch).
+  if (now < CRON_BOOT_GRACE_MS) return;
+  // Globale Pause via 'cron suspend' (rebootfest, separat von per-Job
+  // enable/disable). At-Jobs bleiben aktiv.
+  if (_cron_suspended) return;
+
+  for (uint8_t i = 0; i < CRON_MAX_ENTRIES; i++) {
+    CronEntry& e = _cron_entries[i];
+    if (!e.in_use) continue;
+    if (!(e.flags & 0x01)) continue;  // disabled
+    if (!rtc_valid) continue;          // cron braucht RTC
+
+    bool fire = false;
+    if (e.flags & 0x04) {  // interval-based
+      if (e.last_run_secs == 0
+          || (now_secs - e.last_run_secs) >= e.interval_secs) {
+        fire = true;
+      }
+    } else if (e.flags & 0x02) {  // weekday-based
+      // Wochentag: 0=Mo .. 6=So. Unix-time tm_wday: 0=So .. 6=Sa.
+      // Konvertierung: (tm_wday + 6) % 7. LOCAL TZ -- siehe oben.
+      time_t t = (time_t)now_local;
+      struct tm* lt = gmtime(&t);
+      if (lt) {
+        uint8_t wd_iso = (uint8_t)((lt->tm_wday + 6) % 7);
+        if (e.weekday_mask & (1 << wd_iso)) {
+          bool every_min = (e.flags & 0x08) != 0;
+          uint16_t cur_hm = (uint16_t)(lt->tm_hour * 60 + lt->tm_min);
+          // Robustheit gegen 60s-Polling-Drift: 2-Minuten-Window statt
+          // strict equality. Ohne das wird Ziel-Minute manchmal
+          // verpasst wenn Tick haerter als 60s driftet (User-Befund
+          // 2026-06-20). last_run-Check verhindert Doppel-Trigger.
+          bool time_match = every_min
+                         || (cur_hm == e.hour_min)
+                         || (cur_hm == e.hour_min + 1);
+          if (time_match) {
+            if (e.last_run_secs == 0
+                || (now_secs - e.last_run_secs) >= 60UL) {
+              fire = true;
+            }
+          }
+        }
+      }
+    }
+    if (fire) {
+      executeScheduledCmd(e.cmd, "cron");
+      e.last_run_secs = now_secs;
+    }
+  }
+}
+
+// DL9SAU Wunschliste 88 Phase 2 (2026-06-20): Cron-Persistenz.
+// Layout File "/cron.dat":
+//   uint8_t  magic     = 0xC0   ("CrOn")
+//   uint8_t  version   = 0x02   (v1: ohne suspended-byte)
+//   uint8_t  count
+//   uint8_t  suspended (v2+)
+//   N x:
+//     uint8_t  flags
+//     uint8_t  weekday_mask
+//     uint16_t hour_min
+//     uint32_t interval_secs
+//     char     cmd[CRON_CMD_LEN]   (48 Bytes, NUL-terminiert)
+// last_run_secs nicht persist -- startet beim Boot bei 0 ("nie").
+// in_use wird durch Anwesenheit im File impliziert.
+void MyMesh::saveCronToFile() {
+  if (!_store) return;
+  File f = _store->openWriteFile("/cron.dat");
+  if (!f) return;
+  uint8_t magic = 0xC0;
+  uint8_t version = 0x02;
+  f.write(&magic, 1);
+  f.write(&version, 1);
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < CRON_MAX_ENTRIES; i++) {
+    if (_cron_entries[i].in_use) count++;
+  }
+  f.write(&count, 1);
+  uint8_t susp = _cron_suspended ? 1 : 0;
+  f.write(&susp, 1);
+  for (uint8_t i = 0; i < CRON_MAX_ENTRIES; i++) {
+    CronEntry& e = _cron_entries[i];
+    if (!e.in_use) continue;
+    f.write(&e.flags, 1);
+    f.write(&e.weekday_mask, 1);
+    f.write((uint8_t*)&e.hour_min, 2);
+    f.write((uint8_t*)&e.interval_secs, 4);
+    f.write((uint8_t*)e.cmd, CRON_CMD_LEN);
+  }
+  f.close();
+}
+
+void MyMesh::loadCronFromFile() {
+  if (!_store) return;
+  File f = _store->openRead("/cron.dat");
+  if (!f) return;
+  uint8_t magic = 0, version = 0, count = 0;
+  if (f.read(&magic, 1) != 1 || magic != 0xC0) { f.close(); return; }
+  if (f.read(&version, 1) != 1) { f.close(); return; }
+  if (version != 0x01 && version != 0x02) { f.close(); return; }
+  if (f.read(&count, 1) != 1) { f.close(); return; }
+  if (count > CRON_MAX_ENTRIES) count = CRON_MAX_ENTRIES;
+  if (version >= 0x02) {
+    uint8_t susp = 0;
+    f.read(&susp, 1);
+    _cron_suspended = (susp != 0);
+  }
+  for (uint8_t i = 0; i < count; i++) {
+    CronEntry& e = _cron_entries[i];
+    e.in_use = 0;
+    e.last_run_secs = 0;
+    if (f.read(&e.flags, 1) != 1) break;
+    if (f.read(&e.weekday_mask, 1) != 1) break;
+    if (f.read((uint8_t*)&e.hour_min, 2) != 2) break;
+    if (f.read((uint8_t*)&e.interval_secs, 4) != 4) break;
+    if (f.read((uint8_t*)e.cmd, CRON_CMD_LEN) != CRON_CMD_LEN) break;
+    e.cmd[CRON_CMD_LEN - 1] = 0;
+    e.in_use = 1;
+  }
+  f.close();
+}
+
+void MyMesh::applyShutdownPendingCheck() {
+#if defined(NRF52_PLATFORM)
+  if (!_prefs.shutdown_pending) return;
+  // 50 USB-Samples ueber 500ms -- nur clearen wenn alle stable da.
+  int stable_usb = 0;
+  for (int k = 0; k < 50; k++) {
+    if (board.isExternalPowered()) stable_usb++;
+    delay(10);
+  }
+  if (stable_usb < 50) {
+    char r[60];
+    snprintf(r, sizeof(r), "shutdown-pending(%d/50 usb)", stable_usb);
+    bootLogWritePreReboot(r);
+    board.powerOff();
+    // returns nicht (sd_power_system_off jetzt funktional nach
+    // SD-Init in serial_interface.begin)
+  }
+  _prefs.shutdown_pending = 0;
+  savePrefs();
+#endif
+}
+
+void MyMesh::setShutdownSentinel() {
+#if defined(NRF52_PLATFORM)
+  // Layered defense gegen Phantom-Wake nach shutdown + USB-Pull:
+  // (1) GPREGRET: schnell, BOR-zerstoerbar
+  // (2) NodePrefs.shutdown_pending: BOR-robust via savePrefs() ins
+  //     Flash. Wird in MyMesh::begin() ausgewertet -- bei !USB -> aus.
+  uint8_t sd_en = 0;
+  sd_softdevice_is_enabled(&sd_en);
+  if (sd_en) sd_power_gpregret_set(0, 0xAB);
+  else       NRF_POWER->GPREGRET = 0xAB;
+  _prefs.shutdown_pending = 1;
+  savePrefs();
+#endif
+}
+
+void MyMesh::executeScheduledCmd(const char* cmd, const char* origin_tag) {
+  if (!cmd || !cmd[0]) return;
+  pushDebugLog("[%s] exec: %s\n", origin_tag ? origin_tag : "sched", cmd);
+  // Tag setzen damit pushCompanionMessage in der Ausgabe Sender um
+  // '(at)' / '(cron)' ergaenzt -- plus Serial-Fallback-Prefix wenn
+  // keine App connected ist.
+  _scheduled_origin_tag = origin_tag;
+  // Cmd laeuft durch den normalen Companion-Command-Pfad. Antworten
+  // gehen via pushCompanionMessage in den $companion-Channel.
+  // Self-loop-Schutz (cmd="cron clear") siehe Wunschliste-Doku.
+  handleCompanionCommand(cmd);
+  _scheduled_origin_tag = nullptr;
+}
+
+bool MyMesh::parseRelativeMinutes(const char* s, uint32_t* out_minutes) {
+  // Format: "+N[m|h|d]" -- '+' optional. Default-Unit = m.
+  // Cap auf 14 Tage (User-Klarstellung: kein millis-wrap).
+  if (!s || !*s) return false;
+  if (*s == '+') s++;
+  uint32_t n = 0;
+  while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
+  if (n == 0) return false;
+  char unit = (*s) ? *s : 'm';
+  uint32_t minutes = 0;
+  if (unit == 'm' || unit == 'M') minutes = n;
+  else if (unit == 'h' || unit == 'H') minutes = n * 60;
+  else if (unit == 'd' || unit == 'D') minutes = n * 60 * 24;
+  else return false;
+  if (minutes > 14UL * 24 * 60) return false;  // > 14d Cap
+  *out_minutes = minutes;
+  return true;
+}
+
+bool MyMesh::parseAbsoluteHourMin(const char* s, uint16_t* out_hour_min) {
+  // Format: HH:MM
+  if (!s || !*s) return false;
+  int h = 0, m = 0, n = 0;
+  if (sscanf(s, "%d:%d%n", &h, &m, &n) != 2) return false;
+  if (h < 0 || h > 23 || m < 0 || m > 59) return false;
+  if (s[n] != 0 && s[n] != ' ') return false;
+  *out_hour_min = (uint16_t)(h * 60 + m);
+  return true;
+}
+
+bool MyMesh::parseIntervalSecs(const char* s, uint32_t* out_secs) {
+  // Format: "N[m|h|d]" oder "N[m|h]/K" (Division-Form).
+  if (!s || !*s) return false;
+  uint32_t n = 0;
+  while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
+  if (n == 0) return false;
+  char unit = *s++;
+  uint32_t base_secs = 0;
+  if (unit == 'm') base_secs = n * 60UL;
+  else if (unit == 'h') base_secs = n * 3600UL;
+  else if (unit == 'd') base_secs = n * 86400UL;
+  else return false;
+  uint32_t k = 0;
+  if (*s == '/') {
+    s++;
+    while (*s >= '0' && *s <= '9') { k = k * 10 + (*s - '0'); s++; }
+    if (k == 0) return false;
+    base_secs /= k;
+  }
+  if (base_secs < 60UL) return false;       // Min 1min
+  if (base_secs > 90UL * 86400UL) return false;  // Max 90d
+  *out_secs = base_secs;
+  return true;
+}
+
+bool MyMesh::parseWeekdayMask(const char* s, uint8_t* out_mask) {
+  // Format: Mo,Di,Mi,Do,Fr,Sa,So  (Komma-separiert, case-insensitive,
+  // 2-Buchstaben-Prefixe). Plus 'Wd' = Mo-Fr, 'We' = Sa,So.
+  if (!s || !*s) return false;
+  uint8_t mask = 0;
+  while (*s) {
+    while (*s == ' ' || *s == ',') s++;
+    if (!*s) break;
+    char a = *s, b = (s[1]) ? s[1] : 0;
+    // Lowercase
+    if (a >= 'A' && a <= 'Z') a += 32;
+    if (b >= 'A' && b <= 'Z') b += 32;
+    int bit = -1;
+    if (a == 'm' && b == 'o') bit = 0;
+    else if (a == 'd' && b == 'i') bit = 1;
+    else if (a == 'm' && b == 'i') bit = 2;
+    else if (a == 'd' && b == 'o') bit = 3;
+    else if (a == 'f' && b == 'r') bit = 4;
+    else if (a == 's' && b == 'a') bit = 5;
+    else if (a == 's' && b == 'o') bit = 6;
+    else if (a == 'w' && b == 'd') { mask |= 0x1F; bit = -2; }  // Mo-Fr (Werktage)
+    else if (a == 'w' && b == 'e') { mask |= 0x60; bit = -2; }  // Sa,So (Wochenende)
+    else if (a == 'w' && b == 'k') { mask |= 0x7F; bit = -2; }  // alle 7 Tage (Woche)
+    else return false;
+    if (bit >= 0) mask |= (1 << bit);
+    s += 2;
+  }
+  if (mask == 0) return false;
+  *out_mask = mask;
+  return true;
+}
+
+int MyMesh::findFreeAtSlot() {
+  for (uint8_t i = 0; i < AT_MAX_ENTRIES; i++) {
+    if (!_at_entries[i].in_use) return (int)i;
+  }
+  return -1;
+}
+
+int MyMesh::findFreeCronSlot() {
+  for (uint8_t i = 0; i < CRON_MAX_ENTRIES; i++) {
+    if (!_cron_entries[i].in_use) return (int)i;
+  }
+  return -1;
+}
+
+void MyMesh::emitAtList() {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < AT_MAX_ENTRIES; i++) {
+    AtEntry& e = _at_entries[i];
+    if (!e.in_use) continue;
+    n++;
+    char line[100];
+    if (e.flags & 0x01) {
+      uint32_t now = millis();
+      int32_t rem_ms = (int32_t)(e.when.trigger_millis - now);
+      char r_buf[16];
+      if (rem_ms <= 0) {
+        snprintf(r_buf, sizeof(r_buf), "due");
+      } else if (rem_ms < 60000) {
+        long rem_s = (rem_ms + 999) / 1000;     // ceiling
+        snprintf(r_buf, sizeof(r_buf), "+%lds", rem_s);
+      } else {
+        int rem_min = (int)((rem_ms + 59999) / 60000);  // ceiling
+        snprintf(r_buf, sizeof(r_buf), "+%dmin", rem_min);
+      }
+      snprintf(line, sizeof(line), "[%u] %s -> %s",
+               (unsigned)i, r_buf, e.cmd);
+    } else {
+      snprintf(line, sizeof(line), "[%u] %02u:%02u%s -> %s",
+               (unsigned)i,
+               (unsigned)(e.when.abs.hour_min / 60),
+               (unsigned)(e.when.abs.hour_min % 60),
+               e.when.abs.target_day ? " morgen" : "",
+               e.cmd);
+    }
+    pushCompanionMessage(line);
+  }
+  if (n == 0) pushCompanionMessage("at: keine aktiven Jobs.");
+}
+
+void MyMesh::emitCronList() {
+  if (_cron_suspended) {
+    pushCompanionMessage("cron: SUSPENDED (cron resume zum reaktivieren).");
+  }
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < CRON_MAX_ENTRIES; i++) {
+    CronEntry& e = _cron_entries[i];
+    if (!e.in_use) continue;
+    n++;
+    char line[120];
+    const char* state = (e.flags & 0x01) ? "on" : "off";
+    if (e.flags & 0x04) {
+      // interval-based
+      uint32_t sec = e.interval_secs;
+      char unit_buf[12];
+      if (sec >= 86400 && sec % 86400 == 0) snprintf(unit_buf, sizeof(unit_buf), "%lud", (unsigned long)(sec / 86400));
+      else if (sec >= 3600 && sec % 3600 == 0) snprintf(unit_buf, sizeof(unit_buf), "%luh", (unsigned long)(sec / 3600));
+      else snprintf(unit_buf, sizeof(unit_buf), "%lum", (unsigned long)(sec / 60));
+      snprintf(line, sizeof(line), "[%u] %s every %s -> %s",
+               (unsigned)i, state, unit_buf, e.cmd);
+    } else if (e.flags & 0x02) {
+      char wd[32] = "";
+      static const char* names[7] = {"Mo","Di","Mi","Do","Fr","Sa","So"};
+      // Shortcut-Anzeige: Wk=alle 7, Wd=Mo-Fr, We=Sa,So (User-Wunsch
+      // 2026-06-20: kompakter).
+      if (e.weekday_mask == 0x7F)       strncpy(wd, "Wk", sizeof(wd) - 1);
+      else if (e.weekday_mask == 0x1F)  strncpy(wd, "Wd", sizeof(wd) - 1);
+      else if (e.weekday_mask == 0x60)  strncpy(wd, "We", sizeof(wd) - 1);
+      else {
+        bool first = true;
+        for (uint8_t b = 0; b < 7; b++) {
+          if (e.weekday_mask & (1 << b)) {
+            if (!first) strncat(wd, ",", sizeof(wd) - strlen(wd) - 1);
+            strncat(wd, names[b], sizeof(wd) - strlen(wd) - 1);
+            first = false;
+          }
+        }
+      }
+      char hm_str[8];
+      if (e.flags & 0x08) {
+        // every-minute Wildcard (User-Wunsch 2026-06-20)
+        strncpy(hm_str, "*", sizeof(hm_str) - 1); hm_str[sizeof(hm_str)-1] = 0;
+      } else {
+        snprintf(hm_str, sizeof(hm_str), "%02u:%02u",
+                 (unsigned)(e.hour_min / 60),
+                 (unsigned)(e.hour_min % 60));
+      }
+      snprintf(line, sizeof(line), "[%u] %s %s %s -> %s",
+               (unsigned)i, state, wd, hm_str, e.cmd);
+    } else {
+      snprintf(line, sizeof(line), "[%u] %s ??? -> %s",
+               (unsigned)i, state, e.cmd);
+    }
+    pushCompanionMessage(line);
+  }
+  if (n == 0) pushCompanionMessage("cron: keine aktiven Jobs.");
 }
 
 void MyMesh::manageRxPower() {
@@ -11338,6 +11775,32 @@ void MyMesh::pushCompanionMessage(const char* text) {
   // signed-Vergleich.
   bool async_mirror = (_serial_cli_async_expiry_ms != 0
                        && (int32_t)(millis() - _serial_cli_async_expiry_ms) < 0);
+  // DL9SAU Wunschliste 88 (2026-06-20): Scheduled-Cmd Output-Fallback.
+  // Wenn cron/at-Job laeuft UND keine App connected ist UND wir nicht
+  // schon in CLI-Mirror sind -> auf Serial mit '[cron]'/'[at]' Prefix.
+  // Sonst geht Output bei nicht-verbundener App ins Leere.
+  if (_scheduled_origin_tag != nullptr
+      && !_serial_cli_active && !async_mirror
+      && _serial && !_serial->isConnected()
+      && Serial) {
+    // Prefix vor JEDER Zeile + \n -> \r\n Konvertierung. Multi-line
+    // text wird auf cu/screen sauber dargestellt mit konsistentem
+    // '[tag] ' am Anfang jeder Output-Zeile.
+    char prefix_buf[16];
+    snprintf(prefix_buf, sizeof(prefix_buf), "[%s] ", _scheduled_origin_tag);
+    Serial.print(prefix_buf);
+    const char* p = text;
+    while (*p) {
+      if (*p == '\n') {
+        Serial.print("\r\n");
+        if (p[1] != 0) Serial.print(prefix_buf);
+      } else {
+        Serial.write((uint8_t)*p);
+      }
+      p++;
+    }
+    Serial.print("\r\n");
+  }
   if ((_serial_cli_active || async_mirror) && Serial) {
     // Wunschliste 78: Buffer-Audit. Eingangs-text ist max 145 Byte
     // (Companion-Msg-Limit). Worst case bei \n -> \r\n Konvertierung
@@ -11427,6 +11890,15 @@ void MyMesh::pushCompanionMessage(const char* text) {
   // bei char out[320]. MAX_TEXT_LEN = 160 -> 160B kumulativ pro
   // pushCompanionMessage-Aufruf.
   static char combined[MAX_TEXT_LEN];
+  // DL9SAU Wunschliste 88 (2026-06-20): bei scheduled-execute (cron/at)
+  // den Sender-String um Tag ergaenzen damit User in App sofort sieht
+  // woher der Output kommt. 'Seeed Tracker T1000-E' -> '... (cron)'.
+  static char sender_with_tag[64];
+  if (_scheduled_origin_tag) {
+    snprintf(sender_with_tag, sizeof(sender_with_tag), "%s (%s)",
+             sender ? sender : "fw", _scheduled_origin_tag);
+    sender = sender_with_tag;
+  }
   int n = snprintf(combined, sizeof(combined), "%s: %s", sender ? sender : "fw", text);
   if (n <= 0) return;
   int total_len = n < (int)sizeof(combined) ? n : (int)sizeof(combined) - 1;
@@ -11893,6 +12365,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     {"contact", false}, {"backup", false}, {"save", false}, {"discover", false},
     {"ch.hops", false},
     {"remote", false}, {"bluetooth", false}, {"filter", false}, {"serial-cli", false},
+    // Wunschliste 88 Phase 1 (2026-06-20): at / cron Scheduler.
+    {"at", false}, {"cron", false},
     // Upstream-MeshCore-Kompatibilitaet (https://docs.meshcore.io/cli_commands/)
     {"discover.neighbors", false}, {"neighbor.remove", true},
     {"advert.zerohop", false},
@@ -12742,6 +13216,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "prefs reset\n  alle DL9SAU-Vars auf Default");
         return;
       }
+      if (topic_prefix_match(topic, "at") || topic_prefix_match(topic, "cron")) {
+        pushCompanionMessage(
+          "at / cron: Zeit-getriggerte Befehle.\n"
+          "at = einmalig (RAM, nach Reboot weg).\n"
+          "cron = wiederholt (Phase 1: RAM).");
+        pushCompanionMessage(
+          "at [add] HH:MM <cmd>     absolute Uhrzeit\n"
+          "at [add] +N[m|h|d] <cmd> relativ (Cap 14d)\n"
+          "at list | del <id> | clear");
+        pushCompanionMessage(
+          "cron [add] <intervall|wktg> [HH:MM] <cmd>\n"
+          "  Intervall: 10m, 1h, 2d, 60m/6 (=10min)\n"
+          "  Wktg: Mo,Fr / Wd (Mo-Fr) / We / Wk");
+        pushCompanionMessage(
+          "cron list | del <id> | clear\n"
+          "cron enable <id> | disable <id>");
+        pushCompanionMessage(
+          "cron: erst nach 10min Boot-Grace aktiv.\n"
+          "RTC muss valid sein (sonst skip).");
+        return;
+      }
       if (topic_prefix_match(topic, "save")) {
         pushCompanionMessage(
           "save: persistiert prefs (DL9SAU-Vars + App-Mirror)\n"
@@ -12938,7 +13433,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       "  messages, logging, unscoped-channelmessages,\n"
       "  contact, backup, save, discover, tempradio,\n"
       "  filter, remote, bluetooth, serial-cli,\n"
-      "  ver, board, clear, reboot, shutdown."
+      "  ver, board, clear, reboot, shutdown,\n"
+      "  at, cron."
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
     // (Wunschliste 40). Sehen Kommentare bei den Handlern.
@@ -20859,6 +21355,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                (p & 0x1F) ? "" : "none ",
                (p & 0x10) ? "on" : "off");
     }
+    // DL9SAU 2026-06-20: Einzelne buzzer.* Bits direkt abfragbar.
+    else if (strcmp(key, "buzzer.dm") == 0) {
+      snprintf(r, sizeof(r), "buzzer.dm = %s", (_prefs.buzzer_profile & 0x01) ? "on" : "off");
+    }
+    else if (strcmp(key, "buzzer.channel") == 0 || strcmp(key, "buzzer.ch") == 0) {
+      snprintf(r, sizeof(r), "buzzer.channel = %s", (_prefs.buzzer_profile & 0x02) ? "on" : "off");
+    }
+    else if (strcmp(key, "buzzer.private") == 0 || strcmp(key, "buzzer.priv") == 0) {
+      snprintf(r, sizeof(r), "buzzer.private = %s", (_prefs.buzzer_profile & 0x04) ? "on" : "off");
+    }
+    else if (strcmp(key, "buzzer.ack") == 0) {
+      snprintf(r, sizeof(r), "buzzer.ack = %s", (_prefs.buzzer_profile & 0x08) ? "on" : "off");
+    }
+    else if (strcmp(key, "buzzer.app_disc") == 0 || strcmp(key, "buzzer.appdisc") == 0 || strcmp(key, "buzzer.disc") == 0) {
+      snprintf(r, sizeof(r), "buzzer.app_disc = %s", (_prefs.buzzer_profile & 0x10) ? "on" : "off");
+    }
     else if (strcmp(key, "cpu.clock") == 0 || strcmp(key, "cpu_clock") == 0
              || strcmp(key, "cpu.clock.mhz") == 0
              || strcmp(key, "cpu_clock_mhz") == 0) {
@@ -20953,6 +21465,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                (unsigned)_prefs.usb_wake_action,
                _prefs.usb_wake_action == 0 ? "boot" :
                _prefs.usb_wake_action == 1 ? "stay-off" : "?");
+    }
+    else if (strcmp(key, "shutdown_pending") == 0) {
+      snprintf(r, sizeof(r), "shutdown_pending = %u (RAM/Flash sentinel)",
+               (unsigned)_prefs.shutdown_pending);
     }
     else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
       if (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW)
@@ -21160,6 +21676,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     bootLogWritePreReboot();
 #if defined(NRF52_PLATFORM)
     delay(200);  // Companion-Frame rausgeben bevor Sound startet
+    setShutdownSentinel();   // Wunschliste 90/94: Phantom-Wake-Block
     if (_ui) _ui->shutdown(false);
     else     board.powerOff();
 #else
@@ -21168,6 +21685,287 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     _pending_shutdown_at = millis() + 3000;
     if (_pending_shutdown_at == 0) _pending_shutdown_at = 1;
 #endif
+    return;
+  }
+
+  // DL9SAU Wunschliste 88 Phase 1 (2026-06-20): at-Befehl.
+  //   at HH:MM <cmd>            absolute Uhrzeit (heute oder morgen)
+  //   at +N[m|h|d] <cmd>        relativ ab jetzt
+  //   at list                   aktive at-Jobs
+  //   at del <id>               Job loeschen
+  //   at clear                  alle at-Jobs loeschen
+  if (starts_with_word(cmd, "at")) {
+    const char* p = strchr(cmd, ' ');
+    if (!p) {
+      pushCompanionMessage("Usage: at [add] <HH:MM|+N[m|h|d]> <cmd>");
+      pushCompanionMessage("       at list | del <id> | clear");
+      return;
+    }
+    while (*p == ' ') p++;
+    // Wenn erstes Zeichen kein time-token ('+' oder Digit), ist es
+    // sub-command -- mit Prefix-Match (User-Wunsch: 'at li' -> 'list').
+    if (*p != '+' && !(*p >= '0' && *p <= '9')) {
+      static const CompanionChoice at_subs[] = {
+        {"list",  false},  // 0
+        {"del",   true},   // 1 destructive
+        {"clear", true},   // 2 destructive
+        {"add",   false},  // 3
+      };
+      int idx = dispatchToken(p, at_subs, 4, "list|del|clear|add");
+      if (idx < 0) return;
+      if (idx == 0) { emitAtList(); return; }
+      if (idx == 1) {
+        int id = atoi(p);
+        if (id < 0 || id >= AT_MAX_ENTRIES || !_at_entries[id].in_use) {
+          pushCompanionMessage("Ungueltige id (siehe 'at list').");
+          return;
+        }
+        _at_entries[id].in_use = 0;
+        char r[40]; snprintf(r, sizeof(r), "OK - at-Job %d geloescht.", id);
+        pushCompanionMessage(r);
+        return;
+      }
+      if (idx == 2) {
+        for (uint8_t i = 0; i < AT_MAX_ENTRIES; i++) _at_entries[i].in_use = 0;
+        pushCompanionMessage("OK - alle at-Jobs geloescht.");
+        return;
+      }
+      // idx == 3: add -> fall through zum Time-Parsing
+    }
+    // Time + cmd parsen
+    int slot = findFreeAtSlot();
+    if (slot < 0) {
+      pushCompanionMessage("at: keine freien Slots (max 4).");
+      return;
+    }
+    AtEntry& e = _at_entries[slot];
+    e.flags = 0;
+    uint32_t rel_min = 0;
+    uint16_t hour_min = 0;
+    bool is_rel = (*p == '+');
+    bool ok = false;
+    if (is_rel) {
+      // Token bis Whitespace
+      char timebuf[32]; size_t tl = 0;
+      while (*p && *p != ' ' && tl < sizeof(timebuf) - 1) { timebuf[tl++] = *p++; }
+      timebuf[tl] = 0;
+      ok = parseRelativeMinutes(timebuf, &rel_min);
+      if (ok) {
+        e.flags |= 0x01;
+        e.when.trigger_millis = millis() + rel_min * 60UL * 1000UL;
+      }
+    } else {
+      char timebuf[8]; size_t tl = 0;
+      while (*p && *p != ' ' && tl < sizeof(timebuf) - 1) { timebuf[tl++] = *p++; }
+      timebuf[tl] = 0;
+      ok = parseAbsoluteHourMin(timebuf, &hour_min);
+      if (ok) {
+        // target_day berechnen: wenn HH:MM heute schon vorbei, dann morgen.
+        // LOCAL TZ -- User-Eingabe ist local time (Wunschliste 50).
+        uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
+        uint8_t target_day = 0;
+        if (now_secs >= 1500000000UL) {
+          uint32_t now_local = now_secs + (uint32_t)localTzOffsetSecs(now_secs);
+          uint32_t day_secs = now_local % 86400UL;
+          uint16_t cur_hm = (uint16_t)(day_secs / 60UL);
+          if (cur_hm >= hour_min) target_day = 1;
+        }
+        e.when.abs.hour_min = hour_min;
+        e.when.abs.target_day = target_day;
+      }
+    }
+    if (!ok) {
+      pushCompanionMessage("Time-Format ungueltig.\n"
+                           "  HH:MM oder +N[m|h|d] (Cap 14d).");
+      return;
+    }
+    while (*p == ' ') p++;
+    if (!*p) {
+      pushCompanionMessage("Kein Befehl nach Zeit angegeben.");
+      return;
+    }
+    strncpy(e.cmd, p, sizeof(e.cmd) - 1);
+    e.cmd[sizeof(e.cmd) - 1] = 0;
+    e.in_use = 1;
+    char r[80];
+    if (is_rel) {
+      snprintf(r, sizeof(r), "OK - at [%d] +%lumin -> %s",
+               slot, (unsigned long)rel_min, e.cmd);
+    } else {
+      snprintf(r, sizeof(r), "OK - at [%d] %02u:%02u%s -> %s",
+               slot, (unsigned)(hour_min / 60), (unsigned)(hour_min % 60),
+               e.when.abs.target_day ? " (morgen)" : "",
+               e.cmd);
+    }
+    pushCompanionMessage(r);
+    return;
+  }
+
+  // DL9SAU Wunschliste 88 Phase 1 (2026-06-20): cron-Befehl.
+  //   cron add <interval|weekdays> [HH:MM] <cmd>
+  //     interval: N[m|h|d]  oder N[m|h]/K  (Division-Form)
+  //     weekdays: Mo,Di,...   (HH:MM danach erforderlich)
+  //   cron list / del <id> / clear
+  //   cron enable <id> / disable <id>
+  // Phase 1: KEIN Reboot-Survival (Persistenz = Phase 2).
+  if (starts_with_word(cmd, "cron")) {
+    const char* p = strchr(cmd, ' ');
+    if (!p) {
+      pushCompanionMessage("Usage: cron [add] <intervall|wktg> [HH:MM] <cmd>");
+      pushCompanionMessage("       cron list | del <id> | clear");
+      pushCompanionMessage("       cron enable <id> | disable <id>");
+      pushCompanionMessage("       cron suspend | resume   (alle, rebootfest)");
+      return;
+    }
+    while (*p == ' ') p++;
+    // Konsistenz mit 'at' (User-Wunsch 2026-06-20): 'add' optional.
+    // Erstes Token analysieren -- wenn parseIntervalSecs ODER
+    // parseWeekdayMask greift, direkter add-Pfad. Sonst Sub-Dispatch.
+    // Achtung: parseWeekdayMask matched 2-Buchstaben-Prefixe -- 'li'
+    // 'de' 'cl' 'en' 'di' 'ad' kollidieren NICHT mit Mo/Di/Mi/Do/Fr/
+    // Sa/So/Wd/We/Wk (=> sub-cmd-Prefixe gewinnen). Probe-Parse via
+    // Throwaway-Buf damit p nicht konsumiert wird wenn's sub-cmd ist.
+    {
+      char probe_tok[32]; size_t pl = 0;
+      const char* pp = p;
+      while (*pp && *pp != ' ' && pl < sizeof(probe_tok) - 1) { probe_tok[pl++] = *pp++; }
+      probe_tok[pl] = 0;
+      uint32_t probe_isecs = 0;
+      uint8_t probe_wd_mask = 0;
+      bool is_time_token = parseIntervalSecs(probe_tok, &probe_isecs)
+                        || parseWeekdayMask(probe_tok, &probe_wd_mask);
+      if (is_time_token) {
+        // Direct-add: skip sub-dispatch, fall through.
+        goto cron_add_direct;
+      }
+    }
+    // Sub-Dispatch via Prefix-Match. enable/disable haben unique
+    // Prefixe 'en'/'di' -- Eindeutigkeit via dispatchToken garantiert.
+    {
+    static const CompanionChoice cron_subs[] = {
+      {"list",    false},  // 0
+      {"add",     false},  // 1
+      {"del",     true},   // 2 destructive
+      {"clear",   true},   // 3 destructive
+      {"enable",  false},  // 4
+      {"disable", true},   // 5 destructive
+      {"suspend", false},  // 6 -- pausiert ALLE jobs rebootfest
+      {"resume",  false},  // 7
+    };
+    int idx = dispatchToken(p, cron_subs, 8, "list|add|del|clear|enable|disable|suspend|resume");
+    if (idx < 0) return;
+    if (idx == 0) { emitCronList(); return; }
+    if (idx == 2 || idx == 4 || idx == 5) {
+      int id = atoi(p);
+      if (id < 0 || id >= CRON_MAX_ENTRIES || !_cron_entries[id].in_use) {
+        pushCompanionMessage("Ungueltige id (siehe 'cron list').");
+        return;
+      }
+      if (idx == 2) {  // del
+        _cron_entries[id].in_use = 0;
+        saveCronToFile();
+        char r[40]; snprintf(r, sizeof(r), "OK - cron-Job %d geloescht.", id);
+        pushCompanionMessage(r);
+      } else {  // enable | disable
+        bool en = (idx == 4);
+        if (en) _cron_entries[id].flags |= 0x01;
+        else    _cron_entries[id].flags &= ~0x01;
+        saveCronToFile();
+        char r[40]; snprintf(r, sizeof(r), "OK - cron-Job %d %s.", id,
+                            en ? "enabled" : "disabled");
+        pushCompanionMessage(r);
+      }
+      return;
+    }
+    if (idx == 3) {  // clear
+      for (uint8_t i = 0; i < CRON_MAX_ENTRIES; i++) _cron_entries[i].in_use = 0;
+      saveCronToFile();
+      pushCompanionMessage("OK - alle cron-Jobs geloescht.");
+      return;
+    }
+    if (idx == 6) {  // suspend
+      _cron_suspended = true;
+      saveCronToFile();
+      pushCompanionMessage("OK - cron suspended (rebootfest).");
+      return;
+    }
+    if (idx == 7) {  // resume
+      _cron_suspended = false;
+      saveCronToFile();
+      pushCompanionMessage("OK - cron resumed.");
+      return;
+    }
+    // idx == 1: add -> weiter im Code unten
+    }
+cron_add_direct:
+    while (*p == ' ') p++;
+    // Erstes Token: interval ODER weekdays
+    char tok[32]; size_t tl = 0;
+    while (*p && *p != ' ' && tl < sizeof(tok) - 1) { tok[tl++] = *p++; }
+    tok[tl] = 0;
+    int slot = findFreeCronSlot();
+    if (slot < 0) {
+      pushCompanionMessage("cron: keine freien Slots (max 8).");
+      return;
+    }
+    CronEntry& e = _cron_entries[slot];
+    e.flags = 0;
+    e.weekday_mask = 0;
+    e.hour_min = 0;
+    e.interval_secs = 0;
+    e.last_run_secs = 0;
+    uint32_t isecs = 0;
+    uint8_t wd_mask = 0;
+    // Unix-like Wildcard '*' fuer Wochentag = alle 7 Tage
+    // (User-Wunsch 2026-06-20).
+    if (tok[0] == '*' && tok[1] == 0) {
+      e.flags |= 0x02;
+      e.weekday_mask = 0x7F;
+    } else if (parseIntervalSecs(tok, &isecs)) {
+      e.flags |= 0x04;  // interval
+      e.interval_secs = isecs;
+    } else if (parseWeekdayMask(tok, &wd_mask)) {
+      e.flags |= 0x02;  // weekday
+      e.weekday_mask = wd_mask;
+    } else {
+      pushCompanionMessage("Erstes Arg muss Intervall (10m/1h/2d, 60m/6)\n"
+                           "ODER Wochentag (Mo,Fr / Wd / We / Wk / *).");
+      pushCompanionMessage("Fuer minuetlich:  cron * * <cmd>\n"
+                           "Fuer taeglich:    cron * HH:MM <cmd>\n"
+                           "Wd=Mo-Fr, We=Sa+So, Wk=alle 7 Tage");
+      return;
+    }
+    // Bei weekday-based: zweites Token (HH:MM oder '*'=every-minute).
+    if (e.flags & 0x02) {
+      while (*p == ' ') p++;
+      char hm_tok[8]; size_t hl = 0;
+      while (*p && *p != ' ' && hl < sizeof(hm_tok) - 1) { hm_tok[hl++] = *p++; }
+      hm_tok[hl] = 0;
+      if (hm_tok[0] == '*' && hm_tok[1] == 0) {
+        // every-minute Wildcard (User-Wunsch Unix-like 2026-06-20)
+        e.flags |= 0x08;
+      } else {
+        uint16_t hm = 0;
+        if (!parseAbsoluteHourMin(hm_tok, &hm)) {
+          pushCompanionMessage("Bei weekday-cron HH:MM oder '*' erforderlich.");
+          return;
+        }
+        e.hour_min = hm;
+      }
+    }
+    while (*p == ' ') p++;
+    if (!*p) {
+      pushCompanionMessage("Kein Befehl angegeben.");
+      return;
+    }
+    strncpy(e.cmd, p, sizeof(e.cmd) - 1);
+    e.cmd[sizeof(e.cmd) - 1] = 0;
+    e.flags |= 0x01;   // enabled by default
+    e.in_use = 1;
+    saveCronToFile();
+    char r[100];
+    snprintf(r, sizeof(r), "OK - cron [%d] hinzugefuegt: %s", slot, e.cmd);
+    pushCompanionMessage(r);
     return;
   }
 

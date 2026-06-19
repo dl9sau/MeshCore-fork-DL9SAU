@@ -492,6 +492,11 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.usb_wake_action,
               sizeof(_prefs.usb_wake_action));
     if (_prefs.usb_wake_action == 0xFF) _prefs.usb_wake_action = 0;  // boot
+    // DL9SAU 2026-06-20: shutdown_pending Sentinel.
+    _prefs.shutdown_pending = 0xFF;
+    file.read((uint8_t *)&_prefs.shutdown_pending,
+              sizeof(_prefs.shutdown_pending));
+    if (_prefs.shutdown_pending == 0xFF) _prefs.shutdown_pending = 0;
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
@@ -728,6 +733,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // DL9SAU Wunschliste 90 Phase 2 (2026-06-20): usb_wake_action
     file.write((uint8_t *)&_prefs.usb_wake_action,
                sizeof(_prefs.usb_wake_action));
+    // DL9SAU 2026-06-20: shutdown_pending Sentinel.
+    file.write((uint8_t *)&_prefs.shutdown_pending,
+               sizeof(_prefs.shutdown_pending));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).

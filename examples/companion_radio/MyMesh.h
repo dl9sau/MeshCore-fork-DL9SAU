@@ -541,6 +541,10 @@ public:
   void          bootLogWritePreReboot(const char* cause = "WARM(cli)");
   void          bootLogPrint();          // CLI 'log read'
   void          bootLogClear();          // CLI 'log clear'
+  // DL9SAU 2026-06-20: Boot-Phase Check fuer shutdown_pending Pref.
+  // Wenn Pref=1 UND USB nicht stable an -> board.powerOff (no return).
+  // Public, weil aus main.cpp setup() aufgerufen (nach serial_interface.begin).
+  void          applyShutdownPendingCheck();
 
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {
@@ -1310,6 +1314,78 @@ private:
   // synthetic incoming-channel-message — App sieht es als normalen Chat.
   // 0xFF = nicht initialisiert / kein freier Slot.
   uint8_t       _companion_channel_idx;
+
+  // DL9SAU Wunschliste 88 (2026-06-20) Phase 1: at / cron CLI-Skelett.
+  // RAM-only. Persistenz (cron auf Flash) ist Phase 2 nach Reise.
+  //
+  // AtEntry: einmaliger Job, RAM-only, kein Reboot-Survival.
+  //   - flags bit 0 = relative (millis-basiert), sonst absolute (RTC-basiert)
+  static const uint8_t AT_MAX_ENTRIES   = 4;
+  static const uint8_t CRON_MAX_ENTRIES = 8;
+  static const uint8_t CRON_CMD_LEN     = 48;
+  struct AtEntry {
+    uint8_t flags;            // bit 0 = relative
+    uint8_t in_use;           // 0 = slot frei
+    union {
+      uint32_t trigger_millis;  // bei relative: millis()-Zielwert
+      struct {
+        uint16_t hour_min;      // h*60+m
+        uint8_t  target_day;    // 0=heute, 1=morgen
+      } abs;                    // bei absolute: RTC-basiert
+    } when;
+    char cmd[CRON_CMD_LEN];
+  };
+  AtEntry _at_entries[AT_MAX_ENTRIES] = {};
+
+  // CronEntry: wiederholt, RAM-only Phase 1 (Phase 2: persistent).
+  //   - flags bit 0 = enabled
+  //   - flags bit 1 = weekday-based (nutzt weekday_mask + hour_min)
+  //   - flags bit 2 = interval-based (nutzt interval_secs)
+  struct CronEntry {
+    uint8_t  flags;
+    uint8_t  in_use;          // 0 = slot frei
+    uint8_t  weekday_mask;    // bit 0=Mo .. bit 6=So
+    uint16_t hour_min;        // h*60+m fuer weekday-based
+    uint32_t interval_secs;   // fuer interval-based
+    uint32_t last_run_secs;   // Unix
+    char     cmd[CRON_CMD_LEN];
+  };
+  CronEntry _cron_entries[CRON_MAX_ENTRIES] = {};
+  // DL9SAU Wunschliste 88 Phase 2c (2026-06-20): rebootfest pausieren.
+  // 'cron suspend' / 'cron resume'. Eintraege bleiben erhalten, nur
+  // manageCronAt skippt die Trigger. at-Jobs bleiben aktiv.
+  bool _cron_suspended = false;
+
+  // Letzter Minute-Tick fuer manageCronAt-Polling.
+  uint32_t _cron_at_last_check_ms = 0;
+  // Tag-Origin fuer ScheduledCmd-Output. Gesetzt waehrend execute,
+  // gelesen von pushCompanionMessage fuer Serial-Fallback-Prefix.
+  // nullptr = nicht scheduled, normaler Pfad.
+  const char* _scheduled_origin_tag = nullptr;
+  // Boot-Grace: cron-Jobs erst nach 10min uptime (siehe Wunschliste 88).
+  // At-Jobs duerfen sofort, sind explizite User-Setzung.
+  static const uint32_t CRON_BOOT_GRACE_MS = 10UL * 60 * 1000;
+  // DL9SAU 2026-06-20: GPREGRET-Shutdown-Sentinel. NRF52-only.
+  // Setzt 0xAB in GPREGRET vor powerOff -- Boot-Check in main.cpp
+  // sieht das und blockt Phantom-Wakes (BOR durch USB-Pull-Glitch
+  // hat keine RESETREAS-Bits).
+  void setShutdownSentinel();
+  void manageCronAt();
+  void executeScheduledCmd(const char* cmd, const char* origin_tag);
+  bool parseRelativeMinutes(const char* s, uint32_t* out_minutes);
+  bool parseAbsoluteHourMin(const char* s, uint16_t* out_hour_min);
+  bool parseIntervalSecs(const char* s, uint32_t* out_secs);
+  bool parseWeekdayMask(const char* s, uint8_t* out_mask);
+  int  findFreeAtSlot();
+  int  findFreeCronSlot();
+  void emitAtList();
+  void emitCronList();
+  // DL9SAU Wunschliste 88 Phase 2 (2026-06-20): Cron-Persistenz.
+  // File "/cron.dat": magic-byte (0xC0) + version (0x01) + count +
+  // N x CronEntry (ohne in_use/last_run_secs -- last_run startet
+  // beim Boot wieder bei 0). At-Jobs sind RAM-only by design.
+  void saveCronToFile();
+  void loadCronFromFile();
   // Bitmask aktiver Trace-Kategorien (siehe TRACE_*-Konstanten). RAM-only,
   // reset bei Reboot — verhindert dass eine Trace-Kategorie versehentlich
   // unbegrenzt die Offline-Queue mit Events flutet.

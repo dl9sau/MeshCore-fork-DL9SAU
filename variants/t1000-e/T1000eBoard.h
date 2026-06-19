@@ -85,7 +85,12 @@ public:
     #endif
 
     #ifdef BUTTON_PIN
-    nrf_gpio_cfg_sense_input(BUTTON_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
+    // DL9SAU 2026-06-20: PULLDOWN statt NOPULL fuer Sense-Wake. NOPULL
+    // laesst Pin floating -> kapazitive Aufladung kann SENSE_HIGH
+    // Wake spontan triggern (Phantom-Wake nach Shutdown). Pulldown
+    // haelt Pin sauber LOW im Idle, Button-Press zieht aktiv auf HIGH.
+    // Konsistent mit Pulldown-Fix in T1000eBoard::begin() Z 12.
+    nrf_gpio_cfg_sense_input(BUTTON_PIN, NRF_GPIO_PIN_PULLDOWN, NRF_GPIO_PIN_SENSE_HIGH);
     #endif
 
     sd_power_system_off();

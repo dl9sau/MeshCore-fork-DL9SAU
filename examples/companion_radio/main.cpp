@@ -56,11 +56,18 @@
   // aus src/helpers/NRF52Board.cpp. Spaeter im map-Code lesen wir nur
   // diese Variable; das Clear muss SoftDevice-safe sein (SVC oder
   // direkt -- je nach Status).
-  static uint32_t s_nrf52_resetreas_captured = 0;
+  uint32_t s_nrf52_resetreas_captured = 0;   // extern accessible (kein static)
+  // DL9SAU 2026-06-20: GPREGRET als Shutdown-Sentinel. shutdown CLI
+  // setzt 0xAB vor powerOff. Beim Boot: wenn 0xAB UND !isExternalPowered
+  // -> wieder powerOff (war ein Shutdown + USB-Pull, COLD-Wake nicht
+  // ueber RESETREAS-Bits detektierbar). Wert wird beim Boot gecleart.
+  static uint8_t s_nrf52_gpregret_captured = 0;
   static void __attribute__((constructor(101)))
               wdtCaptureResetReason(void) {
     s_nrf52_resetreas_captured = NRF_POWER->RESETREAS;
+    s_nrf52_gpregret_captured  = NRF_POWER->GPREGRET;
   }
+  static const uint8_t GPREGRET_SHUTDOWN_PENDING = 0xAB;
 #endif
 
 // Reset-Reason Mapping (Plattform-uebergreifend einheitlich):
@@ -500,7 +507,11 @@ void setup() {
   );
 
   DIAG_MARK("M11 post the_mesh.begin");
-#if defined(NRF52_PLATFORM)
+  // DL9SAU 2026-06-20: VBUS-Plug-Out + GPREGRET-Sentinel-Checks
+  // wurden entfernt. Single Source of Truth = NodePrefs.shutdown_pending
+  // (gepruft in MyMesh::begin() nach loadPrefs). Vermeidet Race
+  // zwischen mehreren Checks mit unterschiedlicher USB-State-Sicht.
+
   // DL9SAU Wunschliste 90 Phase 2 (2026-06-20): VBUS-Wake-Stay-Off.
   // NRF52840 hat VBUS-Detect Hardware-aktiv -- nach board.powerOff()
   // weckt sowohl USB-Plug als auch USB-Unplug das Geraet auf
@@ -532,7 +543,6 @@ void setup() {
       // returns nicht (sd_power_system_off in T1000eBoard::powerOff)
     }
   }
-#endif
 #ifdef BLE_PIN_CODE
   DIAG_MARK("M12 pre serial_interface.begin(BLE)");
   serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
@@ -545,6 +555,12 @@ void setup() {
   DIAG_MARK("M14 pre the_mesh.startInterface");
   the_mesh.startInterface(serial_interface);
   DIAG_MARK("M15 post the_mesh.startInterface");
+  // DL9SAU 2026-06-20: shutdown_pending-Check NACH serial_interface.
+  // begin -- jetzt ist Bluefruit aktiv = SoftDevice up = USB-PHY hat
+  // VBUS-Detect-Hardware enabled (isExternalPowered() stable).
+  // Plus board.powerOff() -> sd_power_system_off() ist jetzt funktional
+  // (vorher kein SD -> Error-Return -> Pref wurde irrtuemlich gecleart).
+  the_mesh.applyShutdownPendingCheck();
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
   store.begin();
