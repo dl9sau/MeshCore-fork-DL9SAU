@@ -8961,6 +8961,21 @@ void MyMesh::loadCronFromFile() {
 void MyMesh::applyShutdownPendingCheck() {
 #if defined(NRF52_PLATFORM)
   if (!_prefs.shutdown_pending) return;
+  // Button-Press / Hardware-Reset = expliziter User-Wake -> immer
+  // booten, unabhaengig vom USB-State. RESETREAS_OFF wird gesetzt
+  // bei GPIO-Sense-Wake (BUTTON_PIN via nrf_gpio_cfg_sense_input
+  // in T1000eBoard::powerOff). RESETPIN ist Reset-Pin (falls am
+  // Hardware verkabelt).
+  extern uint32_t s_nrf52_resetreas_captured;
+  uint32_t r = s_nrf52_resetreas_captured;
+  bool user_button_wake = (r & (POWER_RESETREAS_OFF_Msk
+                              | POWER_RESETREAS_RESETPIN_Msk)) != 0;
+  if (user_button_wake) {
+    bootLogWritePreReboot("shutdown-pending(button-wake)");
+    _prefs.shutdown_pending = 0;
+    savePrefs();
+    return;  // boot weiter
+  }
   // 50 USB-Samples ueber 500ms -- nur clearen wenn alle stable da.
   int stable_usb = 0;
   for (int k = 0; k < 50; k++) {
@@ -8968,9 +8983,9 @@ void MyMesh::applyShutdownPendingCheck() {
     delay(10);
   }
   if (stable_usb < 50) {
-    char r[60];
-    snprintf(r, sizeof(r), "shutdown-pending(%d/50 usb)", stable_usb);
-    bootLogWritePreReboot(r);
+    char buf[60];
+    snprintf(buf, sizeof(buf), "shutdown-pending(%d/50 usb)", stable_usb);
+    bootLogWritePreReboot(buf);
     board.powerOff();
     // returns nicht (sd_power_system_off jetzt funktional nach
     // SD-Init in serial_interface.begin)
