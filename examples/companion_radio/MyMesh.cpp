@@ -19446,7 +19446,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  req_resp automatisch mit-gecapped.");
         return;
       }
-      if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
+      if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0
+          || strcmp(key, "flood.max.advert") == 0) {
         pushCompanionMessage(
           "set flood_max_infra <0..flood_max | follow>:\n"
           "  Cap fuer REPEATER/SENSOR/ROOM-Adverts.\n"
@@ -21434,7 +21435,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(r, sizeof(r), "shutdown_pending = %u (RAM/Flash sentinel)",
                (unsigned)_prefs.shutdown_pending);
     }
-    else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
+    else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0
+             || strcmp(key, "flood.max.advert") == 0) {
       if (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW)
         snprintf(r, sizeof(r), "flood_max_infra = follow (-> %u)", (unsigned)_prefs.flood_max);
       else
