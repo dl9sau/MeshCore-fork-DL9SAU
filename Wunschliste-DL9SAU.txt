@@ -6050,7 +6050,9 @@ Quelle: User-Beobachtung 2026-06-16.
 77. EXTERNAL: NRF52 LOOP_STACK_SZ Library-Patch (Adafruit nRF52 Core)
 --------------------------------------------------------------------------------
 
-Status: DONE auf User-Mac 2026-06-17. NICHT im Repo (Library-Patch).
+Status: AUTOMATISIERT via pre-Build-Script (Phase 2 done 2026-06-20).
+        Vorher manuell gepatcht 2026-06-17 -- ist nach PIO-Framework-
+        Update wieder weggeradiert worden.
 
 Problem (2026-06-16/17): T1000-E (NRF52840 + Adafruit-Bluefruit-Stack)
 hat default loopTask-Stack 4 KB. Companion-Code mit 'char r[200]'-
@@ -6085,6 +6087,40 @@ NICHT, weil das #define in main.cpp keine #ifndef-Guard hat -- die
 .cpp-Definition gewinnt last-wins.
 
 Mittelfristige sauberere Loesung: Wunschliste 78 (Buffer-Reduce).
+
+=== UPDATE 2026-06-20: Phase 2 Automatisierung ===
+
+Trigger: User-Befund 2026-06-20. Sein Meshtastic-Compile hatte
+PlatformIO dazu gebracht das nRF52-Framework zu aktualisieren. Folge:
+unser manueller LOOP_STACK_SZ-Patch von 2026-06-17 war weggeradiert
+(.bak war noch da, aber main.cpp wieder im Original-Zustand mit
+4KB Stack).
+
+Symptom des verlorenen Patches:
+  - jede App->$companion-Message triggerte harten Crash auf T1000-E
+  - BLE disconnected unmittelbar, USB-CDC verschwand
+  - Recovery NUR via Reset-Doppelklick + UF2-Mode
+
+Loesung Phase 2 (heute committed):
+  - Script dl9sau_patch_nrf52_loop_stack.py liegt im Repo-Root
+  - Pre-Build-Hook in nrf52_base section von platformio.ini:
+      extra_scripts = ${arduino_base.extra_scripts}
+        create-uf2.py
+        pre:dl9sau_patch_nrf52_loop_stack.py
+  - Idempotent: wenn schon 8KB, no-op
+  - Backup wird einmalig als .dl9sau.bak abgelegt
+  - Funktioniert auch nach PIO-Framework-Updates -- jede Build-Run
+    re-checked + patcht wenn noetig
+
+Plus zusaetzlicher Defensive-Layer (build_flag in nrf52_base):
+  -D CFG_BLE_TASK_STACKSIZE=2048
+  (8KB statt 5KB fuer Bluefruit's eigenen BLE-Task. Separate Task vom
+  loop()-Task. Nicht der Hauptfix fuer das Symptom, aber Sicherheit.)
+
+Plus statische Buffer (Wunschliste 78 Pattern) in pushCompanionMessage
+fuer 480B Stack-Druck-Reduktion pro Call.
+
+=== ENDE UPDATE ===
 
 
 --------------------------------------------------------------------------------
@@ -6421,6 +6457,23 @@ Datenpunkte (gemessen User):
       => RX-Disable spart ca. 40 mA -- mehr als urspruengliche Schaetzung
          (10-15 mA fuer LoRa-RX). Erklaerung: SX1262 in Sleep-Mode + ggf.
          AGC-Subsystem komplett aus.
+    - 2026-06-19 Folgesession (Hardware-Test der Wunschliste-89/90/91-
+      Builds + Phantom-Power-Fix):
+        Erste Messung (User 1. Eintrag):
+          GPS off (RX an, BT an): 67-70 mA (Schnitt 65 mA, Ausreisser bis 63)
+          GPS on  (RX an, BT an): 75-78 mA
+        Spaetere Messung (Akku voller, indirekt Ladestrom ueberlagert):
+          GPS off: 47 mA
+          GPS on : 54 mA
+        Noch spaeter (Akku noch voller, Ladestrom-Ueberlagerung groesser):
+          GPS off: 36-39 mA
+          GPS on : 46-47 mA
+      Delta GPS-on minus GPS-off = konstant 7-11 mA ueber alle Messungen.
+      Vorher war Delta 25-30 mA.
+      => GPS Phantom-Power-Fix (Z 8945/8975 + CLI Z 13937/13970) wirkt.
+         Phantom-Powering via Serial1.write-vor-Sleep ist eliminiert.
+         Reststrom 7-10 mA = AG3335-Sleep-State (vergleichbar mit
+         Meshtastic-UBLOX-PSM Cross-Verify).
   Meshtastic-Firmware, Heltec WT:
     - bluetooth on                 -> 152-160 mA  (User-Messung 2026-06-18)
     - bluetooth off                -> 78-95 mA    (User-Messung 2026-06-18)
@@ -7499,6 +7552,20 @@ Phase 2 -- USB-VBUS Auto-Wake fuer T1000-E (User-Befund 2026-06-18 spaet):
     CLI: set usb_wake_on_plug <0|1|on|off>.
     Implementierung in T1000eBoard::powerOff() #ifdef-gated:
       if (prefs.usb_wake_on_plug) nrf_power_int_enable(...);
+
+  ERGAENZUNG 2026-06-19 (User-Wunsch nach Phase-1-Test):
+    Zweite Pref usb_wake_action (uint8_t, Sentinel 0xFF) -- was
+    soll bei USB-Wieder-Plug passieren?
+      0 = ONLY_CHARGE -- Geraet bleibt aus, nur der Akku laedt.
+          Use-Case: Tracker wieder im Wohnzimmer, soll laden ohne
+          aufzuwachen + Mesh-Traffic zu machen.
+      1 = BOOT (Default fuer T1000-E) -- normaler Boot, Tracker
+          wird aktiv. Auto-Tracker-Use-Case.
+    Implementierung in der Wake-Routine: nach USB-VBUS-Wake
+    Pref pruefen, wenn ONLY_CHARGE -> sofort zurueck in SystemOff
+    mit USB-VBUS-DROP als Wake-Quelle (kommt also wieder rein
+    sobald USB ab). Wenn BOOT -> normaler Boot-Pfad.
+    CLI: set usb_wake_action <charge-only|boot>.
   Aktuell wacht T1000-E nach powerOff() (sd_power_system_off) NICHT
   von alleine auf wenn USB wieder eingesteckt wird -- nur Button-Press
   weckt (variants/t1000-e/T1000eBoard.h:80-89 konfiguriert nur
@@ -7706,5 +7773,73 @@ Cadence-Setting.
 
 Quelle: User-Befund + Meshtastic-Code-Analyse 2026-06-19 spaet.
 Verwandt zu Wunschliste 92 (UBLOX-Aequivalent fuer Heltec WT).
+
+
+--------------------------------------------------------------------------------
+94. Shutdown-Buzzer-Piep vor powerOff + neuer shutdown CLI (2026-06-19)
+--------------------------------------------------------------------------------
+
+Status: DONE. User-Wunsch nach Test von 'set usb_loss_shutdown_min 1' --
+        "Schade dass es keinen Abschalt-Piepton gab". Plus User-Folge-
+        wunsch: "reboot sollte auch Sound abspielen" + "shutdown-CLI
+        analog zu reboot".
+
+Motivation:
+  Auf Boards mit Buzzer (T1000-E hat PIN_BUZZER=25 + PIN_BUZZER_EN=37)
+  ein akustisches Signal vor board.powerOff(). Verhindert dass der
+  User glaubt das Geraet sei defekt -- klare Audio-Quittung dass es
+  bewusst abschaltet (USB-Loss-Timer, Battery-Low).
+
+Implementierungs-Pfad (umgesetzt):
+
+  buzzer ist Member von UITask (genericBuzzer buzzer; in ui-orig/ui-
+  tiny/ui-new UITask.h Z 21/33/29). MyMesh hat keinen direkten Zugriff.
+  Upstream-UITask::shutdown(bool restart) macht schon alles richtig:
+    buzzer.shutdown();
+    uint32_t buzzer_timer = millis();
+    while (buzzer.isPlaying() && (millis() - 2500) < buzzer_timer)
+      buzzer.loop();
+    if (restart) _board->reboot();
+    else { (display->turnOff();) radio_driver.powerOff(); _board->powerOff(); }
+
+  Aenderungen (2026-06-19, dieser Commit):
+  - AbstractUITask.h: virtual void shutdown(bool restart = false) mit
+    Default-Fallback (if restart -> _board->reboot, else
+    _board->powerOff). Damit MyMesh es via AbstractUITask-Pointer
+    aufrufen kann. ui-orig/ui-tiny/ui-new haben das schon -- nur
+    'override' Keyword adden.
+  - ui-orig/UITask.h: 'override' an shutdown() addiert.
+  - ui-tiny/UITask.h: 'override' an shutdown() addiert.
+  - ui-new/UITask.h: 'override' an shutdown() addiert.
+  - MyMesh.cpp manageBatteryAndUsb: beide board.powerOff()-Pfade
+    (USB-Loss-Timeout + Batt-Low-Confirm) auf
+      if (_ui) _ui->shutdown(false); else board.powerOff();
+  - MyMesh.cpp reboot CLI: vor SD-disable+NVIC_SystemReset jetzt
+      if (_ui) _ui->shutdown(true);  // returns nicht im Erfolgsfall
+  - MyMesh.cpp deferred-reboot-Loop (_pending_reboot_at): vor SD-
+    disable+ICER ebenfalls _ui->shutdown(true) (Sound im Idle-loop).
+  - MyMesh.cpp CMD_REBOOT (Companion-App-Frame): _ui->shutdown(true).
+  - MyMesh.cpp Serial-CLI 'reboot': _ui->shutdown(true).
+
+Neuer 'shutdown' CLI-Befehl:
+  - Companion-CLI (MyMesh.cpp ~20990): 'shutdown' -- analog zu reboot,
+    deferred via _pending_shutdown_at (3s damit Companion-Frame raus).
+  - Serial-CLI: 'shutdown' (~7410) -- direkt _ui->shutdown(false).
+  - Help-Liste + help shutdown/help reboot topic.
+  - cmd_freeze_during_dirty Whitelist: 'shutdown' addiert (Z 11839).
+
+Aufwand: ~30 min (kein UI-Variant-cpp-Eingriff weil shutdown() schon
+da war -- nur override-Keyword + AbstractUITask virtual + MyMesh-Calls).
+
+Test: 'set usb_loss_shutdown_min 1' + USB ab -> 1 min warten ->
+Shutdown-Sound + powerOff. Plus 'reboot' und 'shutdown' CLI testen.
+
+Quelle: User-Test-Feedback 2026-06-19 nach Wunschliste-90-Test.
+
+  Buzzer-Quiet-Respekt: buzzer.play() prueft _is_quiet -- bei Master-
+  Mute kein Sound. Wunschliste 75 (Buzzer-Profile) koennte eine
+  shutdown-Bit-Maske bekommen damit User unabhaengig vom Master-Mute
+  shutdown-Sound erzwingen kann (Auto-Tracker-Use-Case: shutdown
+  unbedingt hoeren). Optional Phase B.
 
 
