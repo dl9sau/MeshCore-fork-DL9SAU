@@ -106,5 +106,5 @@ public:
   void loop() override;
   void applyDisplayWakeMode() override;
 
-  void shutdown(bool restart = false);
+  void shutdown(bool restart = false) override;
 };

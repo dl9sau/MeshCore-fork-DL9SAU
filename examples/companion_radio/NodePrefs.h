@@ -708,10 +708,18 @@ struct NodePrefs {  // persisted to file
   // usb_loss_shutdown_min: nach USB-Verlust N Minuten -> shutdown.
   //              0 = disabled (Default). 1..240. Use-Case: Tracker
   //              im Auto, Zuendung aus -> nach N min sauberer Off.
+  // usb_wake_action: Verhalten wenn NRF52 nach powerOff durch USB-
+  //              VBUS-Change (NRF52840 hat VBUS-Detect Hardware-aktiv)
+  //              wieder aufwacht. Nur T1000-E-relevant.
+  //              0 = boot      (Default, heutiges Verhalten)
+  //              1 = stay-off  Boot-Cause-Check: wenn Reset durch
+  //                            VBUS-Wake, sofort wieder powerOff()
+  //              2 = charge-only  (Phase 2b TODO, derzeit = stay-off)
   // 0xFF im File = EOF-Sentinel -> Migration in begin() zu defaults.
   uint8_t        batt_chemistry;
   uint16_t       batt_min_mv;
   uint8_t        usb_loss_shutdown_min;
+  uint8_t        usb_wake_action;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim

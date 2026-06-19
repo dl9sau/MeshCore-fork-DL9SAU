@@ -4899,6 +4899,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   // Wunschliste 89/90/91: Battery + USB State -- alles RAM, kein
   // Persist. Erste Messung erfolgt sofort beim ersten Tick.
   _usb_lost_at_millis            = 0;
+  _usb_ever_seen                 = false;   // Wunschliste 90 Bug-Fix 2026-06-20
   _batt_last_sample_millis       = 0;
   _batt_low_burst_until_millis   = 0;
   _batt_low_consecutive          = 0;
@@ -4929,6 +4930,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _trace_heard_all = false;   // 'trace heard' default mode = new-only
   _unscoped_channel_direct = true;  // Wunschliste 25: unscoped channel = direct
   _pending_reboot_at = 0;
+  _pending_shutdown_at = 0;   // Wunschliste 94: deferred shutdown
   memset(_heard_direct,       0, sizeof(_heard_direct));
   memset(_rx_advert_total,    0, sizeof(_rx_advert_total));
   memset(_rx_advert_by_scope, 0, sizeof(_rx_advert_by_scope));
@@ -5027,6 +5029,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.batt_chemistry        = 0xFF;
   _prefs.batt_min_mv           = 0xFFFF;
   _prefs.usb_loss_shutdown_min = 0xFF;
+  _prefs.usb_wake_action       = 0xFF;   // Wunschliste 90 Phase 2 (2026-06-20)
   _prefs.airtime_factor = 1.0;
   strcpy(_prefs.node_name, "NONAME");
   _prefs.freq = LORA_FREQ;
@@ -5316,8 +5319,20 @@ void MyMesh::begin(bool has_display) {
     _prefs.batt_chemistry = 0;   // disabled, User-Config benoetigt
 #endif
   }
+  // User-Feedback 2026-06-19: Default vergessen-Schutz fuer Geraete mit
+  // bekannt-eingebautem Akku. Bei T1000-E (Seeed verkauft mit 1S Li-Po):
+  // wenn chemistry=0 (disabled), Hardware-Default Li-Po setzen.
+  // Migration vom alten "schon mal mit 0 gebootet"-Zustand zu Standard.
+  // Wer explizit 'none' will, kann nach jedem Reboot 'set batt_chemistry
+  // none' setzen -- Edge-Case, sehr selten.
+#ifdef T1000_E
+  if (_prefs.batt_chemistry == 0) {
+    _prefs.batt_chemistry = 1;
+  }
+#endif
   if (_prefs.batt_min_mv == 0xFFFF) _prefs.batt_min_mv = 0;
   if (_prefs.usb_loss_shutdown_min == 0xFF) _prefs.usb_loss_shutdown_min = 0;
+  if (_prefs.usb_wake_action == 0xFF)       _prefs.usb_wake_action = 0;   // boot
 
   // Wunschliste 43 Migration (2026-06-11, FIX 2026-06-11):
   // altes bluetooth_power_mode-Byte war 1-Wert-Enum (0=off, 1=always-on,
@@ -6620,7 +6635,9 @@ void MyMesh::handleCmdFrame(size_t len) {
     if (dirty_contacts_expiry) { // is there are pending dirty contacts write needed?
       saveContacts();
     }
-    board.reboot();
+    // DL9SAU Wunschliste 94 (2026-06-19): Buzzer-Shutdown-Sound vor Reboot.
+    if (_ui) _ui->shutdown(true);
+    else     board.reboot();
   } else if (cmd_frame[0] == CMD_GET_BATT_AND_STORAGE) {
     uint8_t reply[11];
     int i = 0;
@@ -7390,7 +7407,13 @@ void MyMesh::checkCLIRescueCmd() {
       }
 
     } else if (strcmp(cli_command, "reboot") == 0) {
-      board.reboot();  // doesn't return
+      // DL9SAU Wunschliste 94 (2026-06-19): Sound vor Reboot.
+      if (_ui) _ui->shutdown(true);
+      else     board.reboot();  // doesn't return
+    } else if (strcmp(cli_command, "shutdown") == 0) {
+      // DL9SAU Wunschliste 94 (2026-06-19): Pseudo-Powerloss via Serial-CLI.
+      if (_ui) _ui->shutdown(false);
+      else     board.powerOff();
     } else {
       Serial.println("  Error: unknown command");
     }
@@ -7741,7 +7764,9 @@ void MyMesh::loop() {
     // reset_mcu() nachstellen: SD aus + alle Interrupts aus, dann
     // NVIC_SystemReset(). Genau dies macht enterUf2Dfu(), nur ohne
     // GPREGRET-Magic (= normaler Reboot statt DFU-Mode).
+    // Wunschliste 94: UI-shutdown(true) spielt vorher Buzzer-Sound.
 #if defined(NRF52_PLATFORM)
+    if (_ui) _ui->shutdown(true);
     sd_softdevice_disable();
     NVIC->ICER[0] = 0xFFFFFFFFUL;
     NVIC->ICPR[0] = 0xFFFFFFFFUL;
@@ -7751,9 +7776,18 @@ void MyMesh::loop() {
 #endif
     NVIC_SystemReset();
 #else
-    board.reboot();
+    if (_ui) _ui->shutdown(true);
+    else     board.reboot();
 #endif
     // returns not.
+  }
+  // Wunschliste 94 (2026-06-19): Deferred shutdown. Wie reboot oben,
+  // aber Endzustand ist powerOff(). _ui->shutdown(false) spielt erst
+  // den Buzzer-Shutdown-Sound, dann _board->powerOff().
+  if (_pending_shutdown_at != 0 && (long)(millis() - _pending_shutdown_at) >= 0) {
+    if (_ui) _ui->shutdown(false);
+    else     board.powerOff();
+    _pending_shutdown_at = 0;  // returns not normally; safety reset
   }
   // 2026-06-15: Deferred DFU-Entry (NRF52). Sentinel _pending_dfu_at = 0
   // bedeutet 'nichts pending'. enterUf2Dfu/enterSerialDfu setzen GPREGRET
@@ -8636,7 +8670,14 @@ void MyMesh::manageBatteryAndUsb() {
   bool usb_now = board.isExternalPowered();
 
   // --- USB-Loss-Timer (Wunschliste 90) ---
-  if (_prefs.usb_loss_shutdown_min > 0) {
+  // DL9SAU 2026-06-20 Bug-Fix: usb_loss_shutdown_min darf erst
+  // scharfschalten NACHDEM USB einmal IM LAUFENDEN BETRIEB gesehen
+  // wurde. Sonst triggert es nach jedem Akku-only-Boot (z.B. Button-
+  // Press nach shutdown) sofort wieder (User-Befund 2026-06-20).
+  // _usb_ever_seen ist runtime-only -- nach Reboot wieder false.
+  // Wenn USB nie gesteckt wird, bleibt der Timer dauerhaft inaktiv.
+  if (usb_now) _usb_ever_seen = true;
+  if (_prefs.usb_loss_shutdown_min > 0 && _usb_ever_seen) {
     if (!usb_now) {
       // 10s Hysterese gegen Glitches: erste Erkennung markiert
       // _usb_lost_at_millis, aber shutdown-Timer erst nach 10s.
@@ -8652,7 +8693,10 @@ void MyMesh::manageBatteryAndUsb() {
           pushDebugLog("[batt] USB-loss timeout (%u min) -> powerOff\n",
                        (unsigned)_prefs.usb_loss_shutdown_min);
           savePrefs();
-          board.powerOff();
+          // Wunschliste 94: Shutdown-Piep via UITask. Fallback auf
+          // stilles board.powerOff() wenn kein UI initialisiert.
+          if (_ui) _ui->shutdown(false);
+          else     board.powerOff();
           return;
         }
       }
@@ -8707,7 +8751,9 @@ void MyMesh::manageBatteryAndUsb() {
       if (_batt_low_consecutive >= 3) {
         pushDebugLog("[batt] 3x LOW confirmed -> powerOff\n");
         savePrefs();
-        board.powerOff();
+        // Wunschliste 94: Shutdown-Piep via UITask.
+        if (_ui) _ui->shutdown(false);
+        else     board.powerOff();
         return;
       }
     }
@@ -9270,6 +9316,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("batt_chemistry",        _prefs.batt_chemistry);          // Wunschliste 91
   kv_uint("batt_min_mv",           _prefs.batt_min_mv);             // Wunschliste 91
   kv_uint("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min);   // Wunschliste 90
+  kv_uint("usb_wake_action",       _prefs.usb_wake_action);         // Wunschliste 90 Phase 2
   kv_uint("repeat_scope_mode",     _prefs.repeat_scope_mode);
   kv_uint("msg_store_flash",       _prefs.msg_store_flash);
   kv_arr_uint8("msg_store_limit",  _prefs.msg_store_limit, 5);
@@ -10205,6 +10252,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "batt_chemistry") == 0)        { uint8_t v=(uint8_t)as_uint(); if (v>2) v=0; _prefs.batt_chemistry=v; _br_applied++; return; }       // Wunschliste 91
       if (strcmp(key, "batt_min_mv") == 0)           { _prefs.batt_min_mv           = (uint16_t)as_uint(); _br_applied++; return; }                       // Wunschliste 91
       if (strcmp(key, "usb_loss_shutdown_min") == 0) { uint32_t v=as_uint(); if (v>240) v=240; _prefs.usb_loss_shutdown_min=(uint8_t)v; _br_applied++; return; }  // Wunschliste 90
+      if (strcmp(key, "usb_wake_action") == 0)       { uint8_t v=(uint8_t)as_uint(); if (v>1) v=0; _prefs.usb_wake_action=v; _br_applied++; return; }              // Wunschliste 90 Phase 2
       if (strcmp(key, "repeat_scope_mode") == 0)     { _prefs.repeat_scope_mode     = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "msg_store_flash") == 0)       { _prefs.msg_store_flash       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "log_flags") == 0)             { _prefs.log_flags             = (uint8_t)as_uint(); _br_applied++; return; }
@@ -10905,6 +10953,48 @@ void MyMesh::setBleEnabled(bool en) {
 }
 
 void MyMesh::manageBlePower() {
+  if (!_serial) return;
+
+  // Plattform-unabhaengiger Deferred-off Pfad (auch ohne Cycler):
+  // 'bluetooth off'-CLI gibt 5s grace damit der OK-Frame ueber BLE
+  // an die App geht. Plus periodisch tickle (PUSH_CODE_MSG_WAITING)
+  // alle 1s damit App-Sync nicht verpasst wird (User-Beobachtung
+  // 2026-06-10: 3s ohne re-tickle reichten nicht).
+  if (_pending_ble_off_at != 0) {
+    if ((long)(millis() - _pending_ble_off_at) >= 0) {
+      _pending_ble_off_at = 0;
+      _pending_ble_off_next_tickle_at = 0;
+      _ble_pwr_state = BLE_PWR_OFF;
+      _ble_pwr_state_until = 0;
+      setBleEnabled(false);
+      return;
+    }
+    if (_serial->isConnected()
+        && _pending_ble_off_next_tickle_at != 0
+        && (long)(millis() - _pending_ble_off_next_tickle_at) >= 0) {
+      uint8_t frame[1] = { 0x83 /* PUSH_CODE_MSG_WAITING */ };
+      _serial->writeFrame(frame, 1);
+      _pending_ble_off_next_tickle_at = millis() + 1000;
+    }
+    return;
+  }
+
+#ifndef BLE_CYCLE_AVAILABLE
+  // DL9SAU Wunschliste 85+ (2026-06-20): NRF52 ohne Cycler. Simple
+  // Pref-enforce statt State-Machine. bluetooth_active == 0 -> aus,
+  // sonst an. State-Tracking via _ble_pwr_state nur fuer Status-
+  // Anzeige (OFF / AWAKE).
+  bool want_on = (_prefs.bluetooth_active != 0);
+  bool is_on = _serial->isEnabled();
+  if (want_on && !is_on) {
+    setBleEnabled(true);
+    _ble_pwr_state = BLE_PWR_AWAKE;
+  } else if (!want_on && is_on) {
+    setBleEnabled(false);
+    _ble_pwr_state = BLE_PWR_OFF;
+  }
+  return;
+#else
   // DL9SAU 2026-06-16: Waehrend WiFi-OTA aktiv ist, darf BLE nicht
   // re-enabled werden -- esp_bt_mem_release im OTA-Start hat den
   // Controller-Heap an WiFi gegeben, esp_bt_controller_enable
@@ -10933,32 +11023,9 @@ void MyMesh::manageBlePower() {
                  (_serial && _serial->isConnected()) ? 1 : 0,
                  prof, act);
   }
-  if (!_serial) return;
-  // Deferred-disable check: wenn 'bluetooth off'-CLI gerade gesetzt
-  // wurde, lassen wir BLE noch 5s laufen damit App den OK-Frame ueber
-  // BLE empfangen kann. Plus periodisch tickle (PUSH_CODE_MSG_WAITING)
-  // alle 1s damit App-Sync nicht verpasst wird (User-Beobachtung
-  // 2026-06-10: 3s ohne re-tickle reichten nicht).
-  if (_pending_ble_off_at != 0) {
-    if ((long)(millis() - _pending_ble_off_at) >= 0) {
-      _pending_ble_off_at = 0;
-      _pending_ble_off_next_tickle_at = 0;
-      _ble_pwr_state = BLE_PWR_OFF;
-      _ble_pwr_state_until = 0;
-      setBleEnabled(false);
-      return;
-    }
-    // periodischer Tickle solange connected
-    if (_serial->isConnected()
-        && _pending_ble_off_next_tickle_at != 0
-        && (long)(millis() - _pending_ble_off_next_tickle_at) >= 0) {
-      uint8_t frame[1] = { 0x83 /* PUSH_CODE_MSG_WAITING */ };
-      _serial->writeFrame(frame, 1);
-      _pending_ble_off_next_tickle_at = millis() + 1000;
-    }
-    // waehrend Pending: keine State-Aenderung, BLE bleibt an
-    return;
-  }
+  // Deferred-disable wird jetzt VOR dem #ifdef BLE_CYCLE_AVAILABLE
+  // verarbeitet (oben in dieser Funktion) -- damit auch NRF52 das
+  // 'bluetooth off'-Pattern korrekt umsetzt.
   // External-Toggle-Detection (Wunschliste 43, User 2026-06-10):
   // UITask-Menue (Heltec Wireless Tracker Display + Button, Menupunkt 5
   // 'Bluetooth' mit long-press) ruft _serial->enable()/disable() direkt -- ohne
@@ -11182,6 +11249,7 @@ void MyMesh::manageBlePower() {
     // 'bluetooth power always-on' / 'bluetooth power cycle')
     return;
   }
+#endif // BLE_CYCLE_AVAILABLE
 }
 
 void MyMesh::logBleTransition(BlePwrState to_state, const char* reason) {
@@ -11203,6 +11271,13 @@ void MyMesh::logBleTransition(BlePwrState to_state, const char* reason) {
 }
 
 void MyMesh::bleWakeOnLora(const char* reason) {
+#ifndef BLE_CYCLE_AVAILABLE
+  // DL9SAU Wunschliste 85+ (2026-06-20): NRF52 ohne Cycler -- BLE
+  // ist permanent verfuegbar oder per 'bluetooth off' aus. Wake-
+  // on-LoRa-Hook waere ein No-Op.
+  (void)reason;
+  return;
+#else
   // Aus Cycle-Phasen UND aus TMP_OFF (profile=normal perm-sleep) aufwecken.
   // Bei explizitem User-OFF (Pref active=0) NICHT wachen -- User-Wunsch
   // zu schlafen wird respektiert.
@@ -11214,6 +11289,7 @@ void MyMesh::bleWakeOnLora(const char* reason) {
   _ble_pwr_state = BLE_PWR_HOT_START;
   _ble_pwr_state_until = millis() + 5UL * 60 * 1000;
   setBleEnabled(true);
+#endif
 }
 
 void MyMesh::bleManualToggleFromMenu() {
@@ -11266,8 +11342,14 @@ void MyMesh::pushCompanionMessage(const char* text) {
     // Wunschliste 78: Buffer-Audit. Eingangs-text ist max 145 Byte
     // (Companion-Msg-Limit). Worst case bei \n -> \r\n Konvertierung
     // ergibt 145 * 2 = 290 + 4 trailing = 294. 320 mit Sicherheits-
-    // marge. Vorher 400 -- 80 Byte Stack-Gewinn pro Aufruf.
-    char out[320];
+    // marge.
+    // DL9SAU 2026-06-20 (Stack-Fix nach pattern memory project_nrf52_
+    // cli_handler_stack_limit + commit 04c3dfc6): static statt Stack.
+    // pushCompanionMessage wird in BLE-Task-Kontext gerufen, dort ist
+    // Stack klein (~5KB Bluefruit-Default). 320B local + caller-locals
+    // -> Stack-Overflow + Crash bei jedem App->Companion-Send.
+    // Concurrency-safe: pushCompanionMessage sequenziell.
+    static char out[320];
     int oi = 0;
     size_t tl = strlen(text);
     for (size_t k = 0; k < tl && oi < (int)sizeof(out) - 2; k++) {
@@ -11341,7 +11423,10 @@ void MyMesh::pushCompanionMessage(const char* text) {
   // Konvention onChannelMessageRecv erkennt "Sender: msg" am ": " Separator,
   // wir liefern das ebenso damit die App den Sender-Teil korrekt darstellt.
   const char* sender = board.getManufacturerName();
-  char combined[MAX_TEXT_LEN];
+  // DL9SAU 2026-06-20 (Stack-Fix): static statt Stack -- siehe oben
+  // bei char out[320]. MAX_TEXT_LEN = 160 -> 160B kumulativ pro
+  // pushCompanionMessage-Aufruf.
+  static char combined[MAX_TEXT_LEN];
   int n = snprintf(combined, sizeof(combined), "%s: %s", sender ? sender : "fw", text);
   if (n <= 0) return;
   int total_len = n < (int)sizeof(combined) ? n : (int)sizeof(combined) - 1;
@@ -11800,7 +11885,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     {"stats-core", false}, {"stats-radio", false}, {"stats-packets", false},
     {"uptime", false}, {"advert", false}, {"autoadv", false},
     {"repeater", false}, {"gps", false}, {"trace", false},
-    {"chatname", false}, {"reboot", true}, {"dfu", false}, {"duty", false}, {"scope", false},
+    {"chatname", false}, {"reboot", true}, {"shutdown", true}, {"dfu", false}, {"duty", false}, {"scope", false},
     {"prefs", false}, {"neighbors", false}, {"tempradio", false},
     {"set", false}, {"get", false}, {"clock", false}, {"date", false}, {"time", false},
     {"messages", false}, {"log", false}, {"channels", false}, {"unscoped-channelmessages", false},
@@ -11902,6 +11987,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  disable: hart aus, kein Timer\n"
           "  enable:  Block aufheben\n"
           "RAM-only -- Reboot setzt auf enabled zurueck.");
+        pushCompanionMessage(
+          "Im Repeater-Mode ist 'tx disable' abgelehnt --\n"
+          "nur 'tx suspend N' (mit Auto-Re-Enable) erlaubt.\n"
+          "Schutz gegen versehentlich-stummen Repeater.");
         return;
       }
       if (topic_prefix_match(topic, "rx")) {
@@ -12276,76 +12365,100 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (topic_prefix_match(topic, "set")) {
-        // Mehrere kurze Messages -- jede unter 145 Byte BLE-Wire-Limit.
-        // User-Feedback 2026-06-01: alte Version war ueberindentet und
-        // an mehreren Stellen abgeschnitten (App, Hinweise).
+        // User-Feedback 2026-06-19: Komma-Separation statt Space (sonst
+        // liest sich 'freq sf' wie 'freq mit Argument sf'). Plus klare
+        // Kategorisierung -- airtime_factor + rx_boosted_gain gehoeren
+        // zu Radio, nicht Telemetry. Plus Battery-Block neu.
+        // 145-Byte-Limit pro pushCompanionMessage beachten.
         pushCompanionMessage(
-          "set <key> <value>: persistente Settings.");
+          "set <key> <value>: persistente Settings.\n"
+          "'set <key>' (ohne value) -> Detailhilfe.");
         pushCompanionMessage(
-          "Radio: freq sf bw cr tx_power\n"
-          "Position: lat lon gps gps_interval advert_loc_policy");
+          "Radio:\n"
+          "  freq, sf, bw, cr, tx_power,\n"
+          "  airtime_factor, rx_boosted_gain");
         pushCompanionMessage(
-          "Repeat: repeat flood_max (1..63, def 16)\n"
-          "  flood_max_infra (def 16, 'follow'=fmax)\n"
-          "  flood_max_req_resp (def 0=erbt infra)");
-        pushCompanionMessage(
-          "  flood_max_scope_region\n"
-          "  flood_max_unscoped_companions\n"
-          "    (= alias 'flood_max_unscoped')\n"
-          "  loop_detect (off|min|mod|strict)");
-        pushCompanionMessage(
-          "  ch.hops -> 'help ch.hops'");
+          "Radio Power-Control:\n"
+          "  rx_disabled (0=on, 1=Sleep+wake-on-tx)\n"
+          "  TX-Block via CLI 'tx': disable|enable|\n"
+          "  suspend <N>[s|m|h] -- RAM-only.");
         pushCompanionMessage(
           "Radio LBT/AGC:\n"
-          "  int.thresh (0=off, default 14)\n"
-          "  agc.reset.interval (sec/4, 0=off)\n"
-          "  ('set <key>' ohne Wert -> Detailhilfe)");
+          "  int.thresh   (0=off, Default 14)\n"
+          "  agc.reset.interval (sec/4, 0=off)");
         pushCompanionMessage(
-          "Display:\n"
+          "Position:\n"
+          "  lat, lon, gps, gps_interval,\n"
+          "  advert_loc_policy");
+        pushCompanionMessage(
+          "GPS-Profile\n"
+          "  gps_profile (0=full, 1=position-only,\n"
+          "               2=time-only)\n"
+          "  gps_lead_secs (Sek, 30..7776000)");
+        pushCompanionMessage(
+          "Battery + USB-Power:\n"
+          "  batt_chemistry (none|lion|lipo|lifepo4),\n"
+          "  batt_min_mv (0=Default je Chemie)");
+        pushCompanionMessage(
+          "  usb_loss_shutdown_min (0=off, 1..240),\n"
+          "  usb_wake_action (boot|stay-off)");
+        pushCompanionMessage(
+          "Repeat:\n"
+          "  repeat,\n"
+          "  flood_max (1..63, Default 16),\n"
+          "  flood_max_infra ('follow' = fmax),\n"
+          "  flood_max_req_resp (0=erbt infra)");
+        pushCompanionMessage(
+          "Repeat (weiter):\n"
+          "  flood_max_scope_region,\n"
+          "  flood_max_unscoped_companions\n"
+          "    (Alias flood_max_unscoped)");
+        pushCompanionMessage(
+          "  loop_detect (off|min|mod|strict)\n"
+          "  ch.hops -> 'help ch.hops'");
+        pushCompanionMessage(
+          "Delays:\n"
+          "  rxdelay, txdelay, direct_txdelay\n"
+          "  (tx/direct 'auto'=Default oder 0..2,\n"
+          "   rx 0..20)");
+        pushCompanionMessage(
+          "Telemetry:\n"
+          "  telemetry_mode_base,\n"
+          "  telemetry_mode_loc,\n"
+          "  telemetry_mode_env");
+        pushCompanionMessage(
+          "Display + CPU + Watchdog:\n"
           "  display (off|on|on-at-new-messages)\n"
-          "    off = nie auto-on bei Channel-Msg;\n"
-          "    Button-Press weckt aber weiter.\n"
-          "    Default: on-at-new-messages");
+          "  cpu.clock (max|240|160|80) -- Reboot\n"
+          "  watchdog (on|off) -- Reboot");
         pushCompanionMessage(
-          "Power/CPU:\n"
-          "  cpu.clock (max|240|160|80)\n"
-          "    MHz, wirkt ab Reboot.\n"
-          "    Default 'max'; 80 spart ~10-20 mA.");
+          "App:\n"
+          "  name, manual_add_contacts, multi_acks,\n"
+          "  autoadd_config, autoadd_max_hops,\n"
+          "  path_hash_mode,\n"
+          "  messages_append_scope_to_name (on|off)");
         pushCompanionMessage(
-          "Watchdog (Hang-Recovery):\n"
-          "  watchdog (on|off) - Default off.\n"
-          "  Wirkt ab Reboot. 90s Timeout,\n"
-          "  10min Skip nach WDT-Reset.");
+          "App (weiter):\n"
+          "  owner_info (max 119, '|' = Newline)");
         pushCompanionMessage(
-          "Delays: rxdelay txdelay direct_txdelay\n"
-          "  (tx/dir: 'auto' Default, oder 0..2)\n"
-          "Telemetry: telemetry_mode_base loc env\n"
-          "  airtime_factor rx_boosted_gain");
+          "Buzzer:\n"
+          "  buzzer_quiet (Master-Mute)\n"
+          "  buzzer.dm/channel/private/ack/app_disc\n"
+          "  get buzzer_profile (Bitmask)");
         pushCompanionMessage(
-          "App: name manual_add_contacts multi_acks\n"
-          "  autoadd_config autoadd_max_hops\n"
-          "  path_hash_mode\n"
-          "  messages_append_scope_to_name (on|off)\n"
-          "  owner_info (max 119, '|' -> Newline)");
-        pushCompanionMessage(
-          "Buzzer: buzzer_quiet (on|off, Master-Mute)\n"
-          "  buzzer.dm/channel/private/ack/app_disc on|off\n"
-          "  get buzzer_profile -- aktueller Bitmask");
-        pushCompanionMessage(
-          "Auth (passwd_admin/_guest, max 31):\n"
-          "  set passwd_admin <pw>   (alias: password)\n"
-          "  set passwd_guest <pw>   (alias: guest.password)\n"
-          "  set passwd_admin        (leer = clear)\n"
-          "  OTA-WLAN nutzt passwd_admin als HTTP-Basic-Auth.");
+          "Auth (max 31 Zeichen):\n"
+          "  passwd_admin  (Alias 'password')\n"
+          "  passwd_guest  (Alias 'guest.password')\n"
+          "  '' = clear. OTA HTTP-Basic via admin.");
         pushCompanionMessage(
           "Identity (Reboot noetig!):\n"
-          "  set prv.key <128 hex chars>\n"
-          "  set prv.key NEW    (neu generieren)");
+          "  prv.key <128 hex chars>\n"
+          "  prv.key NEW   (neu generieren)");
         pushCompanionMessage(
-          "Hinweise: Lat/Lon Sued/West negativ.\n"
+          "Hinweise:\n"
+          "  Lat/Lon: Sued/West negativ.\n"
           "  freq MHz, bw kHz.\n"
-          "  Delays = Faktor*Airtime\n"
-          "    (tx/dir 0..2, rx 0..20).\n"
+          "  Delays = Faktor * Airtime.\n"
           "  Aenderungen sofort persistent.");
         return;
       }
@@ -12436,6 +12549,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Cause: COLD WARM WDT PANIC BROWNOUT.\n"
           "Push bei Boot: neueste Info in $companion-Channel."
         );
+        return;
+      }
+      if (topic_prefix_match(topic, "reboot")
+          || topic_prefix_match(topic, "shutdown")) {
+        pushCompanionMessage(
+          "reboot: Neustart.\n"
+          "shutdown: Pseudo-Powerloss (aus).\n"
+          "Beide spielen vorher kurz den\n"
+          "Buzzer-Shutdown-Sound (max 2.5s).");
+        pushCompanionMessage(
+          "shutdown bleibt aus bis Tastendruck.\n"
+          "Auto-Wake bei USB-Wiederkehr ist");
         return;
       }
       if (topic_prefix_match(topic, "dfu")) {
@@ -12530,15 +12655,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  bluetooth <on|off>       persist\n"
           "  bluetooth tmp-off        runtime (kein Reboot-Survival)");
         pushCompanionMessage(
-          "Cycle-Mode (Default): 10min Boot-Grace,\n"
-          "  5min Hot-Start nach Disconnect, dann\n"
-          "  40s SLEEP + 20s WAIT Listening-Window.\n"
-          "  Recency-Bonus: ersten 10min nach Disconnect\n"
-          "    SLEEP nur 20s (schnellerer App-Reconnect).");
+          "bluetooth power cycle:\n"
+          "  Auf NRF52 nicht verfuegbar (BLE-Stack im\n"
+          "  Hardware-Idle = uA). Andere Plattformen:\n"
+          "  default enabled.");
         pushCompanionMessage(
-          "Wake-on-LoRa: eingehende DM oder admin-cmd\n"
-          "  weckt Bluetooth fuer 5min HOT_START.\n"
-          "Display-Menue 5 (long-press) toggled tmp.");
+          "  10min Boot-Grace,\n"
+          "  5min Hot-Start nach Disconnect, dann\n"
+          "  40s SLEEP + 20s WAIT Listening-Window.");
+        pushCompanionMessage(
+          "  Recency-Bonus: ersten 10min nach Disconnect\n"
+          "    SLEEP nur 20s (schneller Reconnect).\n"
+          "  Wake-on-LoRa: DM/admin-cmd weckt 5min HOT.");
+        pushCompanionMessage(
+          "Geraete mit Display: Menu 5 button Long-Press\n"
+          "  toggelt tmp-off.\n"
+          "T1000-E: kein BT-Toggle via Button.");
         return;
       }
       if (topic_prefix_match(topic, "discover")) {
@@ -12792,7 +12924,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       "  messages, logging, unscoped-channelmessages,\n"
       "  contact, backup, save, discover, tempradio,\n"
       "  filter, remote, bluetooth, serial-cli,\n"
-      "  ver, board, clear, reboot."
+      "  ver, board, clear, reboot, shutdown."
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
     // (Wunschliste 40). Sehen Kommentare bei den Handlern.
@@ -13272,6 +13404,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
     if (tx_idx == 1) {  // disable
+      // User-Klarstellung 2026-06-19: Repeater-Mode darf nicht
+      // permanent TX-blockiert werden (Repeater verstummt ohne Auto-
+      // Wiederherstellung). Nur 'tx suspend N' mit Timer ist im
+      // Repeater-Mode OK -- der Auto-Re-Enable garantiert dass das
+      // Geraet nicht stumm haengen bleibt.
+      if (_prefs.client_repeat) {
+        pushCompanionMessage(
+          "Repeater aktiv -- 'tx disable' abgelehnt.\n"
+          "Nutze 'tx suspend <N>[s|m|h]' fuer Wartung\n"
+          "mit Auto-Re-Enable, oder erst 'repeater off'.");
+        return;
+      }
       _tx_blocked = true;
       _tx_blocked_until_millis = 0;
       pushCompanionMessage("OK - tx disabled (kein Auto-Reenable).");
@@ -16111,6 +16255,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       int pwr_idx = dispatchToken(p, bt_pwr, 2, "cycle|always-on");
       if (pwr_idx < 0) return;
       if (pwr_idx == 0) {  // cycle
+#ifndef BLE_CYCLE_AVAILABLE
+        // DL9SAU Wunschliste 85+ (2026-06-20): NRF52 hat keinen
+        // messbaren Spareffekt durch BLE-Cycler, daher heraus-
+        // uebersetzt. CLI bleibt sichtbar fuer Konsistenz mit
+        // ESP32-Plattformen, sagt aber explizit Bescheid.
+        pushCompanionMessage("bluetooth power cycle: auf nrf-Plattform\n"
+                             "nicht verfuegbar (Mehrverbrauch nicht\n"
+                             "messbar). 'always-on' ist Default.");
+        return;
+#else
         _prefs.bluetooth_profile = 0x01;
         if (_prefs.bluetooth_active != 0) {
           _prefs.bluetooth_active = 0x01;
@@ -16122,6 +16276,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         savePrefs();
         pushCompanionMessage("OK - bluetooth power=cycle (persist)");
+#endif
       } else {  // always-on
         _prefs.bluetooth_profile = 0x20;
         if (_prefs.bluetooth_active != 0) {
@@ -18890,6 +19045,62 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  2=PREFS (gespeicherte lat/lon).");
         return;
       }
+      // Wunschliste 91 + User-Wunsch 2026-06-19: Empfehlung pro Akkutyp.
+      if (strcmp(key, "batt_min_mv") == 0) {
+        pushCompanionMessage(
+          "set batt_min_mv <0..5000>:\n"
+          "  Tiefentlade-Schwelle in mV. 3x unter Schwelle\n"
+          "  in 30s -> board.powerOff.");
+        pushCompanionMessage(
+          "  0 = Default je Chemie (Empfehlung):\n"
+          "      lipo/lion: 3200 mV (Reserve ueber 3000mV-Cutoff)\n"
+          "      lifepo4:   2700 mV (Reserve ueber 2500mV-Cutoff)");
+        pushCompanionMessage(
+          "  1..5000 = expliziter User-Wert.\n"
+          "  chemistry=none -> Schutz aus.\n"
+          "  USB an -> Schutz pausiert.");
+        return;
+      }
+      if (strcmp(key, "batt_chemistry") == 0) {
+        pushCompanionMessage(
+          "set batt_chemistry <none|lion|lipo|lifepo4>:\n"
+          "  none    = Schutz + Akku-%-Anzeige aus.\n"
+          "  lion    = Alias fuer lipo.");
+        pushCompanionMessage(
+          "  lipo    = 1S Li-Ion/Li-Po\n"
+          "            Cutoff 3000mV, Default 3200mV.\n"
+          "  lifepo4 = 1S LiFePO4\n"
+          "            Cutoff 2500mV, Default 2700mV.");
+        return;
+      }
+      if (strcmp(key, "usb_loss_shutdown_min") == 0) {
+        pushCompanionMessage(
+          "set usb_loss_shutdown_min <0..240>:\n"
+          "  Minuten nach USB-Loss bis powerOff. 10s Hysterese\n"
+          "  gegen Glitches. Auto-Tracker-Use-Case (Zuendung aus).");
+        pushCompanionMessage(
+          "  0 = disabled (Default).\n"
+          "  Beispiel: 30 = 30min nach USB-Loss schaltet das\n"
+          "  Geraet sauber ab. USB wieder an -> Timer cancel.");
+        return;
+      }
+      if (strcmp(key, "usb_wake_action") == 0) {
+        pushCompanionMessage(
+          "set usb_wake_action <boot|stay-off>:\n"
+          "  Verhalten wenn NRF52 nach powerOff durch USB-\n"
+          "  VBUS-Change wieder aufwacht. Nur T1000-E.");
+        pushCompanionMessage(
+          "  boot     = heutiges Verhalten (Default).\n"
+          "    Tracker bootet voll. Aufgabe shutdown war\n"
+          "    nur kurzfristig wirksam.");
+        pushCompanionMessage(
+          "  stay-off = bei VBUS-Wake direkt wieder\n"
+          "    powerOff. Tracker bleibt aus bis Button-Press.");
+        pushCompanionMessage(
+          "    Use-Case: shutdown bleibt 'aus' auch wenn\n"
+          "    USB getrennt/gesteckt wird.");
+        return;
+      }
       if (strcmp(key, "path_hash_mode") == 0 || strcmp(key, "path.hash.mode") == 0) {
         pushCompanionMessage(
           "set path_hash_mode <0..2>:\n"
@@ -19570,11 +19781,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       _prefs.batt_min_mv = (uint16_t)v;
       savePrefs();
-      char r[120];
-      uint16_t eff = (v == 0) ? getBattDefaultMinMv(_prefs.batt_chemistry) : (uint16_t)v;
-      snprintf(r, sizeof(r),
-               "OK - batt_min_mv = %d (%s, effektiv %u mV)",
-               v, v == 0 ? "default" : "user", (unsigned)eff);
+      char r[140];
+      if (v == 0) {
+        uint16_t eff = getBattDefaultMinMv(_prefs.batt_chemistry);
+        const char* ch_nm = (_prefs.batt_chemistry == 1) ? "lion/lipo"
+                          : (_prefs.batt_chemistry == 2) ? "lifepo4" : "none";
+        if (_prefs.batt_chemistry == 0)
+          snprintf(r, sizeof(r),
+                   "OK - batt_min_mv = 0\n  Achtung: chemistry=none, Schutz inaktiv.");
+        else
+          snprintf(r, sizeof(r),
+                   "OK - batt_min_mv = 0 -> Default %u mV (fuer %s).",
+                   (unsigned)eff, ch_nm);
+      } else {
+        snprintf(r, sizeof(r),
+                 "OK - batt_min_mv = %d mV (User-Override).", v);
+      }
       pushCompanionMessage(r);
       return;
     }
@@ -19591,6 +19813,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (v == 0) snprintf(r, sizeof(r), "OK - usb_loss_shutdown disabled.");
       else        snprintf(r, sizeof(r), "OK - usb_loss_shutdown_min = %d (powerOff %d min nach USB-Loss).", v, v);
       pushCompanionMessage(r);
+      return;
+    }
+    // Wunschliste 90 Phase 2 (2026-06-20): USB-VBUS-Wake-Verhalten.
+    // Nur T1000-E-relevant (NRF52840 hat VBUS-Detect Hardware-aktiv).
+    if (strcmp(key, "usb_wake_action") == 0) {
+      uint8_t v;
+      if (strcmp(value_lc, "boot") == 0 || strcmp(value_lc, "0") == 0) {
+        v = 0;
+      } else if (strcmp(value_lc, "stay-off") == 0
+                 || strcmp(value_lc, "stayoff") == 0
+                 || strcmp(value_lc, "1") == 0) {
+        v = 1;
+      } else {
+        pushCompanionMessage(
+          "Wert muss boot|stay-off sein.\n"
+          "  boot     = heutiges Verhalten (Default)\n"
+          "  stay-off = bei VBUS-Wake gleich wieder powerOff");
+        return;
+      }
+      _prefs.usb_wake_action = v;
+      savePrefs();
+      pushCompanionMessage(v == 0
+        ? "OK - usb_wake_action = boot (Default)."
+        : "OK - usb_wake_action = stay-off.");
       return;
     }
 
@@ -20378,6 +20624,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                          _prefs.messages_append_scope_to_name, 0);
       emit_uint  ("int.thresh",          _prefs.interference_threshold, 14);
       emit_uint  ("agc.reset.interval",  _prefs.agc_reset_interval,    0);
+      // DL9SAU Wunschliste 89/90/91: Battery + USB-Power-Schutz.
+      emit_uint  ("batt_chemistry",      _prefs.batt_chemistry,
+#ifdef T1000_E
+                                                                       1);
+#else
+                                                                       0);
+#endif
+      emit_uint  ("batt_min_mv",         _prefs.batt_min_mv,           0);
+      emit_uint  ("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min, 0);
+      // Wunschliste 90 Phase 2: 0=boot (Default), 1=stay-off
+      emit_uint  ("usb_wake_action",     _prefs.usb_wake_action,        0);
+      // DL9SAU Wunschliste 81 Phase 1+3 / 83: GPS-Profile + Lead + RX.
+      emit_uint  ("gps_profile",         _prefs.gps_profile,           0);
+      emit_uint  ("gps_lead_secs",       _prefs.gps_lead_secs,         300);
+      emit_uint  ("rx_disabled",         _prefs.rx_disabled,           0);
       // Wunschliste 58 Phase B: CPU-Clock. 0 = Default (Build-spezifisch).
       // Anzeige: 'max' wenn Default, sonst MHz-Wert.
       {
@@ -20653,15 +20914,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(r, sizeof(r), "batt_chemistry = %s", nm);
     }
     else if (strcmp(key, "batt_min_mv") == 0) {
-      uint16_t eff = (_prefs.batt_min_mv == 0)
-                     ? getBattDefaultMinMv(_prefs.batt_chemistry)
-                     : _prefs.batt_min_mv;
-      snprintf(r, sizeof(r), "batt_min_mv = %u (effektiv %u mV)",
-               (unsigned)_prefs.batt_min_mv, (unsigned)eff);
+      // User-Feedback 2026-06-19: "0 (effektiv X)" wirkt wie Schaetzwert.
+      // Klare Ausgabe je nach Konfig.
+      if (_prefs.batt_chemistry == 0) {
+        snprintf(r, sizeof(r), "batt_min_mv = %u (chemistry=none -> Schutz aus)",
+                 (unsigned)_prefs.batt_min_mv);
+      } else if (_prefs.batt_min_mv == 0) {
+        uint16_t eff = getBattDefaultMinMv(_prefs.batt_chemistry);
+        const char* ch_nm = (_prefs.batt_chemistry == 1) ? "lion/lipo" : "lifepo4";
+        snprintf(r, sizeof(r),
+                 "batt_min_mv = 0 -> Default %u mV (fuer %s)",
+                 (unsigned)eff, ch_nm);
+      } else {
+        snprintf(r, sizeof(r), "batt_min_mv = %u mV (User-Override)",
+                 (unsigned)_prefs.batt_min_mv);
+      }
     }
     else if (strcmp(key, "usb_loss_shutdown_min") == 0) {
       snprintf(r, sizeof(r), "usb_loss_shutdown_min = %u",
                (unsigned)_prefs.usb_loss_shutdown_min);
+    }
+    else if (strcmp(key, "usb_wake_action") == 0) {
+      snprintf(r, sizeof(r), "usb_wake_action = %u (%s)",
+               (unsigned)_prefs.usb_wake_action,
+               _prefs.usb_wake_action == 0 ? "boot" :
+               _prefs.usb_wake_action == 1 ? "stay-off" : "?");
     }
     else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0) {
       if (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW)
@@ -20830,10 +21107,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage("Rebooting via NVIC..");
     bootLogWritePreReboot();
     {
+      // Wunschliste 94: erst Buzzer-Shutdown-Sound (Companion-Frame
+      // geht in der Buzzer-Wait-Schleife mit raus). _ui->shutdown(true)
+      // ruft intern _board->reboot() (= NVIC_SystemReset auf NRF52),
+      // returnt also nicht im Erfolgsfall. Falls _board->reboot()
+      // doch return't oder _ui nicht initialisiert ist, faellt der
+      // Code unten auf SD-disable + NVIC_SystemReset zurueck.
+      if (_ui) _ui->shutdown(true);
       uint8_t sd_enabled = 0;
       sd_softdevice_is_enabled(&sd_enabled);
       if (sd_enabled) sd_softdevice_disable();
-      delay(200);   // damit pushCompanionMessage rausgeht
+      delay(200);
       NVIC_SystemReset();
     }
 #else
@@ -20847,6 +21131,28 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Frame-Verarbeitung zu blockieren.
     _pending_reboot_at = millis() + 3000;
     if (_pending_reboot_at == 0) _pending_reboot_at = 1;
+#endif
+    return;
+  }
+
+  // ---------- shutdown -------------------------------------------------
+  // DL9SAU Wunschliste 94 (2026-06-19): Pseudo-Powerloss mit Buzzer-Sound.
+  // Analog zum 'reboot' Befehl, ruft denselben Sound + powerOff-Pfad wie
+  // batt_low/usb_loss. Auto-Boot bei wiederkehrender Stromversorgung
+  // braucht USB-VBUS-Wake (Wunschliste 90 Phase 2) -- bis das da ist,
+  // bleibt das Geraet einfach aus bis Tastendruck/Reset.
+  if (starts_with_word(cmd, "shutdown")) {
+    pushCompanionMessage("Shutting down..");
+    bootLogWritePreReboot();
+#if defined(NRF52_PLATFORM)
+    delay(200);  // Companion-Frame rausgeben bevor Sound startet
+    if (_ui) _ui->shutdown(false);
+    else     board.powerOff();
+#else
+    // ESP32: deferred wie reboot, damit Frame-Auslieferung nicht
+    // blockiert wird. Sentinel _pending_shutdown_at = 0 = inaktiv.
+    _pending_shutdown_at = millis() + 3000;
+    if (_pending_shutdown_at == 0) _pending_shutdown_at = 1;
 #endif
     return;
   }

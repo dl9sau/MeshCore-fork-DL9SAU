@@ -56,4 +56,16 @@ public:
   //   2 = on-at-new-messages -> aktueller Zustand bleibt
   // Default-Implementation als No-Op fuer UI-Varianten ohne Display.
   virtual void applyDisplayWakeMode() {}
+  // DL9SAU Wunschliste 94 (2026-06-19): UI-koordinierter Shutdown +
+  // Reboot mit Buzzer-Sound. shutdown(restart) macht alles in einem
+  // Aufruf (Sound + reboot/powerOff). playShutdownSound() nur Sound,
+  // returns -- damit MyMesh den eigenen NRF52-Reset-Pfad (SD-disable
+  // + NVIC-ICER + NVIC_SystemReset) selbst machen kann.
+  virtual void shutdown(bool restart = false) {
+    if (restart) _board->reboot();
+    else         _board->powerOff();
+  }
+  virtual void playShutdownSound(uint32_t max_wait_ms = 3000) {
+    (void)max_wait_ms;
+  }
 };

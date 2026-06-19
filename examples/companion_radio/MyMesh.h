@@ -34,6 +34,29 @@
 #include <helpers/StaticPoolPacketManager.h>
 #include <target.h>
 
+/* ---------------------------------- DL9SAU FEATURE GATES ---------------------------- */
+
+// DL9SAU Wunschliste 85+ (2026-06-20): BLE-Power-Cycle State-Machine
+// ist ESP32-only.
+//   ESP32 (Heltec WT, etc.): NimBLE Software-Stack auf CPU, kein
+//     Hardware-Idle-Modus -- Advertising kostet messbar Strom.
+//     Cycler spart 80 mA bei aktivem App-Connect-Window (User-
+//     Crossvergleich mit Meshtastic 2026-06-19).
+//   NRF52 (T1000-E): SoftDevice hat Hardware-BLE-Idle in uA-Bereich.
+//     Advertising-Stop spart ~ 0 mA messbar (User-Test 2026-06-19,
+//     'BT on/off kaum messbarer Unterschied'). Cycler bringt keinen
+//     Spareffekt, bedeutet aber Code-Komplexitaet + Wartungslast +
+//     SoftDevice-Lifecycle-Risiko (siehe memory project_ble_powerbank_
+//     diagnostics + project_nrf52_resetreas_softdevice_trap).
+// Daher: Cycler-State-Machine, Timer und BleLog werden auf NRF52
+// vollstaendig herausuebersetzt. Auf NRF52 bleibt BLE permanent an
+// (SoftDevice-Default, Advertising-Stop via 'bluetooth off' bleibt
+// als einmaliger Schalter erhalten -- ist in SerialBLEInterface
+// schon ohne SD-Disable implementiert).
+#if !defined(NRF52_PLATFORM)
+  #define BLE_CYCLE_AVAILABLE
+#endif
+
 /* ---------------------------------- CONFIGURATION ------------------------------------- */
 
 #ifndef LORA_FREQ
@@ -1250,6 +1273,11 @@ private:
   // _batt_low_consecutive: Counter im Burst-Mode (3 = shutdown).
   // _batt_last_mv / _batt_last_pct: letzte ermittelte Werte fuer Status.
   unsigned long _usb_lost_at_millis;
+  // _usb_ever_seen (Wunschliste 90 Bug-Fix 2026-06-20): runtime-only
+  // Edge-Detection. usb_loss_shutdown_min schaltet sich erst scharf
+  // wenn USB einmal im laufenden Betrieb gesteckt war. Verhindert
+  // sofort-shutdown nach Akku-only-Boot (Button-Press nach shutdown).
+  bool          _usb_ever_seen;
   unsigned long _batt_last_sample_millis;
   unsigned long _batt_low_burst_until_millis;
   uint8_t       _batt_low_consecutive;
@@ -1304,6 +1332,10 @@ private:
   // CLI-Handler — sonst wuerde die loop() pausiert und der "Rebooting
   // now.."-Push waere nicht zur App ausgeliefert.
   unsigned long _pending_reboot_at;
+  // DL9SAU Wunschliste 94 (2026-06-19): deferred shutdown (Pseudo-
+  // Powerloss mit Buzzer-Sound). Sentinel 0 = nichts pending. Wie
+  // _pending_reboot_at, aber Endzustand ist powerOff statt reboot.
+  unsigned long _pending_shutdown_at;
 #if defined(NRF52_PLATFORM)
   // 2026-06-15: deferred DFU-Mode-Entry (NRF52 only -- ESP32 hat keinen
   // SoftDevice-Bootloader, dort spart das #ifdef RAM). _pending_dfu_at = 0
