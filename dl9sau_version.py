@@ -35,11 +35,16 @@ build_time = datetime.now().strftime("%H:%M")                 # 5 chars (CLI onl
 # Format: "v1.16.0-DL9SAU.gXXX" (19 chars). 'g'-Prefix folgt der
 # 'git describe'-Konvention; Punkt-Separator statt SemVer '+' weil
 # jede Build-Variante materielle Aenderungen mitbringt (Features /
-# Bugfixes), nicht nur Metadata. XXX = letzte 3 hex chars (= 12 Bit)
+# Bugfixes), nicht nur Metadata. XXX = ERSTE 3 hex chars (= 12 Bit)
 # vom 8-char git short hash. Mehr Eindeutigkeit als der frueher
 # 2-char-Hash, ohne im 20-byte Wire-Feld zu wachsen.
 # Aenderung 2026-06-14 (User-Wunsch): Lesbarkeit + Kollisions-Margin.
-firmware_version = "v1.16.0-DL9SAU.g{}".format(git_hash[-3:] if git_hash != "nogit" else "000")
+# Aenderung 2026-06-20 (User-Wunsch): Prefix statt Suffix. Frueher
+# git_hash[-3:] = letzten 3 vom 8-char short hash = Midfix vom Vollhash.
+# Mit git_hash[:3] (Prefix) sehen wir die gleichen 3 Chars auch wenn
+# wir das full hash sehen (24e52ef1... -> 24e). Direkt vergleichbar
+# mit 'git log --oneline'.
+firmware_version = "v1.16.0-DL9SAU.g{}".format(git_hash[:3] if git_hash != "nogit" else "000")
 
 # Use CPPDEFINES with the value already quoted so SCons/gcc see it as a
 # proper string literal. Plain BUILD_FLAGS '-DFOO=\\"bar\\"' gets the

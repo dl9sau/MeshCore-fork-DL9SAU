@@ -9,7 +9,13 @@ void T1000eBoard::begin() {
 
 #ifdef BUTTON_PIN
   pinMode(BATTERY_PIN, INPUT);
-  pinMode(BUTTON_PIN, INPUT);
+  // DL9SAU 2026-06-20 (Wunschliste 94/90 Phase 2): BUTTON_PIN war
+  // INPUT (NOPULL = floating). T1000-E hat keinen externen Pulldown
+  // -> digitalRead random HIGH -> die while(digitalRead(BUTTON_PIN))
+  // Schleife in powerOff() (T1000eBoard.h Z 81) lief endlos -> WDT
+  // triggerte nach 90s. Symptom: 'shutdown' CLI + 'usb_loss_shutdown'
+  // hingen 90s, danach WDT-Reset = Reboot statt Aus.
+  pinMode(BUTTON_PIN, INPUT_PULLDOWN);
   pinMode(LED_PIN, OUTPUT);
 #endif
 
