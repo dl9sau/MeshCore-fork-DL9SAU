@@ -380,7 +380,11 @@ Pref `bluetooth power cycle|always-on` ist auch lokal über die CLI
 einstellbar.
 
 Auf NRF52 nicht aktiv — Bluetooth ist dort hardware-bedingt bereits im
-µA-Bereich im Leerlauf.
+µA-Bereich im Leerlauf. Auf T1000-E ist `bluetooth off` technisch als
+"Advertising aus" umgesetzt (statt SoftDevice-Disable). Damit ist das
+Gerät nicht mehr in der Bluetooth-Umgebung sichtbar, der Stack bleibt
+aber initialisiert und stabil — vermeidet SoftDevice-Lifecycle-Risiken
+und kostet praktisch nichts an Strom.
 
 ### Empfänger-Abschaltung (RX-Disable)
 
