@@ -57,10 +57,32 @@ einen Reboot. Beim Wiederverbinden der App sind alle vorherigen Nachrichten
 wieder da, sortiert nach den Buckets `public`, `hashtag`, `dm`, `flash`
 (Letztere bis zur konfigurierbaren Größe in den Flash-Speicher).
 
+### Bewegungs-abhängige Position-Adverts
+
+Wenn der Companion-Tracker GPS-Bewegung erkennt, sendet er automatisch
+Adverts mit der aktuellen Position. Die Häufigkeit passt sich an: in Ruhe
+seltener (etwa alle 3 Stunden), bei langsamer Bewegung häufiger (etwa
+stündlich), bei schneller Bewegung sehr häufig (etwa alle 15 Minuten).
+Das reduziert unnötigen Funkverkehr im Stillstand und sorgt gleichzeitig
+für aktuelle Positionsinformation bei Reisen. Schwellwerte sind
+konfigurierbar.
+
 ### Automatische Zeitzone
 
 Tracker erkennt EU-Sommerzeit automatisch, oder per Pref auf eine feste
 Zeitzone setzbar. `at`/`cron`, RTC-Anzeige und Boot-Log rechnen in lokaler Zeit.
+
+### Zeit-Sync aus gehörten Adverts
+
+Tracker kann seine Uhrzeit aus Adverts anderer Knoten übernehmen, wenn
+diese eine Zeit-Information mitschicken. Quellen sind:
+
+- der eigene Admin-Companion-Knoten
+- direkt gehörte andere Repeater
+- gepinnte Knoten
+
+Damit ist der Tracker zeitlich aktuell auch ohne GPS-Fix oder App-Verbindung,
+sobald er einen Knoten mit gültiger Uhrzeit hört.
 
 ---
 
@@ -68,9 +90,32 @@ Zeitzone setzbar. `at`/`cron`, RTC-Anzeige und Boot-Log rechnen in lokaler Zeit.
 
 ### Vollständige Repeater-Funktionalität im Companion-Build
 
-`set repeater on` schaltet das Companion-Gerät in den Repeater-Mode. Standard-
-plus Defensive-Mode (`set repeater_profile defensive`) für eingeschränkte
-Weiterleitung. Plus `force` zur Compile-Zeit via `-DREPEATER_DEFENSIVE_FORCE=1`.
+`set repeater on` schaltet das Companion-Gerät in den Repeater-Mode.
+
+Zwei Profile:
+
+- **`set repeater_profile normal`** — Standard-Repeater, leitet alle bekannten
+  Mesh-Pakete weiter
+- **`set repeater_profile defensive`** — Eingeschränkte Weiterleitung mit
+  reduzierter Coding-Rate für weniger Mesh-Belastung. Gut geeignet für
+  **definierte Ad-hoc-Frequenzen** wie bei SAR-Einsätzen
+  (Search-and-Rescue) oder lokalen Veranstaltungen, wo nur Mesh-Traffic der
+  Veranstaltung weitergeleitet werden soll und nicht der globale Mesh-Verkehr
+  durchschlägt.
+
+### Automatische Abschaltung bei Bewegung
+
+Wenn der Repeater per GPS Bewegung erkennt, schaltet er sich automatisch ab
+(Repeater sind als statische Knoten gedacht; ein bewegtes Gerät würde die
+Topologie für andere Knoten dauerhaft verändern). Sobald das Gerät wieder
+stillsteht, schaltet sich der Repeater-Mode wieder ein.
+
+### Nightly-Advert mit Scope
+
+Der Repeater sendet sein Advert einmal pro Nacht zu einem zufälligen
+Zeitpunkt (verhindert Lastspitzen wenn viele Repeater synchron senden).
+Repeater-Adverts sind grundsätzlich mit Scope-Code versehen, bleiben also
+in regionalen Mesh-Bereichen statt global zu fluten.
 
 ### CAD-Threshold (`int.thresh`)
 
@@ -364,6 +409,5 @@ nach PlatformIO-Framework-Updates (idempotent).
 ### Build-Flags
 
 ```
--D REPEATER_DEFENSIVE_FORCE=1    Repeater startet immer im Defensive-Mode
 -D CFG_BLE_TASK_STACKSIZE=2048   Bluefruit BLE-Stack 8 KB (statt 5 KB Default)
 ```
