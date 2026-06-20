@@ -363,20 +363,27 @@ Settings.
 
 ### Bluetooth-Schlaf-Zyklus (ESP32)
 
-Bluetooth schläft automatisch wenn keine App verbunden ist. Auf Heltec
-Wireless Tracker spart das bis zu 80 mA. Cycle: 10 Minuten Boot-Phase,
-dann 40s Schlaf plus 20s Listen-Phase. Eingehende Direkt-Nachrichten oder
-Admin-Befehle wecken Bluetooth für 5 Minuten auf. Pref
-`bluetooth power cycle|always-on` steuert das.
+Bluetooth schläft automatisch wenn keine App verbunden ist. Auf dem Heltec
+Wireless Tracker macht das einen deutlichen Unterschied (Bluetooth permanent
+an vs. Cycler-Modus etwa 169 mA vs. 95 mA, also rund 70 mA Ersparnis). Cycle:
+10 Minuten Boot-Phase, dann 40s Schlaf plus 20s Listen-Phase. Eingehende
+Direkt-Nachrichten oder Admin-Befehle wecken Bluetooth für 5 Minuten auf.
+Pref `bluetooth power cycle|always-on` steuert das.
 
 Auf NRF52 nicht aktiv — Bluetooth ist dort hardware-bedingt bereits im
 µA-Bereich im Leerlauf.
 
 ### Empfänger-Abschaltung (RX-Disable)
 
-Pref `rx_disabled` schaltet den LoRa-Empfangsteil komplett ab. Spart auf
-SenseCAP T1000-E etwa 40 mA. Kurze Aufwach-Phasen bei jedem Sendevorgang
-für Bestätigungs-Empfang. Nur im Companion-Mode (nicht im Repeater-Mode).
+Pref `rx_disabled` schaltet den LoRa-Empfangsteil komplett ab. Kurze
+Aufwach-Phasen bei jedem Sendevorgang für Bestätigungs-Empfang. Nur im
+Companion-Mode (nicht im Repeater-Mode).
+
+Hinweis: auf einem leeren Funkkanal ist der Strom-Spareffekt nicht direkt
+messbar (das Empfangsteil ist nicht aktiv-busy). Auf einem stark belegten
+Kanal mit häufigen Demodulations-Vorgängen kann der Effekt deutlicher sein.
+Hauptanwendung ist eher reine "Schweige"-Konfiguration als pure
+Strom-Optimierung.
 
 ### Sender-Abschaltung (TX-Disable)
 
@@ -437,11 +444,28 @@ automatischem Abschalten.
 ```
 shutdown                       Sauberes Herunterfahren mit Sound
 reboot                         Neustart mit Sound
-dfu                            Direkt in den UF2-Bootloader (NRF52)
 clear                          Bildschirm / Companion-Chat löschen
 contact ...                    Kontakt-Liste verwalten
 remote admin login/cmd         Remote-Befehle an Repeater
 ```
+
+## Firmware-Update
+
+### `dfu` (NRF52)
+
+Befehl `dfu uf2` versetzt den Tracker direkt in den UF2-Bootloader-Modus.
+Der Tracker erscheint dann als USB-Massenspeicher, und eine neue `.uf2`-Datei
+kann einfach drauf kopiert werden — kein Reset-Doppelklick, kein
+zusätzliches Tool nötig.
+
+Alternativ `dfu serial` für klassischen Serial-DFU mit `nrfutil`.
+
+### `start ota` (ESP32)
+
+Befehl `start ota` startet den Tracker in einen WiFi-Access-Point-Modus, in
+dem über eine kleine Web-Oberfläche eine neue Firmware hochgeladen werden
+kann. Praktisch wenn das Gerät schwer zugänglich ist und ein USB-Kabel
+ranlegen nicht in Frage kommt.
 
 ---
 
