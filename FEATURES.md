@@ -366,9 +366,18 @@ Settings.
 Bluetooth schläft automatisch wenn keine App verbunden ist. Auf dem Heltec
 Wireless Tracker macht das einen deutlichen Unterschied (Bluetooth permanent
 an vs. Cycler-Modus etwa 169 mA vs. 95 mA, also rund 70 mA Ersparnis). Cycle:
-10 Minuten Boot-Phase, dann 40s Schlaf plus 20s Listen-Phase. Eingehende
-Direkt-Nachrichten oder Admin-Befehle wecken Bluetooth für 5 Minuten auf.
-Pref `bluetooth power cycle|always-on` steuert das.
+10 Minuten Boot-Phase, dann 40s Schlaf plus 20s Listen-Phase.
+
+Bluetooth wird automatisch für 5 Minuten geweckt wenn:
+- eine **Direkt-Nachricht** ankommt,
+- ein **Remote-Konfigurations-Befehl** ankommt — letzteres aber nur wenn
+  der Knoten gerade als Repeater fungiert (typisch wenn der Operator
+  einen entfernten Repeater warten will).
+
+Per Remote-Konfigurations-Befehl kann das Bluetooth-Profil auch direkt
+gesetzt werden (`bluetooth on`, `bluetooth power cycle|always-on`).
+Pref `bluetooth power cycle|always-on` ist auch lokal über die CLI
+einstellbar.
 
 Auf NRF52 nicht aktiv — Bluetooth ist dort hardware-bedingt bereits im
 µA-Bereich im Leerlauf.
