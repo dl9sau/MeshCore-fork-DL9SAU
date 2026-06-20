@@ -263,7 +263,10 @@ ob eine Nachricht aus dem regionalen oder globalen Mesh kam.
 
 ```
 status                Allgemeine Übersicht (Hardware, Firmware, Uhrzeit, GPS)
-stats                 Kompakte Multi-Funktions-Statistik
+stats                 Ausführliche Paket-Statistiken: empfangene, gesendete und
+                      weitergeleitete (repeated) Pakete je Paket-Typ (DM,
+                      Advert, Channel-Message, REQ/RESP, Path-Discovery, ...),
+                      plus Airtime-Bilanz und Duty-Cycle-Werte
 stats-core            Akku, Uptime, Message-Queue, letzte Reset-Ursache
 stats-radio           RSSI/SNR, Noise-Floor, Sende-/Empfangs-Zähler
 stats-packets         Repeater-Metriken (rx/tx/repeat/drop pro Trace-Kategorie)
