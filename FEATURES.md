@@ -127,9 +127,18 @@ Zwei Profile:
 
 - **`set repeater_profile normal`** — Standard-Repeater, leitet alle bekannten
   Mesh-Pakete weiter
-- **`set repeater_profile defensive`** — Eingeschränkte Weiterleitung mit
-  reduzierter Coding-Rate für weniger Mesh-Belastung. Gut geeignet für
-  **definierte Ad-hoc-Frequenzen** wie bei SAR-Einsätzen
+- **`set repeater_profile defensive`** — Bewusst zurückhaltender Repeater.
+  Das Companion-Gerät ist primär Client; mit diesem Profil hilft es dem
+  Mesh nur minimal und kontrolliert weiter. Konkretes Verhalten:
+
+  - leitet **nur Pakete mit Scope-Code** weiter (unscoped flood wird
+    durchgelassen aber nicht weiterverbreitet),
+  - antwortet auf Pfad-Discovery-Anfragen **nur für direkt gehörte
+    Endpunkte** (nicht für entferntere),
+  - sendet Wiederholungen mit **reduzierter Sendeleistung** und
+    **CR5 (geringere Coding-Rate)** für minimale Funkbelastung.
+
+  Gut geeignet für **definierte Ad-hoc-Frequenzen** wie bei SAR-Einsätzen
   (Search-and-Rescue) oder lokalen Veranstaltungen, wo nur Mesh-Traffic der
   Veranstaltung weitergeleitet werden soll und nicht der globale Mesh-Verkehr
   durchschlägt.
