@@ -33,6 +33,14 @@ Cron-Aufträge überleben einen Neustart, einmalige `at`-Aufträge nicht.
 Eingaben in den Chat-Kanal `$companion` werden lokal vom Tracker verarbeitet —
 nichts geht über Funk raus. Die komplette CLI ist direkt in der App benutzbar.
 
+### Serial-Konsole als Alternative zur App
+
+Die identische CLI ist über USB-Serial erreichbar (z.B. mit `cu`, `screen`,
+oder `picocom`). Damit lässt sich der Tracker auch ohne Smartphone-App
+konfigurieren und überwachen. Auch **Remote-Befehle** an andere Repeater
+können von der Serial-Konsole aus abgesetzt werden (`remote admin login`,
+`remote admin cmd`), nicht nur aus der App.
+
 ### Hilfe-System
 
 `help` zeigt alle Themen, `help <thema>` zeigt Details mit Beispielen.
@@ -52,10 +60,25 @@ in der App erscheint.
 
 ### Eingebaute Speicherung von Nachrichten
 
-Empfangene Nachrichten werden persistent im Flash gespeichert und überleben
-einen Reboot. Beim Wiederverbinden der App sind alle vorherigen Nachrichten
-wieder da, sortiert nach den Buckets `public`, `hashtag`, `dm`, `flash`
-(Letztere bis zur konfigurierbaren Größe in den Flash-Speicher).
+Empfangene Nachrichten werden in fünf Buckets gehalten, die individuell
+konfiguriert sind:
+
+```
+messages (offline-queue):
+  DM          0/24  flash=on        Direkt-Nachrichten
+  $companion  0/16  flash=on        Lokaler Konfigurations-Chat
+
+Channels (Gruppen-Chats):
+  public      0/8   flash=off       Allgemeine Public-Channel-Nachrichten
+  hashtag     0/16  flash=on        Hashtag-/Themen-Channel-Nachrichten
+  private     0/16  flash=on        Private/passwortgeschützte Channels
+```
+
+Buckets mit `flash=on` werden persistent gespeichert und überleben einen
+Reboot. Beim Wiederverbinden der App sind alle vorherigen Nachrichten
+wieder da, ohne dass die App den Tracker beim Verbinden polling muss.
+Größe und Flash-Setting sind pro Bucket konfigurierbar
+(`set msg_store_limit`, `set msg_store_flash`).
 
 ### Bewegungs-abhängige Position-Adverts (zero-hop)
 
@@ -278,8 +301,15 @@ Nach jedem Reset wird der Grund im persistenten Log festgehalten:
 - Plus Sub-Causes wie `WDT(stay-off)`, `shutdown-pending(no-USB)`,
   `LORA(dead)`, `VBUS(stay-off)` für spezifische Diagnose
 
-Befehl `log read` zeigt die letzten 10 Einträge inkl. Uptime der jeweils
+Befehl `log read` zeigt die letzten 10 Boot-Einträge inkl. Uptime der jeweils
 vorherigen Session.
+
+### Log-Output-Routing
+
+Debug- und Trace-Ausgaben können wahlweise auf USB-Serial oder in den
+`$companion`-Chat (oder beides) ausgegeben werden. Praktisch wenn man
+über die App alleine arbeitet und keine serielle Verbindung hat — die
+Logs erscheinen dann als Nachrichten im lokalen Konfigurations-Chat.
 
 ### Watchdog
 
