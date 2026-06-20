@@ -278,9 +278,27 @@ neighbors             Direkt gehörte oder N-Hop entfernte Knoten mit RSSI/SNR,
 
 ### Trace-Kategorien
 
-`set trace <kategorie> on|off` aktiviert detaillierte Logs für bestimmte
-Mesh-Vorgänge: `heard`, `discover`, `duty`, `ack`, `repeat`, `filter`,
-weitere. Nicht alle gleichzeitig (RAM-Limit).
+`set trace <kategorie> on|off` aktiviert detaillierte Logs für einzelne
+Bereiche der Firmware, ohne dass die anderen Module zugeschüttet werden.
+Hilfreich zum gezielten Debuggen ohne dass der Output unleserlich wird.
+
+Verfügbare Kategorien (Auswahl):
+
+- `gps` — GPS-Empfang, NMEA-Parsing, Schlaf-/Wake-Vorgänge
+- `filter` — wie Pakete vom Filter-System behandelt wurden (durchgelassen,
+  ausgeblendet, weitergeleitet)
+- `scope` — gehörte Scope-Codes, Region-Auflösung
+- `bluetooth` (auch `ble`) — Bluetooth-Stack-Übergänge (Connect, Disconnect,
+  Sleep-Cycle-Phasen, BLE-OTA-Zustände)
+- `rtc` — Zeit-Sync-Ereignisse (App-Sync, GPS-Sync, Advert-Sync), Drift
+- `heard` — direkt gehörte Knoten (neue Entdeckungen oder jeder Empfang)
+- `discover` — Discovery-Vorgänge (Repeater-Liste, Regions-Anfragen)
+- `duty` — Duty-Cycle-Beobachtung, Schwellwert-Überschreitungen
+- `ack` — Bestätigungs-Empfang und Timeouts
+- `repeat` — Repeater-Entscheidungen (warum weitergeleitet/abgewiesen)
+
+Plus mehrere weitere Kategorien für spezialisierte Bereiche.
+Nicht alle gleichzeitig aktivierbar (RAM-Limit für Trace-Buffer).
 
 ### Discovery-Befehle
 
