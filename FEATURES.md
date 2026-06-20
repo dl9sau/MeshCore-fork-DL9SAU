@@ -57,15 +57,23 @@ einen Reboot. Beim Wiederverbinden der App sind alle vorherigen Nachrichten
 wieder da, sortiert nach den Buckets `public`, `hashtag`, `dm`, `flash`
 (Letztere bis zur konfigurierbaren Größe in den Flash-Speicher).
 
-### Bewegungs-abhängige Position-Adverts
+### Bewegungs-abhängige Position-Adverts (zero-hop)
 
 Wenn der Companion-Tracker GPS-Bewegung erkennt, sendet er automatisch
-Adverts mit der aktuellen Position. Die Häufigkeit passt sich an: in Ruhe
-seltener (etwa alle 3 Stunden), bei langsamer Bewegung häufiger (etwa
-stündlich), bei schneller Bewegung sehr häufig (etwa alle 15 Minuten).
+**zero-hop-Adverts** mit der aktuellen Position — also nur an direkt
+gehörte Nachbarn, ohne dass die Pakete durch das Mesh geflutet werden.
+Die Häufigkeit passt sich an:
+
+- in Ruhe seltener (etwa alle 3 Stunden, ohne Position),
+- bei langsamer Bewegung häufiger (etwa stündlich, mit Position),
+- bei schneller Bewegung sehr häufig (etwa alle 15 Minuten, mit Position).
+
 Das reduziert unnötigen Funkverkehr im Stillstand und sorgt gleichzeitig
-für aktuelle Positionsinformation bei Reisen. Schwellwerte sind
-konfigurierbar.
+für aktuelle Positionsinformation bei Reisen — ohne dass weit entfernte
+Mesh-Knoten mit fortlaufenden Positions-Updates belastet werden.
+
+Real-world validiert: 4 Stunden Autofahrt (Heimat → Jever) ergab
+10 Adverts.
 
 ### Automatische Zeitzone
 
