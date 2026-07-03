@@ -279,7 +279,8 @@ struct AdvertPath {
 #define TRACE_MSGSTORE  0x0800   // Offline-Queue Bucket-Save zu Flash
 #define TRACE_BT        0x1000   // BLE-Diagnose (heap + disconnect-counter)
 #define TRACE_DISCOVER  0x2000   // discover regions ANON-RESP + leer-Diagnose
-#define TRACE_ALL_MASK  0x3FFF
+#define TRACE_DBG_ANON  0x4000   // Bug-5-Debug: ANON-TX/RX hex-dump (CLI vs App)
+#define TRACE_ALL_MASK  0x7FFF
 
 // Duty-Cycle-Schutz: regulatorische 10% TX-Airtime pro rollendem 1h-Fenster
 // (EU SRD 869 narrow). Sliding-Window mit 60 Slots à 1 Minute (millis-basiert,
@@ -367,6 +368,42 @@ protected:
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis);
   void sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis=0) override;
   void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
+
+  // Wunschliste 2026-07-02: Magic-Scope-Namen beim Senden. Wenn der
+  // App-User im Scope-Feld eines Channels (oder als default_scope) einen
+  // dieser Namen setzt, entfaltet die Firmware Sonderverhalten:
+  //   #direct/#direkt  -> zero-hop, kein Scope
+  //   #unscoped        -> klassischer flood ohne Scope-Code (path>0)
+  //   #geo             -> chooseGeoFallbackScope (Fallback: #local
+  //                       aus Build-in-Table analog chooseNightFloodScope)
+  // Alle anderen Scopes werden normal als Transport-Code gesendet.
+  // Erkennung ueber vorberechnete SHA(#name)-Keys.
+  enum MagicScope : uint8_t {
+    MS_NONE = 0,
+    MS_DIRECT,      // #direct/#direkt
+    MS_UNSCOPED,    // #unscoped
+    MS_GEO,         // #geo
+  };
+  MagicScope detectMagicScope(const TransportKey& scope);
+  void initMagicScopeKeys();
+  // Channel-Name-Force fuer #local/#lokal: unabhaengig von Scope-Magic.
+  // User-Test 2026-06-XX: bei Channel '#local' wurde User via 80km/2hops
+  // gehoert weil er dabei einen weiten Scope gewaehlt hatte -- das
+  // konterkariert 'local'. Firmware erzwingt Scope=#local bzw #lokal
+  // ungeachtet App-Scope. Returns "local"/"lokal" oder NULL wenn kein Match.
+  const char* detectForcedLocalChannel(const mesh::GroupChannel& channel);
+  TransportKey _magic_direct_key;
+  TransportKey _magic_direkt_key;
+  TransportKey _magic_norepeat_key;
+  TransportKey _magic_no_repeat_key;
+  TransportKey _magic_unscoped_key;
+  TransportKey _magic_geo_key;
+  bool _magic_scope_keys_inited = false;
+
+  // Wunschliste 2026-07-01: Path-Bytes als 'aa,bb,cc' formatieren.
+  // Zeigt Adressierungsbreite (1/2/3-Byte Hop-IDs) sowie welche Repeater
+  // konkret auf dem Weg waren -- diagnostisch wertvoll bei Rerouting.
+  static void formatPathBytes(char* out, size_t out_size, const uint8_t* path, uint8_t path_len);
 
   // DL9SAU Wunschliste 82: zentraler TX-Choke-Point. Wenn _tx_blocked
   // gesetzt ist, wird das Paket sofort an den Pool zurueckgegeben statt
@@ -1586,6 +1623,14 @@ private:
     uint32_t channel_hash; // 0 = DM (kein Channel), sonst 4-Byte Channel-Hash
     uint32_t name_fnv1a;
     uint32_t scope_fnv1a;
+    uint32_t path_fnv1a;   // DM: FNV ueber pkt->path (0 wenn path_len==0).
+                           // Channel: immer 0 (Path wird bei Channel nicht getrackt).
+                           // Path-Wechsel bei DM -> neuer Tuple -> neuer []-Frame.
+    uint8_t  scope_key[16]; // Task 63: Reply-Scope-Cache. Bei Channel-Msg
+                           // gespeichert wenn Sender bekannten Scope-Namen
+                           // hatte (aus Region-Table). Null (all zero) wenn
+                           // Sender unscoped ('#*') oder unbekannter Scope
+                           // ('#?') war. Wird bei Reply-Detection genutzt.
     uint8_t  direct_flag;  // 0 = via repeats, 1 = direkt gehoert (path_len==0)
   };
   static const int CHANNEL_SENDER_SEEN_MAX = 16;
@@ -1603,7 +1648,14 @@ private:
   // (per-Channel-Separation: derselbe Sender in zwei Channels = zwei Tupel).
   bool channelSenderSeenLookupOrAdd(uint32_t channel_hash,
                                     uint32_t name_fnv1a, uint32_t scope_fnv1a,
+                                    uint32_t path_fnv1a,
+                                    const uint8_t scope_key[16],
                                     uint8_t direct_flag);
+  // Task 63: Reply-Scope-Cache lookup. Suche einen (channel_hash, name_h)
+  // Slot; wenn gefunden und scope_key != null, kopiere Key nach out_key.
+  // Returns true wenn Match mit gueltigem Key (Reply-Scope aktivierbar).
+  bool channelSenderScopeLookup(uint32_t channel_hash, uint32_t name_fnv1a,
+                                uint8_t out_key[16]);
 
   // Lazy-Mode Boot-Collection-Phase: bis zu 5 Kandidaten ueber 3 Min
   // sammeln, dann Cluster-Auswertung. RAM-only, einmal pro Boot.

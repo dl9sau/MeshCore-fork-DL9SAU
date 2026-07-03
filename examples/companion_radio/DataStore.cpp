@@ -496,6 +496,18 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
               sizeof(_prefs.shutdown_pending));
     if (_prefs.shutdown_pending == 0xFF) _prefs.shutdown_pending = 0;
 
+    // DL9SAU 2026-07-02: channel_no_scope_behavior (loest runtime-only
+    // '_unscoped_channel_direct' ab). EOF-Sentinel 0xFF -> Migration.
+    _prefs.channel_no_scope_behavior = 0xFF;
+    file.read((uint8_t *)&_prefs.channel_no_scope_behavior,
+              sizeof(_prefs.channel_no_scope_behavior));
+    // 0xFF (Pref-Byte fehlt) oder 0 (zufaellig Zero) -> Default 1 (direct).
+    if (_prefs.channel_no_scope_behavior == 0xFF
+        || _prefs.channel_no_scope_behavior == 0
+        || _prefs.channel_no_scope_behavior > 2) {
+      _prefs.channel_no_scope_behavior = 1;  // direct
+    }
+
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
     // NRF52 nutzt DFU-Pfad statt WiFi-OTA).
@@ -734,6 +746,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // DL9SAU 2026-06-20: shutdown_pending Sentinel.
     file.write((uint8_t *)&_prefs.shutdown_pending,
                sizeof(_prefs.shutdown_pending));
+    // DL9SAU 2026-07-02: channel_no_scope_behavior.
+    file.write((uint8_t *)&_prefs.channel_no_scope_behavior,
+               sizeof(_prefs.channel_no_scope_behavior));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).

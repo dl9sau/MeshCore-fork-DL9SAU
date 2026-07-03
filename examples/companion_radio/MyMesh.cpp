@@ -2028,6 +2028,22 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
   _serial->writeFrame(out_frame, 1 + PUB_KEY_SIZE); // NOTE: app may not be connected
 
   dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+  // Path-Rediscovery-Sichtbarkeit (User-Wunsch 2026-07-01): jedes Mal
+  // wenn wir einen neuen out_path fuer einen Contact lernen (PATH-
+  // Return-Frame kam gerade rein), ist das ein Path-Discovery-Event.
+  // Fuer Diagnose sichtbar machen wieviel Pfad-Neu-Findung im Netz
+  // stattfindet.
+  if (contact.out_path_len == 0) {
+    traceCompanion(TRACE_SCOPE,
+                   "[path] '%s' -> zero-hop (direct heard)",
+                   contact.name);
+  } else {
+    char hebuf[40];
+    formatPathBytes(hebuf, sizeof(hebuf), contact.out_path, contact.out_path_len);
+    traceCompanion(TRACE_SCOPE,
+                   "[path] '%s' -> %u hops (%s)",
+                   contact.name, (unsigned)contact.out_path_len, hebuf);
+  }
 }
 
 ContactInfo*  MyMesh::processAck(const uint8_t *data) {
@@ -2074,16 +2090,68 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     computeScopeLabel(pkt, scope_h, scope_buf, sizeof(scope_buf));
     const char* scope_label = scope_buf;
     uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
-    // DM-Pfad: channel_hash=0 (kein Channel-Bezug). User-Wunsch 2026-06-08:
-    // wenn ein Sender seinen scope aendert, soll die '[#scope, direct]'-
-    // Vorab-Message neu kommen -- ist durch das scope_h-Tuple-Member
-    // automatisch (neuer scope_h => neuer Tuple => !already_seen).
-    bool already_seen = channelSenderSeenLookupOrAdd(0 /* DM */, name_h, scope_h, direct_flag);
-    if (!already_seen) {
-      // Separate Vorab-Frame mit Metadata-Text.
-      char meta_text[48];
-      snprintf(meta_text, sizeof(meta_text), "[%s%s]",
-               scope_label, direct_flag ? ", direct" : "");
+    // DM-Pfad: channel_hash=0 (kein Channel-Bezug). Tuple enthaelt zusaetzlich
+    // FNV-Hash des Empfangspfads (Reise-Feedback 2026-07-02): bei Pfad-
+    // Aenderung (z.B. wegen re-discovery) kommt ein neuer []-Frame.
+    uint32_t path_h = (pkt->path_len > 0)
+                    ? fnv1a32((const char*)pkt->path, pkt->path_len)
+                    : 0;
+    bool already_seen = channelSenderSeenLookupOrAdd(0 /* DM */, name_h, scope_h, path_h,
+                                                    nullptr /* scope_key: DM = kein Reply-Cache */,
+                                                    direct_flag);
+    // Wunschliste 2026-07-01: Erweiterte []-Frame mit Pfad-Info.
+    // Statistiken zeigen viel path-discovery -- []-Frame liefert dem User
+    // empirische Sichtbarkeit.
+    //   Flood, path_len=0 (direkt vom Sender):  '[#scope flood, may work direct]'
+    //   Flood, path_len>0 (via Repeater):       '[#scope flood he: aa,bb,cc]'
+    //   Direct, path_len=0 (zero-hop):          kein Frame (App zeigt "direkt")
+    //   Direct, symmetrisch (we==reverse(he)):  '[we/he: aa,bb,cc]'
+    //   Direct, asymmetrisch, we bekannt:       '[we: aa,bb he: cc,dd]'
+    //   Direct, asymmetrisch, we unbekannt:     '[he: cc,dd]'
+    // Path-Format 'aa,bb,cc' -- hex-Bytes zeigen Adressier-Breite (1/2/3-Byte-IDs)
+    // und die konkreten Repeater-IDs. Bei Rerouting sichtbar was ausgefallen ist.
+    char meta_text[128];
+    meta_text[0] = 0;
+    bool skip_meta = already_seen;   // bereits gesehen -> nichts neu anzeigen
+    if (!skip_meta) {
+      if (pkt->isRouteFlood()) {
+        if (pkt->path_len == 0) {
+          snprintf(meta_text, sizeof(meta_text),
+                   "[%s flood, may work direct]", scope_label);
+        } else {
+          char hebuf[40];
+          formatPathBytes(hebuf, sizeof(hebuf), pkt->path, pkt->path_len);
+          snprintf(meta_text, sizeof(meta_text),
+                   "[%s flood he: %s]", scope_label, hebuf);
+        }
+      } else {
+        // Direct-Path
+        if (pkt->path_len == 0) {
+          // zero-hop direct -- kein Frame, App zeigt "direkt" im Fenster-Titel
+          skip_meta = true;
+        } else {
+          char hebuf[40];
+          formatPathBytes(hebuf, sizeof(hebuf), pkt->path, pkt->path_len);
+          // Symmetrie: unser out_path[i] == pkt->path[N-1-i] (reverse)
+          bool sym = (from.out_path_len == pkt->path_len && from.out_path_len > 0);
+          for (int j = 0; sym && j < pkt->path_len; j++) {
+            if (pkt->path[j] != from.out_path[pkt->path_len - 1 - j]) sym = false;
+          }
+          if (sym) {
+            snprintf(meta_text, sizeof(meta_text), "[we/he: %s]", hebuf);
+          } else if (from.out_path_len > 0) {
+            char webuf[40];
+            formatPathBytes(webuf, sizeof(webuf), from.out_path, from.out_path_len);
+            snprintf(meta_text, sizeof(meta_text),
+                     "[we: %s he: %s]", webuf, hebuf);
+          } else {
+            snprintf(meta_text, sizeof(meta_text), "[he: %s]", hebuf);
+          }
+        }
+      }
+    }
+    if (!skip_meta && meta_text[0]) {
+      (void)direct_flag;  // bleibt fuer Tuple-Key
       uint32_t meta_ts = sender_timestamp > 0 ? (sender_timestamp - 1) : sender_timestamp;
       int mi = 0;
       if (app_target_ver >= 3) {
@@ -2700,10 +2768,129 @@ void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, ui
     // weder Default noch geo_prefers haben gegriffen -> null Scope
     memset(eff_scope.key, 0, sizeof(eff_scope.key));
   }
+  // Wunschliste 2026-07-02: Magic-Scope-Erkennung (auch fuer DM-Flood).
+  {
+    MagicScope ms = detectMagicScope(eff_scope);
+    if (ms == MS_DIRECT) {
+      traceCompanion(TRACE_SCOPE, "[send-dm] magic #direct -> zero-hop");
+      sendZeroHop(pkt, delay_millis);
+      return;
+    }
+    if (ms == MS_UNSCOPED) {
+      traceCompanion(TRACE_SCOPE,
+                     "[send-dm] magic #unscoped -> flood ohne scope-code");
+      sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
+      return;
+    }
+    if (ms == MS_GEO) {
+      TransportKey geo_eff;
+      if (chooseGeoFallbackScope(geo_eff)) {
+        traceCompanion(TRACE_SCOPE, "[send-dm] magic #geo -> geo-fallback");
+        sendFloodScoped(geo_eff, pkt, delay_millis);
+      } else {
+        int idx = dl9sau_find_region_index("local");
+        if (idx >= 0 && idx < _buildin_keys_count) {
+          traceCompanion(TRACE_SCOPE, "[send-dm] magic #geo -> #local (kein Fix)");
+          sendFloodScoped(_buildin_keys[idx], pkt, delay_millis);
+        } else {
+          traceCompanion(TRACE_SCOPE, "[send-dm] magic #geo -> zero-hop (kein Fix)");
+          sendZeroHop(pkt, delay_millis);
+        }
+      }
+      return;
+    }
+  }
   sendFloodScoped(eff_scope, pkt, delay_millis);
 }
+// Wunschliste 2026-07-01: Path-Bytes als 'aa,bb,cc' hex-formatieren.
+// Zeigt Adressierungsbreite und die konkrete Repeater-Kette.
+void MyMesh::formatPathBytes(char* out, size_t out_size, const uint8_t* path, uint8_t path_len) {
+  if (out_size == 0) return;
+  out[0] = 0;
+  size_t pos = 0;
+  for (int i = 0; i < path_len; i++) {
+    // Atomar: erst pruefen ob VOLLSTAENDIGES ',aa' bzw 'aa' plus null
+    // reinpasst. Sonst sauber abbrechen (kein orphan-Komma oder halbes Hex).
+    // Reise-Feedback 2026-07-02: vorher blieb bei knapper Grenze mal ','
+    // oder ',a' im Buffer stehen, je nach Buffer-Rest.
+    size_t need = (i > 0 ? 1 : 0) + 2 + 1;  // sep + hex + nul
+    if (pos + need > out_size) break;
+    int n = snprintf(out + pos, out_size - pos, "%s%02x",
+                     (i > 0) ? "," : "", path[i]);
+    if (n < 0) break;
+    pos += n;
+  }
+}
+
+// Wunschliste 2026-07-02: Magic-Scope-Erkennung beim Senden.
+// Vergleicht den 16-Byte-Scope-Key mit vorberechneten SHA(#name)-Keys.
+// Lazy-Init bei erstem Aufruf.
+void MyMesh::initMagicScopeKeys() {
+  if (_magic_scope_keys_inited) return;
+  // ACHTUNG: NICHT TransportKeyStore::getAutoKeyFor benutzen -- der
+  // Upstream-Cache-Bug (siehe Memory project_buildin_keys_cache_bug)
+  // matcht per id, nicht per name. Alle Aufrufe mit id=0 liefern
+  // denselben Key (den zuerst berechneten). Beobachtet 2026-07-02:
+  // nur #direct funktionierte, #direkt/#unscoped/#geo/#norepeat/#no-repeat
+  // bekamen den Key von #direct. Fix: SHA256 direkt berechnen.
+  auto sha_of = [](const char* name, TransportKey& out) {
+    mesh::Utils::sha256(out.key, sizeof(out.key),
+                        (const uint8_t*)name, (int)strlen(name));
+  };
+  sha_of("#direct",    _magic_direct_key);
+  sha_of("#direkt",    _magic_direkt_key);
+  // Wunschliste 38: #norepeat/#no-repeat sind Repeater-Sentinels (User
+  // signalisiert 'nicht weiterleiten'). Semantisch identisch zu #direct
+  // beim eigenen Send: zero-hop, keine Repeater-Weiterleitung.
+  sha_of("#norepeat",  _magic_norepeat_key);
+  sha_of("#no-repeat", _magic_no_repeat_key);
+  sha_of("#unscoped",  _magic_unscoped_key);
+  sha_of("#geo",       _magic_geo_key);
+  _magic_scope_keys_inited = true;
+}
+
+MyMesh::MagicScope MyMesh::detectMagicScope(const TransportKey& scope) {
+  if (scope.isNull()) return MS_NONE;
+  initMagicScopeKeys();
+  if (memcmp(scope.key, _magic_direct_key.key,    16) == 0) return MS_DIRECT;
+  if (memcmp(scope.key, _magic_direkt_key.key,    16) == 0) return MS_DIRECT;
+  if (memcmp(scope.key, _magic_norepeat_key.key,  16) == 0) return MS_DIRECT;
+  if (memcmp(scope.key, _magic_no_repeat_key.key, 16) == 0) return MS_DIRECT;
+  if (memcmp(scope.key, _magic_unscoped_key.key,  16) == 0) return MS_UNSCOPED;
+  if (memcmp(scope.key, _magic_geo_key.key,       16) == 0) return MS_GEO;
+  return MS_NONE;
+}
+
+// Channel-Name-Force fuer #local/#lokal (orthogonal zur Scope-Magic).
+// Grund (Reise-Test): User schrieb in Channel '#local' mit weitem Scope
+// (#de-bw) und wurde 80km via 2 Hops gehoert -- das macht 'local' absurd.
+// Firmware erzwingt bei Channel-Namen '#local'/'#lokal' den entsprechenden
+// Scope, ungeachtet dessen was die App im Scope-Feld setzt.
+const char* MyMesh::detectForcedLocalChannel(const mesh::GroupChannel& channel) {
+  int idx = findChannelIdx(channel);
+  if (idx < 0) return nullptr;
+  ChannelDetails det;
+  if (!getChannel(idx, det)) return nullptr;
+  const char* raw = det.name;
+  if (!raw || raw[0] == 0) return nullptr;
+  const char* n = (raw[0] == '#') ? raw + 1 : raw;
+  if (strcasecmp(n, "local") == 0) return "local";
+  if (strcasecmp(n, "lokal") == 0) return "lokal";
+  return nullptr;
+}
+
 void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis) {
   // TODO: have per-channel send_scope
+  //
+  // Wunschliste 2026-07-01/02: Channel-Name-Force fuer #local/#lokal.
+  // Force greift nur wenn wir sonst einen WEITEREN Send machen wuerden.
+  // Wenn User zero-hop meint (Scope #direct/#direkt oder null-Scope +
+  // _unscoped_channel_direct=true) -> lokal bleiben, kein Force
+  // (User-Feedback 2026-07-02: 'wer zero-hop schickt will noch weniger
+  // Reichweite als lokal repeated -- das ist auch OK').
+  // Force wird nach der eff_scope-Bestimmung und Magic-Scope-Erkennung
+  // weiter unten angewandt.
+  const char* forced_local_name = detectForcedLocalChannel(channel);
   //
   // Architektur Scope-Auswahl vs Routing-Policy (Channel-Send):
   //
@@ -2732,6 +2919,69 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
   } else if (!resolveDefaultOrGeo(eff_scope)) {
     memset(eff_scope.key, 0, sizeof(eff_scope.key));
   }
+  // Wunschliste 2026-07-02: Magic-Scope-Erkennung. Wenn der User im
+  // App-Scope-Feld einen der Magic-Namen gewaehlt hat (oder ihn als
+  // scope default gesetzt hat), greift Sonderverhalten unabhaengig
+  // vom sonstigen Pfad. Vergleich per vorberechneten SHA(#name)-Keys.
+  // Helper: berechnet den Force-Local-Scope-Key wenn Channel #local/#lokal ist.
+  // Wird verwendet um in den Send-Pfaden unten Weitem-Send auf #local zu drosseln.
+  auto applyLocalForce = [&](TransportKey& out_key) -> bool {
+    if (!forced_local_name) return false;
+    char tag[16]; snprintf(tag, sizeof(tag), "#%s", forced_local_name);
+    TransportKeyStore tmp;
+    tmp.getAutoKeyFor(0, tag, out_key);
+    return true;
+  };
+  {
+    MagicScope ms = detectMagicScope(eff_scope);
+    if (ms == MS_DIRECT) {
+      // Zero-hop: auch in #local-Channel OK, KEIN Force.
+      traceCompanion(TRACE_SCOPE, "[send-ch] magic #direct -> zero-hop");
+      sendZeroHop(pkt, delay_millis);
+      return;
+    }
+    if (ms == MS_UNSCOPED) {
+      // Klassischer Flood: in #local-Channel force auf #local.
+      TransportKey lk;
+      if (applyLocalForce(lk)) {
+        traceCompanion(TRACE_SCOPE,
+                       "[send-ch] magic #unscoped + #%s-channel -> scope=#%s (Force)",
+                       forced_local_name, forced_local_name);
+        sendFloodScoped(lk, pkt, delay_millis);
+      } else {
+        traceCompanion(TRACE_SCOPE,
+                       "[send-ch] magic #unscoped -> flood ohne scope-code");
+        sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
+      }
+      return;
+    }
+    if (ms == MS_GEO) {
+      // Geo: in #local-Channel force auf #local (Geo waere breiter).
+      TransportKey lk;
+      if (applyLocalForce(lk)) {
+        traceCompanion(TRACE_SCOPE,
+                       "[send-ch] magic #geo + #%s-channel -> scope=#%s (Force)",
+                       forced_local_name, forced_local_name);
+        sendFloodScoped(lk, pkt, delay_millis);
+        return;
+      }
+      TransportKey geo_eff;
+      if (chooseGeoFallbackScope(geo_eff)) {
+        traceCompanion(TRACE_SCOPE, "[send-ch] magic #geo -> geo-fallback");
+        sendFloodScoped(geo_eff, pkt, delay_millis);
+      } else {
+        int idx = dl9sau_find_region_index("local");
+        if (idx >= 0 && idx < _buildin_keys_count) {
+          traceCompanion(TRACE_SCOPE, "[send-ch] magic #geo -> #local (kein Fix)");
+          sendFloodScoped(_buildin_keys[idx], pkt, delay_millis);
+        } else {
+          traceCompanion(TRACE_SCOPE, "[send-ch] magic #geo -> zero-hop (kein Fix)");
+          sendZeroHop(pkt, delay_millis);
+        }
+      }
+      return;
+    }
+  }
   // Wunschliste 25 (Floodless unscoped channels, 2026-05-30):
   // bei null-Scope -- direct (zero-hop) statt flood. Zwei Beweggruende:
   //   1) Netzentlastung. Unscoped Flood propagiert bis flood_max-Hops
@@ -2745,17 +2995,53 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
   //      Mit _unscoped_channel_direct=Default kann der User einen
   //      privaten Channel 'meineHausgemeinschaft' fuehren ohne dass
   //      Repeater die Nachrichten weiterreichen.
-  // Default-Aktiv. Override via 'unscoped-channelmessages flood'
-  // (runtime-only) falls Flooding doch erwuenscht (z.B. fuer einen
-  // bewusst grossraeumigen Public-Channel ohne Scope).
+  // Default-Aktiv. Override persistent via 'scope channel no-scope flood'
+  // falls Flooding doch erwuenscht (z.B. fuer einen bewusst grossraeumigen
+  // Public-Channel ohne Scope). Alternative pro Channel: Scope=#unscoped.
+  // TRACE_SCOPE: dokumentieren welcher Pfad greift. Hilft Task 62 debug
+  // 'Repeater repeatete trotz unscoped-channelmessages=direct'.
+  const char* trace_path;
+  if (send_unscoped)                     trace_path = "app-unscoped";
+  else if (!send_scope.isNull())         trace_path = "app-scope";
+  else if (!eff_scope.isNull())          trace_path = "default-or-geo";
+  else                                   trace_path = "null-scope";
   if (eff_scope.isNull() && _unscoped_channel_direct) {
+    // Zero-hop -- auch in #local-Channel OK, KEIN Force.
+    traceCompanion(TRACE_SCOPE,
+                   "[send-ch] path=%s -> zero-hop (scope channel no-scope=direct)",
+                   trace_path);
     sendZeroHop(pkt, delay_millis);
     return;
   }
   if (eff_scope.isNull()) {
-    sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
+    // Unscoped flood: in #local-Channel force auf #local.
+    TransportKey lk;
+    if (applyLocalForce(lk)) {
+      traceCompanion(TRACE_SCOPE,
+                     "[send-ch] path=%s + #%s-channel -> scope=#%s (Force)",
+                     trace_path, forced_local_name, forced_local_name);
+      sendFloodScoped(lk, pkt, delay_millis);
+    } else {
+      traceCompanion(TRACE_SCOPE,
+                     "[send-ch] path=%s -> flood UNSCOPED (scope channel no-scope=flood)",
+                     trace_path);
+      sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
+    }
     return;
   }
+  // Normaler scoped Send: in #local-Channel force auf #local.
+  {
+    TransportKey lk;
+    if (applyLocalForce(lk)) {
+      traceCompanion(TRACE_SCOPE,
+                     "[send-ch] path=%s + #%s-channel -> scope=#%s (Force)",
+                     trace_path, forced_local_name, forced_local_name);
+      sendFloodScoped(lk, pkt, delay_millis);
+      return;
+    }
+  }
+  traceCompanion(TRACE_SCOPE,
+                 "[send-ch] path=%s -> flood scoped", trace_path);
   sendFloodScoped(eff_scope, pkt, delay_millis);
 }
 
@@ -2841,6 +3127,45 @@ void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uin
 //   '@[X (foo) (#scope)] hi'              -> '@[X (foo)] hi'
 //   '@[X] hi'                             -> '@[X] hi'  (no-op)
 //   '@[X (#scope)]'                       -> '@[X]'    (empty body)
+// Task 63 (2026-07-02): Reply-Namen aus einem der beiden App-Formate
+// extrahieren. Returns true wenn ein Reply erkannt wurde und out_name
+// den Namen enthaelt (ohne evtl. ' (#scope)'-Zusatz).
+//   - Klassisch:  '@Name: text'          -> Name = 'Name'
+//   - Bracket:    '@[Name] text'         -> Name = 'Name'
+//   - Bracket+#:  '@[Name (#de-bw)] text' -> Name = 'Name' (Scope-Hint
+//                                            wird gestrippt)
+static bool extractReplyName(const char* text, char* out_name, size_t out_size) {
+  if (!text || !out_name || out_size == 0) return false;
+  if (text[0] != '@') return false;
+  // Bracket form
+  if (text[1] == '[') {
+    const char* close = strchr(text + 2, ']');
+    if (!close || close == text + 2) return false;
+    const char* lim = text + 2;
+    const char* name_end = close;
+    // Optional ' (#scope)' am Ende strippen
+    if (name_end - lim >= 4 && name_end[-1] == ')') {
+      for (const char* q = name_end - 4; q >= lim; q--) {
+        if (q[0] == ' ' && q[1] == '(' && q[2] == '#') { name_end = q; break; }
+      }
+    }
+    size_t nlen = (size_t)(name_end - lim);
+    if (nlen == 0 || nlen >= out_size) nlen = (nlen >= out_size) ? out_size - 1 : nlen;
+    if (nlen == 0) return false;
+    memcpy(out_name, lim, nlen);
+    out_name[nlen] = 0;
+    return true;
+  }
+  // Klassisches '@Name:' -- Name endet am ersten ':' oder Whitespace.
+  const char* colon = strchr(text + 1, ':');
+  if (!colon || colon == text + 1) return false;
+  size_t nlen = (size_t)(colon - (text + 1));
+  if (nlen >= out_size) nlen = out_size - 1;
+  memcpy(out_name, text + 1, nlen);
+  out_name[nlen] = 0;
+  return true;
+}
+
 static void stripReplyMentionDecoration(char* buf) {
   if (buf == NULL) return;
   char* p = buf;
@@ -2981,13 +3306,22 @@ uint32_t MyMesh::fnv1a32_cstr(const char* s) {
 bool MyMesh::channelSenderSeenLookupOrAdd(uint32_t channel_hash,
                                           uint32_t name_fnv1a,
                                           uint32_t scope_fnv1a,
+                                          uint32_t path_fnv1a,
+                                          const uint8_t scope_key[16],
                                           uint8_t direct_flag) {
   for (uint8_t i = 0; i < _channel_sender_seen_count; i++) {
-    const ChannelSenderSeen& e = _channel_sender_seen[i];
+    ChannelSenderSeen& e = _channel_sender_seen[i];
     if (e.channel_hash == channel_hash
         && e.name_fnv1a == name_fnv1a
         && e.scope_fnv1a == scope_fnv1a
-        && e.direct_flag == direct_flag) return true;
+        && e.path_fnv1a == path_fnv1a
+        && e.direct_flag == direct_flag) {
+      // Slot vorhanden. scope_key aktualisieren -- Task 63 (Reply-Cache):
+      // wenn der User zwischenzeitlich einen anderen bekannten Scope
+      // sichtbar hatte, den neuesten behalten.
+      if (scope_key) memcpy(e.scope_key, scope_key, 16);
+      return true;
+    }
   }
   // Nicht in Liste -> als neu eintragen (LRU-Wrap nach MAX).
   uint8_t slot;
@@ -3000,7 +3334,29 @@ bool MyMesh::channelSenderSeenLookupOrAdd(uint32_t channel_hash,
   _channel_sender_seen[slot].channel_hash = channel_hash;
   _channel_sender_seen[slot].name_fnv1a = name_fnv1a;
   _channel_sender_seen[slot].scope_fnv1a = scope_fnv1a;
+  _channel_sender_seen[slot].path_fnv1a = path_fnv1a;
+  if (scope_key) memcpy(_channel_sender_seen[slot].scope_key, scope_key, 16);
+  else           memset(_channel_sender_seen[slot].scope_key, 0, 16);
   _channel_sender_seen[slot].direct_flag = direct_flag;
+  return false;
+}
+
+// Task 63: Reply-Scope-Cache lookup. Zurueckgabe true nur wenn Match
+// UND scope_key nicht null (Sender hatte einen bekannten Scope).
+bool MyMesh::channelSenderScopeLookup(uint32_t channel_hash,
+                                      uint32_t name_fnv1a,
+                                      uint8_t out_key[16]) {
+  for (uint8_t i = 0; i < _channel_sender_seen_count; i++) {
+    const ChannelSenderSeen& e = _channel_sender_seen[i];
+    if (e.channel_hash == channel_hash && e.name_fnv1a == name_fnv1a) {
+      // Key muss nicht-null sein damit Reply sinnvoll ist.
+      bool has_key = false;
+      for (int k = 0; k < 16; k++) if (e.scope_key[k]) { has_key = true; break; }
+      if (!has_key) return false;
+      memcpy(out_key, e.scope_key, 16);
+      return true;
+    }
+  }
   return false;
 }
 
@@ -3113,12 +3469,35 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     uint32_t channel_h;
     memcpy(&channel_h, channel.hash, sizeof(channel_h));
     if (channel_h == 0) channel_h = 1;  // collision-safe vs DM-Sentinel
-    bool already_seen = channelSenderSeenLookupOrAdd(channel_h, name_h, scope_h, direct_flag);
+    // Task 63 (Reply-Scope-Cache): scope_key des Senders aus der
+    // Region-Table holen wenn bekannt. Bei #* (unscoped) oder #?
+    // (unbekannt) bleibt der Key null -> Reply faellt auf Hierarchie.
+    uint8_t sender_scope_key[16];
+    memset(sender_scope_key, 0, 16);
+    if (pkt->hasTransportCodes()) {
+      const char* rn = lookupRegionByTransportCode(pkt);
+      if (rn) {
+        int idx = dl9sau_find_region_index(rn);
+        if (idx >= 0 && idx < _buildin_keys_count) {
+          memcpy(sender_scope_key, _buildin_keys[idx].key, 16);
+        }
+      }
+    }
+    // Channel: path_fnv1a=0 (Path wird bei Channel-Msg nicht getrackt).
+    bool already_seen = channelSenderSeenLookupOrAdd(channel_h, name_h, scope_h, 0 /* path */,
+                                                    sender_scope_key, direct_flag);
     if (!already_seen) {
-      // One-time Annotation. Format: 'Name (#scope[, direct]): text'
-      const char* dir_suffix = direct_flag ? ", direct" : "";
-      int n = snprintf(augmented, sizeof(augmented), "%.*s (%s%s)%s",
-                       (int)name_len, text, scope_label, dir_suffix, sep);
+      // One-time Annotation. Format nach Reise-Feedback 2026-07-02:
+      //   'Name (#scope): text' -- NUR Scope, keine Pfad-/Flood-Info.
+      // Grund: Task 55 hatte Pfad+Flood-Info dem Namen vorangestellt,
+      // was die App-Anzeige umbrach (Pfad als erster Textbestandteil).
+      // Die App zeigt eh Hops und Direct-Empfang; die Pfad-Info ist
+      // in Channel-Konversationen visuelles Rauschen. Reine Scope-
+      // Annotation bleibt sinnvoll (welchen Scope der Sender nutzte).
+      // Pfad-Diagnostik gibt es weiterhin bei DMs via separater
+      // Metadata-Frame '[#scope ...]'.
+      int n = snprintf(augmented, sizeof(augmented), "%.*s (%s)%s",
+                       (int)name_len, text, scope_label, sep);
       if (n > 0 && n < (int)sizeof(augmented)) {
         effective_text = augmented;
       }
@@ -3854,6 +4233,21 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
   uint32_t tag;
   memcpy(&tag, data, 4);
+  // Bug-5-Debug: RX-side dump.
+  if (_trace_flags & TRACE_DBG_ANON) {
+    char hex[128]; hex[0] = 0;
+    int hp = 0;
+    for (int i = 0; i < (int)len && hp + 3 < (int)sizeof(hex); i++) {
+      hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x ", data[i]);
+    }
+    char msg[180];
+    snprintf(msg, sizeof(msg),
+             "[anon-rx] from=%02x%02x%02x%02x%02x%02x name='%s' payload(%u)=%s",
+             contact.id.pub_key[0], contact.id.pub_key[1], contact.id.pub_key[2],
+             contact.id.pub_key[3], contact.id.pub_key[4], contact.id.pub_key[5],
+             contact.name, (unsigned)len, hex);
+    traceCompanion(TRACE_DBG_ANON, "%s", msg);
+  }
 
   // Wunschliste 52 (2026-06-10): Remote-Admin Antwort.
   if ((pending_admin_pubkey[0] || pending_admin_pubkey[1]
@@ -4130,6 +4524,29 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
   // weiter an die App durchreichen (alte Default-Behavior).
   if (packet->payload_len >= 1) {
     uint8_t type_high = packet->payload[0] & 0xF0;
+    // Bug-5-Debug: sichtbar machen dass CTL-Frames reinkommen -- inkl.
+    // Hex-Dump des Payloads (max 32 Bytes) und Path (falls via Repeater).
+    if (_trace_flags & TRACE_DBG_ANON) {
+      char hex[100]; hex[0] = 0;
+      int hp = 0;
+      int show = (int)packet->payload_len; if (show > 32) show = 32;
+      for (int i = 0; i < show && hp + 3 < (int)sizeof(hex); i++) {
+        hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x ",
+                       (unsigned)packet->payload[i]);
+      }
+      char pathbuf[40]; pathbuf[0] = 0;
+      if (packet->path_len > 0) {
+        formatPathBytes(pathbuf, sizeof(pathbuf), packet->path, packet->path_len);
+      }
+      traceCompanion(TRACE_DBG_ANON,
+                     "[discover] CTL rx snr=%d path_len=%u path=%s\n"
+                     "  payload(%u)=%s%s",
+                     (int)(_radio->getLastSNR() * 4),
+                     (unsigned)packet->path_len,
+                     pathbuf[0] ? pathbuf : "-",
+                     (unsigned)packet->payload_len, hex,
+                     (int)packet->payload_len > 32 ? "..." : "");
+    }
     if (type_high == CTL_TYPE_NODE_DISCOVER_RESP) {
       discoverHandleResp(packet);
       // weiterleiten an App ist optional; wir behandeln den RESP
@@ -4200,6 +4617,13 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
   if (!pkt) {
     pushCompanionMessage("discover: createControlData FAILED (Packet-Pool voll?).");
     return;
+  }
+  // Bug-5-Debug: markiere Discover-Start.
+  if (_trace_flags & TRACE_DBG_ANON) {
+    traceCompanion(TRACE_DBG_ANON,
+                   "[discover] CTL-REQ start filter=%02x chained=%d tag=%08lx",
+                   (unsigned)filter, (int)_discover_regions_chained,
+                   (unsigned long)_discover_tag);
   }
   sendZeroHop(pkt);
 
@@ -4406,6 +4830,21 @@ bool MyMesh::sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_n
   req_data[4] = req_type;
   req_data[5] = 0x00;
   uint32_t tag, est_timeout;
+  // Bug-5-Debug: dump CLI-generierten ANON-Payload + Route-State.
+  if (_trace_flags & TRACE_DBG_ANON) {
+    char hex[64]; hex[0] = 0;
+    int hp = 0;
+    for (int i = 0; i < (int)sizeof(req_data) && hp + 3 < (int)sizeof(hex); i++) {
+      hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x ", req_data[i]);
+    }
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "[anon-tx cli] to=%02x%02x%02x%02x%02x%02x path_len=%u payload(%d)=%s",
+             pubkey32[0], pubkey32[1], pubkey32[2],
+             pubkey32[3], pubkey32[4], pubkey32[5],
+             (unsigned)tmp.out_path_len, (int)sizeof(req_data), hex);
+    traceCompanion(TRACE_DBG_ANON, "%s", msg);
+  }
   int result = sendAnonReq(tmp, req_data, sizeof(req_data), tag, est_timeout);
   if (result == MSG_SEND_FAILED) return false;
   PendingRegionsEntry& e = _regions_pending[_regions_pending_count++];
@@ -4717,10 +5156,11 @@ void MyMesh::discoverFinishAndPrint() {
       _regions_pending_count = 0;
       return;
     }
-    char r[140];
+    char r[160];
     snprintf(r, sizeof(r),
-             "discover regions chain: %u REPEATER,\n"
-             "  %u ANON-REQs offen.\n"
+             "discover regions chain:\n"
+             "  %u REPEATER hat/haben in 30s geantwortet\n"
+             "  %u Regions-Anfrage(n) laufen noch\n"
              "Aggregat in 60s (oder nach Abschluss).",
              (unsigned)_discover_count,
              (unsigned)_regions_pending_count);
@@ -4928,7 +5368,11 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
   _trace_heard_all = false;   // 'trace heard' default mode = new-only
-  _unscoped_channel_direct = true;  // Wunschliste 25: unscoped channel = direct
+  // Wunschliste 25 (2026-07-02): jetzt aus persistentem Pref
+  // channel_no_scope_behavior geladen (1=direct, 2=flood). Init auf true
+  // damit erste Send-Aktion vor loadPrefs safe ist; wird bei begin() nach
+  // loadPrefs synchronisiert.
+  _unscoped_channel_direct = true;
   _pending_reboot_at = 0;
   _pending_shutdown_at = 0;   // Wunschliste 94: deferred shutdown
   memset(_heard_direct,       0, sizeof(_heard_direct));
@@ -5525,6 +5969,9 @@ void MyMesh::begin(bool has_display) {
   if (_prefs.scope_repeater_auto == 0 || _prefs.scope_repeater_auto > 2) {
     _prefs.scope_repeater_auto = 2;
   }
+  // channel_no_scope_behavior: 1=direct (Default), 2=flood.
+  // DataStore hat 0/0xFF/OOR bereits auf 1 gemappt.
+  _unscoped_channel_direct = (_prefs.channel_no_scope_behavior != 2);
   // repeater_profile: 0 = defensive (Default), 1 = normal
   if (_prefs.repeater_profile > 1) _prefs.repeater_profile = 0;
   // advert_role (Wunschliste 7): 0=auto, 1=chat, 2=repeater, 3=sensor, 4=room
@@ -6006,6 +6453,32 @@ void MyMesh::startInterface(BaseSerialInterface &serial) {
 }
 
 void MyMesh::handleCmdFrame(size_t len) {
+  // Bug-5-Debug: nur die interessanten Send-CMDs tracen. Sonst Feedback-
+  // Loop weil unser Trace pusht nach $companion, App holt via GET-CMD ab,
+  // wieder Trace, endlos. Whitelist: SEND-Familie (nicht: get/query/sync).
+  if (_trace_flags & TRACE_DBG_ANON) {
+    uint8_t c = cmd_frame[0];
+    bool interesting =
+         c == CMD_SEND_TXT_MSG || c == CMD_SEND_CHANNEL_TXT_MSG
+      || c == CMD_SEND_SELF_ADVERT || c == CMD_SEND_LOGIN
+      || c == CMD_SEND_STATUS_REQ || c == CMD_SEND_TRACE_PATH
+      || c == CMD_SEND_TELEMETRY_REQ || c == CMD_SEND_BINARY_REQ
+      || c == CMD_SEND_PATH_DISCOVERY_REQ || c == CMD_SEND_CONTROL_DATA
+      || c == CMD_SEND_ANON_REQ || c == CMD_SEND_CHANNEL_DATA
+      || c == CMD_SEND_RAW_PACKET || c == CMD_SEND_RAW_DATA;
+    if (interesting) {
+      char hex[80]; hex[0] = 0;
+      int hp = 0;
+      int show = (int)len; if (show > 24) show = 24;
+      for (int i = 0; i < show && hp + 3 < (int)sizeof(hex); i++) {
+        hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x ", cmd_frame[i]);
+      }
+      traceCompanion(TRACE_DBG_ANON,
+                     "[app-cmd] cmd=0x%02x len=%u first=%s%s",
+                     (unsigned)c, (unsigned)len, hex,
+                     (int)len > 24 ? "..." : "");
+    }
+  }
   if (cmd_frame[0] == CMD_DEVICE_QUERY && len >= 2) { // sent when app establishes connection
     app_target_ver = cmd_frame[1];                    // which version of protocol does app understand
 
@@ -6192,9 +6665,42 @@ void MyMesh::handleCmdFrame(size_t len) {
       if (mlen_raw >= (int)sizeof(mtext)) mlen_raw = sizeof(mtext) - 1;
       memcpy(mtext, text, mlen_raw);
       mtext[mlen_raw] = 0;
+      // Task 63: Reply-Scope-Cache. VOR stripReplyMentionDecoration den
+      // Reply-Namen extrahieren (extractReplyName kennt beide Formate und
+      // strippt den (#scope)-Zusatz beim Bracket-Format).
+      uint8_t reply_scope_key[16];
+      bool have_reply_scope = false;
+      {
+        char reply_name[32];
+        if (extractReplyName(mtext, reply_name, sizeof(reply_name))) {
+          uint32_t name_h = fnv1a32(reply_name, strlen(reply_name));
+          uint32_t channel_h;
+          memcpy(&channel_h, channel.channel.hash, sizeof(channel_h));
+          if (channel_h == 0) channel_h = 1;
+          if (channelSenderScopeLookup(channel_h, name_h, reply_scope_key)) {
+            have_reply_scope = true;
+            traceCompanion(TRACE_SCOPE,
+                           "[reply-scope] '@%s' -> cached scope aktiv",
+                           reply_name);
+          }
+        }
+      }
       stripReplyMentionDecoration(mtext);
       int mlen = (int)strlen(mtext);
-      if (success && sendGroupMessage(msg_timestamp, channel.channel, short_sender, mtext, mlen)) {
+      // Temporaerer Scope-Override fuer diesen Send. Companion-Radio ist
+      // single-threaded, keine Race.
+      TransportKey saved_send_scope = send_scope;
+      bool saved_send_unscoped = send_unscoped;
+      if (have_reply_scope) {
+        memcpy(send_scope.key, reply_scope_key, 16);
+        send_unscoped = false;
+      }
+      bool send_ok = success && sendGroupMessage(msg_timestamp, channel.channel, short_sender, mtext, mlen);
+      if (have_reply_scope) {
+        send_scope = saved_send_scope;
+        send_unscoped = saved_send_unscoped;
+      }
+      if (send_ok) {
         // Autolearn des TX-Scope-Override aus Channel-Sends wurde entfernt:
         // wir mischten channel.secret (= Channel-Decryption-Key) und scope-
         // keys (= SHA-256("#name")) im selben Slot — zwei unterschiedliche
@@ -6735,6 +7241,22 @@ void MyMesh::handleCmdFrame(size_t len) {
       if (addContact(anon)) recipient = &anon;
     }
     uint8_t *data = &cmd_frame[1 + PUB_KEY_SIZE];
+    // Bug-5-Debug: dump von App gelieferten Payload + ausgehendem Route-State.
+    if (_trace_flags & TRACE_DBG_ANON) {
+      char hex[128]; hex[0] = 0;
+      int hp = 0;
+      int payload_len = (int)(len - (1 + PUB_KEY_SIZE));
+      for (int i = 0; i < payload_len && hp + 3 < (int)sizeof(hex); i++) {
+        hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x ", data[i]);
+      }
+      char msg[160];
+      snprintf(msg, sizeof(msg),
+               "[anon-tx app] to=%02x%02x%02x%02x%02x%02x path_len=%u payload(%d)=%s",
+               pub_key[0], pub_key[1], pub_key[2], pub_key[3], pub_key[4], pub_key[5],
+               recipient ? (unsigned)recipient->out_path_len : 0,
+               payload_len, hex);
+      traceCompanion(TRACE_DBG_ANON, "%s", msg);
+    }
     // Wunschliste 27c: anon_req-Typ merken damit onContactResponse die
     // typ-spezifische Antwort (z.B. REGIONS-CSV) parsen + in $companion
     // pushen kann. Anon-REQ-Payload-Layout: [ts×4][type×1][...].
@@ -8242,6 +8764,9 @@ bool MyMesh::resolveDefaultOrGeo(TransportKey& out_key) const {
   TransportKey configured;
   memcpy(configured.key, _prefs.default_scope_key, sizeof(configured.key));
   bool has_default = !configured.isNull();
+  // Wunschliste 2026-07-02: 'scope default #geo' wird jetzt in
+  // sendFloodScoped(channel|recipient) via detectMagicScope erkannt --
+  // hier kein Sonderfall mehr noetig.
   uint8_t mode = _prefs.scope_advert_auto;
 
   // prefer (3): Geo > Default falls anderer Match.
@@ -8628,7 +9153,7 @@ void MyMesh::doNightFloodAdvert() {
       src = "override"; nm = _prefs.override_scope_name;
     } else if (keyNotNull(_prefs.bake_scope_key, 16)
         && memcmp(scope.key, _prefs.bake_scope_key, 16) == 0) {
-      src = "bake"; nm = _prefs.bake_scope_name;
+      src = "advert"; nm = _prefs.bake_scope_name;
     } else if (keyNotNull(_prefs.default_scope_key, 16)
         && memcmp(scope.key, _prefs.default_scope_key, 16) == 0) {
       src = "default"; nm = _prefs.default_scope_name;
@@ -9750,13 +10275,14 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("loop_detect",           _prefs.loop_detect);
   kv_uint("duty_soft_pct",         _prefs.duty_soft_pct);
   kv_uint("duty_hard_pct",         _prefs.duty_hard_pct);
-  kv_str ("bake_scope_name",       _prefs.bake_scope_name);
-  kv_hex ("bake_scope_key",        _prefs.bake_scope_key, 16);
+  kv_str ("advert_scope_name",     _prefs.bake_scope_name);
+  kv_hex ("advert_scope_key",      _prefs.bake_scope_key, 16);
   kv_str ("override_scope_name",   _prefs.override_scope_name);
   kv_hex ("override_scope_key",    _prefs.override_scope_key, 16);
   kv_uint("override_expiry",       _prefs.override_expiry);
-  kv_uint("scope_advert_auto",     _prefs.scope_advert_auto);
+  kv_uint("scope_use_auto",        _prefs.scope_advert_auto);
   kv_uint("scope_repeater_auto",   _prefs.scope_repeater_auto);
+  kv_uint("channel_no_scope_behavior", _prefs.channel_no_scope_behavior);
   kv_uint("advert_role",           _prefs.advert_role);
   kv_str ("owner_info",            _prefs.owner_info);
   kv_uint("trace_flags_persistent",_prefs.trace_flags_persistent);
@@ -10692,8 +11218,14 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "duty_soft_pct") == 0)         { _prefs.duty_soft_pct         = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "duty_hard_pct") == 0)         { _prefs.duty_hard_pct         = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "override_expiry") == 0)       { _prefs.override_expiry       = as_uint();         _br_applied++; return; }
-      if (strcmp(key, "scope_advert_auto") == 0)     { _prefs.scope_advert_auto     = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "scope_use_auto") == 0)        { _prefs.scope_advert_auto     = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "scope_repeater_auto") == 0)   { _prefs.scope_repeater_auto   = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "channel_no_scope_behavior") == 0) {
+        uint8_t v = (uint8_t)as_uint();
+        _prefs.channel_no_scope_behavior = (v == 2) ? 2 : 1;
+        _unscoped_channel_direct = (_prefs.channel_no_scope_behavior != 2);
+        _br_applied++; return;
+      }
       if (strcmp(key, "advert_role") == 0)           { _prefs.advert_role           = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "trace_flags_persistent") == 0){ _prefs.trace_flags_persistent= (uint16_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_power_mode") == 0)        { _prefs.gps_power_mode        = (uint8_t)as_uint(); _br_applied++; return; }
@@ -10711,8 +11243,8 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
     }
     if (val_type == 's') {
       if (strcmp(key, "chat_name_custom") == 0)    { brExtractString(val_start, val_len, _prefs.chat_name_custom, sizeof(_prefs.chat_name_custom)); _br_applied++; return; }
-      if (strcmp(key, "bake_scope_name") == 0)     { brExtractString(val_start, val_len, _prefs.bake_scope_name, sizeof(_prefs.bake_scope_name)); _br_applied++; return; }
-      if (strcmp(key, "bake_scope_key") == 0)      { brExtractHex(val_start, val_len, _prefs.bake_scope_key, sizeof(_prefs.bake_scope_key)); _br_applied++; return; }
+      if (strcmp(key, "advert_scope_name") == 0)   { brExtractString(val_start, val_len, _prefs.bake_scope_name, sizeof(_prefs.bake_scope_name)); _br_applied++; return; }
+      if (strcmp(key, "advert_scope_key") == 0)    { brExtractHex(val_start, val_len, _prefs.bake_scope_key, sizeof(_prefs.bake_scope_key)); _br_applied++; return; }
       if (strcmp(key, "override_scope_name") == 0) { brExtractString(val_start, val_len, _prefs.override_scope_name, sizeof(_prefs.override_scope_name)); _br_applied++; return; }
       if (strcmp(key, "override_scope_key") == 0)  { brExtractHex(val_start, val_len, _prefs.override_scope_key, sizeof(_prefs.override_scope_key)); _br_applied++; return; }
       if (strcmp(key, "owner_info") == 0)          { brExtractString(val_start, val_len, _prefs.owner_info, sizeof(_prefs.owner_info)); _br_applied++; return; }
@@ -11436,14 +11968,26 @@ void MyMesh::manageBlePower() {
   // Pref-enforce statt State-Machine. bluetooth_active == 0 -> aus,
   // sonst an. State-Tracking via _ble_pwr_state nur fuer Status-
   // Anzeige (OFF / AWAKE).
+  //
+  // Fix 2026-07-01: Der urspruengliche Code setzte den State nur beim
+  // Transition (want_on && !is_on). Ergebnis: bei Boot mit BLE bereits
+  // enabled blieb _ble_pwr_state = BLE_PWR_BOOT ewig -- Diagnose
+  // 'bluetooth' zeigte 'state=BOOT (Grace)' auch nach Tagen. Jetzt:
+  // State bei jedem Tick nach Pref synchronisieren (idempotent).
   bool want_on = (_prefs.bluetooth_active != 0);
   bool is_on = _serial->isEnabled();
-  if (want_on && !is_on) {
-    setBleEnabled(true);
-    _ble_pwr_state = BLE_PWR_AWAKE;
-  } else if (!want_on && is_on) {
-    setBleEnabled(false);
-    _ble_pwr_state = BLE_PWR_OFF;
+  if (want_on) {
+    if (!is_on) setBleEnabled(true);
+    if (_ble_pwr_state != BLE_PWR_AWAKE) {
+      _ble_pwr_state = BLE_PWR_AWAKE;
+      _ble_pwr_state_until = 0;
+    }
+  } else {
+    if (is_on) setBleEnabled(false);
+    if (_ble_pwr_state != BLE_PWR_OFF) {
+      _ble_pwr_state = BLE_PWR_OFF;
+      _ble_pwr_state_until = 0;
+    }
   }
   return;
 #else
@@ -12303,7 +12847,7 @@ static const TraceCat trace_cats[] = {
   { "gps",     TRACE_GPS,     "GPS power on/off, first fix, fix loss" },
   { "adverts", TRACE_ADVERTS, "eigene Adverts (periodic zero-hop, nightly flood, manual). Fremde Adverts via 'repeat'." },
   { "repeat",  TRACE_REPEAT,  "durchgereichte Packets" },
-  { "scope",   TRACE_SCOPE,   "scope override/default/bake Wechsel" },
+  { "scope",   TRACE_SCOPE,   "scope override/default/advert-scope Wechsel" },
   { "motion",  TRACE_MOTION,  "_is_moving Uebergaenge" },
   { "heard",   TRACE_HEARD,   "direkt gehoerte zero-hop-Adverts (default: nur neue; 'trace heard on all' = alle)" },
   { "rtc",     TRACE_RTC,     "detektierte RTC-Spruenge" },
@@ -12314,6 +12858,7 @@ static const TraceCat trace_cats[] = {
   { "msgstore", TRACE_MSGSTORE, "Offline-Queue Flash-Persistenz-Writes (Flash-Wear-Diagnose)" },
   { "bt",       TRACE_BT,       "Bluetooth-Diagnose alle 5min: heap + disconnect-counter (default off)" },
   { "discover", TRACE_DISCOVER, "discover regions ANON-RESP-Empfang + leer-Diagnose" },
+  { "debug-anon", TRACE_DBG_ANON, "Bug-5-Debug: ANON-TX/RX hex-dump (CLI vs App)" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
@@ -12375,7 +12920,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     {"chatname", false}, {"reboot", true}, {"shutdown", true}, {"dfu", false}, {"duty", false}, {"scope", false},
     {"prefs", false}, {"neighbors", false}, {"tempradio", false},
     {"set", false}, {"get", false}, {"clock", false}, {"date", false}, {"time", false},
-    {"messages", false}, {"log", false}, {"channels", false}, {"unscoped-channelmessages", false},
+    {"messages", false}, {"log", false}, {"channels", false},
     {"clear", true},
     {"contact", false}, {"backup", false}, {"save", false}, {"discover", false},
     {"ch.hops", false},
@@ -12611,23 +13156,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  scope <name> delete  dauerhaft verstecken (Build-in)");
         return;
       }
-      if (topic_prefix_match(topic, "scope advert")
-          || topic_prefix_match(topic, "scope adv")) {
+      if (topic_prefix_match(topic, "scope use")) {
         pushCompanionMessage(
-          "scope advert: konfiguriert was meine eigenen Auto-Adverts senden.");
+          "scope use: Sende-Hierarchie fuer alle eigenen Flood-Pakete\n"
+          "(DM-Discovery, ACK, REQ/RESP, ANON-REQ, Channel-Msg, nightly Advert).");
         pushCompanionMessage(
-          "scope advert default <name>|clear\n"
-          "  Default-Scope fuer Auto-Adverts.");
+          "scope use default <name>|clear\n"
+          "  Default-Scope fuer eigene Flood-Pakete.");
         pushCompanionMessage(
-          "scope advert bake <name>|clear\n"
+          "scope use advert <name>|clear\n"
           "  Nightly-Flood-Advert nutzt diesen Scope (kann weiter sein\n"
           "  als default, z.B. de-be -> de-bebb).");
         pushCompanionMessage(
-          "scope advert override <name> [<n>h|<n>d]|clear\n"
+          "scope use override <name> [<n>h|<n>d]|clear\n"
           "  Hoechste Send-Prioritaet, persistent ueber Reboots, max 30d TTL.");
         pushCompanionMessage(
-          "scope advert auto off|on|prefer\n"
-          "  Send-Hierarchie fuer eigene Auto-Adverts:");
+          "scope use auto off|on|prefer\n"
+          "  Regelt wie Default und Geo interagieren:");
         pushCompanionMessage(
           "    on (Default):\n"
           "      Default-Scope gewinnt. Geo nur als Fallback wenn\n"
@@ -12638,20 +13183,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "      andere ist als das Default. ('User ist nicht zu Hause')");
         pushCompanionMessage(
           "    off:\n"
-          "      Geo wird nie verwendet, nur Default/Bake/Override.");
+          "      Geo wird nie verwendet, nur Default/Advert-Scope/Override.");
+        pushCompanionMessage(
+          "Siehe auch 'help magic-scopes' fuer Scope-Namen mit\n"
+          "Firmware-Sonderbehandlung (#direct/#unscoped/#geo).");
         return;
       }
       if (topic_prefix_match(topic, "scope")) {
         pushCompanionMessage(
           "scope: vier Bereiche.");
         pushCompanionMessage(
-          "1) Auto-Adverts ('scope advert', 'help scope advert')\n"
+          "1) Send-Hierarchie ('scope use', 'help scope use')\n"
           "2) Registry (scope list/add/remove/info/regions)\n"
           "3) Repeater-Policy ('scope repeater', 'help scope repeater')\n"
           "4) Per-Eintrag ('scope <name> ...')");
         pushCompanionMessage(
-          "Send-Hierarchie (nightly bake / 'advert flood'):\n"
-          "  override > bake > default-oder-geo (gemaess scope advert auto)");
+          "Sende-Hierarchie fuer eigene Flood-Pakete:\n"
+          "  override > advert-Scope > default-oder-geo (gemaess scope use auto)");
         pushCompanionMessage(
           "scope\n"
           "  ohne Argument: Status der drei Send-Quellen + Registry-Count");
@@ -12662,12 +13210,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "scope default clear\n"
           "  loescht den default");
         pushCompanionMessage(
-          "scope bake <name>\n"
-          "  persistent, NUR fuer nightly. Darf weiter sein als default\n"
-          "  (z.B. default=#de-be, bake=#de-bebb).");
+          "scope advert <name>\n"
+          "  persistent, NUR fuer nightly Flood-Advert. Darf weiter sein als default\n"
+          "  (z.B. default=#de-be, advert=#de-bebb).");
         pushCompanionMessage(
-          "scope bake clear\n"
-          "  loescht bake");
+          "scope advert clear\n"
+          "  loescht den Advert-Scope");
         pushCompanionMessage(
           "scope override <name> [12h|3d]\n"
           "  persistent ueber Reboots, hoechste Prio.\n"
@@ -12693,6 +13241,58 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "scope regions\n"
           "  Build-in Geo-Tabelle (RO)");
+        pushCompanionMessage(
+          "Siehe auch 'help magic-scopes' fuer Scope-Namen mit\n"
+          "Firmware-Sonderbehandlung (#direct/#unscoped/#geo).");
+        return;
+      }
+      if (topic_prefix_match(topic, "magic-scopes")
+          || topic_prefix_match(topic, "magic-channels")
+          || topic_prefix_match(topic, "magic")) {
+        pushCompanionMessage(
+          "magic scope names: die Firmware erkennt bestimmte\n"
+          "Scope-Namen und schaltet Sonderverhalten ein statt\n"
+          "sie normal als Transport-Code zu senden.");
+        pushCompanionMessage(
+          "Wenn du im Scope-Feld eines Channels (App-UI, oder\n"
+          "als 'scope default') einen dieser Namen setzt:");
+        pushCompanionMessage(
+          "Scope #direct / #direkt / #norepeat / #no-repeat:\n"
+          "  -> zero-hop, kein Scope-Code. Nur direkte Nachbarn.");
+        pushCompanionMessage(
+          "  (#norepeat/#no-repeat sind Aliase, gleiche Wirkung.)");
+        pushCompanionMessage(
+          "Scope #unscoped:\n"
+          "  -> klassischer Flood ohne Scope-Code (path>0 moeglich).");
+        pushCompanionMessage(
+          "  Beispiel: SAR-Einsatz oder Event auf abweichender\n"
+          "  Frequenz, wo im kleinen ueberschaubaren Netz alle\n"
+          "  Nachrichten ankommen sollen.");
+        pushCompanionMessage(
+          "  Alternativ fuer alle Channels: 'scope channel\n"
+          "  no-scope flood', dann in der App den Scope leer\n"
+          "  lassen ('kein Scope').");
+        pushCompanionMessage(
+          "Scope #geo:\n"
+          "  -> Geo-Auto (GPS-Position bestimmt Region).\n"
+          "     Fallback: #local wenn kein GPS-Fix (single-hop).");
+        pushCompanionMessage(
+          "Alle anderen Scope-Namen (z.B. #de-be, #meinDorf) werden\n"
+          "normal als Transport-Code gesendet -- der Repeater\n"
+          "entscheidet ob er weiterleitet.");
+        pushCompanionMessage(
+          "Zusatz-Regel Channel-Name:\n"
+          "Channels #local / #lokal erzwingen Scope=#local bzw #lokal,\n"
+          "ungeachtet welcher Scope in der App gesetzt ist.");
+        pushCompanionMessage(
+          "Grund: 'local' mit weitem Scope waere widerspruechlich.");
+        pushCompanionMessage(
+          "Hinweis: 'scope default #geo' setzt Geo-Auto als Firmware-\n"
+          "Default fuer alle eigenen Sends. Beim Reisen nichts anpassen.");
+        pushCompanionMessage(
+          "Wenn du 'kein Scope' waehlst (App-Setting leer), gilt\n"
+          "'scope channel no-scope' (Default: direct = zero-hop).\n"
+          "Fuer klassischen Flood ohne Setting-Aenderung: Scope=#unscoped.");
         return;
       }
       if (topic_prefix_match(topic, "filter")) {
@@ -12993,9 +13593,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
-      if (topic_prefix_match(topic, "unscoped-channelmessages")) {
+      if (topic_prefix_match(topic, "scope channel")
+          || topic_prefix_match(topic, "unscoped-channelmessages")) {
         pushCompanionMessage(
-          "unscoped-channelmessages [direct|flood]:\n"
+          "scope channel no-scope <direct|flood>:\n"
           "  Verhalten bei Channel-Send ohne Scope."
         );
         pushCompanionMessage(
@@ -13005,8 +13606,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         pushCompanionMessage(
           "Greift NUR bei Channel-Msgs ohne send_scope/Default/Geo.\n"
-          "Scoped Sends sind unbeeinflusst.\n"
-          "Runtime-only -- Reboot stellt 'direct' wieder her."
+          "Scoped Sends und DMs/Path-Discovery sind unbeeinflusst."
+        );
+        pushCompanionMessage(
+          "Alternativ pro Channel: Scope=#unscoped fuer Flood,\n"
+          "Scope=#direct fuer zero-hop. Siehe 'help magic-scopes'."
         );
         return;
       }
@@ -13444,11 +14048,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       "  trace, chatname, prefs, set, get, ch.hops, clock, time,"
     );
     pushCompanionMessage(
-      "  messages, logging, unscoped-channelmessages,\n"
+      "  messages, logging,\n"
       "  contact, backup, save, discover, tempradio,\n"
-      "  filter, remote, bluetooth, serial-cli,\n"
-      "  ver, board, clear, reboot, shutdown,\n"
-      "  at, cron."
+      "  filter, remote, bluetooth, serial-cli,"
+    );
+    pushCompanionMessage(
+      "  ver, board, clear, reboot, shutdown, dfu,\n"
+      "  at, cron, magic-scopes."
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
     // (Wunschliste 40). Sehen Kommentare bei den Handlern.
@@ -13757,6 +14363,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(batt_line, sizeof(batt_line), "%u mV%s",
                  (unsigned)bmv_d, usb_on ? " [usb]" : "");
       }
+      // 145-Byte-Limit: sensors in mehrere pushCompanionMessage splitten.
 #ifdef T1000_E
       extern uint32_t t1000e_get_light();
       extern float    t1000e_get_temperature();
@@ -13765,22 +14372,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(rd, sizeof(rd),
                "sensors:\n"
                "  battery = %s\n"
-               "  temp    = %.1f C (NTC heater-sensor)\n"
-               "  light   = %lu (Photocell 0-100, app zeigt als lux)\n"
+               "  temp    = %.1f C (NTC heater-sensor)",
+               batt_line, (double)tmp_d);
+      pushCompanionMessage(rd);
+      snprintf(rd, sizeof(rd),
+               "  light   = %lu (0-100; App zeigt als lux)",
+               (unsigned long)lux_d);
+      pushCompanionMessage(rd);
+      snprintf(rd, sizeof(rd),
                "  gps     = %.6f, %.6f\n"
                "    src=%s  last_fix=%s",
-               batt_line, (double)tmp_d, (unsigned long)lux_d,
                sensors.node_lat, sensors.node_lon, gps_src, age_buf);
+      pushCompanionMessage(rd);
 #else
       snprintf(rd, sizeof(rd),
                "sensors:\n"
-               "  battery = %s\n"
+               "  battery = %s",
+               batt_line);
+      pushCompanionMessage(rd);
+      snprintf(rd, sizeof(rd),
                "  gps     = %.6f, %.6f\n"
                "    src=%s  last_fix=%s",
-               batt_line,
                sensors.node_lat, sensors.node_lon, gps_src, age_buf);
-#endif
       pushCompanionMessage(rd);
+#endif
       return;
     }
     // Subcommand-Dispatch (User-Memory feedback_keyword_prefix_abbreviation):
@@ -14240,7 +14855,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (_prefs.bake_scope_key[k] != 0) { bake_set = true; break; }
       }
       if (bake_set) {
-        snprintf(src_label, sizeof(src_label), "bake = #%s",
+        snprintf(src_label, sizeof(src_label), "advert-scope = #%s",
                  _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
         have_scope = true;
       }
@@ -15923,11 +16538,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (ovr_set) non_default_count++;
     }
-    // scope advert auto (Wunschliste 13)
+    // scope use auto (Wunschliste 13, renamed 2026-07-01)
     if (show_all || _prefs.scope_advert_auto != 2) {
       const char* st = (_prefs.scope_advert_auto == 1) ? "off"
                      : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
-      snprintf(tmp, sizeof(tmp), "  scope_advert_auto = %s%s", st,
+      snprintf(tmp, sizeof(tmp), "  scope_use_auto = %s%s", st,
                _prefs.scope_advert_auto == 2 ? " [default]" : " (default: on)");
       add_line(tmp);
       if (_prefs.scope_advert_auto != 2) non_default_count++;
@@ -16484,40 +17099,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   bit 1 = CHANNEL DISABLED (1 = off). Default 0 = ON.
   // -> Default-Verhalten: USB aus, Channel an. Safe fuer USB-Companion-
   //    Builds wo Trace die App-Frames zerschiessen wuerde.
-  // ---------- unscoped-channelmessages [direct|flood] ------------------
-  // Wunschliste 25 (User-Wunsch 2026-05-30, Spazier-Gespraech):
-  // wenn ein Channel-Send ohne Scope rausgeht (kein send_scope, kein
-  // Default-Scope, kein Geo-Fallback), wird er per Default als zero-hop
-  // direct gesendet statt geflooded -- begrenzt z.B. einen Channel
-  // '#meineHausgemeinschaft' ohne Scope auf direkt-empfangbare Nachbarn
-  // statt Europa-weit zu fluten.
-  // Override via 'unscoped-channelmessages flood'. Runtime-only -- nach
-  // Reboot wieder default (direct).
-  if (starts_with_word(cmd, "unscoped-channelmessages")) {
-    const char* arg = strchr(cmd, ' ');
-    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
-    if (!arg || *arg == 0) {
-      char block[160];
-      snprintf(block, sizeof(block),
-               "unscoped-channelmessages:\n"
-               "  mode = %s   (default: direct, nicht persistent)",
-               _unscoped_channel_direct ? "direct" : "flood");
-      pushCompanionMessage(block);
-      return;
-    }
-    if (strcmp(arg, "direct") == 0) {
-      _unscoped_channel_direct = true;
-      pushCompanionMessage("OK - unscoped channel-msgs gehen ab jetzt als zero-hop direct.");
-      return;
-    }
-    if (strcmp(arg, "flood") == 0) {
-      _unscoped_channel_direct = false;
-      pushCompanionMessage("OK - unscoped channel-msgs werden ab jetzt geflooded.");
-      return;
-    }
-    pushCompanionMessage("Usage: unscoped-channelmessages <direct|flood>");
-    return;
-  }
+  // (Alter 'unscoped-channelmessages' entfernt 2026-07-02, verschoben in
+  //  Hierarchie 'scope channel no-scope <direct|flood>'. Grund: runtime-only
+  //  war fuer User nach Reboot verwirrend + gehoerte thematisch unter scope.)
 
   // Wunschliste 53 Phase 7 (2026-06-14): unified 'log'-Command.
   // Loest altes 'logging' ab + integriert Boot-Log.
@@ -21210,34 +21794,38 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       emit_uint  ("flood_max",           _prefs.flood_max,             16);
       // flood_max_infra: Sentinel 254 = follow flood_max (Default).
+      // Bei manueller Zahl zeigen wir die follow-Auflösung mit, damit User
+      // sieht ob sein Wert der eff. Follow-Kaskade entspricht.
       {
         bool eq = (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW);
         if (!list_changed || !eq) {
           if (!eq) changed++;
           if (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW)
             snprintf(tmp, sizeof(tmp),
-              "  flood_max_infra = follow (-> %u) [default]",
+              "  flood_max_infra = follow (-> flood_max = %u) [default]",
               (unsigned)_prefs.flood_max);
           else
             snprintf(tmp, sizeof(tmp),
-              "  flood_max_infra = %u (default: follow)",
-              (unsigned)_prefs.flood_max_infra);
+              "  flood_max_infra = %u (default: follow -> flood_max = %u)",
+              (unsigned)_prefs.flood_max_infra,
+              (unsigned)_prefs.flood_max);
           gline(tmp);
         }
       }
-      // flood_max_req_resp: Sentinel 254 = follow infra (Default).
+      // flood_max_req_resp: Sentinel 254 = follow flood_max_infra (Default).
       {
         bool eq = (_prefs.flood_max_req_resp == FLOOD_MAX_INFRA_FOLLOW);
         if (!list_changed || !eq) {
           if (!eq) changed++;
           if (_prefs.flood_max_req_resp == FLOOD_MAX_INFRA_FOLLOW)
             snprintf(tmp, sizeof(tmp),
-              "  flood_max_req_resp = follow (-> %u) [default]",
+              "  flood_max_req_resp = follow (-> flood_max_infra = %u) [default]",
               (unsigned)effectiveFloodMaxInfra());
           else
             snprintf(tmp, sizeof(tmp),
-              "  flood_max_req_resp = %u (default: follow)",
-              (unsigned)_prefs.flood_max_req_resp);
+              "  flood_max_req_resp = %u (default: follow -> flood_max_infra = %u)",
+              (unsigned)_prefs.flood_max_req_resp,
+              (unsigned)effectiveFloodMaxInfra());
           gline(tmp);
         }
       }
@@ -21249,15 +21837,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           if (!eq) changed++;
           if (_prefs.flood_max_unscoped_companions == CH_HOPS_OFF)
             snprintf(tmp, sizeof(tmp),
-              "  flood_max_unscoped_companions = follow (-> %u) [default]",
+              "  flood_max_unscoped_companions = follow (-> flood_max_scope_region = %u) [default]",
               (unsigned)_prefs.flood_max_scope_region);
           else if (_prefs.flood_max_unscoped_companions == 0)
             snprintf(tmp, sizeof(tmp),
               "  flood_max_unscoped_companions = off (default: follow)");
           else
             snprintf(tmp, sizeof(tmp),
-              "  flood_max_unscoped_companions = %u (default: follow)",
-              (unsigned)_prefs.flood_max_unscoped_companions);
+              "  flood_max_unscoped_companions = %u (default: follow -> scope_region = %u)",
+              (unsigned)_prefs.flood_max_unscoped_companions,
+              (unsigned)_prefs.flood_max_scope_region);
           gline(tmp);
         }
       }
@@ -22048,44 +22637,49 @@ cron_add_direct:
     int q_used = offlineQueueTotal();
     int q_cap  = BUCKET_CAP_PUBLIC + BUCKET_CAP_HASHTAG + BUCKET_CAP_PRIVATE
                + BUCKET_CAP_DM + BUCKET_CAP_COMPANION;
+    // 145-Byte-Limit: stats-core in mehrere pushCompanionMessage splitten,
+    // damit nichts abgeschnitten wird (v.a. bei USB-Marker und ESP32-CPU-Temp).
     char block[200];
-    int n = snprintf(block, sizeof(block),
-                     "stats-core:\n"
-                     "  uptime    = ");
-    if (up_d > 0) n += snprintf(block+n, sizeof(block)-n,
-                                "%lud%02luh%02lum\n", up_d, up_h, up_m);
-    else          n += snprintf(block+n, sizeof(block)-n,
-                                "%luh%02lum\n", up_h, up_m);
+    char uptime_str[24];
+    if (up_d > 0) snprintf(uptime_str, sizeof(uptime_str),
+                           "%lud%02luh%02lum", up_d, up_h, up_m);
+    else          snprintf(uptime_str, sizeof(uptime_str),
+                           "%luh%02lum", up_h, up_m);
     // Wunschliste 89/90/91: USB-Status + Charge-% (wenn chemistry set).
     bool usb_on = board.isExternalPowered();
     uint8_t pct = (_prefs.batt_chemistry == 0) ? 0xFF
                 : getBattChargePctForCurve(_prefs.batt_chemistry, batt_mv);
     if (pct != 0xFF) {
-      n += snprintf(block+n, sizeof(block)-n,
-                    "  battery   = %u mV (%u%%) %s\n"
-                    "  msg-queue = %d / %d slots\n",
-                    (unsigned)batt_mv, (unsigned)pct,
-                    usb_on ? "[usb]" : "", q_used, q_cap);
+      snprintf(block, sizeof(block),
+               "stats-core:\n"
+               "  uptime    = %s\n"
+               "  battery   = %u mV (%u%%) %s\n"
+               "  msg-queue = %d / %d slots",
+               uptime_str, (unsigned)batt_mv, (unsigned)pct,
+               usb_on ? "[usb]" : "", q_used, q_cap);
     } else {
-      n += snprintf(block+n, sizeof(block)-n,
-                    "  battery   = %u mV%s\n"
-                    "  msg-queue = %d / %d slots\n",
-                    (unsigned)batt_mv,
-                    usb_on ? " [usb]" : "", q_used, q_cap);
+      snprintf(block, sizeof(block),
+               "stats-core:\n"
+               "  uptime    = %s\n"
+               "  battery   = %u mV%s\n"
+               "  msg-queue = %d / %d slots",
+               uptime_str, (unsigned)batt_mv,
+               usb_on ? " [usb]" : "", q_used, q_cap);
     }
+    pushCompanionMessage(block);
     // CPU-Temperatur (User-Wunsch 2026-06-14): ESP32-S3 hat internen
-    // Temp-Sensor. Arduino-ESP32 temperatureRead() liefert float °C.
-    // Auf NRF52/anderen Plattformen nicht verfuegbar -- daher #ifdef.
-    // Sensor-Genauigkeit +/- 1-2°C, Trend ist relevant fuer Repeater
-    // im Sommer / Gehaeuse-Heat-Issues.
+    // Temp-Sensor. Sensor-Genauigkeit +/- 1-2C, Trend relevant fuer
+    // Repeater im Sommer / Gehaeuse-Heat-Issues.
 #if defined(ESP32)
-    float cpu_temp_c = temperatureRead();
-    n += snprintf(block+n, sizeof(block)-n,
-                  "  cpu temp  = %.1f C\n", (double)cpu_temp_c);
+    {
+      float cpu_temp_c = temperatureRead();
+      snprintf(block, sizeof(block),
+               "  cpu temp  = %.1f C", (double)cpu_temp_c);
+      pushCompanionMessage(block);
+    }
 #endif
     // Wunschliste 53 (2026-06-14): vorige Session-Uptime (Piggyback
-    // aus rtc_persist, +-10min Toleranz) und Reset-Reason. Im Feld
-    // Diagnose ohne App-Debug-Log: "lief 14d03h dann WDT".
+    // aus rtc_persist, +-10min Toleranz) und Reset-Reason.
     {
       uint32_t prev_up_ms = getLastSessionUptimeMs();
       if (prev_up_ms != 0) {
@@ -22093,20 +22687,19 @@ cron_add_direct:
         uint32_t pd = prev_s / 86400;
         uint32_t ph = (prev_s % 86400) / 3600;
         uint32_t pm = (prev_s % 3600) / 60;
-        if (pd > 0) n += snprintf(block+n, sizeof(block)-n,
-                                  "  lastUptime= %lud%02luh%02lum\n",
-                                  pd, ph, pm);
-        else        n += snprintf(block+n, sizeof(block)-n,
-                                  "  lastUptime= %luh%02lum\n",
-                                  ph, pm);
+        if (pd > 0) snprintf(block, sizeof(block),
+                             "  lastUptime= %lud%02luh%02lum", pd, ph, pm);
+        else        snprintf(block, sizeof(block),
+                             "  lastUptime= %luh%02lum", ph, pm);
+        pushCompanionMessage(block);
       }
-      n += snprintf(block+n, sizeof(block)-n,
-                    "  lastReset = %s\n", getLastResetReasonStr());
     }
-    n += snprintf(block+n, sizeof(block)-n,
-                  "  trace     = 0x%04X (%s)",
-                  (unsigned)_trace_flags,
-                  _trace_flags ? "active" : "off");
+    snprintf(block, sizeof(block),
+             "  lastReset = %s\n"
+             "  trace     = 0x%04X (%s)",
+             getLastResetReasonStr(),
+             (unsigned)_trace_flags,
+             _trace_flags ? "active" : "off");
     pushCompanionMessage(block);
     return;
   }
@@ -22209,20 +22802,22 @@ cron_add_direct:
     };
     uint32_t rxf_total = 0;
     for (int pp = 0; pp < 16; pp++) rxf_total += rxf_sum((uint8_t)pp);
-    p = snprintf(block, sizeof(block),
-                 "rx flood:\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
-                 "  total=%lu",
-                 rxf_sum(PAYLOAD_TYPE_ADVERT),
-                 rxf_sum(PAYLOAD_TYPE_PATH),
-                 rxf_sum(PAYLOAD_TYPE_TXT_MSG),
-                 rxf_sum(PAYLOAD_TYPE_GRP_TXT),
-                 rxf_sum(PAYLOAD_TYPE_ACK),
-                 rxf_sum(PAYLOAD_TYPE_REQ),
-                 rxf_sum(PAYLOAD_TYPE_RESPONSE),
-                 rxf_sum(PAYLOAD_TYPE_ANON_REQ),
-                 rxf_sum(PAYLOAD_TYPE_TRACE),
-                 (unsigned long)rxf_total);
+    // 145-Byte-Limit: 9 Zaehler auf 2 Zeilen (5+4), total als eigene Message.
+    snprintf(block, sizeof(block),
+             "rx flood:\n"
+             "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
+             "  req=%u rsp=%u anon=%u trc=%u",
+             rxf_sum(PAYLOAD_TYPE_ADVERT),
+             rxf_sum(PAYLOAD_TYPE_PATH),
+             rxf_sum(PAYLOAD_TYPE_TXT_MSG),
+             rxf_sum(PAYLOAD_TYPE_GRP_TXT),
+             rxf_sum(PAYLOAD_TYPE_ACK),
+             rxf_sum(PAYLOAD_TYPE_REQ),
+             rxf_sum(PAYLOAD_TYPE_RESPONSE),
+             rxf_sum(PAYLOAD_TYPE_ANON_REQ),
+             rxf_sum(PAYLOAD_TYPE_TRACE));
+    pushCompanionMessage(block);
+    p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rxf_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
     pushCompanionMessage(block);
 
@@ -22233,31 +22828,31 @@ cron_add_direct:
     };
     uint32_t own_total = 0;
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
-    p = snprintf(block, sizeof(block),
-                 "tx self-initiated (flood + zero-hop):\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
-                 "  total=%lu",
-                 own_of(PAYLOAD_TYPE_ADVERT),
-                 own_of(PAYLOAD_TYPE_PATH),
-                 own_of(PAYLOAD_TYPE_TXT_MSG),
-                 own_of(PAYLOAD_TYPE_GRP_TXT),
-                 own_of(PAYLOAD_TYPE_ACK),
-                 own_of(PAYLOAD_TYPE_REQ),
-                 own_of(PAYLOAD_TYPE_RESPONSE),
-                 own_of(PAYLOAD_TYPE_ANON_REQ),
-                 own_of(PAYLOAD_TYPE_TRACE),
-                 (unsigned long)own_total);
+    snprintf(block, sizeof(block),
+             "tx self-initiated (flood + zero-hop):\n"
+             "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
+             "  req=%u rsp=%u anon=%u trc=%u",
+             own_of(PAYLOAD_TYPE_ADVERT),
+             own_of(PAYLOAD_TYPE_PATH),
+             own_of(PAYLOAD_TYPE_TXT_MSG),
+             own_of(PAYLOAD_TYPE_GRP_TXT),
+             own_of(PAYLOAD_TYPE_ACK),
+             own_of(PAYLOAD_TYPE_REQ),
+             own_of(PAYLOAD_TYPE_RESPONSE),
+             own_of(PAYLOAD_TYPE_ANON_REQ),
+             own_of(PAYLOAD_TYPE_TRACE));
+    pushCompanionMessage(block);
+    p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)own_total);
     append_rate_hint(block + p, sizeof(block) - p, own_total, uptime_s);
     pushCompanionMessage(block);
 
     // Selbst-initiierter FLOOD-Anteil pro ptype. Direct = own_of - flood.
-    // Eigene Message damit es das 145-Byte-Limit nicht reisst.
     uint32_t own_flood_total = 0;
     for (int pp = 0; pp < 16; pp++) own_flood_total += _tx_self_flood_by_ptype[pp];
     snprintf(block, sizeof(block),
              "tx own flood:\n"
-             "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
-             "  flood total=%lu",
+             "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
+             "  req=%u rsp=%u anon=%u trc=%u",
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_PATH],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG],
@@ -22266,8 +22861,9 @@ cron_add_direct:
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_REQ],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_RESPONSE],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ],
-             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TRACE],
-             (unsigned long)own_flood_total);
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TRACE]);
+    pushCompanionMessage(block);
+    snprintf(block, sizeof(block), "  flood total=%lu", (unsigned long)own_flood_total);
     pushCompanionMessage(block);
     return;
   }
@@ -22436,38 +23032,40 @@ cron_add_direct:
     }
 
     // ---- 6a) rx flood -- heard-direct (FLOOD-typed, path_len=0) ----
-    p = snprintf(block, sizeof(block),
-                 "rx flood -- heard-direct (path_len=0):\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
-                 "  total=%lu",
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH][0],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG][0],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT][0],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK][0],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ][0],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][0],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][0],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][0],
-                 (unsigned long)rxf_hd_total);
+    snprintf(block, sizeof(block),
+             "rx flood -- heard-direct (path_len=0):\n"
+             "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
+             "  req=%u rsp=%u anon=%u trc=%u",
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][0]);
+    pushCompanionMessage(block);
+    p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rxf_hd_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_hd_total, uptime_s);
     pushCompanionMessage(block);
 
     // ---- 6b) rx flood -- repeated (FLOOD-typed, path_len>0) ----
-    p = snprintf(block, sizeof(block),
-                 "rx flood -- repeated (path_len>0):\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
-                 "  total=%lu",
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][1],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH][1],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG][1],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT][1],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK][1],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ][1],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][1],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][1],
-                 (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][1],
-                 (unsigned long)rxf_rep_total);
+    snprintf(block, sizeof(block),
+             "rx flood -- repeated (path_len>0):\n"
+             "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
+             "  req=%u rsp=%u anon=%u trc=%u",
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_PATH][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ACK][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_REQ][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][1]);
+    pushCompanionMessage(block);
+    p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rxf_rep_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_rep_total, uptime_s);
     pushCompanionMessage(block);
 
@@ -22523,33 +23121,33 @@ cron_add_direct:
     };
     uint32_t own_total = 0;
     for (int pp = 0; pp < 16; pp++) own_total += own_of((uint8_t)pp);
-    p = snprintf(block, sizeof(block),
-                 "tx self-initiated (flood + zero-hop):\n"
-                 "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
-                 "  total=%lu",
-                 own_of(PAYLOAD_TYPE_ADVERT),
-                 own_of(PAYLOAD_TYPE_PATH),
-                 own_of(PAYLOAD_TYPE_TXT_MSG),
-                 own_of(PAYLOAD_TYPE_GRP_TXT),
-                 own_of(PAYLOAD_TYPE_ACK),
-                 own_of(PAYLOAD_TYPE_REQ),
-                 own_of(PAYLOAD_TYPE_RESPONSE),
-                 own_of(PAYLOAD_TYPE_ANON_REQ),
-                 own_of(PAYLOAD_TYPE_TRACE),
-                 (unsigned long)own_total);
+    snprintf(block, sizeof(block),
+             "tx self-initiated (flood + zero-hop):\n"
+             "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
+             "  req=%u rsp=%u anon=%u trc=%u",
+             own_of(PAYLOAD_TYPE_ADVERT),
+             own_of(PAYLOAD_TYPE_PATH),
+             own_of(PAYLOAD_TYPE_TXT_MSG),
+             own_of(PAYLOAD_TYPE_GRP_TXT),
+             own_of(PAYLOAD_TYPE_ACK),
+             own_of(PAYLOAD_TYPE_REQ),
+             own_of(PAYLOAD_TYPE_RESPONSE),
+             own_of(PAYLOAD_TYPE_ANON_REQ),
+             own_of(PAYLOAD_TYPE_TRACE));
+    pushCompanionMessage(block);
+    p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)own_total);
     append_rate_hint(block + p, sizeof(block) - p, own_total, uptime_s);
     pushCompanionMessage(block);
 
     // ---- Msg 5b: tx own flood-Subset (Direct = own_of - flood) ------------
-    // Eigene Message wegen 145-Byte-BLE-Limit. Nightly-Beacon-Adverts sind
-    // hier sichtbar (gehen als Flood raus); manuelle Direct-DMs zaehlen
-    // gegen self-initiated aber nicht hier.
+    // Nightly-Beacon-Adverts sind hier sichtbar (Flood); manuelle Direct-DMs
+    // zaehlen gegen self-initiated aber nicht hier.
     uint32_t own_flood_total = 0;
     for (int pp = 0; pp < 16; pp++) own_flood_total += _tx_self_flood_by_ptype[pp];
     snprintf(block, sizeof(block),
              "tx own flood:\n"
-             "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
-             "  flood total=%lu",
+             "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
+             "  req=%u rsp=%u anon=%u trc=%u",
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ADVERT],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_PATH],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG],
@@ -22558,28 +23156,30 @@ cron_add_direct:
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_REQ],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_RESPONSE],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ],
-             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TRACE],
-             (unsigned long)own_flood_total);
+             (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TRACE]);
+    pushCompanionMessage(block);
+    snprintf(block, sizeof(block), "  flood total=%lu", (unsigned long)own_flood_total);
     pushCompanionMessage(block);
 
     // ---- Msg 6+7: tx repeated + tx total — nur wenn Repeater aktiv ----
     uint32_t rep_total = 0;
     for (int pp = 0; pp < 16; pp++) rep_total += _repeat_by_ptype[pp];
     if (_prefs.client_repeat != 0) {
-      p = snprintf(block, sizeof(block),
-                   "tx repeated:\n"
-                   "  adv=%u path=%u txt=%u grp=%u ack=%u req=%u rsp=%u anon=%u trc=%u\n"
-                   "  total=%lu",
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ADVERT],
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_PATH],
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_TXT_MSG],
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_GRP_TXT],
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ACK],
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_REQ],
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_RESPONSE],
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ANON_REQ],
-                   (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_TRACE],
-                   (unsigned long)rep_total);
+      snprintf(block, sizeof(block),
+               "tx repeated:\n"
+               "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
+               "  req=%u rsp=%u anon=%u trc=%u",
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ADVERT],
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_PATH],
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_TXT_MSG],
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_GRP_TXT],
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ACK],
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_REQ],
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_RESPONSE],
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_ANON_REQ],
+               (unsigned)_repeat_by_ptype[PAYLOAD_TYPE_TRACE]);
+      pushCompanionMessage(block);
+      p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rep_total);
       append_rate_hint(block + p, sizeof(block) - p, rep_total, uptime_s);
       pushCompanionMessage(block);
 
@@ -22968,9 +23568,9 @@ cron_add_direct:
                _prefs.default_scope_name[0] ? _prefs.default_scope_name : "?");
       else snprintf(def_line, sizeof(def_line), "default = (none)");
 
-      if (bake_set) snprintf(bake_line, sizeof(bake_line), "bake = #%s",
+      if (bake_set) snprintf(bake_line, sizeof(bake_line), "advert = #%s",
                _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
-      else snprintf(bake_line, sizeof(bake_line), "bake = (none)");
+      else snprintf(bake_line, sizeof(bake_line), "advert = (none)");
 
       if (override_active) {
         uint32_t remaining = _prefs.override_expiry - now;
@@ -23033,7 +23633,7 @@ cron_add_direct:
       const char* active_val;
       const char* active_legend;   // NULL = kein Legende-Zeile noetig
       if (override_active)         { active_val = "override";     active_legend = NULL; }
-      else if (bake_set)           { active_val = "bake";         active_legend = "flooded advert, nightly"; }
+      else if (bake_set)           { active_val = "advert";       active_legend = "nightly Flood-Advert-Scope"; }
       else if (geo_wins_default)   {
         if (geo_name_buf[0]) {
           snprintf(active_val_buf, sizeof(active_val_buf),
@@ -23042,9 +23642,9 @@ cron_add_direct:
         } else {
           active_val = "geo-fallback";
         }
-        active_legend = "Geo gewinnt vor Default (auto=prefer)";
+        active_legend = "Geo-Scope aktiv, weicht vom Default ab (auto=prefer)";
       }
-      else if (default_set)        { active_val = "default";      active_legend = "configured catchall scope"; }
+      else if (default_set)        { active_val = "default";      active_legend = "in der App konfigurierter Default-Scope"; }
       else if (geo_is_fallback)    {
         if (geo_name_buf[0]) {
           snprintf(active_val_buf, sizeof(active_val_buf),
@@ -23053,28 +23653,28 @@ cron_add_direct:
         } else {
           active_val = "geo-fallback";
         }
-        active_legend = "kein Default gesetzt";
+        active_legend = "kein Default gesetzt, Geo greift als Fallback";
       }
-      else                         { active_val = "#local";       active_legend = "last-resort (kein Default/Geo)"; }
+      else                         { active_val = "#local";       active_legend = "letzter Ausweg (weder Default noch Geo verfuegbar)"; }
 
       const char* auto_val;
       const char* auto_legend;
       switch (_prefs.scope_advert_auto) {
         case 1: // off
-          auto_val = "off"; auto_legend = "Geo wird nie verwendet";
+          auto_val = "off"; auto_legend = "Geo-Scope wird nie verwendet";
           break;
         case 3: // prefer
           auto_val = "prefer";
-          if (geo_wins_default)      auto_legend = "Geo gewinnt vor Default";
-          else if (default_set)      auto_legend = "Default == Geo / kein Geo-Match";
-          else if (has_geo)          auto_legend = "Geo als Fallback (kein Default)";
-          else                       auto_legend = "keine Quelle";
+          if (geo_wins_default)      auto_legend = "Geo-Scope aktiv, weicht vom Default ab";
+          else if (default_set)      auto_legend = "Default aktiv -- kein GPS-Fix oder Geo entspricht Default";
+          else if (has_geo)          auto_legend = "Geo aktiv als Fallback (kein Default konfiguriert)";
+          else                       auto_legend = "weder Geo noch Default verfuegbar";
           break;
         default: // on
           auto_val = "on";
-          if (default_set)           auto_legend = "Default gesetzt -- 'auto prefer' liesse Geo gewinnen";
-          else if (has_geo)          auto_legend = "Geo greift als Fallback";
-          else                       auto_legend = "kein Geo-Match";
+          if (default_set)           auto_legend = "Default aktiv -- 'auto prefer' wuerde Geo den Vorrang geben";
+          else if (has_geo)          auto_legend = "Geo aktiv als Fallback";
+          else                       auto_legend = "kein Geo-Match verfuegbar";
           break;
       }
 
@@ -23120,6 +23720,7 @@ cron_add_direct:
       // die anderen Sub-Befehle:
       pushCompanionMessage(
         "weitere:\n"
+        "  scope use       -- Sende-Hierarchie\n"
         "  scope repeater  -- Policy/allowlist\n"
         "  scope list      -- Registry\n"
         "  scope <name>    = Details");
@@ -23131,16 +23732,17 @@ cron_add_direct:
     // -- Sub-Befehl-Dispatch via match_choice (Prefix-Matching erlaubt).
     // 'remove' und 'clear' sind no_abbrev (zerstoerend).
     static const CompanionChoice scope_subs[] = {
-      { "default",  false },  // 0  - eigene Send-Default (auch unter 'advert')
-      { "bake",     false },  // 1  - nightly bake (auch unter 'advert')
-      { "override", false },  // 2  - persistent override (auch unter 'advert')
+      { "default",  false },  // 0  - eigene Send-Default (auch unter 'use')
+      { "advert",   false },  // 1  - nightly Flood-Advert-Scope (auch unter 'use')
+      { "override", false },  // 2  - persistent override (auch unter 'use')
       { "list",     false },  // 3  - Registry (Liste A) anzeigen
       { "add",      false },  // 4  - Registry-Eintrag hinzufuegen
       { "remove",   true  },  // 5  - Registry-Eintrag loeschen (no_abbrev!)
       { "info",     false },  // 6  - Detail-Anzeige fuer einen Eintrag
       { "repeater", false },  // 7  - Sub-Namespace: Repeat-Policy
       { "regions",  false },  // 8  - Built-in Region-Tabelle (read-only)
-      { "advert",   false },  // 9  - Sub-Namespace: Advert-Policy (Wunschliste 13)
+      { "use",      false },  // 9  - Sub-Namespace: Sende-Hierarchie fuer eigene Flood-Pakete
+      { "channel",  false },  // 10 - Sub-Namespace: Channel-Msg-Behavior (z.B. no-scope)
     };
     // Punkt 16 Reise-Fix 2026-06-08: Pre-Flight Region-Lookup.
     // Wenn das erste Wort ein bekannter Region-Name ist (z.B. 'de',
@@ -23196,8 +23798,9 @@ cron_add_direct:
       // ? — Top-Level-Hilfe
       if (first_word[0] == '?' && first_word[1] == 0) {
         pushCompanionMessage("scope — Sub-Befehle:");
-        pushCompanionMessage("  scope advert [...]   ('scope adv ?')\n    Eigene Adverts: default/bake/override/auto");
+        pushCompanionMessage("  scope use [...]   ('scope use ?')\n    Sende-Hierarchie eigener Flood-Pakete:\n    default/advert/override/auto");
         pushCompanionMessage("  scope repeater [...]   ('scope rep ?')\n    Repeat-Policy + globaler Auto-Schalter");
+        pushCompanionMessage("  scope channel no-scope <direct|flood>\n    Channel-Msg-Verhalten ohne Scope");
         pushCompanionMessage("  scope list | add | remove | info | regions\n    Registry");
         pushCompanionMessage("  scope <name> pin|geo|off|disable|delete|advert|info\n    Per-Eintrag");
         return;
@@ -23426,13 +24029,62 @@ cron_add_direct:
       return;
     }
 
-    // -- scope advert <sub> ... (Wunschliste 13) --
-    // Sub-Namespace fuer alles Advert-bezogene:
-    //   scope advert default <n>|clear     -> sub_idx 0
-    //   scope advert bake <n>|clear        -> sub_idx 1
-    //   scope advert override <n> [TTL]    -> sub_idx 2
-    //   scope advert auto off|on|prefer    -> hier behandelt
-    // Re-Dispatch fuer default/bake/override: arg + sub_idx werden auf
+    // -- scope channel <sub> ... (2026-07-02) --
+    // Sub-Namespace fuer Channel-Msg-Behavior:
+    //   scope channel no-scope <flood|direct>  (persistent)
+    if (sub_idx == 10) {
+      const char* p = strchr(arg, ' ');
+      if (p) { while (*p == ' ' || *p == '\t') p++; }
+      if (!p || *p == 0 || (p[0] == '?' && (p[1] == 0 || p[1] == ' '))) {
+        const char* mode = (_prefs.channel_no_scope_behavior == 2) ? "flood" : "direct";
+        char r[180];
+        snprintf(r, sizeof(r),
+                 "scope channel:\n"
+                 "  no-scope = %s (default: direct)\n"
+                 "Sub-Befehl: 'scope channel no-scope <direct|flood>'\n"
+                 "Alternative pro Channel: Scope=#unscoped fuer Flood.",
+                 mode);
+        pushCompanionMessage(r);
+        return;
+      }
+      static const CompanionChoice ch_subs[] = { { "no-scope", false } };
+      char amb[40];
+      int ci = match_choice(p, ch_subs, 1, amb, sizeof(amb));
+      if (ci == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", amb); pushCompanionMessage(r); return; }
+      if (ci < 0)   { pushCompanionMessage("scope channel: bekannt ist 'no-scope'."); return; }
+      // no-scope <flood|direct>
+      const char* val = strchr(p, ' ');
+      if (val) { while (*val == ' ' || *val == '\t') val++; }
+      if (!val || *val == 0) {
+        const char* mode = (_prefs.channel_no_scope_behavior == 2) ? "flood" : "direct";
+        char r[120];
+        snprintf(r, sizeof(r),
+                 "scope channel no-scope = %s\n"
+                 "Werte: direct | flood", mode);
+        pushCompanionMessage(r);
+        return;
+      }
+      static const CompanionChoice ns_vals[] = { {"direct", false}, {"flood", false} };
+      char vamb[40];
+      int vi = match_choice(val, ns_vals, 2, vamb, sizeof(vamb));
+      if (vi == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", vamb); pushCompanionMessage(r); return; }
+      if (vi < 0)   { pushCompanionMessage("Usage: scope channel no-scope <direct|flood>"); return; }
+      _prefs.channel_no_scope_behavior = (vi == 0) ? 1 : 2;
+      _unscoped_channel_direct = (vi == 0);
+      savePrefs();
+      pushCompanionMessage(vi == 0
+        ? "OK - scope channel no-scope = direct (zero-hop)"
+        : "OK - scope channel no-scope = flood (klassisch)");
+      return;
+    }
+    // -- scope use <sub> ... (Wunschliste 13, renamed 2026-07-01) --
+    // Sub-Namespace fuer die Sende-Hierarchie eigener Flood-Pakete
+    // (DM-Discovery, ACK, REQ/RESP, ANON-REQ, Channel-Msg, nightly Advert):
+    //   scope use default <n>|clear     -> sub_idx 0
+    //   scope use advert <n>|clear      -> sub_idx 1 (nightly Flood-Advert-Scope)
+    //   scope use override <n> [TTL]    -> sub_idx 2
+    //   scope use auto off|on|prefer    -> hier behandelt
+    // Re-Dispatch fuer default/advert/override: arg + sub_idx werden auf
     // die existierenden Handler umgebogen und das if-chain faellt durch.
     if (sub_idx == 9) {
       const char* p = strchr(arg, ' ');
@@ -23462,7 +24114,7 @@ cron_add_direct:
         char def_line[80], bake_line[80], ovr_line[120];
         snprintf(def_line, sizeof(def_line), "default = %s",
                  default_set ? _prefs.default_scope_name : "(none)");
-        snprintf(bake_line, sizeof(bake_line), "bake = %s",
+        snprintf(bake_line, sizeof(bake_line), "advert = %s",
                  bake_set ? _prefs.bake_scope_name : "(none)");
         if (override_active) {
           uint32_t rem = _prefs.override_expiry - now;
@@ -23493,44 +24145,51 @@ cron_add_direct:
 
         const char* active;
         if (override_active)            active = "override";
-        else if (bake_set)              active = "bake (flooded advert, nightly)";
+        else if (bake_set)              active = "advert (nightly Flood-Advert-Scope)";
         else if (geo_wins_default)      active = "geo-fallback (gewinnt vor Default)";
-        else if (default_set)           active = "default (configured catchall scope)";
+        else if (default_set)           active = "default (in der App konfigurierter Default-Scope)";
         else if (geo_is_fallback)       active = "geo-fallback";
         else                            active = "(none)";
 
-        char auto_str[140];
+        char auto_str[200];
         switch (_prefs.scope_advert_auto) {
           case 1:
-            snprintf(auto_str, sizeof(auto_str), "off (Geo wird nie verwendet)");
+            snprintf(auto_str, sizeof(auto_str),
+                     "off (Geo-Scope wird nie verwendet)");
             break;
           case 3:
             if (geo_wins_default)
-              snprintf(auto_str, sizeof(auto_str), "prefer (Geo gewinnt vor Default)");
+              snprintf(auto_str, sizeof(auto_str),
+                       "prefer (Geo-Scope aktiv, weicht vom Default ab)");
             else if (default_set)
               snprintf(auto_str, sizeof(auto_str),
-                       "prefer (Default == Geo oder kein Geo-Match -- Default wins)");
+                       "prefer (Default aktiv -- kein GPS-Fix oder\n"
+                       "       Geo-Scope entspricht Default)");
             else if (has_geo)
-              snprintf(auto_str, sizeof(auto_str), "prefer (Geo als Fallback)");
+              snprintf(auto_str, sizeof(auto_str),
+                       "prefer (Geo-Scope aktiv, kein Default konfiguriert)");
             else
-              snprintf(auto_str, sizeof(auto_str), "prefer (keine Quelle)");
+              snprintf(auto_str, sizeof(auto_str),
+                       "prefer (weder Geo noch Default verfuegbar)");
             break;
           default:
             if (default_set)
               snprintf(auto_str, sizeof(auto_str),
-                       "on (Geo bereit, greift NICHT -- Default gesetzt;\n"
-                       "       'auto prefer' liesse Geo gewinnen)");
+                       "on (Default aktiv; Geo waere verfuegbar aber greift nicht\n"
+                       "       -- 'auto prefer' wuerde Geo den Vorrang geben)");
             else if (has_geo)
-              snprintf(auto_str, sizeof(auto_str), "on (Geo greift als Fallback)");
+              snprintf(auto_str, sizeof(auto_str),
+                       "on (Geo-Scope aktiv als Fallback, kein Default gesetzt)");
             else
-              snprintf(auto_str, sizeof(auto_str), "on (kein Geo-Match)");
+              snprintf(auto_str, sizeof(auto_str),
+                       "on (kein Geo-Match verfuegbar)");
             break;
         }
 
         // Split wie oben -- s. Wire-Frame-Limit-Kommentar.
         char head[200];
         snprintf(head, sizeof(head),
-                 "scope advert (send hierarchy):\n"
+                 "scope use (Sende-Hierarchie eigener Flood-Pakete):\n"
                  "  %s\n  %s\n  %s",
                  def_line, bake_line, ovr_line);
         pushCompanionMessage(head);
@@ -23591,7 +24250,7 @@ cron_add_direct:
           pushCompanionMessage(nxt);
         }
 
-        pushCompanionMessage("Hilfe: 'scope advert ?' fuer Sub-Befehle.");
+        pushCompanionMessage("Hilfe: 'scope use ?' fuer Sub-Befehle.");
         return;
       }
 
@@ -23601,19 +24260,20 @@ cron_add_direct:
                           : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
         char r[200];
         snprintf(r, sizeof(r),
-          "scope advert — Sub-Befehle (Status auto = %s):", state);
+          "scope use — Sub-Befehle (Status auto = %s):", state);
         pushCompanionMessage(r);
         pushCompanionMessage(
-          "  scope advert default <name> | clear\n"
-          "    Default-Scope fuer eigene Auto-Adverts");
+          "  scope use default <name> | clear\n"
+          "    Default-Scope fuer alle eigenen Flood-Pakete\n"
+          "    (DM-Discovery, ACK, REQ/RESP, ANON-REQ, Channel-Msg, Advert)");
         pushCompanionMessage(
-          "  scope advert bake <name> | clear\n"
-          "    Nightly-Flood-Advert nutzt diesen Scope");
+          "  scope use advert <name> | clear\n"
+          "    Scope fuer den nightly Flood-Advert (Bake)");
         pushCompanionMessage(
-          "  scope advert override <name> [<n>h|<n>d] | clear\n"
+          "  scope use override <name> [<n>h|<n>d] | clear\n"
           "    Temp Override (max 30d, persistent ueber Reboot)");
         pushCompanionMessage(
-          "  scope advert auto off | on | prefer");
+          "  scope use auto off | on | prefer");
         pushCompanionMessage(
           "    on (Default):\n"
           "      Default-Scope gewinnt. Geo als Fallback wenn\n"
@@ -23624,30 +24284,30 @@ cron_add_direct:
           "      andere ist als das Default. ('User ist nicht zu Hause')");
         pushCompanionMessage(
           "    off:\n"
-          "      Geo wird nie verwendet, nur Default/Bake/Override.");
+          "      Geo wird nie verwendet, nur Default/Advert-Scope/Override.");
         return;
       }
 
-      static const CompanionChoice adv_subs[] = {
+      static const CompanionChoice use_subs[] = {
         { "default",  false },  // 0 -> dispatch to existing sub_idx==0
-        { "bake",     false },  // 1 -> sub_idx==1
+        { "advert",   false },  // 1 -> sub_idx==1 (nightly Flood-Advert-Scope)
         { "override", false },  // 2 -> sub_idx==2
         { "auto",     false },  // 3 -> handled here
       };
-      char adv_ambig[40];
-      int av = match_choice(p, adv_subs, 4, adv_ambig, sizeof(adv_ambig));
+      char use_ambig[40];
+      int av = match_choice(p, use_subs, 4, use_ambig, sizeof(use_ambig));
       if (av == -1) {
-        char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", adv_ambig);
+        char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", use_ambig);
         pushCompanionMessage(r); return;
       }
       if (av < 0) {
         pushCompanionMessage(
-          "Sub-Aktion unbekannt. 'scope advert ?' fuer Liste.");
+          "Sub-Aktion unbekannt. 'scope use ?' fuer Liste.");
         return;
       }
 
       if (av == 3) {
-        // scope advert auto off|on|prefer
+        // scope use auto off|on|prefer
         const char* val = strchr(p, ' ');
         if (val) { while (*val == ' ') val++; }
         if (!val || *val == 0) {
@@ -23655,8 +24315,8 @@ cron_add_direct:
                             : (_prefs.scope_advert_auto == 3) ? "prefer" : "on";
           char r[160];
           snprintf(r, sizeof(r),
-            "scope advert auto = %s\n"
-            "  off / on / prefer  (siehe 'scope advert ?')", state);
+            "scope use auto = %s\n"
+            "  off / on / prefer  (siehe 'scope use ?')", state);
           pushCompanionMessage(r);
           return;
         }
@@ -23668,7 +24328,7 @@ cron_add_direct:
         char val_ambig[40];
         int vi = match_choice(val, auto_vals, 3, val_ambig, sizeof(val_ambig));
         if (vi == -1) { char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", val_ambig); pushCompanionMessage(r); return; }
-        if (vi < 0) { pushCompanionMessage("Usage: scope advert auto off|on|prefer"); return; }
+        if (vi < 0) { pushCompanionMessage("Usage: scope use auto off|on|prefer"); return; }
         _prefs.scope_advert_auto = (uint8_t)(vi + 1);
         savePrefs();
         const char* name_str = (vi == 0) ? "off" : (vi == 1) ? "on" : "prefer";
@@ -23676,12 +24336,12 @@ cron_add_direct:
             (vi == 0) ? "Geo wird nie verwendet"
           : (vi == 1) ? "Geo als Fallback wenn Default leer"
                       : "Geo schlaegt Default wenn oertlich andere Region";
-        char r[160]; snprintf(r, sizeof(r), "OK - scope advert auto = %s\n  %s", name_str, desc);
+        char r[160]; snprintf(r, sizeof(r), "OK - scope use auto = %s\n  %s", name_str, desc);
         pushCompanionMessage(r);
         return;
       }
 
-      // av == 0/1/2: re-dispatch zu existing default/bake/override.
+      // av == 0/1/2: re-dispatch zu existing default/advert/override.
       // Wir biegen arg + sub_idx um und lassen die if-chain weiterlaufen.
       arg = p;
       sub_idx = av;
@@ -23717,28 +24377,28 @@ cron_add_direct:
       return;
     }
 
-    // -- bake <name>|clear --
+    // -- advert <name>|clear --  (nightly Flood-Advert-Scope, war frueher 'bake')
     if (sub_idx == 1) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
-      if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope bake <name>|clear"); return; }
+      if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope advert <name>|clear"); return; }
       // Punkt 17 Fix: clear/none/off als Synonyme.
       if (strcmp(sub, "clear") == 0 || strcmp(sub, "none") == 0 || strcmp(sub, "off") == 0) {
         memset(_prefs.bake_scope_name, 0, sizeof(_prefs.bake_scope_name));
         memset(_prefs.bake_scope_key,  0, sizeof(_prefs.bake_scope_key));
         savePrefs();
-        pushCompanionMessage("OK - scope bake cleared.");
+        pushCompanionMessage("OK - scope advert cleared.");
         return;
       }
       char name[32];
       extract_name(arg, name, sizeof(name));
-      if (name[0] == 0) { pushCompanionMessage("Usage: scope bake <name>|clear"); return; }
+      if (name[0] == 0) { pushCompanionMessage("Usage: scope advert <name>|clear"); return; }
       char tag[40]; snprintf(tag, sizeof(tag), "#%s", name);
       TransportKey key; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, key);
       StrHelper::strncpy(_prefs.bake_scope_name, name, sizeof(_prefs.bake_scope_name));
       memcpy(_prefs.bake_scope_key, key.key, sizeof(_prefs.bake_scope_key));
       savePrefs();
-      char line[100]; snprintf(line, sizeof(line), "OK - scope bake = #%s", name);
+      char line[100]; snprintf(line, sizeof(line), "OK - scope advert = #%s", name);
       pushCompanionMessage(line);
       return;
     }
@@ -23910,7 +24570,7 @@ cron_add_direct:
         "  ! = Eigenes geo auto-Advert nimmt diesen Scope nie.\n"
         "      Keine Auswirkung auf Repeater-Verhalten.");
       pushCompanionMessage(
-        "      'scope advert default/bake/override <name>' kann diesen\n"
+        "      'scope use default/advert/override <name>' kann diesen\n"
         "      Scope trotzdem explizit waehlen.");
       return;
     }

@@ -723,6 +723,15 @@ struct NodePrefs {  // persisted to file
   // nicht da -> wieder powerOff. Robuster als GPREGRET (BOR loescht)
   // und File-Sentinel (LittleFS-Cache-Race). Sentinel 0xFF -> 0.
   uint8_t        shutdown_pending;
+  // DL9SAU 2026-07-02: 'scope channel no-scope' (loest runtime-only
+  // 'unscoped-channelmessages' ab). Steuert was passiert wenn eine
+  // Channel-Msg ohne Scope raus geht (weder App-Scope noch Default
+  // noch Geo). Persistent.
+  //   0xFF (EOF) = uninit -> Migration in initPrefs auf Default (1)
+  //   0          = uninit-alt (falls Byte zufaellig 0 gelanded) -> auf Default
+  //   1          = direct (Default; zero-hop, kein Repeat)
+  //   2          = flood (klassisch, unscoped Reichweite)
+  uint8_t        channel_no_scope_behavior;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim
