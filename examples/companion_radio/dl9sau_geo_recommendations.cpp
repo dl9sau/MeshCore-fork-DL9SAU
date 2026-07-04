@@ -54,7 +54,10 @@ static const GeoRegion regions[] = {
   GEO("de",     47.27, 55.06, 5.87, 15.04),   // Germany bounding box
 
   // Aggregate "super-regions" (union of several Bundesländer, generous boxes)
-  GEO("de-nord",  51.30, 55.06,  6.65, 14.42),  // HH, HB, SH, MV, NI
+  // Sued-Grenze 51.30 -> 52.30 (Feedback 2026-07-04): Halle-Region
+  // (~51.5N) und Sued-Sachsen-Anhalt gehoerten faelschlich zu 'Nord'.
+  // Hannover ~52.4 bleibt knapp drin, Osnabrueck ~52.28 faellt raus.
+  GEO("de-nord",  52.30, 55.06,  6.65, 14.42),  // HH, HB, SH, MV, NI
   GEO("de-ost",   50.16, 54.69,  9.87, 15.04),  // MV, BE, BB, SN, ST, TH
   GEO("de-sued",  47.27, 50.56,  7.51, 13.84),  // BY, BW, parts of HE/RP
   GEO("de-west",  49.11, 53.89,  5.87, 10.24),  // HE, NI, HB, NW, RP, SL
@@ -93,7 +96,11 @@ static const GeoRegion regions[] = {
   GEO("de-th", 50.20, 51.65,  9.87, 12.66),   // Thüringen
 
   // Local specials (DL9SAU's two geo-fence regions, see chooseGeoFallbackScope)
-  GEO("de-bebb",      51.36, 53.56, 11.27, 14.77),  // Berlin/Brandenburg bridge (=de-bb box)
+  // West-Grenze 11.27 -> 12.40 und Sued-Grenze 51.36 -> 51.80
+  // (Feedback 2026-07-04): Halle (51.5N, 11.97E) ist Sachsen-Anhalt,
+  // nicht Berlin/Brandenburg. Berlin (13.09-13.76E, >52.34N) bleibt
+  // komplett drin; Cottbus ~51.75N knapp drin.
+  GEO("de-bebb",      51.80, 53.56, 12.40, 14.77),  // Berlin/Brandenburg bridge
   GEO("ostfriesland", 52.95, 53.80,  6.50,  8.50),   // Sued-Grenze 53.10 -> 52.95 (Papenburg + ~10km Margin, User-Wunsch 2026-06-05)
 
   // Special-Scopes (Wunschliste 11 Schritte 10-12): position-unabhaengig,
