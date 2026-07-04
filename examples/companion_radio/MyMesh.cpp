@@ -5160,11 +5160,11 @@ void MyMesh::discoverFinishAndPrint() {
     snprintf(r, sizeof(r),
              "discover regions chain:\n"
              "  %u REPEATER hat/haben in 30s geantwortet\n"
-             "  %u Regions-Anfrage(n) laufen noch\n"
-             "Aggregat in 60s (oder nach Abschluss).",
+             "  %u Regions-Anfrage(n) laufen noch",
              (unsigned)_discover_count,
              (unsigned)_regions_pending_count);
     pushCompanionMessage(r);
+    pushCompanionMessage("Aggregat in 60s (oder nach Abschluss).");
     // Wunschliste 59 (2026-06-14): 30s -> 60s. User-Constraint: discover
     // selbst ist auf 60s-Intervalle throttled, also keine zusaetzliche
     // Wartezeit fuer User. Plus Early-Exit-Pfad in loop()-Check unten
@@ -13251,8 +13251,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           || topic_prefix_match(topic, "magic")) {
         pushCompanionMessage(
           "magic scope names: die Firmware erkennt bestimmte\n"
-          "Scope-Namen und schaltet Sonderverhalten ein statt\n"
-          "sie normal als Transport-Code zu senden.");
+          "Scope-Namen und schaltet Sonderverhalten ein");
+        pushCompanionMessage(
+          "statt sie normal als Transport-Code zu senden.");
         pushCompanionMessage(
           "Wenn du im Scope-Feld eines Channels (App-UI, oder\n"
           "als 'scope default') einen dieser Namen setzt:");
@@ -13291,8 +13292,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Default fuer alle eigenen Sends. Beim Reisen nichts anpassen.");
         pushCompanionMessage(
           "Wenn du 'kein Scope' waehlst (App-Setting leer), gilt\n"
-          "'scope channel no-scope' (Default: direct = zero-hop).\n"
-          "Fuer klassischen Flood ohne Setting-Aenderung: Scope=#unscoped.");
+          "'scope channel no-scope' (Default: direct = zero-hop).");
+        pushCompanionMessage(
+          "Fuer klassischen Flood ohne Setting-Aenderung:\n"
+          "Scope=#unscoped.");
         return;
       }
       if (topic_prefix_match(topic, "filter")) {
@@ -23642,7 +23645,14 @@ cron_add_direct:
         } else {
           active_val = "geo-fallback";
         }
-        active_legend = "Geo-Scope aktiv, weicht vom Default ab (auto=prefer)";
+        // Wenn Default=#geo ist die Aussage 'weicht ab' widerspruechlich --
+        // #geo ist gerade die dynamische Geo-Aufloesung.
+        bool default_is_geo =
+            _prefs.default_scope_name[0] != 0
+            && strcasecmp(_prefs.default_scope_name, "geo") == 0;
+        active_legend = default_is_geo
+            ? "default=#geo, dynamisch aufgeloest (auto=prefer)"
+            : "Geo-Scope aktiv, weicht vom Default ab (auto=prefer)";
       }
       else if (default_set)        { active_val = "default";      active_legend = "in der App konfigurierter Default-Scope"; }
       else if (geo_is_fallback)    {
@@ -23665,7 +23675,14 @@ cron_add_direct:
           break;
         case 3: // prefer
           auto_val = "prefer";
-          if (geo_wins_default)      auto_legend = "Geo-Scope aktiv, weicht vom Default ab";
+          if (geo_wins_default) {
+            bool default_is_geo =
+                _prefs.default_scope_name[0] != 0
+                && strcasecmp(_prefs.default_scope_name, "geo") == 0;
+            auto_legend = default_is_geo
+                ? "default=#geo, dynamisch aufgeloest"
+                : "Geo-Scope aktiv, weicht vom Default ab";
+          }
           else if (default_set)      auto_legend = "Default aktiv -- kein GPS-Fix oder Geo entspricht Default";
           else if (has_geo)          auto_legend = "Geo aktiv als Fallback (kein Default konfiguriert)";
           else                       auto_legend = "weder Geo noch Default verfuegbar";
@@ -23698,19 +23715,19 @@ cron_add_direct:
         snprintf(line, sizeof(line), "  %s", ovr_line);  pushCompanionMessage(line);
       }
 
-      // auto + active als 2 separate Messages (jede mit Wert + Legende).
-      // Bleibt unter 145 Zeichen auch bei laengster Legende.
+      // auto + active als 2 separate Messages. Legende darunter
+      // eingerueckt statt Wert zu wiederholen (Feedback 2026-07-04).
       char line2[160];
       if (auto_legend)
-        snprintf(line2, sizeof(line2), "  auto = %s\n  %s: %s",
-                 auto_val, auto_val, auto_legend);
+        snprintf(line2, sizeof(line2), "  auto = %s\n    %s",
+                 auto_val, auto_legend);
       else
         snprintf(line2, sizeof(line2), "  auto = %s", auto_val);
       pushCompanionMessage(line2);
 
       if (active_legend)
-        snprintf(line2, sizeof(line2), "  active = %s\n  %s: %s",
-                 active_val, active_val, active_legend);
+        snprintf(line2, sizeof(line2), "  active = %s\n    %s",
+                 active_val, active_legend);
       else
         snprintf(line2, sizeof(line2), "  active = %s", active_val);
       pushCompanionMessage(line2);
