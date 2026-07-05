@@ -773,6 +773,9 @@ private:
   struct CompletedRegionsEntry {
     uint8_t  pubkey[32];
     int8_t   our_snr_q4;        // unsere SNR-Sicht der RESP
+    uint32_t received_at_rtc;   // 2026-07-05: fuer TTL-basiertes Purge
+                                //  in discoverStart -- roll-forward-Cache
+                                //  ueber mehrere Discover-Runden hinweg.
     char     csv[120];          // CSV der Regions vom Responder
   };
   static const int MAX_COMPLETED_REGIONS = 16;
@@ -799,6 +802,11 @@ private:
                             uint8_t req_type);
   // Legacy-Convenience -- ruft sendAnonQueryZeroHop mit REGIONS.
   bool sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name);
+  // 2026-07-05: Roll-Forward-Cache Helper. Update wenn pubkey schon in
+  // _regions_completed, sonst Insert (falls Platz). csv_data==NULL ODER
+  // csv_len==0 -> Leer-CSV (deny unscoped, keine Regionen).
+  void upsertCompletedRegion(const uint8_t* pubkey32, const uint8_t* csv_data,
+                             size_t csv_len);
   void finalizeRegionsChain();
   // Einheitlicher Legend-Entry fuer 'discover' (CTL-only) UND
   // 'discover regions' (Chain mit Region-CSV). entry liefert
