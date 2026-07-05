@@ -386,6 +386,12 @@ void setup() {
     delay(300);
   }
 #endif
+  // 2026-07-05: Reset-Reason FRUEH lesen + an MyMesh weitergeben, damit
+  // MyMesh::begin() intern den Boot-Log-Push (vor "booted") mit der
+  // richtigen Info generieren kann. wdtMapResetReason() liest hardware
+  // register -- sicher hier aufrufbar.
+  _wdt_last_reset = wdtMapResetReason();
+  the_mesh.setLastResetReason((uint8_t)_wdt_last_reset);
   // DL9SAU 2026-06-01 v2: USB-CDC TX-Timeout sehr klein halten. Verhindert
   // loop()-Stalls wenn das Geraet ohne USB-Host laeuft (z.B. Powerbank) und
   // der TX-FIFO sich fuellt -- ohne diesen Hint koennte Serial.write() bis
@@ -643,6 +649,10 @@ void setup() {
 
   sensors.begin();
 
+  // 2026-07-05: Reset-Reason wurde jetzt ganz vorne (nach Serial.begin)
+  // gelesen; bootLogAppend() ruft MyMesh::begin() intern auf, VOR dem
+  // "booted"-Push. Aufruf hier entfaellt komplett.
+
 #if ENV_INCLUDE_GPS == 1
   the_mesh.applyGpsPrefs();
 #endif
@@ -668,14 +678,9 @@ void setup() {
   }
 #endif
 
-  // Wunschliste 53 (2026-06-14): Reset-Reason auslesen + an MyMesh
-  // weitergeben fuer stats-core 'last_reset'-Anzeige + Boot-Log.
-  _wdt_last_reset = wdtMapResetReason();
-  the_mesh.setLastResetReason((uint8_t)_wdt_last_reset);
-  // Persistenten Boot-Log um neuen Eintrag erweitern (Ring 10, oldest
-  // out). Pusht zugleich '[boot] ...' an $companion-Channel damit User
-  // den Reboot-Grund direkt im Chat sieht.
-  the_mesh.bootLogAppend();
+  // Wunschliste 53 (2026-06-14): Boot-Log wurde nach 2026-07-05 nach oben
+  // (VOR applyGpsPrefs/UI/onBootComplete) verschoben. Aufruf hier
+  // entfaellt.
   // WDT-State initialisieren (kein activate hier -- erst am Ende vom
   // ersten loop(), damit BLE/LoRa-/Sensor-Init mit ihren langlaufenden
   // Stack-Inits den Pet-Cycle nicht verzoegern).

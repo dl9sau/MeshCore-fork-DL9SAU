@@ -698,7 +698,35 @@ private:
   DiscoverEntry _discover_entries[MAX_DISCOVER_ENTRIES];
   uint8_t       _discover_count;
   uint32_t      _discover_tag;
+  // Piggyback 2026-07-04: App-triggered Discovers mit-processen. Wenn die
+  // App CMD_SEND_CONTROL_DATA mit CTL_TYPE_NODE_DISCOVER_REQ schickt,
+  // extrahieren wir den Tag und matchen ihn zusaetzlich in
+  // discoverHandleResp. Damit fuellt sich unser _discover_entries[] auch
+  // wenn User die Discovery via App (nicht CLI) startet.
+  uint32_t      _app_discover_tag;
+  // 2026-07-05: Filter aus CTL-REQ merken damit Ausgabe zwischen
+  // "discover repeater" / "discover sensor" / "discover all" unterscheiden
+  // kann. 0 = nicht app-triggered oder unbekannt.
+  uint8_t       _app_discover_filter = 0;
+  // Regions-Modus wird per follow-up CMD_SEND_ANON_REQ (REGIONS-type)
+  // erkannt -- App sendet nach den CTL-RESPs eine ANON-Query je REPEATER.
+  bool          _app_discover_regions_mode = false;
   bool          _discover_active;
+
+  // Wunschliste 2026-07-05: Chain-Send-Staffelung. Statt 9 ANON-REQs
+  // back-to-back (~4.5s Radio-Blockade + Rate-Limit-Risiko) queuen wir
+  // sie und senden 1.5s versetzt in manageChainSends() im Loop-Tick.
+  struct ChainSendPending {
+    uint8_t  pubkey[32];
+    char     name[32];
+    uint32_t send_at_ms;
+  };
+  static const int MAX_CHAIN_SEND_PENDING = 16;
+  ChainSendPending _chain_send_pending[MAX_CHAIN_SEND_PENDING];
+  uint8_t          _chain_send_pending_count;
+  void enqueueChainSend(const uint8_t* pk32, const char* name,
+                        uint32_t delay_from_now_ms);
+  void manageChainSends();
   unsigned long _discover_expiry_ms;
   unsigned long _discover_next_allowed_ms; // rate-limit: 60s seit letztem REQ
   // RTC-Timestamp wann der letzte discover-Batch endete (>=1 Antwort).
