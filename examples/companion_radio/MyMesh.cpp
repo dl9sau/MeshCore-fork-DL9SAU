@@ -3736,6 +3736,14 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
       off += nl;
       return true;
     };
+    // 2026-07-05: Meshcore-Wildcard-Sentinel '*' als ersten Token wenn
+    // wir unscoped Traffic repeaten. flood_max_unscoped_companions:
+    //   0                 = explizit off (kein '*')
+    //   CH_HOPS_OFF (254) = follow default (repeated, '*')
+    //   1..N              = expliziter Cap (repeated, '*')
+    if (_prefs.flood_max_unscoped_companions != 0) {
+      append_name("*");
+    }
     bool auto_en = (_prefs.scope_repeater_auto == 2);
     for (int i = 0; i < _buildin_keys_count; i++) {
       // Alias-Eintraege (zusatz-Bbox fuer einen schon vorhandenen Namen)
