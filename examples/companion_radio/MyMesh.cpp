@@ -4373,29 +4373,22 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     // Wunschliste 27c: erst unseren eigenen Ring (Multi-Tag) pruefen,
     // damit Chain-/Manual-CLI Antworten in $companion landen ohne den
     // App-Pfad zu stoeren.
-    for (uint8_t i = 0; i < _regions_pending_count; i++) {
-      if (_regions_pending[i].tag != tag) continue;
-      bool from_chain = _regions_pending[i].from_chain;
+    // 2026-07-06 REFACTOR: Match auf _discovery.region_query_tag statt
+    // _regions_pending. Ein Slot pro pubkey -- strukturell keine Doubles.
+    for (uint8_t i = 0; i < _discovery_count; i++) {
+      if (_discovery[i].region_query_tag != tag || tag == 0) continue;
+      DiscoveryEntry& d = _discovery[i];
+      const bool from_chain = (d.region_from_chain || d.region_from_ctl_trigger);
+      const uint8_t rt = ANON_REQ_TYPE_REGIONS;  // sendAnonQueryZeroHop nutzt nur REGIONS
       if (from_chain) {
-        // Chain-Modus: in den Completed-Buffer fuer spaeteren Aggregat-Output.
-        // Wunschliste 59 (2026-06-14): zusaetzlich Trace + Progressive-Output
-        // damit User waehrend der bis-zu-60s-Wartezeit schon Antworten sieht
-        // und Diagnose-Hinweise bekommt.
-        const uint8_t* pk = _regions_pending[i].pubkey;
+        // Chain-Modus: progressive push + _discovery update via upsert.
         char prefix6[7];
-        mesh::Utils::toHex(prefix6, pk, 3);
+        mesh::Utils::toHex(prefix6, d.pubkey, 3);
         size_t csv_len = (len > 8) ? (size_t)(len - 8) : 0;
-        // Trace: in TRACE_DISCOVER sichtbar wenn 'trace on discover' aktiv.
         traceCompanion(TRACE_DISCOVER,
                        "[discover] REGIONS-RESP von %s csv_len=%u",
                        prefix6, (unsigned)csv_len);
         if (csv_len > 0) {
-          // Progressive: sofort an User schicken statt erst bei finalize.
-          // Format kompakt -- Wir geben das volle CSV durch (Zeilenumbruch
-          // in pushCompanionMessage wird zu \r\n im USB-Serial).
-          // 145-Byte-Limit pro $companion-Message (Memory-Entry):
-          //   Prefix 'discover regions: <prefix6> -> ' = 28 Byte
-          //   CSV-Slot 100 Byte -> Gesamt max 128 Byte (safe).
           char buf[160];
           size_t emit_len = csv_len;
           if (emit_len > 100) emit_len = 100;
@@ -4403,32 +4396,23 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
                    "discover regions: %s -> %.*s",
                    prefix6, (int)emit_len, (const char*)&data[8]);
           pushCompanionMessage(buf);
-          upsertCompletedRegion(_regions_pending[i].pubkey, &data[8], csv_len);
+          upsertCompletedRegion(d.pubkey, &data[8], csv_len);
         } else {
-          // Leere RESP -- Repeater hat weder '*' noch Regionen konfiguriert
-          // (praktisch: 'deny unscoped' + keine Region gesetzt).
           char buf[120];
           snprintf(buf, sizeof(buf),
                    "discover regions: %s -> leer "
                    "(deny unscoped und keine Regionen!)",
                    prefix6);
           pushCompanionMessage(buf);
-          if (_chain_responded_empty < 0xFF) _chain_responded_empty++;
-          // Auch bei leerer RESP einen _regions_completed-Slot belegen mit
-          // csv[0]=0. Ermoeglicht in printRepeaterLegendEntry differenzierte
-          // Ausgabe: 'nicht geantwortet' vs 'deny unscoped und keine
-          // Regionen' (User-Feedback 2026-07-05).
-          upsertCompletedRegion(_regions_pending[i].pubkey, NULL, 0);
+          upsertCompletedRegion(d.pubkey, NULL, 0);
         }
       } else {
-        // Manuelle 'discover <regions|owner|basic> <name>' Antwort:
-        // sofort pushen mit Type-spezifischem Format.
-        uint8_t rt = _regions_pending[i].req_type;
+        // Manuelle 'discover <regions|owner|basic> <name>' Antwort.
         char id_str[40];
-        if (_regions_pending[i].name[0]) {
-          StrHelper::strzcpy(id_str, _regions_pending[i].name, sizeof(id_str));
+        if (d.name[0]) {
+          StrHelper::strzcpy(id_str, d.name, sizeof(id_str));
         } else {
-          mesh::Utils::toHex(id_str, _regions_pending[i].pubkey, 8);
+          mesh::Utils::toHex(id_str, d.pubkey, 8);
         }
         char buf[220];
         if (rt == ANON_REQ_TYPE_REGIONS && len > 8) {
@@ -4438,63 +4422,13 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
                    "discover regions @%s:\n  %.*s",
                    id_str, (int)csv_len, (const char*)&data[8]);
           pushCompanionMessage(buf);
-          // 2026-07-05: auch in _regions_completed[] eintragen -- damit
-          // App-getriggerte Regions-Antworten via 'discover show' und
-          // Piggyback-Anzeige sichtbar sind (upsert -> update wenn schon
-          // vorhanden, roll-forward-Cache).
-          upsertCompletedRegion(_regions_pending[i].pubkey, &data[8], csv_len);
-        } else if (rt == ANON_REQ_TYPE_OWNER && len > 8) {
-          // Payload: "name\nowner_info" (kann leer sein nach \n).
-          size_t txt_len = len - 8;
-          if (txt_len > sizeof(buf) - 80) txt_len = sizeof(buf) - 80;
-          // \n im Payload bleibt als Zeilenumbruch -- pushCompanionMessage
-          // expandiert \n -> \r\n auf USB-Serial.
-          snprintf(buf, sizeof(buf),
-                   "discover owner @%s:\n%.*s",
-                   id_str, (int)txt_len, (const char*)&data[8]);
-          pushCompanionMessage(buf);
-        } else if (rt == ANON_REQ_TYPE_BASIC && len >= 9) {
-          uint8_t features = data[8];
-          // 4-Byte RTC im Reply (Bytes 4-7) ist die Remote-Clock.
-          uint32_t remote_clk;
-          memcpy(&remote_clk, &data[4], 4);
-          int32_t skew = (int32_t)remote_clk - (int32_t)getRTCClock()->getCurrentTime();
-          snprintf(buf, sizeof(buf),
-                   "discover basic @%s:\n"
-                   "  features=0x%02X%s%s\n"
-                   "  clock=%lu (skew %+lds)",
-                   id_str,
-                   (unsigned)features,
-                   (features & 0x80) ? " disabled" : "",
-                   (features & 0x03) ? " bridge" : "",
-                   (unsigned long)remote_clk,
-                   (long)skew);
-          pushCompanionMessage(buf);
+          upsertCompletedRegion(d.pubkey, &data[8], csv_len);
         }
+        // OWNER/BASIC-Zweige nicht mehr durch diese Site -- diese Types werden
+        // vom App-CMD_SEND_ANON_REQ-Handler direkt behandelt (App-Piggyback).
       }
-      // Slot aus Ring entfernen (shift down).
-      uint8_t match_pubkey[PUB_KEY_SIZE];
-      memcpy(match_pubkey, _regions_pending[i].pubkey, PUB_KEY_SIZE);
-      for (uint8_t j = i+1; j < _regions_pending_count; j++) {
-        _regions_pending[j-1] = _regions_pending[j];
-      }
-      _regions_pending_count--;
-      // 2026-07-06: Defensiv -- alle weiteren pending-Slots mit demselben
-      // pubkey aufraeumen. Falls trotz Dedup-Fix noch mal 2 pending fuer
-      // denselben Repeater existieren (Race, edge case), werden sie hier
-      // konsistent entfernt statt spaeter als 'nicht geantwortet' zu
-      // erscheinen.
-      uint8_t j = 0;
-      while (j < _regions_pending_count) {
-        if (memcmp(_regions_pending[j].pubkey, match_pubkey, PUB_KEY_SIZE) == 0) {
-          for (uint8_t k = j+1; k < _regions_pending_count; k++) {
-            _regions_pending[k-1] = _regions_pending[k];
-          }
-          _regions_pending_count--;
-        } else {
-          j++;
-        }
-      }
+      // tag clearen; region_answered_at_rtc setzt upsertCompletedRegion.
+      d.region_query_tag = 0;
       return;  // nicht an App weiterleiten -- wir initiierten
     }
     if (tag != pending_req) return;
@@ -4637,25 +4571,6 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
   // simple_repeater/simple_sensor pruefen jeweils nur ihr eigenes Bit
   // mit '(filter & (1<<TYPE)) != 0', stoeren also nicht an anderen Bits.
   if (filter == 0) filter = 0xFE;
-  // 2026-07-05: Roll-Forward-Cache. Statt _regions_completed komplett
-  // zu clearen, alte Eintraege (> 15 min) per TTL purgen. Neue Antworten
-  // updaten den Slot per upsertCompletedRegion. Dadurch akkumuliert
-  // 'discover show' Ergebnisse ueber mehrere Discover-Runden hinweg
-  // ohne veraltete Daten mitzuschleppen.
-  {
-    uint32_t now_rtc = getRTCClock()->getCurrentTime();
-    const uint32_t REGIONS_TTL_SECS = 15UL * 60UL;  // 15 min
-    uint8_t j = 0;
-    for (uint8_t i = 0; i < _regions_completed_count; i++) {
-      uint32_t age = (now_rtc >= _regions_completed[i].received_at_rtc)
-                     ? (now_rtc - _regions_completed[i].received_at_rtc)
-                     : 0;
-      if (age > REGIONS_TTL_SECS) continue;  // purge
-      if (j != i) _regions_completed[j] = _regions_completed[i];
-      j++;
-    }
-    _regions_completed_count = j;
-  }
   // 2026-07-06 REFACTOR: unified _discovery[] mit TTL-Purge.
   // Purge Slots die > 15min alt sind (roll-forward Cache). Neue
   // Anfragen setzen queried_at_rtc; Antworten setzen answered_at_rtc.
@@ -4673,12 +4588,6 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
     _discovery[i].region_from_chain = false;
     _discovery[i].region_from_ctl_trigger = false;
   }
-  // Auch _regions_pending_count zuruecksetzen: sonst wuerden Reste vom
-  // vorigen App-Discover den ersten Chain-Vorab-Send per Dedup blocken
-  // -> Zaehl-Diskrepanz "3 im Cache" vs "2 angefragt" (Feedback 2026-07-05).
-  _regions_pending_count = 0;
-  _chain_total_queried   = 0;
-  _chain_responded_empty = 0;
   // App-Piggyback-Label auch resetten -- sonst uebernimmt der naechste
   // CLI-Discover das Label vom vorigen App-Discover.
   _app_discover_filter = 0;
@@ -4758,14 +4667,14 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
         }
         de->last_seen_at_rtc = now_rtc;
       }
-      // Erste Anfrage sofort (delay=0), weitere mit +1500ms Staffelung.
+      // Erste Anfrage sofort (delay=0), weitere queued auf de->chain_send_at_ms
+      // (Staffelung 1.5s). manageChainSends() feuert sie zeitgestaffelt ab.
       if (chain_delay_ms == 0) {
         if (sendRegionsQueryZeroHop(n.pub_key, known ? known->name : "")) {
           pre_queried++;
           chain_delay_ms = 1500;
         }
       } else {
-        enqueueChainSend(n.pub_key, known ? known->name : "", chain_delay_ms);
         if (de) de->chain_send_at_ms = millis() + chain_delay_ms;
         chain_delay_ms += 1500;
         pre_queried++;
@@ -4782,29 +4691,15 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
                pre_queried == 1 ? "bekannter" : "bekannte");
       pushCompanionMessage(r);
     }
-    // Wunschliste 59 (2026-06-14): Chain-Queried-Counter fuer Early-Exit
-    // setzen. Wird in onAnonDataRecv durch CTL-triggered Queries weiter
-    // hochgezaehlt; finalize-loop checkt
-    //   _regions_completed_count + _chain_responded_empty >= _chain_total_queried
-    // und kann dann frueher als bei 60s Timeout finalisieren.
-    _chain_total_queried = pre_queried;
-    _chain_responded_empty = 0;
+    // 2026-07-06 REFACTOR: Early-Exit-Zaehlung jetzt via _discovery-Iteration
+    // im discoverLoop (siehe dort). Kein separater Counter noetig.
   }
 
   // Listening-Window: 30 s
   _discover_active = true;
-  // Reise-Wunsch 2026-06-08: 15-min-Cache. Wenn der letzte Discover
-  // weniger als 15 Min her ist, bestehende Eintraege behalten -- neue
-  // Antworten ergaenzen sie (per pub_key-Match) oder ueberschreiben
-  // den aeltesten bei voller Liste. Vorher: _discover_count = 0 hat
-  // alle Eintraege geloescht, selbst wenn der User wiederholt
-  // 'discover regions' gemacht hat und manche Repeater nur sporadisch
-  // antworten.
+  // 2026-07-06 REFACTOR: 15-min-Cache-Semantik jetzt via discoveryPurgeStale
+  // im _discovery-Array. Alte _discover_entries-Verwaltung entfaellt.
   uint32_t now_rtc = getRTCClock()->getCurrentTime();
-  bool keep_cache = (_discover_last_at_rtc != 0
-                     && now_rtc >= _discover_last_at_rtc
-                     && (now_rtc - _discover_last_at_rtc) <= 15UL * 60UL);
-  if (!keep_cache) _discover_count = 0;
   _discover_expiry_ms = futureMillis(30000);
   _discover_next_allowed_ms = futureMillis(60000);  // 60 s bis naechster discover
   _discover_round_started_rtc = now_rtc;  // fuer cached/fresh-Trennung
@@ -4834,69 +4729,41 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   // (_app_discover_tag) matchen. App-getriggerte Discovers werden
   // damit auch in _discover_entries[] gesammelt.
   if (echo_tag != _discover_tag && echo_tag != _app_discover_tag) return;
-  // Pub_key extrahieren (32 byte full ODER 8 byte prefix)
+  // Pub_key extrahieren (nur full 32-Byte akzeptieren -- _discovery-Slot
+  // braucht vollen pubkey fuer sichere Identifizierung. Short-8-Byte-Antworten
+  // gab es nur bei prefix_only-Discover; strukturell selten und wir ignorieren
+  // sie hier lieber als einen Zombie-Slot mit 8-Byte-Prefix zu managen).
   size_t pk_len = packet->payload_len - 6;
-  if (pk_len != 32 && pk_len != 8) return;
-  // Reise-Wunsch 2026-06-08: 15-min-Cache + slot-Reuse.
-  // 1) Wenn pub_key bereits in der Liste -> existing slot ueberschreiben
-  //    (neueste Daten gewinnen).
-  // 2) Sonst wenn Platz frei -> hinten anhaengen.
-  // 3) Sonst (voll) -> aeltesten Eintrag per recv_at_rtc ueberschreiben.
+  if (pk_len != 32) return;
   uint32_t now_rtc = getRTCClock()->getCurrentTime();
-  // Kompare-Laenge: voll-key vergleichen wenn beide full, sonst prefix
-  size_t cmp_len = (pk_len == 32) ? 8 : pk_len;  // 8-byte-prefix reicht
-                                                  // fuer Duplikat-Erkennung
-  int target_idx = -1;
-  for (uint8_t i = 0; i < _discover_count; i++) {
-    if (memcmp(_discover_entries[i].pub_key, &packet->payload[6], cmp_len) == 0) {
-      target_idx = i;
-      break;
-    }
+  int8_t our_snr_q4  = (int8_t)(_radio->getLastSNR() * 4);
+  int8_t our_rssi_dbm = (int8_t)radio_driver.getLastRSSI();
+  // 2026-07-06 REFACTOR: Slot in _discovery updaten (findOrAdd garantiert
+  // genau 1 Slot pro pubkey).
+  const uint8_t* pk = &packet->payload[6];
+  DiscoveryEntry* de = discoveryFindOrAdd(pk);
+  if (!de) return;  // Array voll und kein LRU-Kandidat -- selten
+  de->adv_type = node_type;
+  de->full_pubkey = true;
+  de->ctl_answered_at_rtc = now_rtc;
+  de->their_snr_q4 = their_snr_q4;
+  de->our_snr_q4 = our_snr_q4;
+  de->our_rssi_dbm = our_rssi_dbm;
+  de->last_seen_at_rtc = now_rtc;
+  ContactInfo* known_ct = lookupContactByPubKey(pk, PUB_KEY_SIZE);
+  if (known_ct && known_ct->name[0] && !de->name[0]) {
+    StrHelper::strzcpy(de->name, known_ct->name, sizeof(de->name));
   }
-  if (target_idx < 0) {
-    if (_discover_count < MAX_DISCOVER_ENTRIES) {
-      target_idx = _discover_count++;
-    } else {
-      // Liste voll -- aeltesten Eintrag finden und ueberschreiben.
-      uint32_t oldest_rtc = 0xFFFFFFFFUL;
-      target_idx = 0;
-      for (uint8_t i = 0; i < _discover_count; i++) {
-        if (_discover_entries[i].recv_at_rtc < oldest_rtc) {
-          oldest_rtc = _discover_entries[i].recv_at_rtc;
-          target_idx = i;
-        }
-      }
-    }
-  }
-  DiscoverEntry& e = _discover_entries[target_idx];
-  memset(e.pub_key, 0, sizeof(e.pub_key));
-  memcpy(e.pub_key, &packet->payload[6], pk_len);
-  e.full_pubkey = (pk_len == 32);
+  // Emulate 'DiscoverEntry& e' fuer die alte Ablage-Logik unten.
+  struct { uint8_t pub_key[32]; uint8_t adv_type; bool full_pubkey;
+           int8_t their_snr_q4, our_snr_q4, our_rssi_dbm; uint32_t recv_at_rtc; } e;
+  memcpy(e.pub_key, pk, 32);
   e.adv_type = node_type;
+  e.full_pubkey = true;
   e.their_snr_q4 = their_snr_q4;
-  e.our_snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
-  e.our_rssi_dbm = (int8_t)radio_driver.getLastRSSI();
+  e.our_snr_q4 = our_snr_q4;
+  e.our_rssi_dbm = our_rssi_dbm;
   e.recv_at_rtc = now_rtc;
-  // 2026-07-06 REFACTOR: parallel-write in _discovery. CTL-Response updated
-  // Slot mit CTL-SNR/RSSI-Info + adv_type. Nur bei full pubkey (8-byte-Prefix
-  // ist zu kurz um sicher in _discovery zu managen -- die Slots dort sind
-  // auf 32-Byte-pubkey angewiesen fuer Dedup).
-  if (e.full_pubkey) {
-    DiscoveryEntry* de = discoveryFindOrAdd(e.pub_key);
-    if (de) {
-      de->adv_type = node_type;
-      de->full_pubkey = true;
-      de->ctl_answered_at_rtc = now_rtc;
-      de->their_snr_q4 = their_snr_q4;
-      de->our_snr_q4 = e.our_snr_q4;
-      de->our_rssi_dbm = e.our_rssi_dbm;
-      de->last_seen_at_rtc = now_rtc;
-      ContactInfo* known_ct = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
-      if (known_ct && known_ct->name[0] && !de->name[0]) {
-        StrHelper::strzcpy(de->name, known_ct->name, sizeof(de->name));
-      }
-    }
-  }
 
   // Diskover-Antwort kommt per Definition zero-hop (CTL_DISCOVER_RESP wird
   // vom Responder per sendZeroHop verschickt -- siehe simple_repeater).
@@ -4939,12 +4806,9 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
       // queried_at wird auch in sendAnonQueryZeroHop parallel-write gesetzt,
       // hier bereits zur Dedup-Sicherheit.
     }
-    // Wunschliste 59 (2026-06-14): Counter fuer Early-Exit. Inkrement nur
-    // wenn die Query auch tatsaechlich abgesetzt wurde (sendRegionsQueryZeroHop
-    // returnt false bei Dedup-Hit gegen bereits aus Cache abgefragten Knoten).
-    if (sendRegionsQueryZeroHop(e.pub_key, known ? known->name : "")) {
-      _chain_total_queried++;
-    }
+    // 2026-07-06 REFACTOR: kein separater Counter mehr -- Early-Exit
+    // iteriert _discovery direkt.
+    sendRegionsQueryZeroHop(e.pub_key, known ? known->name : "");
   }
 }
 
@@ -5011,111 +4875,58 @@ void MyMesh::upsertCompletedRegion(const uint8_t* pubkey32,
                                    const uint8_t* csv_data, size_t csv_len) {
   uint32_t now_rtc = getRTCClock()->getCurrentTime();
   int8_t snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
-  // 2026-07-06 REFACTOR: parallel-write in _discovery. Update csv, timestamp,
-  // clear pending_tag. Leere CSV -> region_csv_empty_deny=true. Nicht-leere
-  // CSV -> region_csv_empty_deny=false + csv befuellen.
+  // 2026-07-06 REFACTOR: Slot in _discovery updaten. Leere CSV setzt nur
+  // empty_deny flag, csv bleibt bei letztem guten Wert (Roll-Forward).
   DiscoveryEntry* de = discoveryFindOrAdd(pubkey32);
-  if (de) {
-    de->our_snr_q4 = snr_q4;
-    de->region_answered_at_rtc = now_rtc;
-    de->region_query_tag = 0;
-    de->last_seen_at_rtc = now_rtc;
-    if (csv_data && csv_len > 0) {
-      size_t s = csv_len;
-      if (s > sizeof(de->region_csv) - 1) s = sizeof(de->region_csv) - 1;
-      memcpy(de->region_csv, csv_data, s);
-      de->region_csv[s] = 0;
-      de->region_csv_empty_deny = false;
-    } else {
-      // Leere RESP: NUR das empty_deny-flag setzen. csv bleibt bei letztem
-      // guten Wert (User-Vorgabe 2026-07-06). Falls Repeater NIE eine
-      // nicht-leere Antwort geliefert hat, ist csv='' seit init.
-      de->region_csv_empty_deny = true;
-    }
+  if (!de) return;
+  de->our_snr_q4 = snr_q4;
+  de->region_answered_at_rtc = now_rtc;
+  de->region_query_tag = 0;
+  de->last_seen_at_rtc = now_rtc;
+  if (csv_data && csv_len > 0) {
+    size_t s = csv_len;
+    if (s > sizeof(de->region_csv) - 1) s = sizeof(de->region_csv) - 1;
+    memcpy(de->region_csv, csv_data, s);
+    de->region_csv[s] = 0;
+    de->region_csv_empty_deny = false;
+  } else {
+    de->region_csv_empty_deny = true;
+    // csv unangetastet lassen -- User-Vorgabe 2026-07-06.
   }
-  // Vorhandenen Slot updaten (roll-forward Cache).
-  for (uint8_t i = 0; i < _regions_completed_count; i++) {
-    if (memcmp(_regions_completed[i].pubkey, pubkey32, PUB_KEY_SIZE) == 0) {
-      _regions_completed[i].our_snr_q4 = snr_q4;
-      _regions_completed[i].received_at_rtc = now_rtc;
-      size_t stored = csv_len;
-      if (stored > sizeof(_regions_completed[i].csv) - 1) {
-        stored = sizeof(_regions_completed[i].csv) - 1;
-      }
-      if (csv_data && stored > 0) memcpy(_regions_completed[i].csv, csv_data, stored);
-      _regions_completed[i].csv[stored] = 0;
-      return;
-    }
-  }
-  // Neuer Slot.
-  if (_regions_completed_count >= MAX_COMPLETED_REGIONS) return;
-  CompletedRegionsEntry& ce = _regions_completed[_regions_completed_count++];
-  memcpy(ce.pubkey, pubkey32, PUB_KEY_SIZE);
-  ce.our_snr_q4 = snr_q4;
-  ce.received_at_rtc = now_rtc;
-  size_t stored = csv_len;
-  if (stored > sizeof(ce.csv) - 1) stored = sizeof(ce.csv) - 1;
-  if (csv_data && stored > 0) memcpy(ce.csv, csv_data, stored);
-  ce.csv[stored] = 0;
-}
-
-void MyMesh::enqueueChainSend(const uint8_t* pk32, const char* name,
-                              uint32_t delay_from_now_ms) {
-  if (_chain_send_pending_count >= MAX_CHAIN_SEND_PENDING) return;
-  ChainSendPending& e = _chain_send_pending[_chain_send_pending_count++];
-  memcpy(e.pubkey, pk32, 32);
-  StrHelper::strzcpy(e.name, name ? name : "", sizeof(e.name));
-  e.send_at_ms = millis() + delay_from_now_ms;
 }
 
 void MyMesh::manageChainSends() {
-  if (_chain_send_pending_count == 0) return;
+  // 2026-07-06 REFACTOR: iteriere _discovery mit chain_send_at_ms != 0.
+  // Max 1 pro Loop-Tick abfeuern -- die Staffelung wirkt via
+  // millis-Delay, nicht ueber Loop-Frequenz.
   uint32_t now = millis();
-  uint8_t i = 0;
-  while (i < _chain_send_pending_count) {
-    if ((int32_t)(now - _chain_send_pending[i].send_at_ms) >= 0) {
-      // Send. Bei Erfolg oder Fehler: Slot entfernen.
-      sendRegionsQueryZeroHop(_chain_send_pending[i].pubkey,
-                              _chain_send_pending[i].name);
-      for (uint8_t j = i + 1; j < _chain_send_pending_count; j++) {
-        _chain_send_pending[j - 1] = _chain_send_pending[j];
-      }
-      _chain_send_pending_count--;
-      // Nicht mehr als 1 pro Loop-Tick abfeuern -- die Staffelung soll
-      // auf den millis-Delay basieren, nicht auf Loop-Frequenz.
-      return;
-    }
-    i++;
+  for (uint8_t i = 0; i < _discovery_count; i++) {
+    DiscoveryEntry& de = _discovery[i];
+    if (de.chain_send_at_ms == 0) continue;
+    if ((int32_t)(now - de.chain_send_at_ms) < 0) continue;
+    // Send-Zeit erreicht. Clear zuerst damit ein moeglicher Fehler nicht
+    // in einer Endlosschleife im naechsten Loop nochmal probiert.
+    de.chain_send_at_ms = 0;
+    ContactInfo* known = lookupContactByPubKey(de.pubkey, PUB_KEY_SIZE);
+    const char* name = (known && known->name[0]) ? known->name : de.name;
+    sendRegionsQueryZeroHop(de.pubkey, name);
+    return;
   }
 }
 
 bool MyMesh::sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_name,
                                   uint8_t req_type) {
-  if (_regions_pending_count >= MAX_PENDING_REGIONS) return false;
-  // Dedup nur fuer denselben req_type -- ein OWNER + ein REGIONS auf
-  // denselben Repeater duerfen koexistieren.
-  for (uint8_t i = 0; i < _regions_pending_count; i++) {
-    if (_regions_pending[i].req_type == req_type
-        && memcmp(_regions_pending[i].pubkey, pubkey32, PUB_KEY_SIZE) == 0) {
-      return false;  // already pending
-    }
-  }
-  // 2026-07-06: Dedup gegen _regions_completed NUR wenn in aktueller Runde
-  // beantwortet (received_at_rtc >= _discover_round_started_rtc). Alte
-  // Antworten aus vorheriger Runde bleiben refreshbar (Roll-Forward-Cache),
-  // aber innerhalb einer Runde wird nicht doppelt gefragt.
-  // Ohne diesen Check: Chain-Vorab schickt Anfrage, RESP kommt, pending-Slot
-  // wird entfernt. Danach CTL-triggered ANON-Anfrage findet keinen pending
-  // Slot -> zweite Anfrage geht raus. Repeater antwortet 2x, zweiter
-  // pending-Slot bleibt als "nicht geantwortet" haengen -> User sieht
-  // denselben pubkey doppelt in der Aufschluesselung.
+  // 2026-07-06 REFACTOR: Dedup allein via _discovery-Slot-State.
+  //   region_query_tag != 0   -> pending, skip.
+  //   region_answered_at_rtc  -> in aktueller Runde beantwortet, skip.
   if (req_type == ANON_REQ_TYPE_REGIONS) {
-    for (uint8_t i = 0; i < _regions_completed_count; i++) {
-      if (memcmp(_regions_completed[i].pubkey, pubkey32, PUB_KEY_SIZE) != 0) continue;
-      if (_regions_completed[i].received_at_rtc >= _discover_round_started_rtc) {
+    DiscoveryEntry* existing = discoveryFindByPubkey(pubkey32);
+    if (existing) {
+      if (existing->region_query_tag != 0) return false;  // already pending
+      if (existing->region_answered_at_rtc >= _discover_round_started_rtc
+          && existing->region_answered_at_rtc != 0) {
         return false;  // schon in dieser Runde beantwortet
       }
-      break;
     }
   }
   // Temp ContactInfo. Nur die Felder die sendAnonReq braucht:
@@ -5154,19 +4965,17 @@ bool MyMesh::sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_n
   }
   int result = sendAnonReq(tmp, req_data, sizeof(req_data), tag, est_timeout);
   if (result == MSG_SEND_FAILED) return false;
-  PendingRegionsEntry& e = _regions_pending[_regions_pending_count++];
-  e.tag = tag;
-  e.req_type = req_type;
-  StrHelper::strzcpy(e.name, display_name ? display_name : "", sizeof(e.name));
-  memcpy(e.pubkey, pubkey32, PUB_KEY_SIZE);
-  e.from_chain = _discover_regions_chained;
-  // 2026-07-06 REFACTOR: parallel-write in _discovery. pending-tag + queried-
-  // Zeitstempel im Slot.
+  // 2026-07-06 REFACTOR: nur noch _discovery-Slot befuellen.
   if (req_type == ANON_REQ_TYPE_REGIONS) {
     DiscoveryEntry* de = discoveryFindOrAdd(pubkey32);
     if (de) {
       de->region_query_tag = tag;
       de->region_queried_at_rtc = getRTCClock()->getCurrentTime();
+      // from_chain flag: wenn wir im Chain-Modus sind und noch nicht
+      // ctl-triggered gefragt hatten -> Chain-Vorab-Query.
+      if (_discover_regions_chained && !de->region_from_ctl_trigger) {
+        de->region_from_chain = true;
+      }
       if (display_name && display_name[0] && !de->name[0]) {
         StrHelper::strzcpy(de->name, display_name, sizeof(de->name));
       }
@@ -5255,75 +5064,8 @@ static void utf8ByteTruncate(char* dst, const char* src, size_t dst_size) {
   dst[bytes] = 0;
 }
 
-// Einheitlicher Legend-Entry (CTL + Chain teilen sich diesen Helper).
-// Pro Repeater eine kompakte Zeile unter 145 byte:
-//   "aabbcc Name [REP good +2.5/-3.0] 12km @45° (no regions response)"
-// 'csv_or_null' ist nur im Chain-Modus interessant -- NULL = wir haben
-// keinen Region-CSV fuer diesen Knoten.
-void MyMesh::printRepeaterLegendEntry(const DiscoverEntry& e,
-                                       const CompletedRegionsEntry* csv_or_null,
-                                       bool verbose) {
-  char prefix6[7];
-  mesh::Utils::toHex(prefix6, e.pub_key, 3);
-  ContactInfo* known = lookupContactByPubKey(
-      (const uint8_t*)e.pub_key, e.full_pubkey ? PUB_KEY_SIZE : 8);
-  const char* role = (e.adv_type == ADV_TYPE_REPEATER) ? "REP"
-                   : (e.adv_type == ADV_TYPE_SENSOR)   ? "SNS"
-                   : (e.adv_type == ADV_TYPE_CHAT)     ? "CMP"
-                   : (e.adv_type == ADV_TYPE_ROOM)     ? "ROOM" : "?";
-  // Quality: schlechtere der beiden SNR-Richtungen entscheidet
-  int8_t worse = (e.our_snr_q4 < e.their_snr_q4) ? e.our_snr_q4 : e.their_snr_q4;
-  const char* qual = (worse >= 0)   ? "good"
-                   : (worse >= -32) ? "mid"
-                   : "bad";
-  char dist_buf[32]; dist_buf[0] = 0;
-  bool have_my_gps = (sensors.node_lat != 0.0 || sensors.node_lon != 0.0);
-  if (known && have_my_gps && (known->gps_lat != 0 || known->gps_lon != 0)) {
-    double their_lat = (double)known->gps_lat / 1000000.0;
-    double their_lon = (double)known->gps_lon / 1000000.0;
-    double km  = dl9sau_haversine_km(sensors.node_lat, sensors.node_lon,
-                                      their_lat, their_lon);
-    int    brg = dl9sau_bearing_deg(sensors.node_lat, sensors.node_lon,
-                                      their_lat, their_lon);
-    // Reise-Wunsch 2026-06-08: 1 Dezimalstelle (100m-Aufloesung)
-    snprintf(dist_buf, sizeof(dist_buf), " %.1fkm @%d°", km, brg);
-  }
-  // Suffix differenzieren:
-  //   csv_or_null == NULL          -> Repeater komplett stumm
-  //   csv_or_null vorhanden aber '' -> Repeater antwortete leer
-  //                                    (deny unscoped + keine Regionen)
-  //   csv_or_null mit Inhalt        -> kein Suffix noetig (Regions oben)
-  const char* suffix = "";
-  if (_discover_regions_chained || _app_discover_regions_mode) {
-    if (!csv_or_null)              suffix = " (nicht geantwortet)";
-    else if (!csv_or_null->csv[0]) suffix = " (deny unscoped und keine Regionen!)";
-  }
-  const char* name = known ? known->name : "(unknown)";
-  // Name UTF-8-safe auf 30 bytes truncieren (statt byte-basiertem %.30s
-  // im snprintf, das mitten in Emoji/Umlaut abschneiden koennte).
-  char name_buf[31];
-  utf8ByteTruncate(name_buf, name, sizeof(name_buf));
-  char line[160];
-  if (verbose) {
-    // Fuer 'discover': raw Werte mitausgeben (Reise-Wunsch 2026-06-09:
-    // Wording 'our/their' -> 'rx_us/rx_him' -- klarer welche
-    // Empfangsrichtung gemeint ist):
-    //   rx_him = unsere RX seiner RESP (SNR + RSSI) -- wir hoeren ihn
-    //   rx_us  = seine RX unseres REQ (SNR, sein RSSI nicht im Protokoll)
-    snprintf(line, sizeof(line),
-             "%s %s [%s %s] rx_him=%+.1fdB/%ddBm rx_us=%+.1fdB%s%s",
-             prefix6, name_buf, role, qual,
-             (double)e.our_snr_q4 / 4.0, (int)e.our_rssi_dbm,
-             (double)e.their_snr_q4 / 4.0,
-             dist_buf, suffix);
-  } else {
-    // Fuer 'discover regions' chain: kompakt nur Quality-Klassifikation.
-    snprintf(line, sizeof(line),
-             "%s %s [%s %s]%s%s",
-             prefix6, name_buf, role, qual, dist_buf, suffix);
-  }
-  pushCompanionMessage(line);
-}
+// 2026-07-06 REFACTOR: printRepeaterLegendEntry entfernt -- durch
+// printDiscoveryLegendEntry ersetzt (siehe unten).
 
 // =========================================================================
 // 2026-07-06 REFACTOR: printDiscoveryLegendEntry -- neuer Print-Helper der
@@ -5404,21 +5146,31 @@ void MyMesh::printDiscoveryLegendEntry(const DiscoveryEntry& e, bool verbose,
 // vollen Namen (falls in der Kontaktliste) + Entfernung/Bearing falls
 // GPS bekannt.
 void MyMesh::finalizeRegionsChain() {
-  if (_discover_count == 0) {
-    pushCompanionMessage("discover regions: keine REPEATER gefunden.");
-    _discover_regions_chained = false;
-    _regions_chain_finalize_at = 0;
-    return;
+  // 2026-07-06 REFACTOR: check ob mind. 1 Slot mit CTL-Antwort in aktueller
+  // Runde vorhanden ist. Sonst 'keine REPEATER' Meldung.
+  bool any_ctl_this_round = false;
+  for (uint8_t i = 0; i < _discovery_count; i++) {
+    if (_discovery[i].ctl_answered_at_rtc >= _discover_round_started_rtc
+        && _discovery[i].ctl_answered_at_rtc != 0) {
+      any_ctl_this_round = true; break;
+    }
   }
-  // CSV-by-pubkey Lookup helper
-  auto find_csv = [&](const uint8_t* pk) -> const CompletedRegionsEntry* {
-    for (uint8_t i = 0; i < _regions_completed_count; i++) {
-      if (memcmp(_regions_completed[i].pubkey, pk, PUB_KEY_SIZE) == 0) {
-        return &_regions_completed[i];
+  if (!any_ctl_this_round) {
+    // Check ob wenigstens Chain-Vorab-Antworten vorhanden sind.
+    bool any_chain_answer = false;
+    for (uint8_t i = 0; i < _discovery_count; i++) {
+      if (_discovery[i].region_answered_at_rtc >= _discover_round_started_rtc
+          && _discovery[i].region_answered_at_rtc != 0) {
+        any_chain_answer = true; break;
       }
     }
-    return NULL;
-  };
+    if (!any_chain_answer) {
+      pushCompanionMessage("discover regions: keine REPEATER gefunden.");
+      _discover_regions_chained = false;
+      _regions_chain_finalize_at = 0;
+      return;
+    }
+  }
   // Region-Aggregator
   struct AggRegion {
     char    name[28];
@@ -5562,11 +5314,7 @@ void MyMesh::finalizeRegionsChain() {
     }
   }
 
-  // Reset 2026-07-05: NICHT _regions_completed_count -- der Cache bleibt
-  // fuer 'discover show' verfuegbar bis zum naechsten discoverStart().
-  _regions_pending_count   = 0;
-  _chain_total_queried = 0;
-  _chain_responded_empty = 0;
+  // Chain-Modus-Flag ausschalten. _discovery bleibt fuer 'discover show'.
   _discover_regions_chained = false;
   _regions_chain_finalize_at = 0;
 }
@@ -5620,25 +5368,35 @@ void MyMesh::discoverFinishAndPrint() {
     // Antworten brachte, Sofort beenden statt nochmal 30s auf ein
     // Region-Aggregat zu warten (das ohnehin leer waere). Vorher: 1 Min
     // umsonst gewartet.
-    if (_discover_count == 0) {
-      // 2026-07-05: Text differenzieren -- wenn Chain-Vorab-ANONs
-      // wirklich Regions gebracht haben, laenger Text mit Cache-Hinweis.
-      // Sonst kurzer '0 Antworten' Text (User-Feedback: der lange Text
-      // 'aber 0 Ergebnisse' bei komplett leerem Ergebnis war redundant).
-      if (_regions_completed_count > 0) {
+    // 2026-07-06 REFACTOR: Zaehlen aus _discovery-Iteration.
+    uint32_t rstart = _discover_round_started_rtc;
+    uint8_t ctl_this_round = 0, region_asked = 0, region_open = 0, region_done = 0;
+    uint8_t region_with_csv = 0;
+    for (uint8_t i = 0; i < _discovery_count; i++) {
+      const DiscoveryEntry& d = _discovery[i];
+      if (d.ctl_answered_at_rtc >= rstart && d.ctl_answered_at_rtc != 0) ctl_this_round++;
+      if (d.region_queried_at_rtc < rstart) continue;
+      region_asked++;
+      if (d.region_query_tag != 0) region_open++;
+      if (d.region_answered_at_rtc >= rstart && d.region_answered_at_rtc != 0) {
+        region_done++;
+        if (!d.region_csv_empty_deny && d.region_csv[0]) region_with_csv++;
+      }
+    }
+    if (ctl_this_round == 0) {
+      if (region_with_csv > 0) {
         char r[160];
         snprintf(r, sizeof(r),
                  "discover regions: 0 CTL-Antworten in 30s,\n"
                  "aber %u Chain-Vorab-Ergebnis(se) im Cache\n"
                  "(siehe 'discover show').",
-                 (unsigned)_regions_completed_count);
+                 (unsigned)region_with_csv);
         pushCompanionMessage(r);
       } else {
         pushCompanionMessage("discover regions: keine REPEATER in 30s.");
       }
       _discover_regions_chained = false;
       _regions_chain_finalize_at = 0;
-      _regions_pending_count = 0;
       return;
     }
     char r[160];
@@ -5646,10 +5404,10 @@ void MyMesh::discoverFinishAndPrint() {
              "discover regions chain:\n"
              "  Phase 1 (Repeaters): %u meldete(n) sich in 30s\n"
              "  Phase 2 (Regions): %u/%u offen, %u fertig",
-             (unsigned)_discover_count,
-             (unsigned)_regions_pending_count,
-             (unsigned)_chain_total_queried,
-             (unsigned)(_regions_completed_count + _chain_responded_empty));
+             (unsigned)ctl_this_round,
+             (unsigned)region_open,
+             (unsigned)region_asked,
+             (unsigned)region_done);
     pushCompanionMessage(r);
     pushCompanionMessage("Aggregat in 60s (oder nach Abschluss).");
     // Wunschliste 59 (2026-06-14): 30s -> 60s. User-Constraint: discover
@@ -5721,9 +5479,18 @@ void MyMesh::discoverLoop() {
   // wenn alle queried Repeater (Cache + CTL-triggered) geantwortet haben
   // (with-content oder leer), keine Wartezeit auf 60s mehr.
   if (_regions_chain_finalize_at != 0) {
-    bool early_exit = (_chain_total_queried > 0)
-        && ((uint16_t)_regions_completed_count + _chain_responded_empty
-            >= _chain_total_queried);
+    // 2026-07-06 REFACTOR: Early-Exit wenn alle in dieser Runde befragten
+    // Slots beantwortet sind (mit CSV oder empty_deny). Iteration ueber
+    // _discovery, kein separater Zaehler noetig.
+    uint32_t rstart = _discover_round_started_rtc;
+    uint8_t asked = 0, answered = 0;
+    for (uint8_t i = 0; i < _discovery_count; i++) {
+      if (_discovery[i].region_queried_at_rtc < rstart) continue;
+      asked++;
+      if (_discovery[i].region_answered_at_rtc >= rstart
+          && _discovery[i].region_answered_at_rtc != 0) answered++;
+    }
+    bool early_exit = (asked > 0) && (answered >= asked);
     if (early_exit || millisHasNowPassed(_regions_chain_finalize_at)) {
       finalizeRegionsChain();
     }
@@ -5903,23 +5670,17 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _br_reboot_recommended = false;
   _br_pre_clear_dirty = false;
   _br_prefs_snapshot_taken = false;
-  // Wunschliste 27: CTL_TYPE_NODE_DISCOVER state
+  // 2026-07-06 REFACTOR: unified _discovery state.
   _discover_active = false;
-  _discover_count = 0;
   _discover_tag = 0;
   _discover_expiry_ms = 0;
   _discover_next_allowed_ms = 0;
   _discover_last_at_rtc = 0;
   _discoverable_window_start_ms = 0;
   _discoverable_count_window = 0;
-  memset(_discover_entries, 0, sizeof(_discover_entries));
+  memset(_discovery, 0, sizeof(_discovery));
+  _discovery_count = 0;
   _last_anon_req_type = 0;
-  memset(_regions_pending, 0, sizeof(_regions_pending));
-  _regions_pending_count = 0;
-  memset(_regions_completed, 0, sizeof(_regions_completed));
-  _regions_completed_count = 0;
-  _chain_total_queried = 0;
-  _chain_responded_empty = 0;
   _discover_regions_chained = false;
   _regions_chain_finalize_at = 0;
   _last_advert_route_direct = 0;
@@ -7814,32 +7575,26 @@ void MyMesh::handleCmdFrame(size_t len) {
       } else {
         clearPendingReqs();
         pending_req = tag; // match this to onContactResponse()
-        // 2026-07-05: App-getriggerte ANON-Queries auch in _regions_pending
-        // tracken, damit ihre RESPs im firmware-eigenen Regions-Handler
-        // landen und via 'discover show' sichtbar werden. Payload-Layout
-        // App: [type][meta] -- also data[0] ist der req_type.
+        // 2026-07-06 REFACTOR: App-getriggerte ANON-Queries in _discovery
+        // tracken (statt vorher in _regions_pending). Payload-Layout App:
+        // [type][meta] -- data[0] ist der req_type.
         int payload_len = (int)(len - (1 + PUB_KEY_SIZE));
-        if (payload_len >= 1
-            && _regions_pending_count < MAX_PENDING_REGIONS) {
+        if (payload_len >= 1) {
           uint8_t rt = data[0];
-          if (rt == ANON_REQ_TYPE_REGIONS
-              || rt == ANON_REQ_TYPE_OWNER
-              || rt == ANON_REQ_TYPE_BASIC) {
-            PendingRegionsEntry& p = _regions_pending[_regions_pending_count++];
-            p.tag = tag;
-            memcpy(p.pubkey, pub_key, PUB_KEY_SIZE);
-            if (recipient->name[0]) {
-              StrHelper::strzcpy(p.name, recipient->name, sizeof(p.name));
-            } else {
-              p.name[0] = 0;
+          if (rt == ANON_REQ_TYPE_REGIONS) {
+            DiscoveryEntry* de = discoveryFindOrAdd(pub_key);
+            if (de) {
+              de->region_query_tag = tag;
+              de->region_queried_at_rtc = getRTCClock()->getCurrentTime();
+              de->last_seen_at_rtc = de->region_queried_at_rtc;
+              // App-getriggert (weder Chain-Vorab noch CTL-Trigger).
+              de->region_from_chain = false;
+              de->region_from_ctl_trigger = false;
+              if (recipient->name[0] && !de->name[0]) {
+                StrHelper::strzcpy(de->name, recipient->name, sizeof(de->name));
+              }
             }
-            p.from_chain = false;
-            p.req_type = rt;
-            // 2026-07-05: App macht 'discover regions' als CTL-Discover +
-            // ANON follow-up. Erst hier (bei der follow-up ANON) wissen
-            // wir dass es Regions war -- Piggyback-Ausgabe kann sich
-            // spaeter entsprechend labeln.
-            if (rt == ANON_REQ_TYPE_REGIONS) _app_discover_regions_mode = true;
+            _app_discover_regions_mode = true;
           }
         }
         out_frame[0] = RESP_CODE_SENT;
@@ -16691,7 +16446,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (_discover_last_at_rtc > 0
         && now >= _discover_last_at_rtc
         && (now - _discover_last_at_rtc) <= CR_HEARD_MAX_AGE_SECS
-        && _discover_count > 0
+        && _discovery_count > 0
         && !has_km && !has_deg) {
       char dage[16];
       uint32_t s = now - _discover_last_at_rtc;
@@ -16702,14 +16457,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else                 snprintf(dage, sizeof(dage), "%ud%02uh",
                                     (unsigned)(s / 86400), (unsigned)((s % 86400) / 3600));
 
-      for (uint8_t i = 0; i < _discover_count; i++) {
-        const DiscoverEntry& e = _discover_entries[i];
-        // Skip wenn Eintrag in Kontaktliste -- wurde dann oben schon
-        // (oder durch Filter bewusst nicht) gelistet.
-        ContactInfo* known = lookupContactByPubKey(
-            (uint8_t*)e.pub_key, e.full_pubkey ? PUB_KEY_SIZE : 8);
+      // 2026-07-06 REFACTOR: iteriere _discovery, nur Slots mit CTL-Answer.
+      for (uint8_t i = 0; i < _discovery_count; i++) {
+        const DiscoveryEntry& e = _discovery[i];
+        if (e.ctl_answered_at_rtc == 0) continue;
+        ContactInfo* known = lookupContactByPubKey(e.pubkey, PUB_KEY_SIZE);
         if (known) continue;
-        // Role-Filter auch hier respektieren.
         if ((role_mask & (1 << e.adv_type)) == 0) continue;
 
         const char* dtname;
@@ -16720,18 +16473,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           case ADV_TYPE_SENSOR:   dtname = "sns "; break;
           default:                dtname = "?   "; break;
         }
-        // Konsistent zur Kontakt-Zeile oben: 6-hex-Prefix vorn, dann
-        // '(unknown)' im Namens-Slot. Discover-Cache liefert mindestens
-        // 8 Byte Pub-Key (short-discover) bzw. 32 Byte (full); die ersten
-        // 3 Byte (6 hex chars) genuegen fuer Visual-Identifikation.
         char dprefix6[7];
-        mesh::Utils::toHex(dprefix6, e.pub_key, 3);
+        mesh::Utils::toHex(dprefix6, e.pubkey, 3);
         char did[40];
         snprintf(did, sizeof(did), "%s (unknown)", dprefix6);
-
-        // SNR-Anzeige fuer unknown-Knoten (User-Wunsch 2026-06-12:
-        // 'unknown'-Eintrag wie 2ea0e5 ist informativer mit SNR-Wert,
-        // damit man sieht ob weit entfernt oder neben einem stehend).
         char dsnr[16];
         if (e.our_snr_q4 != INT8_MIN) {
           snprintf(dsnr, sizeof(dsnr), "%+6.1fdB", (double)e.our_snr_q4 / 4.0);
@@ -16743,7 +16488,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           snprintf(line, sizeof(line), "  %s %-25.25s %6s %s",
                    dtname, did, dage, dsnr);
         } else {
-          // hops=0 (discover-Antworten sind protokoll-bedingt direct)
           snprintf(line, sizeof(line), "  %s %-25.25s %6s %s hops=0",
                    dtname, did, dage, dsnr);
         }

@@ -683,20 +683,10 @@ private:
   // aus einer frischen Antwort. Trennung im Output (User-Wunsch 2026-06-12:
   // "1 Antworten" suggerierte fresh, war aber Cache-Treffer).
   uint32_t _discover_round_started_rtc = 0;
-  struct DiscoverEntry {
-    uint8_t pub_key[32];     // 32 byte voll oder 8 byte prefix + Rest 0
-    uint8_t adv_type;        // ADV_TYPE_*
-    int8_t  their_snr_q4;    // ihre SNR-Sicht auf unseren REQ (aus RESP-Payload)
-    int8_t  our_snr_q4;      // unsere SNR-Sicht auf ihren RESP
-    int8_t  our_rssi_dbm;    // unsere RSSI-Sicht (dBm, int8); their_rssi nicht im Protokoll
-    bool    full_pubkey;     // true wenn 32 byte, false wenn 8 byte prefix
-    uint32_t recv_at_rtc;    // Reise-Wunsch 2026-06-08: RTC bei Eintrags-Empfang
-                              // fuer 15-min-Cache + LRU-Overwrite bei voller Liste
-  };
-  static const int MAX_DISCOVER_ENTRIES = 16;
   // ---- (a) Sender 'discover*' ---------------------------------------------
-  DiscoverEntry _discover_entries[MAX_DISCOVER_ENTRIES];
-  uint8_t       _discover_count;
+  // 2026-07-06 REFACTOR: _discover_entries[] + _discover_count entfernt.
+  // Ersetzt durch _discovery[MAX_DISCOVERY] (siehe unten). Ein Slot pro
+  // pubkey mit vollem CTL + Regions + Chain-Send State.
   uint32_t      _discover_tag;
   // Piggyback 2026-07-04: App-triggered Discovers mit-processen. Wenn die
   // App CMD_SEND_CONTROL_DATA mit CTL_TYPE_NODE_DISCOVER_REQ schickt,
@@ -713,19 +703,8 @@ private:
   bool          _app_discover_regions_mode = false;
   bool          _discover_active;
 
-  // Wunschliste 2026-07-05: Chain-Send-Staffelung. Statt 9 ANON-REQs
-  // back-to-back (~4.5s Radio-Blockade + Rate-Limit-Risiko) queuen wir
-  // sie und senden 1.5s versetzt in manageChainSends() im Loop-Tick.
-  struct ChainSendPending {
-    uint8_t  pubkey[32];
-    char     name[32];
-    uint32_t send_at_ms;
-  };
-  static const int MAX_CHAIN_SEND_PENDING = 16;
-  ChainSendPending _chain_send_pending[MAX_CHAIN_SEND_PENDING];
-  uint8_t          _chain_send_pending_count;
-  void enqueueChainSend(const uint8_t* pk32, const char* name,
-                        uint32_t delay_from_now_ms);
+  // 2026-07-06 REFACTOR: ChainSendPending entfernt -- chain_send_at_ms
+  // ist jetzt Feld in DiscoveryEntry.
   void manageChainSends();
   unsigned long _discover_expiry_ms;
   unsigned long _discover_next_allowed_ms; // rate-limit: 60s seit letztem REQ
@@ -819,45 +798,10 @@ private:
   // Multi-Tag-Tracking fuer parallele eigene REGIONS-Queries (CLI- und
   // Chain-getriggert). Notwendig weil pending_req nur 1 outstanding tag
   // halten kann, der Chain aber N parallele REQs verschickt.
-  struct PendingRegionsEntry {
-    uint32_t tag;
-    char     name[32];          // contact name oder leer
-    uint8_t  pubkey[32];        // voller pubkey -- bei chain-mode brauchen
-                                // wir den fuer den Legenden-Lookup
-    bool     from_chain;        // true=chain-buffered, false=manual immediate-push
-    uint8_t  req_type;          // ANON_REQ_TYPE_REGIONS/OWNER/BASIC -- bestimmt
-                                // Output-Format im Response-Handler. Default
-                                // REGIONS (=1) fuer Back-Compat.
-  };
-  // Limit 16 fuer Paritaet mit MAX_DISCOVER_ENTRIES (alle drei Strukturen
-  // -- CTL-Antworten, in-flight Tags, gebufferte ANON-RESPs -- sind im
-  // Chain-Modus 1:1 verbunden).
-  static const int MAX_PENDING_REGIONS = 16;
-  PendingRegionsEntry _regions_pending[MAX_PENDING_REGIONS];
-  uint8_t  _regions_pending_count;
-  // Chain-mode Buffered-Responses (Aggregator)
-  struct CompletedRegionsEntry {
-    uint8_t  pubkey[32];
-    int8_t   our_snr_q4;        // unsere SNR-Sicht der RESP
-    uint32_t received_at_rtc;   // 2026-07-05: fuer TTL-basiertes Purge
-                                //  in discoverStart -- roll-forward-Cache
-                                //  ueber mehrere Discover-Runden hinweg.
-    char     csv[120];          // CSV der Regions vom Responder
-  };
-  static const int MAX_COMPLETED_REGIONS = 16;
-  CompletedRegionsEntry _regions_completed[MAX_COMPLETED_REGIONS];
-  uint8_t  _regions_completed_count;
-  // Wunschliste 59 (2026-06-14): Chain-Counter fuer Early-Exit + bessere
-  // Diagnose-Anzeige im finalize-Output.
-  //   _chain_total_queried:  pre-cache + CTL-triggered ANON-REQs (alle die
-  //                          gesendet wurden). Vergleichswert fuer Early-Exit.
-  //   _chain_responded_empty: REGIONS-RESP ohne CSV-Inhalt (Repeater hat
-  //                          keine Region konfiguriert). Nicht in
-  //                          _regions_completed weil dort nur with-CSV.
-  // _regions_completed_count zaehlt with-CSV. Early-Exit-Bedingung:
-  // (_regions_completed_count + _chain_responded_empty) >= _chain_total_queried.
-  uint8_t  _chain_total_queried;
-  uint8_t  _chain_responded_empty;
+  // 2026-07-06 REFACTOR: PendingRegionsEntry + CompletedRegionsEntry
+  // entfernt. State ist jetzt Feld in DiscoveryEntry (region_query_tag,
+  // region_answered_at_rtc, region_csv, region_csv_empty_deny).
+  // Chain-Counter entfernt -- Zaehlung via _discovery-Iteration.
   // Flag: 'discover regions' (no args) hat CTL-Discover ausgeloest und
   // erwartet pro REPEATER-RESP einen automatischen ANON_REQ_TYPE_REGIONS.
   bool          _discover_regions_chained;
@@ -868,20 +812,10 @@ private:
                             uint8_t req_type);
   // Legacy-Convenience -- ruft sendAnonQueryZeroHop mit REGIONS.
   bool sendRegionsQueryZeroHop(const uint8_t* pubkey32, const char* display_name);
-  // 2026-07-05: Roll-Forward-Cache Helper. Update wenn pubkey schon in
-  // _regions_completed, sonst Insert (falls Platz). csv_data==NULL ODER
-  // csv_len==0 -> Leer-CSV (deny unscoped, keine Regionen).
+  // Upsert Regions-Antwort in Slot _discovery. csv_len==0 -> empty_deny.
   void upsertCompletedRegion(const uint8_t* pubkey32, const uint8_t* csv_data,
                              size_t csv_len);
   void finalizeRegionsChain();
-  // Einheitlicher Legend-Entry fuer 'discover' (CTL-only) UND
-  // 'discover regions' (Chain mit Region-CSV). entry liefert
-  // SNR + role + name, csv_or_null fuegt ggf. Region-Info hinzu.
-  // verbose=true: zeigt raw SNR/RSSI-Werte (fuer 'discover')
-  // verbose=false: nur Quality-Klassifikation (fuer 'discover regions' chain)
-  void printRepeaterLegendEntry(const DiscoverEntry& entry,
-                                const CompletedRegionsEntry* csv_or_null,
-                                bool verbose);
   // Wunschliste 28: backup save -- schreibt zwei JSON-Bloecke nach
   // USB-Serial (DL9SAU prefs + node main).
   void backupSaveToSerial();
