@@ -733,6 +733,72 @@ private:
   // Verwendet von 'neighbors' um discover-only-Eintraege (nicht in
   // Kontaktliste) bis 48h nachzulisten.
   uint32_t      _discover_last_at_rtc;
+
+  // ====================================================================
+  // 2026-07-06 REFACTOR: Unified DiscoveryEntry
+  //
+  // Ersetzt die 4 vorherigen Listen (_discover_entries, _regions_pending,
+  // _regions_completed, _chain_send_pending) durch EINE Liste mit einem
+  // Slot pro pubkey. Verhindert strukturell:
+  //   - Doppelanfragen (Chain-Vorab + CTL-triggered) durch zentralen
+  //     region_query_pending_tag + Dedup gegen region_answered_at_rtc.
+  //   - Doppel-Slots durch findOrAddByPubkey (nie 2 Slots pro pubkey).
+  //   - Duplikate im Print durch nur EINE Iteration.
+  //   - Zombie-pendings durch state-machine mit klaren Uebergaengen.
+  // TTL-Purge (15 min) in discoverStart -- Roll-Forward-Cache.
+  // ====================================================================
+  struct DiscoveryEntry {
+    // ---- Identity ----
+    uint8_t  pubkey[32];
+    uint8_t  adv_type;               // ADV_TYPE_REPEATER/SENSOR/... (0=unknown)
+    bool     full_pubkey;            // false = nur 8-Byte-Prefix
+    char     name[32];               // Contact-Name (aus lookup)
+    // ---- Global lifetime ----
+    uint32_t last_seen_at_rtc;       // max(ctl_answered, region_answered,
+                                     // chain_queried, ctl_queried) -- fuer TTL-Purge.
+    // ---- CTL-Discovery-State (Repeater/Sensor meldete sich) ----
+    uint32_t ctl_answered_at_rtc;    // 0 = nie via CTL-RESP gehoert
+    int8_t   their_snr_q4;           // seine SNR-Sicht auf unseren CTL-REQ
+    int8_t   our_snr_q4;             // unsere SNR-Sicht auf seine CTL-RESP
+    int8_t   our_rssi_dbm;           // unsere RSSI-Sicht
+    // ---- Regions-Anfrage State ----
+    // WICHTIG: region_csv wird NUR bei einer eingehenden Antwort geaendert.
+    // Kein Reset beim erneuten Query, kein Loeschen bei 'keine Antwort'.
+    // So bleibt eine "gute" Antwort aus fruherem Discover erhalten wenn der
+    // Repeater in einer spaeteren Runde nicht mehr geantwortet hat. TTL-
+    // basiertes Purge (last_seen_at_rtc > 15 min) wirft alte Slots
+    // vollstaendig raus. Gilt gleichermassen fuer 'discover repeater' (dort
+    // wird gar keine REGIONS-Query abgesetzt -> csv bleibt vom letzten mal).
+    uint32_t region_queried_at_rtc;  // 0 = nie gefragt (in dieser Session)
+    uint32_t region_answered_at_rtc; // 0 = keine Antwort. >0 = update-Zeitstempel.
+    uint32_t region_query_tag;       // Match-Tag fuer RESP; 0 = kein pending
+    bool     region_from_chain;      // gefragt weil aus _neighbours[] bekannt
+    bool     region_from_ctl_trigger;// gefragt weil per CTL-RESP entdeckt
+    bool     region_csv_empty_deny;  // aktueller Repeater-Zustand: deny unscoped +
+                                     // keine Regionen (leere RESP). Wird gesetzt
+                                     // wenn leerer RESP kommt und geloescht bei
+                                     // non-leerem RESP. Bei 'keine Antwort'
+                                     // bleibt der letzte Zustand erhalten.
+    char     region_csv[120];        // letzte erhaltene Regions-CSV oder ""
+    // ---- Chain-Send-Queue (delayed send fuer Staffelung) ----
+    uint32_t chain_send_at_ms;       // 0 = nicht in queue; >0 = pending send
+  };
+  static const int MAX_DISCOVERY = 16;
+  DiscoveryEntry _discovery[MAX_DISCOVERY];
+  uint8_t        _discovery_count;
+  // Hilfs-API:
+  DiscoveryEntry* discoveryFindByPubkey(const uint8_t* pk32);
+  DiscoveryEntry* discoveryFindOrAdd(const uint8_t* pk32);
+  void discoveryPurgeStale(uint32_t ttl_secs);
+  // Ist der Slot in aktueller Runde schon beantwortet (Regions)?
+  // Wird als Dedup-Check verwendet BEVOR eine neue Anfrage rausgeht.
+  bool discoveryHasFreshRegionAnswer(const DiscoveryEntry& e,
+                                     uint32_t round_started_rtc) const;
+  // Neuer Print-Helper -- direkt auf DiscoveryEntry. suppress_suffix
+  // fuer 'discover repeater' ohne Regions-Kontext.
+  void printDiscoveryLegendEntry(const DiscoveryEntry& e, bool verbose,
+                                 bool suppress_suffix = false);
+
   void discoverStart(uint8_t filter, bool prefix_only);
   void discoverFinishAndPrint();
   void discoverHandleResp(mesh::Packet* packet);
