@@ -6972,9 +6972,24 @@ void MyMesh::handleCmdFrame(size_t len) {
             if (channel_h == 0) channel_h = 1;
             if (channelSenderScopeLookup(channel_h, name_h, reply_scope_key)) {
               have_reply_scope = true;
-              traceCompanion(TRACE_SCOPE,
-                             "[reply-scope] '@%s' -> cached scope aktiv",
-                             reply_name);
+              // 2026-07-06: Reverse-Lookup Scope-Name aus dem 16-Byte-Key.
+              // Iteriere _buildin_keys und vergleiche.
+              const char* scope_name = NULL;
+              for (int k = 0; k < _buildin_keys_count; k++) {
+                if (memcmp(_buildin_keys[k].key, reply_scope_key, 16) == 0) {
+                  dl9sau_get_region((size_t)k, &scope_name, NULL, NULL, NULL, NULL);
+                  break;
+                }
+              }
+              if (scope_name) {
+                traceCompanion(TRACE_SCOPE,
+                               "[reply-scope] '@%s' -> cached scope aktiv: #%s",
+                               reply_name, scope_name);
+              } else {
+                traceCompanion(TRACE_SCOPE,
+                               "[reply-scope] '@%s' -> cached scope aktiv (custom/unknown)",
+                               reply_name);
+              }
             } else {
               traceCompanion(TRACE_SCOPE,
                              "[reply-scope] '@%s' name_h=%08lx ch_h=%08lx "
