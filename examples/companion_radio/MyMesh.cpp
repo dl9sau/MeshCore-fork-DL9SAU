@@ -975,6 +975,20 @@ float MyMesh::getAirtimeBudgetFactor() const {
 int MyMesh::getInterferenceThreshold() const {
   return _prefs.interference_threshold;
 }
+// 2026-07-06 Upstream-Merge: CAD-Toggle (Hardware Channel Activity Detection).
+// SX1262 macht Preamble-Detection intern -- praeziser als RSSI-basiertes LBT.
+// Beide zusammen: CAD faengt Meshcore-Preambles, int.thresh faengt allgemeines
+// RF-Level. Default true (aktiv).
+bool MyMesh::getCADEnabled() const {
+  // 2026-07-06: cad_enabled ist nur im 'normalen Repeater'-Modus abschaltbar
+  // (User weiss was er tut). In allen anderen Modes (client, defensive
+  // repeater) ist CAD forced-on als Sicherheitsnetz -- kein Grund unnoetig
+  // Kollisionen zu riskieren.
+  bool is_full_normal_repeater = (_prefs.client_repeat != 0
+                                  && _prefs.repeater_profile == 1);
+  if (!is_full_normal_repeater) return true;
+  return _prefs.cad_enabled != 0;
+}
 // Wunschliste 45: AGC-Reset-Interval (Sekunden/4, intern *4000 ms).
 // 0 = disabled. Periodischer AGC-Reset bei verrauschten RX-Standorten,
 // macht das Geraet fuer wenige ms taub -- bewusst sparsam nutzen.
@@ -4254,6 +4268,10 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
   return 0; // unknown
 }
 
+// Forward-Decls fuer utf8-Helper (Definition weiter unten in dieser Datei).
+static void neighbors_utf8_truncate_to_visual(char* s, size_t max_visual);
+static size_t neighbors_utf8_visual_count(const char* s);
+
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
   uint32_t tag;
   memcpy(&tag, data, 4);
@@ -4271,6 +4289,14 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
              contact.id.pub_key[3], contact.id.pub_key[4], contact.id.pub_key[5],
              contact.name, (unsigned)len, hex);
     traceCompanion(TRACE_DBG_ANON, "%s", msg);
+    // 2026-07-07: CLI-ping-Diagnose. Zeigt tag der Response und den erwarteten
+    // pending tag. Bei mismatch schauen ob mit anderem tag geantwortet wurde.
+    if (_cli_ping_tag != 0) {
+      traceCompanion(TRACE_DBG_ANON,
+                     "[ping-diag] rx tag=%08lx (waiting=%08lx) match=%d",
+                     (unsigned long)tag, (unsigned long)_cli_ping_tag,
+                     (int)(tag == _cli_ping_tag));
+    }
   }
 
   // Wunschliste 52 (2026-06-10): Remote-Admin Antwort.
@@ -4343,6 +4369,26 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       i += 6; // pub_key_prefix
     }
     _serial->writeFrame(out_frame, i);
+  } else if (len > 4 && _cli_ping_tag != 0 && tag == _cli_ping_tag) {
+    // 2026-07-06 CLI-ping RESP. Ausgabe: RTT + rx_him (SNR/RSSI unsere Sicht
+    // seiner RESP). Ping-Payload ist unerheblich -- Status-Info interessiert
+    // die App, hier zaehlt nur RTT und Signalqualitaet.
+    unsigned long rtt = millis() - _cli_ping_started_ms;
+    double our_snr = (double)_radio->getLastSNR();
+    int our_rssi = (int)radio_driver.getLastRSSI();
+    _cli_ping_tag = 0;
+    _cli_ping_expiry_ms = 0;
+    char pkx[7];
+    mesh::Utils::toHex(pkx, contact.id.pub_key, 3);
+    char name_buf[80];
+    StrHelper::strzcpy(name_buf, contact.name, sizeof(name_buf));
+    neighbors_utf8_truncate_to_visual(name_buf, 25);
+    char r[140];
+    snprintf(r, sizeof(r),
+             "ping %s %s:\n  rtt=%.1fs rx_him=%+.1fdB/%ddBm",
+             pkx, name_buf, (double)rtt / 1000.0, our_snr, our_rssi);
+    pushCompanionMessage(r);
+    return;
   } else if (len > 4 && // check for status response
              pending_status &&
              memcmp(&pending_status, contact.id.pub_key, 4) == 0 // legacy matching scheme
@@ -4380,56 +4426,33 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       DiscoveryEntry& d = _discovery[i];
       const bool from_chain = (d.region_from_chain || d.region_from_ctl_trigger);
       const uint8_t rt = ANON_REQ_TYPE_REGIONS;  // sendAnonQueryZeroHop nutzt nur REGIONS
-      if (from_chain) {
-        // Chain-Modus: progressive push + _discovery update via upsert.
+      {
+        // Einheitliche Ausgabe fuer chain + manuell (rt hier stets REGIONS).
+        size_t csv_len = (len > 8) ? (size_t)(len - 8) : 0;
         char prefix6[7];
         mesh::Utils::toHex(prefix6, d.pubkey, 3);
-        size_t csv_len = (len > 8) ? (size_t)(len - 8) : 0;
         traceCompanion(TRACE_DISCOVER,
                        "[discover] REGIONS-RESP von %s csv_len=%u",
                        prefix6, (unsigned)csv_len);
-        if (csv_len > 0) {
-          char buf[160];
-          size_t emit_len = csv_len;
-          if (emit_len > 100) emit_len = 100;
-          snprintf(buf, sizeof(buf),
-                   "discover regions: %s -> %.*s",
-                   prefix6, (int)emit_len, (const char*)&data[8]);
-          pushCompanionMessage(buf);
-          upsertCompletedRegion(d.pubkey, &data[8], csv_len);
-        } else {
-          char buf[120];
-          snprintf(buf, sizeof(buf),
-                   "discover regions: %s -> leer "
-                   "(deny unscoped und keine Regionen!)",
-                   prefix6);
-          pushCompanionMessage(buf);
-          upsertCompletedRegion(d.pubkey, NULL, 0);
+        // Name aus discovery-slot (chain), fallback contact-lookup.
+        const char* nm = d.name[0] ? d.name : NULL;
+        if (!nm) {
+          ContactInfo* ci = lookupContactByPubKey(d.pubkey, PUB_KEY_SIZE);
+          if (ci && ci->name[0]) nm = ci->name;
         }
-      } else {
-        // Manuelle 'discover <regions|owner|basic> <name>' Antwort.
-        char id_str[40];
-        if (d.name[0]) {
-          StrHelper::strzcpy(id_str, d.name, sizeof(id_str));
-        } else {
-          mesh::Utils::toHex(id_str, d.pubkey, 8);
-        }
-        char buf[220];
-        if (rt == ANON_REQ_TYPE_REGIONS && len > 8) {
-          size_t csv_len = len - 8;
-          if (csv_len > sizeof(buf) - 80) csv_len = sizeof(buf) - 80;
-          snprintf(buf, sizeof(buf),
-                   "discover regions @%s:\n  %.*s",
-                   id_str, (int)csv_len, (const char*)&data[8]);
-          pushCompanionMessage(buf);
-          upsertCompletedRegion(d.pubkey, &data[8], csv_len);
-        }
-        // OWNER/BASIC-Zweige nicht mehr durch diese Site -- diese Types werden
-        // vom App-CMD_SEND_ANON_REQ-Handler direkt behandelt (App-Piggyback).
+        pushRegionsResult(d.pubkey, nm,
+                          csv_len > 0 ? &data[8] : NULL, csv_len);
+        upsertCompletedRegion(d.pubkey, csv_len > 0 ? &data[8] : NULL, csv_len);
+        // OWNER/BASIC-Zweige nicht durch diese Site -- App-Piggyback handled.
       }
       // tag clearen; region_answered_at_rtc setzt upsertCompletedRegion.
       d.region_query_tag = 0;
-      return;  // nicht an App weiterleiten -- wir initiierten
+      // 2026-07-07 BUG-FIX: nur bei from_chain (chain-piggyback/CTL-trigger)
+      // return -- wir waren wirklich Absender. Bei App-getriggert (from_chain
+      // == false) FALL-THROUGH, damit die App weiter ihre BINARY_RESPONSE
+      // bekommt (App-Menu 'discover regions' bleibt sonst leer).
+      if (from_chain) return;
+      break;  // aus dem _discovery-Iterator raus, App-Pfad unten laeuft weiter
     }
     if (tag != pending_req) return;
     // App-getriggerter ANON_REQ-Response-Pfad
@@ -4437,13 +4460,10 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
 
     // App-Mirror: ANON_REQ_TYPE_REGIONS vom App-Outgoing -> $companion
     if (_last_anon_req_type == ANON_REQ_TYPE_REGIONS && len > 8) {
-      char buf[200];
       size_t csv_len = len - 8;
-      if (csv_len > sizeof(buf) - 80) csv_len = sizeof(buf) - 80;
-      snprintf(buf, sizeof(buf),
-               "discover regions @%s:\n  %.*s",
-               contact.name, (int)csv_len, (const char*)&data[8]);
-      pushCompanionMessage(buf);
+      pushRegionsResult(contact.id.pub_key,
+                        contact.name[0] ? contact.name : NULL,
+                        &data[8], csv_len);
     }
     _last_anon_req_type = 0;
 
@@ -5446,9 +5466,27 @@ void MyMesh::discoverFinishAndPrint() {
   if (n_fresh > 0 || n_cached > 0) {
     _discover_last_at_rtc = getRTCClock()->getCurrentTime();
   }
-  char header[140];
+  // 2026-07-07: Bei discover regions zusaetzlich Regions-Antworten
+  // zaehlen. Sonst ist "5 Antworten" bei nur 2 mit Regions irrefuehrend.
+  bool is_regions_mode = _app_discover_regions_mode;
+  uint8_t region_answered = 0;
+  if (is_regions_mode) {
+    for (uint8_t i = 0; i < _discovery_count; i++) {
+      const DiscoveryEntry& de = _discovery[i];
+      if (adv_filter != 0 && (adv_filter & (1 << de.adv_type)) == 0) continue;
+      if (de.region_answered_at_rtc >= _discover_round_started_rtc
+          && de.region_answered_at_rtc != 0) region_answered++;
+    }
+  }
+  char header[180];
   if (n_fresh == 0 && n_cached == 0) {
     snprintf(header, sizeof(header), "%s: keine Antworten.", label);
+  } else if (is_regions_mode) {
+    // Klar: was in DIESER Runde passierte vs was im Cache steht.
+    snprintf(header, sizeof(header),
+             "%s: %u/%u antworteten (Runde/Cache), %u mit Region-Info:",
+             label, (unsigned)n_fresh, (unsigned)(n_fresh + n_cached),
+             (unsigned)region_answered);
   } else if (n_cached > 0) {
     snprintf(header, sizeof(header),
              "%s: %u frische Antworten + %u aus Cache:",
@@ -5458,13 +5496,14 @@ void MyMesh::discoverFinishAndPrint() {
              "%s: %u Antworten:", label, (unsigned)n_fresh);
   }
   pushCompanionMessage(header);
-  // Pro Slot mit CTL-Answer eine Zeile. Kein Suffix-Regions-Kontext
-  // (suppress_suffix=true) weil dies der Non-Chain-Modus ist.
+  // Pro Slot mit CTL-Answer eine Zeile. Bei is_regions_mode Suffix
+  // zeigen damit man sieht wer Regions geantwortet hat und wer nicht.
   for (uint8_t i = 0; i < _discovery_count; i++) {
     const DiscoveryEntry& de = _discovery[i];
     if (de.ctl_answered_at_rtc == 0) continue;
     if (adv_filter != 0 && (adv_filter & (1 << de.adv_type)) == 0) continue;
-    printDiscoveryLegendEntry(de, /*verbose=*/true, /*suppress_suffix=*/true);
+    printDiscoveryLegendEntry(de, /*verbose=*/true,
+                              /*suppress_suffix=*/!is_regions_mode);
   }
 }
 
@@ -5520,6 +5559,128 @@ void MyMesh::onRawDataRecv(mesh::Packet *packet) {
 void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
                          const uint8_t *path_snrs, const uint8_t *path_hashes, uint8_t path_len) {
   uint8_t path_sz = flags & 0x03;  // NEW v1.11+
+  uint8_t hash_size = (uint8_t)(1 << path_sz);
+  // 2026-07-07: CLI 'ping'-Match (jetzt TRACE-basiert statt REQ_TYPE_GET_STATUS).
+  if (_cli_ping_tag != 0 && tag == _cli_ping_tag) {
+    unsigned long rtt = millis() - _cli_ping_started_ms;
+    _cli_ping_tag = 0;
+    _cli_ping_expiry_ms = 0;
+    char pkx[7];
+    mesh::Utils::toHex(pkx, _cli_ping_target_pubkey, 3);
+    char name_buf[32];
+    StrHelper::strzcpy(name_buf, _cli_ping_target_name, sizeof(name_buf));
+    neighbors_utf8_truncate_to_visual(name_buf, 25);
+    // hin = wie stark WIR bei ihm ankamen (Ziel's SNR-Messung, in path_snrs).
+    // rueck = wie stark ER bei UNS ankam (unser aktueller RX-SNR/RSSI).
+    double snr_hin   = (path_len >= 1) ? (double)((int8_t)path_snrs[0]) / 4.0 : 0.0;
+    double snr_rueck = (double)_radio->getLastSNR();
+    int    rssi_rueck = (int)radio_driver.getLastRSSI();
+    char r[220];
+    // Bei -c N mode: Sequenz-Nummer im Prefix.
+    if (_cli_ping_count_target > 1) {
+      snprintf(r, sizeof(r),
+               "ping[%u/%u] %s %s:\n  rtt=%.1fs snr_hin=%+.1fdB snr_rueck=%+.1fdB/%ddBm",
+               (unsigned)(_cli_ping_count_done + 1),
+               (unsigned)_cli_ping_count_target,
+               pkx, name_buf, (double)rtt / 1000.0, snr_hin, snr_rueck, rssi_rueck);
+    } else {
+      snprintf(r, sizeof(r),
+               "ping %s %s:\n  rtt=%.1fs snr_hin=%+.1fdB snr_rueck=%+.1fdB/%ddBm",
+               pkx, name_buf, (double)rtt / 1000.0, snr_hin, snr_rueck, rssi_rueck);
+    }
+    pushCompanionMessage(r);
+    // Stats aktualisieren.
+    updateCliPingStats((double)rtt / 1000.0, snr_hin, snr_rueck, rssi_rueck);
+    _cli_ping_count_done++;
+    // Naechsten Ping schedulen oder Stats printen.
+    uint16_t total_sent = _cli_ping_count_done + _cli_ping_count_lost;
+    if (_cli_ping_count_target > 1 && total_sent < _cli_ping_count_target) {
+      _cli_ping_next_at_ms = millis() + _cli_ping_interval_ms;
+    } else if (_cli_ping_count_target > 1) {
+      printCliPingStats();
+      _cli_ping_count_target = 0;
+      _cli_ping_next_at_ms = 0;
+    }
+    return;
+  }
+  // 2026-07-07: App-Piggyback -- wenn App-getriggert, $companion-Push zusaetzlich
+  // zum App-Frame.
+  if (_app_trace_tag != 0 && tag == _app_trace_tag) {
+    unsigned long rtt = millis() - _app_trace_started_ms;
+    _app_trace_tag = 0;
+    char pkx[7];
+    mesh::Utils::toHex(pkx, _app_trace_target_pubkey, 3);
+    char r[160];
+    snprintf(r, sizeof(r),
+             "app-ping %s: rtt=%.1fs, %u hops.",
+             pkx, (double)rtt / 1000.0, (unsigned)path_len);
+    pushCompanionMessage(r);
+    // fall-through: kein return, App bekommt normalen Trace-Frame.
+  }
+  // 2026-07-07 CLI 'tracepath'-Match: wenn wir selbst der Auslöser waren,
+  // haben wir den tag im Slot _cli_trace_tag. path_snrs (path_len entries)
+  // ist die SNR-Kette entlang der Hop-Reihenfolge. path_hashes ist die
+  // original hop-hash-chain (unveraendert).
+  if (_cli_trace_tag != 0 && tag == _cli_trace_tag) {
+    unsigned long rtt = millis() - _cli_trace_started_ms;
+    _cli_trace_tag = 0;
+    _cli_trace_expiry_ms = 0;
+    char pkx[7];
+    mesh::Utils::toHex(pkx, _cli_trace_target_pubkey,
+                       (_cli_trace_target_hex_len > 3) ? 3 : _cli_trace_target_hex_len);
+    char name_buf[32];
+    StrHelper::strzcpy(name_buf, _cli_trace_target_name, sizeof(name_buf));
+    neighbors_utf8_truncate_to_visual(name_buf, 25);
+    // 2026-07-07: Format analog ping. Bei zero-hop (path_len == 1)
+    // reines ping-Format. Bei multi-hop: hop-Liste angehaengt.
+    double snr_hin   = (path_len >= 1) ? (double)((int8_t)path_snrs[0]) / 4.0 : 0.0;
+    double snr_rueck = (double)_radio->getLastSNR();
+    int    rssi_rueck = (int)radio_driver.getLastRSSI();
+    if (path_len <= 1) {
+      // Zero-hop direct: gleiches Format wie ping.
+      char r[200];
+      snprintf(r, sizeof(r),
+               "tracepath %s %s:\n  rtt=%.1fs snr_hin=%+.1fdB snr_rueck=%+.1fdB/%ddBm",
+               pkx, name_buf, (double)rtt / 1000.0, snr_hin, snr_rueck, rssi_rueck);
+      pushCompanionMessage(r);
+      return;
+    }
+    // Multi-hop: header + hop-Liste
+    char hdr[200];
+    snprintf(hdr, sizeof(hdr),
+             "tracepath %s %s:\n"
+             "  %u hops rt, rtt=%.1fs snr_rueck=%+.1fdB/%ddBm",
+             pkx, name_buf, (unsigned)path_len, (double)rtt / 1000.0,
+             snr_rueck, rssi_rueck);
+    pushCompanionMessage(hdr);
+    static const int MSG_CAP = 125;
+    char block[280]; block[0] = 0; int blen = 0;
+    for (uint8_t h = 0; h < path_len; h++) {
+      char hop_hex[8]; hop_hex[0] = 0;
+      int hp = 0;
+      for (uint8_t b = 0; b < hash_size && hp + 3 < (int)sizeof(hop_hex); b++) {
+        hp += snprintf(hop_hex + hp, sizeof(hop_hex) - hp, "%02x",
+                       path_hashes[h * hash_size + b]);
+      }
+      double snr_db = (double)((int8_t)path_snrs[h]) / 4.0;
+      char one[64];
+      // Erster hop ohne fuehrenden \n, nachfolgende mit.
+      const char* sep = (blen == 0) ? "" : "\n";
+      int olen = snprintf(one, sizeof(one),
+                          "%s  hop%u: %s snr=%+.1fdB",
+                          sep, (unsigned)(h + 1), hop_hex, snr_db);
+      if (blen + olen >= MSG_CAP) {
+        pushCompanionMessage(block);
+        block[0] = 0; blen = 0;
+        olen = snprintf(one, sizeof(one),
+                        "  hop%u: %s snr=%+.1fdB",
+                        (unsigned)(h + 1), hop_hex, snr_db);
+      }
+      blen += snprintf(block + blen, sizeof(block) - blen, "%s", one);
+    }
+    if (blen > 0) pushCompanionMessage(block);
+    return;
+  }
   if (12 + path_len + (path_len >> path_sz) + 1 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onTraceRecv(), path_len is too long: %d", (uint32_t)path_len);
     return;
@@ -5561,7 +5722,7 @@ void MyMesh::onSendTimeout() {}
 
 MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store, AbstractUITask* ui)
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
-      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui) {
+      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui), _iter(0) {
   _iter_started = false;
   _cli_rescue = false;
   // 5 Offline-Buckets initialisieren (seq_no=0 als leerer-Slot Sentinel).
@@ -5908,6 +6069,10 @@ void MyMesh::begin(bool has_display) {
   // Default 0 (= disabled) -- selten gebraucht, User aktiviert manuell.
   _prefs.interference_threshold = 14;
   _prefs.agc_reset_interval = 0;
+  // 2026-07-06 Upstream-Merge: CAD default an. Belt-and-suspenders mit
+  // int.thresh -- CAD faengt Meshcore-Preambles, int.thresh das
+  // allgemeine RF-Level.
+  _prefs.cad_enabled = 1;
 
   // Wunschliste 58 Phase B (2026-06-13): CPU-Clock Pref. 0 = "Default
   // benutzen" (Build-spezifisch, auf ESP32-S3 = 240 MHz). Wird in
@@ -7556,6 +7721,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       memcpy(anon.id.pub_key, pub_key, PUB_KEY_SIZE);
       anon.out_path_len = 0;   // default to zero-hop direct
       anon.type = ADV_TYPE_NONE;  // unknown
+      anon.lastmod = getRTCClock()->getCurrentTime();
 
       if (addContact(anon)) recipient = &anon;
     }
@@ -7816,6 +7982,34 @@ void MyMesh::handleCmdFrame(size_t len) {
       memcpy(&auth, &cmd_frame[5], 4);
       auto pkt = createTrace(tag, auth, flags);
       if (pkt) {
+        // 2026-07-07: App-Piggyback -- Tag mitschneiden fuer $companion push.
+        // Target-Hash = erstes byte des path (bei zero-hop=1-byte path das Ziel).
+        _app_trace_tag = tag;
+        _app_trace_started_ms = millis();
+        memset(_app_trace_target_pubkey, 0, sizeof(_app_trace_target_pubkey));
+        // Path enthaelt (1<<path_sz) bytes je Hop. Erste Hop = Ziel bei zero-hop.
+        uint8_t app_hash_size = (uint8_t)(1 << path_sz);
+        if (path_len >= app_hash_size) {
+          memcpy(_app_trace_target_pubkey, &cmd_frame[10], app_hash_size);
+        }
+        {
+          char pkx[7]; pkx[0] = 0;
+          for (int i = 0; i < 3 && i < app_hash_size; i++) {
+            char h[3]; snprintf(h, sizeof(h), "%02x", cmd_frame[10 + i]);
+            strcat(pkx, h);
+          }
+          // path_hops = alle Hops im Path inkl. Ziel. intermediate = path_hops - 1.
+          unsigned path_hops = (unsigned)(path_len / (app_hash_size ? app_hash_size : 1));
+          char r[100];
+          // Letzter Hop im Path = Ziel. Zwischenhops davor = path_hops - 1.
+          if (path_hops <= 1) {
+            snprintf(r, sizeof(r), "app-ping %s: sent (zero-hop).", pkx);
+          } else {
+            snprintf(r, sizeof(r), "app-ping %s: sent (%u hop%s).",
+                     pkx, path_hops - 1, (path_hops - 1 == 1) ? "" : "s");
+          }
+          pushCompanionMessage(r);
+        }
         sendDirect(pkt, &cmd_frame[10], path_len);
 
         uint32_t t = _radio->getEstAirtimeFor(pkt->payload_len + pkt->path_len + 2);
@@ -8117,6 +8311,7 @@ void MyMesh::handleCmdFrame(size_t len) {
         sendPacket(pkt, priority, 0);
         writeOKFrame();
       } else {
+        releasePacket(pkt);
         writeErrFrame(ERR_CODE_ILLEGAL_ARG);
       }
     } else {
@@ -8332,15 +8527,7 @@ void MyMesh::checkSerialInterface() {
              && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!
   ) {
     ContactInfo contact;
-    bool found = false;
-    while (_iter.hasNext(this, contact)) {
-      if (contact.type != ADV_TYPE_NONE) {
-        found = true;
-        break;
-      }
-    }
-
-    if (found) {
+    if (_iter.hasNext(this, contact)) {
       if (contact.lastmod > _iter_filter_since) { // apply the 'since' filter
         writeContactRespFrame(RESP_CODE_CONTACT, contact);
         if (contact.lastmod > _most_recent_lastmod) {
@@ -8452,6 +8639,71 @@ void MyMesh::loop() {
   manageBatteryAndUsb();  // Wunschliste 89/90/91
   manageCronAt();         // Wunschliste 88 Phase 1
   manageChainSends();     // Wunschliste 2026-07-05: gestaffelte Chain-ANONs
+  // 2026-07-06 CLI ping timeout check.
+  if (_cli_ping_tag != 0 && (int32_t)(millis() - _cli_ping_expiry_ms) >= 0) {
+    char pkx[7];
+    mesh::Utils::toHex(pkx, _cli_ping_target_pubkey, 3);
+    char r[220];
+    if (_cli_ping_count_target > 1) {
+      snprintf(r, sizeof(r),
+               "ping[%u/%u] %s: keine Antwort in %.1fs.",
+               (unsigned)(_cli_ping_count_done + _cli_ping_count_lost + 1),
+               (unsigned)_cli_ping_count_target, pkx,
+               (double)(millis() - _cli_ping_started_ms) / 1000.0);
+    } else {
+      ContactInfo* ci = lookupContactByPubKey(_cli_ping_target_pubkey, PUB_KEY_SIZE);
+      if (ci && ci->out_path_len != OUT_PATH_UNKNOWN && ci->out_path_len > 0) {
+        snprintf(r, sizeof(r),
+                 "ping %s: keine Antwort in %.1fs.\n"
+                 "Kontakt hat gelernten Path (%u hops).\n"
+                 "Versuche: path trace %s",
+                 pkx, (double)(millis() - _cli_ping_started_ms) / 1000.0,
+                 (unsigned)ci->out_path_len, pkx);
+      } else {
+        snprintf(r, sizeof(r), "ping %s: keine Antwort in %.1fs.",
+                 pkx, (double)(millis() - _cli_ping_started_ms) / 1000.0);
+      }
+    }
+    pushCompanionMessage(r);
+    _cli_ping_tag = 0;
+    _cli_ping_expiry_ms = 0;
+    // -c N mode: als lost zaehlen, naechsten schedulen oder Stats printen.
+    if (_cli_ping_count_target > 1) {
+      _cli_ping_count_lost++;
+      uint16_t total_sent = _cli_ping_count_done + _cli_ping_count_lost;
+      if (total_sent < _cli_ping_count_target) {
+        _cli_ping_next_at_ms = millis() + _cli_ping_interval_ms;
+      } else {
+        printCliPingStats();
+        _cli_ping_count_target = 0;
+        _cli_ping_next_at_ms = 0;
+      }
+    }
+  }
+  // 2026-07-07 CLI ping next-schedule (-c mode).
+  if (_cli_ping_count_target > 1 && _cli_ping_next_at_ms != 0
+      && (int32_t)(millis() - _cli_ping_next_at_ms) >= 0
+      && _cli_ping_tag == 0) {
+    _cli_ping_next_at_ms = 0;
+    if (!sendCliPingToStoredTarget()) {
+      pushCompanionMessage("ping[-c]: Packet-Pool voll, Abbruch.");
+      _cli_ping_count_target = 0;
+    }
+  }
+  // 2026-07-07 CLI tracepath timeout. KEIN Auto-Path-Reset -- User
+  // entscheidet ob er den Path verwerfen will.
+  if (_cli_trace_tag != 0 && (int32_t)(millis() - _cli_trace_expiry_ms) >= 0) {
+    char pkx[7];
+    mesh::Utils::toHex(pkx, _cli_trace_target_pubkey,
+                       (_cli_trace_target_hex_len > 3) ? 3 : _cli_trace_target_hex_len);
+    char r[160];
+    snprintf(r, sizeof(r),
+             "tracepath %s: timeout (%.1fs).",
+             pkx, (double)(millis() - _cli_trace_started_ms) / 1000.0);
+    pushCompanionMessage(r);
+    _cli_trace_tag = 0;
+    _cli_trace_expiry_ms = 0;
+  }
 
   // RTC-Persistierung Periodic-Check (Bug-Fix 2026-06-14): GPS-Sync
   // setzt RTC direkt ueber _clock->setCurrentTime (in MicroNMEALocation-
@@ -11837,6 +12089,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "buzzer_profile") == 0)        { _prefs.buzzer_profile        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0) { _prefs.interference_threshold = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "agc.reset.interval") == 0 || strcmp(key, "agc_reset_interval") == 0) { _prefs.agc_reset_interval = (uint8_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "cad") == 0) { _prefs.cad_enabled = (uint8_t)(as_uint() ? 1 : 0); _br_applied++; return; }
       // Bug 4 Fix 2026-06-16: cpu_clock_mhz, display_wake_mode, watchdog
       // Handler wurden hier (val_type=='n' Branch) durch String-Werte ueber-
       // sprungen -- alle drei werden via kv_str gespeichert. Handler nach
@@ -13233,6 +13486,127 @@ static const TraceCat trace_cats[] = {
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
+// 2026-07-07: Einheitliche Regions-Result-Ausgabe. Ersetzt 4 zuvor
+// inkonsistente snprintf-Sites (chain-progressive, chain-empty, cli-manuell,
+// app-piggyback). Format: 'discover regions HEX name: csv' (name optional).
+void MyMesh::pushRegionsResult(const uint8_t* pubkey32, const char* name,
+                               const uint8_t* csv, size_t csv_len) {
+  char pkx[7];
+  mesh::Utils::toHex(pkx, pubkey32, 3);
+  const bool has_name = (name != NULL && name[0] != 0);
+  char buf[220];
+  if (csv_len == 0) {
+    if (has_name) {
+      snprintf(buf, sizeof(buf),
+               "discover regions %s %s: (leer, deny unscoped)",
+               pkx, name);
+    } else {
+      snprintf(buf, sizeof(buf),
+               "discover regions %s: (leer, deny unscoped)", pkx);
+    }
+  } else {
+    size_t emit_len = csv_len;
+    // Cap damit buf nicht ueberlaeuft. 80 Byte fuer prefix + name.
+    if (emit_len > sizeof(buf) - 80) emit_len = sizeof(buf) - 80;
+    if (has_name) {
+      snprintf(buf, sizeof(buf),
+               "discover regions %s %s:\n  %.*s",
+               pkx, name, (int)emit_len, (const char*)csv);
+    } else {
+      snprintf(buf, sizeof(buf),
+               "discover regions %s:\n  %.*s",
+               pkx, (int)emit_len, (const char*)csv);
+    }
+  }
+  pushCompanionMessage(buf);
+}
+
+// 2026-07-07: Ping-Stats-Helper. Running Stats ohne Array (sum, sum_sq, min, max).
+void MyMesh::resetCliPingStats() {
+  _cli_ping_count_done = 0;
+  _cli_ping_count_lost = 0;
+  _cli_ping_rtt_sum = 0;   _cli_ping_rtt_sq = 0;
+  _cli_ping_rtt_min = 1e9; _cli_ping_rtt_max = -1e9;
+  _cli_ping_hin_sum = 0;   _cli_ping_hin_sq = 0;
+  _cli_ping_hin_min = 1e9; _cli_ping_hin_max = -1e9;
+  _cli_ping_rueck_sum = 0; _cli_ping_rueck_sq = 0;
+  _cli_ping_rueck_min = 1e9; _cli_ping_rueck_max = -1e9;
+  _cli_ping_rssi_sum = 0;  _cli_ping_rssi_sq = 0;
+  _cli_ping_rssi_min = 1e9; _cli_ping_rssi_max = -1e9;
+}
+
+void MyMesh::updateCliPingStats(double rtt_s, double hin, double rueck, int rssi) {
+  auto upd = [](double v, double& sum, double& sq, double& mn, double& mx) {
+    sum += v; sq += v*v;
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+  };
+  upd(rtt_s, _cli_ping_rtt_sum, _cli_ping_rtt_sq, _cli_ping_rtt_min, _cli_ping_rtt_max);
+  upd(hin,   _cli_ping_hin_sum, _cli_ping_hin_sq, _cli_ping_hin_min, _cli_ping_hin_max);
+  upd(rueck, _cli_ping_rueck_sum, _cli_ping_rueck_sq, _cli_ping_rueck_min, _cli_ping_rueck_max);
+  upd((double)rssi, _cli_ping_rssi_sum, _cli_ping_rssi_sq, _cli_ping_rssi_min, _cli_ping_rssi_max);
+}
+
+void MyMesh::printCliPingStats() {
+  uint16_t sent = _cli_ping_count_done + _cli_ping_count_lost;
+  double loss_pct = sent > 0 ? (100.0 * _cli_ping_count_lost / sent) : 0.0;
+  char pkx[7];
+  mesh::Utils::toHex(pkx, _cli_ping_target_pubkey, 3);
+  char h1[200];
+  snprintf(h1, sizeof(h1),
+           "ping %s statistics:\n  %u sent, %u received, %u lost, %.0f%% loss",
+           pkx, (unsigned)sent, (unsigned)_cli_ping_count_done,
+           (unsigned)_cli_ping_count_lost, loss_pct);
+  pushCompanionMessage(h1);
+  if (_cli_ping_count_done == 0) return;
+  double n = (double)_cli_ping_count_done;
+  auto stddev = [&](double sum, double sq) -> double {
+    double mean = sum / n;
+    double var = sq / n - mean * mean;
+    return var < 0 ? 0 : sqrt(var);
+  };
+  double rtt_avg = _cli_ping_rtt_sum / n;
+  double rtt_dev = stddev(_cli_ping_rtt_sum, _cli_ping_rtt_sq);
+  char h2[220];
+  snprintf(h2, sizeof(h2),
+           "  rtt min/avg/max/mdev = %.1f/%.1f/%.1f/%.1f s",
+           _cli_ping_rtt_min, rtt_avg, _cli_ping_rtt_max, rtt_dev);
+  pushCompanionMessage(h2);
+  char h3[220];
+  snprintf(h3, sizeof(h3),
+           "  snr_hin min/avg/max = %+.1f/%+.1f/%+.1f dB\n"
+           "  snr_rueck min/avg/max = %+.1f/%+.1f/%+.1f dB",
+           _cli_ping_hin_min, _cli_ping_hin_sum / n, _cli_ping_hin_max,
+           _cli_ping_rueck_min, _cli_ping_rueck_sum / n, _cli_ping_rueck_max);
+  pushCompanionMessage(h3);
+  char h4[180];
+  snprintf(h4, sizeof(h4),
+           "  rssi min/avg/max = %.0f/%.0f/%.0f dBm",
+           _cli_ping_rssi_min, _cli_ping_rssi_sum / n, _cli_ping_rssi_max);
+  pushCompanionMessage(h4);
+}
+
+bool MyMesh::sendCliPingToStoredTarget() {
+  uint8_t hash_size = 1;
+  uint8_t ping_path[8];
+  size_t ppo = 0;
+  memcpy(&ping_path[ppo], _cli_ping_target_pubkey, hash_size); ppo += hash_size;
+  uint8_t tag_bytes[4], auth_bytes[4];
+  getRNG()->random(tag_bytes, 4);
+  getRNG()->random(auth_bytes, 4);
+  uint32_t tag, auth;
+  memcpy(&tag, tag_bytes, 4);
+  memcpy(&auth, auth_bytes, 4);
+  uint8_t flags = (uint8_t)(hash_size - 1);
+  auto pkt = createTrace(tag, auth, flags);
+  if (!pkt) return false;
+  sendDirect(pkt, ping_path, (uint8_t)ppo);
+  _cli_ping_tag = tag;
+  _cli_ping_started_ms = millis();
+  _cli_ping_expiry_ms = millis() + 10000;
+  return true;
+}
+
 void MyMesh::handleCompanionCommand(const char* cmd) {
   if (cmd == NULL) return;
   // Führende Whitespace überspringen
@@ -13241,6 +13615,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     pushCompanionMessage("(leerer Befehl - 'help' zeigt verfügbare Kommandos)");
     return;
   }
+  // 2026-07-07: '!!' Recall des letzten Befehls (unix shell style).
+  // Nur exakt '!!' (allein) oder '!!' gefolgt von Whitespace.
+  if (cmd[0] == '!' && cmd[1] == '!'
+      && (cmd[2] == 0 || cmd[2] == ' ' || cmd[2] == '\t'
+       || cmd[2] == '\r' || cmd[2] == '\n')) {
+    if (_cli_last_cmd[0] == 0) {
+      pushCompanionMessage("!!: kein vorheriger Befehl.");
+      return;
+    }
+    char echo[160];
+    snprintf(echo, sizeof(echo), "!! %s", _cli_last_cmd);
+    pushCompanionMessage(echo);
+    // Rekursiv aufrufen -- der recall speichert sich selbst nicht.
+    char tmp[128];
+    StrHelper::strzcpy(tmp, _cli_last_cmd, sizeof(tmp));
+    handleCompanionCommand(tmp);
+    return;
+  }
+  // Letzten cmd speichern (fuer '!!'). Nur non-empty non-!!-Befehle.
+  StrHelper::strzcpy(_cli_last_cmd, cmd, sizeof(_cli_last_cmd));
 #if defined(NRF52_PLATFORM) && defined(NRF52_STACK_DIAG)
   // DL9SAU 2026-06-16 T1000-E $companion-Hang Diagnose:
   // FreeRTOS-API: minimaler freier Stack-Watermark fuer aktuellen Task.
@@ -13290,6 +13684,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     {"repeater", false}, {"gps", false}, {"trace", false},
     {"chatname", false}, {"reboot", true}, {"shutdown", true}, {"dfu", false}, {"duty", false}, {"scope", false},
     {"prefs", false}, {"neighbors", false}, {"tempradio", false},
+    {"path", false},  // 2026-07-07: Path-Diagnose (ping, trace, show, ...)
+    {"ping", false},       // 2026-07-07: shortcut (pi, pin ...).
+    {"tracepath", false},  // 2026-07-07: tracep..tracepath. 'tra' bleibt bei
+                           // 'trace' (shortest-wins Tie-Break).
     {"set", false}, {"get", false}, {"clock", false}, {"date", false}, {"time", false},
     {"messages", false}, {"log", false}, {"channels", false},
     {"clear", true},
@@ -13846,8 +14244,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  TX-Block via CLI 'tx': disable|enable|\n"
           "  suspend <N>[s|m|h] -- RAM-only.");
         pushCompanionMessage(
-          "Radio LBT/AGC:\n"
-          "  int.thresh   (0=off, Default 14)\n"
+          "Radio LBT/CAD/AGC:\n"
+          "  int.thresh   (0=off, Default 14 dB LBT)\n"
+          "  cad          (on|off, Default on)\n"
           "  agc.reset.interval (sec/4, 0=off)");
         pushCompanionMessage(
           "Position:\n"
@@ -14176,6 +14575,66 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  werden separat gelistet.");
         return;
       }
+      if (topic_prefix_match(topic, "path")) {
+        pushCompanionMessage(
+          "path: Sub-Commands zur Path-Diagnose:\n"
+          "  path ping  <name|hex>  -- zero-hop Ping\n"
+          "  path trace <name|hex>  -- Round-Trip TRACE");
+        pushCompanionMessage(
+          "  path show <name|hex>   -- zeigt in/out Path\n"
+          "  path show direct       -- alle mit out_path_len=0\n"
+          "  path show <hex,,>      -- Substring-Query mit Ankern");
+        pushCompanionMessage(
+          "  path clear <name|hex>  -- out_path -> UNKNOWN\n"
+          "                            (naechster send macht flood-Disc.)\n"
+          "  path set <name|hex> direct     -- out_path_len=0\n"
+          "  path set <name|hex> aa,bb,cc   -- expl. Hop-Chain");
+        pushCompanionMessage(
+          "Abkuerzungen: pa p, pa t, pa s, pa c.\n"
+          "Auch als Top-Cmd 'ping' (pi..), 'tracepath' (tracep..).");
+        pushCompanionMessage(
+          "Query-Anker fuer 'path show <hex,,>':\n"
+          "  aabb        -> substring irgendwo\n"
+          "  aabb,       -> beginnt mit aabb (mehr hops)\n"
+          "  ,aabb       -> endet mit aabb\n"
+          "  ,aabb,      -> Zwischenhop (weder Anfang noch Ende)");
+        pushCompanionMessage(
+          "Begriffe:\n"
+          "  hs = hash-size (Bytes je Hop-Hash, 1..3)\n"
+          "  rt = round-trip (hin + zurueck)\n"
+          "  UNKNOWN vs direct: UNKNOWN = Firmware weiss nix,\n"
+          "  direct = out_path_len=0 (Nachbar, kein Zwischenhop)");
+        return;
+      }
+      if (topic_prefix_match(topic, "ping")) {
+        pushCompanionMessage(
+          "ping <name-prefix|hex-prefix>:\n"
+          "  Zero-hop direct-REQ an einen REPEATER/ROOM.\n"
+          "  Zeigt RTT + rx_him (SNR/RSSI der Antwort).");
+        pushCompanionMessage(
+          "  Namensuche case-insensitive, Prefix reicht.\n"
+          "  Beispiele: ping F Zio -- ping 02d4aa.\n"
+          "  Path wird nicht angetastet (Zero-Hop-Test).");
+        pushCompanionMessage(
+          "  Nur Repeater/Room antworten -- Clients/Sensoren\n"
+          "  sind stumm auf Ping.");
+        return;
+      }
+      if (topic_prefix_match(topic, "tracepath")) {
+        pushCompanionMessage(
+          "tracepath <name-prefix|hex-prefix>:\n"
+          "  Round-Trip-TRACE (rt) ueber gelernten Path.\n"
+          "  Zeigt RTT + SNR pro Hop (hin + Ziel + zurueck).");
+        pushCompanionMessage(
+          "  Voraussetzung: Path bekannt (contact.out_path\n"
+          "  oder advert_paths[] Fallback). Bei hex-only\n"
+          "  ohne Contact -> raw-hex zero-hop TRACE.");
+        pushCompanionMessage(
+          "  Timeout ist airtime-basiert:\n"
+          "  3s + 2*airtime*(hops+1) + hops*2s (mind. 5s).\n"
+          "  hs = hash-size (Bytes je Hop-Hash).");
+        return;
+      }
       if (topic_prefix_match(topic, "tempradio")) {
         pushCompanionMessage(
           "tempradio: temporaere Funk-Parameter.\n"
@@ -14431,12 +14890,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     );
     pushCompanionMessage(
       "  messages, logging,\n"
-      "  contact, backup, save, discover, tempradio,\n"
+      "  contact, backup, save, discover, path,\n"
+      "  tempradio,\n"
       "  filter, remote, bluetooth, serial-cli,"
     );
     pushCompanionMessage(
       "  ver, board, clear, reboot, shutdown, dfu,\n"
-      "  at, cron, magic-scopes."
+      "  at, cron, magic-scopes.\n"
+      "  '!!' - letzten Befehl wiederholen (shell-style)."
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
     // (Wunschliste 40). Sehen Kommentare bei den Handlern.
@@ -17092,6 +17553,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.agc_reset_interval != 0) non_default_count++;
     }
+    if (show_all || _prefs.cad_enabled != 1) {
+      snprintf(tmp, sizeof(tmp),
+               "  cad = %s%s",
+               _prefs.cad_enabled ? "on" : "off",
+               _prefs.cad_enabled == 1 ? " [default]" : " (default: on)");
+      add_line(tmp);
+      if (_prefs.cad_enabled != 1) non_default_count++;
+    }
     // Wunschliste 52 (Remote-Admin): passwd_admin/guest -- nur Count (Secret).
     if (show_all || _prefs.passwd_admin[0] != 0 || _prefs.passwd_guest[0] != 0) {
       snprintf(tmp, sizeof(tmp),
@@ -17952,8 +18421,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pending_admin_tag = tag;
       pending_admin_login = true;
       char r[100];
-      snprintf(r, sizeof(r), "OK - login Request an %s, est=%lums",
-               c->name, (unsigned long)est_timeout);
+      snprintf(r, sizeof(r), "OK - login Request an %s, est=%.1fs",
+               c->name, (double)est_timeout / 1000.0);
       pushCompanionMessage(r);
     } else {
       // REQ: [type(1)][cmd_text(...)] + Framework praefixed ts.
@@ -17972,8 +18441,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pending_admin_tag = tag;
       pending_admin_login = false;
       char r[100];
-      snprintf(r, sizeof(r), "OK - cmd Request an %s, est=%lums",
-               c->name, (unsigned long)est_timeout);
+      snprintf(r, sizeof(r), "OK - cmd Request an %s, est=%.1fs",
+               c->name, (double)est_timeout / 1000.0);
       pushCompanionMessage(r);
     }
     return;
@@ -19802,6 +20271,1034 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     discoverStart((1 << ADV_TYPE_REPEATER), false);
     return;
   }
+  // 2026-07-07: 'path' Sub-Command-Dispatcher.
+  //   path ping  <target>  -> Zero-hop direct-Ping (ex "ping")
+  //   path trace <target>  -> Round-Trip-Tracepath (ex "tracepath")
+  //   spaeter: path show|clear|direct|set|list (Wunschliste)
+  // Sub-Command prefix-abkuerzbar: 'pa p' -> 'path ping', 'pa t' -> 'path trace'.
+  // Umsetzung: sub -> synthese cmd = "ping ..." / "tracepath ...",
+  // dann fall-through zu den alten Handler-Bodies unten.
+  static char _path_synth_cmd[160];
+  if (starts_with_word(cmd, "path")) {
+    const char* sub = strchr(cmd, ' ');
+    if (!sub) {
+      pushCompanionMessage(
+          "path: Sub-Commands\n"
+          "  path ping  <name|hex>  -- zero-hop\n"
+          "  path trace <name|hex>  -- round-trip");
+      return;
+    }
+    while (*sub == ' ' || *sub == '\t') sub++;
+    if (!*sub) {
+      pushCompanionMessage(
+          "path <ping|trace> <name|hex>");
+      return;
+    }
+    // sub-token isolieren
+    const char* rest = sub;
+    while (*rest && *rest != ' ' && *rest != '\t') rest++;
+    size_t sub_len = (size_t)(rest - sub);
+    while (*rest == ' ' || *rest == '\t') rest++;  // arg-anfang
+    // Prefix-Match auf 'ping'/'trace'.
+    const char* canon = NULL;
+    if (sub_len > 0) {
+      auto matches = [&](const char* w) -> bool {
+        size_t wl = strlen(w);
+        if (sub_len > wl) return false;
+        for (size_t k = 0; k < sub_len; k++) {
+          char a = sub[k], b = w[k];
+          if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+          if (a != b) return false;
+        }
+        return true;
+      };
+      bool m_ping  = matches("ping");
+      bool m_trace = matches("trace");
+      bool m_clear = matches("clear");
+      bool m_show  = matches("show");
+      bool m_set   = matches("set");
+      int hit_count = (m_ping?1:0) + (m_trace?1:0) + (m_clear?1:0) + (m_show?1:0) + (m_set?1:0);
+      if (hit_count > 1) {
+        pushCompanionMessage("path: Mehrdeutig. Sub: ping|trace|clear|show|set");
+        return;
+      }
+      if (m_ping)   canon = "ping";
+      else if (m_trace) canon = "tracepath";
+      else if (m_clear || m_show || m_set) {
+        // path clear/show inline handhaben (kein synth cmd).
+        if (!*rest) {
+          pushCompanionMessage(m_clear ? "Usage: path clear <name|hex>"
+            : m_show ? "Usage: path show <name|hex|direct>"
+            : "Usage: path set <name|hex> <hex,hex,..|direct>");
+          return;
+        }
+        // 2026-07-07: 'path show direct' -> alle Kontakte mit out_path_len == 0.
+        if (m_show
+            && strncasecmp(rest, "direct", 6) == 0
+            && (rest[6] == 0 || rest[6] == ' ' || rest[6] == '\t'
+             || rest[6] == '\r' || rest[6] == '\n')) {
+          char hdr[80];
+          int found_n = 0;
+          int tot = getNumContacts();
+          for (int i = 0; i < tot; i++) {
+            ContactInfo ci;
+            if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+            if (ci.out_path_len != 0) continue;
+            if (ci.type == ADV_TYPE_NONE) continue;  // skip anon-leftover
+            char pkx[7];
+            mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
+            char line[100];
+            const char* type_str = (ci.type == ADV_TYPE_CHAT) ? "CHAT"
+                                 : (ci.type == ADV_TYPE_REPEATER) ? "REP"
+                                 : (ci.type == ADV_TYPE_ROOM) ? "ROOM"
+                                 : (ci.type == ADV_TYPE_SENSOR) ? "SENSOR"
+                                 : "NONE";
+            snprintf(line, sizeof(line), "  %s %s (%s)",
+                     pkx, ci.name, type_str);
+            if (found_n == 0) {
+              snprintf(hdr, sizeof(hdr), "path show direct:");
+              pushCompanionMessage(hdr);
+            }
+            pushCompanionMessage(line);
+            found_n++;
+          }
+          if (found_n == 0) pushCompanionMessage("path show direct: keine.");
+          else {
+            char sum[80];
+            snprintf(sum, sizeof(sum), "  %d Kontakte direct.", found_n);
+            pushCompanionMessage(sum);
+          }
+          return;
+        }
+        // 2026-07-07: 'path show <hex[,hex...]>' mit Anker-Kommas.
+        // 'aabb'       -> substring irgendwo im out_path
+        // 'aabb,'      -> path faengt mit aabb an (mehr hops folgen)
+        // ',aabb'      -> path endet mit aabb
+        // ',aabb,'     -> aabb ist Zwischenhop
+        if (m_show) {
+          bool query_looks_hex = true;
+          for (const char* p = rest; *p; p++) {
+            if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f')
+                 || (*p >= 'A' && *p <= 'F') || *p == ',')) {
+              query_looks_hex = false; break;
+            }
+          }
+          bool has_comma = false;
+          for (const char* p = rest; *p; p++) if (*p == ',') { has_comma = true; break; }
+          if (query_looks_hex && has_comma) {
+            // Anker-Query!
+            const char* qs = rest;
+            const char* qe = qs + strlen(qs);
+            while (qe > qs && (qe[-1] == ' ' || qe[-1] == '\t'
+                            || qe[-1] == '\r' || qe[-1] == '\n')) qe--;
+            bool anch_start = (*qs != ',');
+            bool anch_end   = (qe > qs && qe[-1] != ',');
+            // Strip leading/trailing commas fuer den Suchstring.
+            const char* ss = qs;
+            const char* se = qe;
+            if (*ss == ',') ss++;
+            if (se > ss && se[-1] == ',') se--;
+            // Alle Kommas dazwischen weg -> reine hex-bytes.
+            char clean[80]; size_t cl = 0;
+            for (const char* p = ss; p < se && cl + 1 < sizeof(clean); p++) {
+              if (*p != ',') clean[cl++] = *p;
+            }
+            clean[cl] = 0;
+            if (cl == 0 || (cl % 2) != 0) {
+              pushCompanionMessage("path show: hex-hop braucht gerade Anzahl.");
+              return;
+            }
+            uint8_t needle[32]; size_t nl = 0;
+            auto hv = [](char c) -> int {
+              if (c >= '0' && c <= '9') return c - '0';
+              if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+              if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+              return -1;
+            };
+            for (size_t i = 0; i < cl && nl < sizeof(needle); i += 2) {
+              int a = hv(clean[i]), b = hv(clean[i+1]);
+              if (a < 0 || b < 0) {
+                pushCompanionMessage("path show: bad hex."); return;
+              }
+              needle[nl++] = (uint8_t)((a << 4) | b);
+            }
+            int found_n = 0;
+            int tot = getNumContacts();
+            for (int i = 0; i < tot; i++) {
+              ContactInfo ci;
+              if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+              if (ci.out_path_len == 0 || ci.out_path_len == OUT_PATH_UNKNOWN) continue;
+              if (ci.out_path_len < nl) continue;
+              // Suche needle im out_path.
+              bool matches_pos = false;
+              int match_pos = -1;
+              int max_start = (int)ci.out_path_len - (int)nl;
+              for (int s = 0; s <= max_start; s++) {
+                if (memcmp(ci.out_path + s, needle, nl) == 0) {
+                  match_pos = s; break;
+                }
+              }
+              if (match_pos < 0) continue;
+              // Anker pruefen
+              bool at_start = (match_pos == 0);
+              bool at_end   = (match_pos + (int)nl == ci.out_path_len);
+              if (anch_start && anch_end) {
+                // 'aabb,' UND ',aabb' beides gesetzt = 'aabb' allein (kein Komma) = irgendwo
+                matches_pos = true;
+              } else if (!anch_start && !anch_end) {
+                // ',aabb,' -> mittig, weder start noch end
+                if (!at_start && !at_end) matches_pos = true;
+              } else if (anch_start && !anch_end) {
+                // 'aabb,' -> faengt mit aabb an, aber weitere Hops
+                if (at_start && !at_end) matches_pos = true;
+              } else if (!anch_start && anch_end) {
+                // ',aabb' -> endet mit aabb
+                if (at_end) matches_pos = true;
+              }
+              if (!matches_pos) continue;
+              char pkx[7];
+              mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
+              char line[220];
+              int lp = snprintf(line, sizeof(line), "  %s %s: ",
+                                pkx, ci.name);
+              for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++) {
+                lp += snprintf(line + lp, sizeof(line) - lp,
+                              "%s%02x", j == 0 ? "" : ",", ci.out_path[j]);
+              }
+              if (found_n == 0) pushCompanionMessage("path show:");
+              pushCompanionMessage(line);
+              found_n++;
+            }
+            char sum[80];
+            snprintf(sum, sizeof(sum), "  %d Treffer.", found_n);
+            pushCompanionMessage(sum);
+            return;
+          }
+        }
+        // Bei 'set': trenne target vom path-arg.
+        const char* set_path_arg = NULL;
+        size_t rest_target_len = 0;
+        if (m_set) {
+          // Erst Target-Token isolieren (bis Whitespace), dann rest ist path-arg.
+          const char* tp = rest;
+          while (*tp && *tp != ' ' && *tp != '\t') tp++;
+          rest_target_len = (size_t)(tp - rest);
+          while (*tp == ' ' || *tp == '\t') tp++;
+          if (!*tp) {
+            pushCompanionMessage("Usage: path set <name|hex> <hex,hex,..|direct>");
+            return;
+          }
+          set_path_arg = tp;
+        }
+        // Target lookup wie im ping/tracepath.
+        const char* rp2 = rest;
+        const char* rp2_end;
+        if (m_set) {
+          rp2_end = rp2 + rest_target_len;
+        } else {
+          rp2_end = rp2 + strlen(rp2);
+          while (rp2_end > rp2
+                 && (rp2_end[-1] == ' ' || rp2_end[-1] == '\t'
+                  || rp2_end[-1] == '\r' || rp2_end[-1] == '\n')) rp2_end--;
+        }
+        size_t il = (size_t)(rp2_end - rp2);
+        bool ih = (il >= 2 && (il % 2) == 0);
+        for (size_t i = 0; i < il && ih; i++) {
+          char c = rp2[i];
+          if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+               || (c >= 'A' && c <= 'F'))) ih = false;
+        }
+        size_t hb = ih ? (il / 2) : 0;
+        uint8_t ht[16]; memset(ht, 0, sizeof(ht));
+        if (ih && hb <= sizeof(ht)) {
+          auto hv = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+          };
+          for (size_t i = 0; i < hb; i++) {
+            ht[i] = (uint8_t)((hv(rp2[i*2]) << 4) | hv(rp2[i*2+1]));
+          }
+        } else {
+          ih = false;
+        }
+        // Contact-Suche
+        ContactInfo found;
+        bool got = false;
+        int nmatch = 0;
+        int tot = getNumContacts();
+        for (int i = 0; i < tot; i++) {
+          ContactInfo ci;
+          if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+          bool ok = false;
+          if (ih) {
+            if (memcmp(ci.id.pub_key, ht, hb) == 0) ok = true;
+          } else {
+            ok = true;
+            for (size_t k = 0; k < il; k++) {
+              char a = ci.name[k], b = rp2[k];
+              if (a == 0) { ok = false; break; }
+              if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+              if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+              if (a != b) { ok = false; break; }
+            }
+          }
+          if (!ok) continue;
+          if (nmatch == 0) { found = ci; got = true; }
+          nmatch++;
+        }
+        if (!got) {
+          pushCompanionMessage("path: kein Kontakt mit diesem Prefix.");
+          return;
+        }
+        // 2026-07-07: bei 'show' und Mehrdeutigkeit ALLE listen (kein error).
+        // Bei clear/set muss es aber eindeutig sein.
+        if (nmatch > 1 && m_show) {
+          char hdr[80];
+          snprintf(hdr, sizeof(hdr), "path show (%d Treffer):", nmatch);
+          pushCompanionMessage(hdr);
+          for (int i = 0; i < tot; i++) {
+            ContactInfo ci;
+            if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+            bool ok = false;
+            if (ih) {
+              if (memcmp(ci.id.pub_key, ht, hb) == 0) ok = true;
+            } else {
+              ok = true;
+              for (size_t k = 0; k < il; k++) {
+                char a = ci.name[k], b = rp2[k];
+                if (a == 0) { ok = false; break; }
+                if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+                if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+                if (a != b) { ok = false; break; }
+              }
+            }
+            if (!ok) continue;
+            char pkx[7];
+            mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
+            char line[220];
+            int lp = snprintf(line, sizeof(line), "  %s %s: ",
+                              pkx, ci.name);
+            if (ci.out_path_len == OUT_PATH_UNKNOWN) {
+              snprintf(line + lp, sizeof(line) - lp, "UNKNOWN");
+            } else if (ci.out_path_len == 0) {
+              snprintf(line + lp, sizeof(line) - lp, "direct");
+            } else {
+              for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++) {
+                lp += snprintf(line + lp, sizeof(line) - lp,
+                              "%s%02x", j == 0 ? "" : ",", ci.out_path[j]);
+              }
+            }
+            pushCompanionMessage(line);
+          }
+          return;
+        }
+        if (nmatch > 1) {
+          pushCompanionMessage("path: Mehrdeutig fuer clear/set. Praeziseres Prefix.");
+          return;
+        }
+        if (m_clear || m_set) {
+          ContactInfo* ci = lookupContactByPubKey(found.id.pub_key, PUB_KEY_SIZE);
+          if (!ci) {
+            pushCompanionMessage("path: interner lookup fail.");
+            return;
+          }
+          if (m_clear) {
+            // Clear -> UNKNOWN (Pfad vergessen, naechster send macht flood).
+            // Fuer explizit direct: 'path set X direct'.
+            ci->out_path_len = OUT_PATH_UNKNOWN;
+            memset(ci->out_path, 0, sizeof(ci->out_path));
+            dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+            char r[140];
+            snprintf(r, sizeof(r), "path clear %s: out_path -> UNKNOWN.",
+                     found.name);
+            pushCompanionMessage(r);
+            return;
+          }
+          // m_set
+          // Prueft ob 'direct' Schluesselwort.
+          bool is_direct_kw = (strncasecmp(set_path_arg, "direct", 6) == 0
+                              && (set_path_arg[6] == 0 || set_path_arg[6] == ' '
+                               || set_path_arg[6] == '\r' || set_path_arg[6] == '\n'));
+          if (is_direct_kw) {
+            ci->out_path_len = 0;
+            memset(ci->out_path, 0, sizeof(ci->out_path));
+            dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+            char r[140];
+            snprintf(r, sizeof(r), "path set %s direct: out_path -> direct.",
+                     found.name);
+            pushCompanionMessage(r);
+            return;
+          }
+          // Hex-hop-chain parsen: hex,hex,hex.
+          // Alle Hops muessen gleiche Byte-Anzahl haben (kein mix).
+          uint8_t new_path[MAX_PATH_SIZE]; memset(new_path, 0, sizeof(new_path));
+          size_t new_path_len = 0;
+          size_t hop_byte_len = 0;
+          const char* sp = set_path_arg;
+          while (*sp) {
+            while (*sp == ' ' || *sp == '\t') sp++;
+            if (!*sp) break;
+            const char* hs = sp;
+            while (*sp && *sp != ',' && *sp != ' ' && *sp != '\t'
+                   && *sp != '\r' && *sp != '\n') sp++;
+            size_t hlen = (size_t)(sp - hs);
+            if (hlen == 0 || (hlen % 2) != 0) {
+              pushCompanionMessage("path set: hex hop muss gerade Anzahl chars sein.");
+              return;
+            }
+            size_t hbytes = hlen / 2;
+            if (hbytes < 1 || hbytes > 3) {
+              pushCompanionMessage("path set: 1..3 byte je hop.");
+              return;
+            }
+            if (hop_byte_len == 0) hop_byte_len = hbytes;
+            else if (hbytes != hop_byte_len) {
+              pushCompanionMessage("path set: alle hops muessen gleiche Byte-Anzahl haben.");
+              return;
+            }
+            auto hv = [](char c) -> int {
+              if (c >= '0' && c <= '9') return c - '0';
+              if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+              if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+              return -1;
+            };
+            for (size_t k = 0; k < hbytes; k++) {
+              int a = hv(hs[k*2]);
+              int b = hv(hs[k*2+1]);
+              if (a < 0 || b < 0) {
+                pushCompanionMessage("path set: ungueltiges hex-Zeichen.");
+                return;
+              }
+              if (new_path_len >= MAX_PATH_SIZE) {
+                pushCompanionMessage("path set: Path zu lang.");
+                return;
+              }
+              new_path[new_path_len++] = (uint8_t)((a << 4) | b);
+            }
+            while (*sp == ' ' || *sp == '\t') sp++;
+            if (*sp == ',') sp++;
+          }
+          if (new_path_len == 0) {
+            pushCompanionMessage("path set: leerer Path.");
+            return;
+          }
+          ci->out_path_len = (uint8_t)new_path_len;
+          memcpy(ci->out_path, new_path, new_path_len);
+          dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+          char r[200];
+          snprintf(r, sizeof(r),
+                   "path set %s: %u bytes, %u hops (hs=%u).",
+                   found.name, (unsigned)new_path_len,
+                   (unsigned)(new_path_len / hop_byte_len),
+                   (unsigned)hop_byte_len);
+          pushCompanionMessage(r);
+          return;
+        }
+        // path show
+        char hdr[180];
+        snprintf(hdr, sizeof(hdr), "path %s:\n  type=%u, out_path_len=%u",
+                 found.name, (unsigned)found.type,
+                 (unsigned)found.out_path_len);
+        pushCompanionMessage(hdr);
+        // out_path
+        char out_line[220] = "  out=";
+        int opl = strlen(out_line);
+        if (found.out_path_len == OUT_PATH_UNKNOWN) {
+          snprintf(out_line + opl, sizeof(out_line) - opl, "UNKNOWN");
+        } else if (found.out_path_len == 0) {
+          snprintf(out_line + opl, sizeof(out_line) - opl, "direct (0 hops)");
+        } else {
+          for (uint8_t i = 0; i < found.out_path_len && opl + 4 < (int)sizeof(out_line); i++) {
+            opl += snprintf(out_line + opl, sizeof(out_line) - opl,
+                            "%s%02x", i == 0 ? "" : ",", found.out_path[i]);
+          }
+        }
+        pushCompanionMessage(out_line);
+        // in_path aus advert_paths[]
+        char in_line[220] = "  in=";
+        int ipl = strlen(in_line);
+        bool found_advert = false;
+        for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
+          if (memcmp(advert_paths[i].pubkey_prefix, found.id.pub_key, 7) != 0) continue;
+          found_advert = true;
+          if (advert_paths[i].path_len == 0) {
+            snprintf(in_line + ipl, sizeof(in_line) - ipl, "direct (0 hops)");
+          } else {
+            for (uint8_t j = 0; j < advert_paths[i].path_len && ipl + 4 < (int)sizeof(in_line); j++) {
+              ipl += snprintf(in_line + ipl, sizeof(in_line) - ipl,
+                              "%s%02x", j == 0 ? "" : ",", advert_paths[i].path[j]);
+            }
+          }
+          break;
+        }
+        if (!found_advert) {
+          snprintf(in_line + ipl, sizeof(in_line) - ipl,
+                   "(kein Eintrag im advert_paths cache)");
+        }
+        pushCompanionMessage(in_line);
+        return;
+      }
+    }
+    if (!canon) {
+      pushCompanionMessage(
+          "path: Sub-Commands:\n"
+          "  ping <name|hex>   -- zero-hop TRACE Ping\n"
+          "  trace <name|hex>  -- Round-Trip TRACE\n"
+          "  clear <name|hex>  -- out_path -> UNKNOWN\n"
+          "  show <name|hex>   -- zeigt in/out path");
+      return;
+    }
+    snprintf(_path_synth_cmd, sizeof(_path_synth_cmd), "%s %s", canon, rest);
+    cmd = _path_synth_cmd;
+    // fall through zu den bestehenden ping/tracepath Handlern unten.
+  }
+
+  // 2026-07-06 Wunschliste 2026-07-06: CLI 'ping <name-prefix|hex-prefix>'.
+  // Zero-hop direct REQ_TYPE_GET_STATUS an einen Repeater/Room-Server.
+  // Zeigt RTT + rx_him (unsere Sicht seiner RESP). Ping antastet den
+  // Path nicht -- fuer path-Test 'tracepath'.
+  // Direkt via 'ping' oder ueber 'path ping'/'pa p' (via synth cmd).
+  if (starts_with_word(cmd, "ping")) {
+    const char* rp = strchr(cmd, ' ');
+    if (!rp) {
+      pushCompanionMessage(
+          "Usage: ping [-c N] [-i M[s|m|h]] <name|hex>\n"
+          "  -c N   Anzahl Pings (max 60, default 1)\n"
+          "  -i M   Intervall (min 10m, max 1h, default 10m)");
+      return;
+    }
+    while (*rp == ' ' || *rp == '\t') rp++;
+    if (!*rp) { pushCompanionMessage("Usage: ping [-c N] [-i M] <target>"); return; }
+    if (_cli_ping_tag != 0
+        && (int32_t)(millis() - _cli_ping_expiry_ms) < 0) {
+      pushCompanionMessage("ping: laeuft noch. Bitte warten.");
+      return;
+    }
+    // Trim trailing whitespace
+    const char* rp_end = rp + strlen(rp);
+    while (rp_end > rp
+           && (rp_end[-1] == ' ' || rp_end[-1] == '\t'
+            || rp_end[-1] == '\r' || rp_end[-1] == '\n')) rp_end--;
+    size_t input_len = (size_t)(rp_end - rp);
+    // 2026-07-07: Optionale -c N und -i M[s|m|h] Flags am Anfang.
+    int arg_c = 1;
+    unsigned long arg_i_ms = 600000UL;  // default 10 min
+    while (input_len >= 2 && rp[0] == '-'
+           && (rp[1] == 'c' || rp[1] == 'i')) {
+      char flag = rp[1];
+      const char* q = rp + 2;
+      size_t qlen = input_len - 2;
+      while (qlen > 0 && (*q == ' ' || *q == '\t')) { q++; qlen--; }
+      // Mindestens 1 digit erwartet.
+      if (qlen == 0 || !(*q >= '0' && *q <= '9')) {
+        char err[100];
+        snprintf(err, sizeof(err),
+                 "ping: -%c braucht eine positive Zahl.\n"
+                 "Usage: ping [-c N] [-i M[s|m|h|d]] <target>",
+                 flag);
+        pushCompanionMessage(err);
+        return;
+      }
+      unsigned long val = 0;
+      while (qlen > 0 && *q >= '0' && *q <= '9') {
+        val = val * 10 + (*q - '0');
+        q++; qlen--;
+      }
+      // Default unit fuer -i = minutes (m). 's', 'm', 'h', 'd' erlaubt.
+      char unit = 'm';
+      if (flag == 'i' && qlen > 0
+          && (*q == 's' || *q == 'm' || *q == 'h' || *q == 'd')) {
+        unit = *q; q++; qlen--;
+      }
+      if (flag == 'c') {
+        if (val < 1 || val > 60) {
+          pushCompanionMessage("ping: -c muss 1..60 sein.");
+          return;
+        }
+        arg_c = (int)val;
+      } else {
+        unsigned long mult = (unit == 'd') ? 86400000UL
+                            : (unit == 'h') ? 3600000UL
+                            : (unit == 'm') ? 60000UL : 1000UL;
+        arg_i_ms = val * mult;
+        if (arg_i_ms < 600000UL || arg_i_ms > 86400000UL) {
+          pushCompanionMessage("ping: -i muss 10m..1d sein.");
+          return;
+        }
+      }
+      while (qlen > 0 && (*q == ' ' || *q == '\t')) { q++; qlen--; }
+      rp = q; input_len = qlen;
+    }
+    if (input_len == 0) {
+      pushCompanionMessage("ping: kein Ziel angegeben.");
+      return;
+    }
+    rp_end = rp + input_len;
+    while (rp_end > rp
+           && (rp_end[-1] == ' ' || rp_end[-1] == '\t'
+            || rp_end[-1] == '\r' || rp_end[-1] == '\n')) rp_end--;
+    input_len = (size_t)(rp_end - rp);
+    // Hex-Detection: nur 0-9/a-f/A-F, gerade Anzahl >= 2
+    bool is_hex = (input_len >= 2 && (input_len % 2) == 0);
+    for (size_t i = 0; i < input_len && is_hex; i++) {
+      char c = rp[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+           || (c >= 'A' && c <= 'F'))) is_hex = false;
+    }
+    size_t hex_bytes = is_hex ? (input_len / 2) : 0;
+    uint8_t hex_target[16]; memset(hex_target, 0, sizeof(hex_target));
+    if (is_hex && hex_bytes <= sizeof(hex_target)) {
+      auto hexval = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      for (size_t i = 0; i < hex_bytes; i++) {
+        hex_target[i] = (uint8_t)((hexval(rp[i*2]) << 4) | hexval(rp[i*2+1]));
+      }
+    } else {
+      is_hex = false;
+    }
+
+    // 2026-07-07: Zwei-Pass. Erst ALLE matches sammeln (unabh. vom Type),
+    // dann bei Konflikt Rep/Room-Kandidaten bevorzugen. Wenn nach Filter
+    // nur 1 uebrig -> den nehmen. Sonst ambig.
+    ContactInfo cand;
+    int n_total_match = 0;
+    int n_role_match = 0;
+    bool has_exact = false;
+    ContactInfo cand_exact;
+    ContactInfo cand_role;  // erster Rep/Room-Kandidat
+    char ambig[180] = "";
+    size_t ambig_used = 0;
+    char ambig_role[180] = "";
+    size_t ambig_role_used = 0;
+    int total = getNumContacts();
+    // 2026-07-07 BUG-FIX: getContactByIdx(i) liest contacts[i] direkt,
+    // ohne MAX_ANON_CONTACTS-Offset. Aber getNumContacts() gibt bereits
+    // die um MAX_ANON_CONTACTS reduzierte Zahl zurueck. Wir muessen den
+    // Offset selber addieren, sonst iterieren wir NUR ueber die Anon-Slots.
+    for (int i = 0; i < total; i++) {
+      ContactInfo ci;
+      if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+      bool match = false;
+      if (is_hex) {
+        if (memcmp(ci.id.pub_key, hex_target, hex_bytes) == 0) match = true;
+      } else {
+        match = true;
+        for (size_t k = 0; k < input_len; k++) {
+          char a = ci.name[k], b = rp[k];
+          if (a == 0) { match = false; break; }
+          if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+          if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+          if (a != b) { match = false; break; }
+        }
+      }
+      if (!match) continue;
+      if (ci.type == ADV_TYPE_SENSOR) continue;  // antwortet eh nicht
+      // Alle non-Sensor matches sammeln.
+      bool is_role = (ci.type == ADV_TYPE_REPEATER || ci.type == ADV_TYPE_ROOM);
+      if (!is_hex && strlen(ci.name) == input_len) {
+        cand_exact = ci; has_exact = true;
+      }
+      if (n_total_match == 0) cand = ci;
+      n_total_match++;
+      if (is_role) {
+        if (n_role_match == 0) cand_role = ci;
+        n_role_match++;
+        if (ambig_role_used + strlen(ci.name) + 3 < sizeof(ambig_role)) {
+          if (ambig_role_used > 0) {
+            ambig_role[ambig_role_used++] = ',';
+            ambig_role[ambig_role_used++] = ' ';
+          }
+          size_t nl = strlen(ci.name);
+          memcpy(ambig_role + ambig_role_used, ci.name, nl);
+          ambig_role_used += nl;
+          ambig_role[ambig_role_used] = 0;
+        }
+      }
+      if (ambig_used + strlen(ci.name) + 3 < sizeof(ambig)) {
+        if (ambig_used > 0) {
+          ambig[ambig_used++] = ',';
+          ambig[ambig_used++] = ' ';
+        }
+        size_t nl = strlen(ci.name);
+        memcpy(ambig + ambig_used, ci.name, nl);
+        ambig_used += nl;
+        ambig[ambig_used] = 0;
+      }
+    }
+    // Konflikt-Aufloesung: wenn >1 total, aber genau 1 Rep/Room -> den nehmen.
+    if (n_total_match > 1 && n_role_match == 1) {
+      cand = cand_role;
+      n_total_match = 1;
+      n_role_match = 1;
+    } else if (n_role_match > 0) {
+      // Falls mind. ein Rep/Room dabei -- Ambig-Liste auf Role-Only.
+      memcpy(ambig, ambig_role, ambig_role_used + 1);
+      ambig_used = ambig_role_used;
+      n_total_match = n_role_match;  // Ambig-Count auf role-set
+    }
+    if (n_total_match == 0) {
+      // 2026-07-07: temporaer immer als $companion-msg damit User Bug findet.
+      {
+        char msg[180];
+        snprintf(msg, sizeof(msg),
+                 "[ping-diag] input_len=%u is_hex=%d hex_bytes=%u total=%d "
+                 "hex_target=%02x%02x%02x",
+                 (unsigned)input_len, (int)is_hex, (unsigned)hex_bytes, total,
+                 hex_target[0], hex_target[1], hex_target[2]);
+        pushCompanionMessage(msg);
+      }
+      // Klare Fehlermeldung + Empfehlung path trace (braucht keinen pubkey).
+      char r[200];
+      char input_copy[80];
+      size_t cl = input_len < sizeof(input_copy) - 1 ? input_len : sizeof(input_copy) - 1;
+      memcpy(input_copy, rp, cl);
+      input_copy[cl] = 0;
+      snprintf(r, sizeof(r),
+               "ping: node %s unbekannt.\n"
+               "Verwende: path trace %s",
+               input_copy, input_copy);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (n_total_match > 1 && !has_exact) {
+      char r[220];
+      snprintf(r, sizeof(r), "Mehrdeutig (%d): %s",
+               n_total_match, ambig);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (has_exact) cand = cand_exact;
+
+    // 2026-07-07: zero-hop TRACE (App-kompatibel). Path = [target] allein.
+    // Target forwarded -- der forward-Echo trifft uns, path_snrs[0] = wie
+    // stark WIR bei IHM ankamen. Unser Radio-SNR beim RX = wie stark ER
+    // bei UNS ankam.
+    // 2026-07-07: hs=1 fuer Ping (backward-Kompat, aeltere Repeater
+    // koennen nicht mit 2/3-byte-hashes umgehen). Analog App-Verhalten.
+    uint8_t hash_size = 1;
+    uint8_t ping_path[8];
+    size_t ppo = 0;
+    memcpy(&ping_path[ppo], cand.id.pub_key, hash_size); ppo += hash_size;
+    uint8_t tag_bytes[4], auth_bytes[4];
+    getRNG()->random(tag_bytes, 4);
+    getRNG()->random(auth_bytes, 4);
+    uint32_t tag, auth;
+    memcpy(&tag, tag_bytes, 4);
+    memcpy(&auth, auth_bytes, 4);
+    uint8_t flags = (uint8_t)(hash_size - 1);
+    auto pkt = createTrace(tag, auth, flags);
+    if (!pkt) {
+      pushCompanionMessage("ping: Packet-Pool voll.");
+      return;
+    }
+    sendDirect(pkt, ping_path, (uint8_t)ppo);
+    _cli_ping_tag = tag;
+    _cli_ping_started_ms = millis();
+    _cli_ping_expiry_ms  = millis() + 10000;
+    // 2026-07-07: -c N -i M state.
+    memcpy(_cli_ping_target_pubkey, cand.id.pub_key, 32);
+    StrHelper::strzcpy(_cli_ping_target_name, cand.name,
+                       sizeof(_cli_ping_target_name));
+    _cli_ping_count_target = (uint16_t)arg_c;
+    _cli_ping_interval_ms = arg_i_ms;
+    _cli_ping_next_at_ms = 0;  // wird nach RESP/Timeout gesetzt
+    resetCliPingStats();
+    // Async-Output-Fenster fuer USB-CLI. Grosser Puffer damit auch bei
+    // zwischenzeitlichen anderen Async-Aktivitaeten (discover, chat) das
+    // Ping-Timeout im CLI sichtbar bleibt.
+    if (_serial_cli_active) {
+      // Bei -c N mit -i M: gesamtes Fenster abdecken damit auch spaete
+      // Pings + Stats via USB-CLI sichtbar bleiben.
+      unsigned long total_window = 25000UL;
+      if (arg_c > 1) {
+        total_window = (unsigned long)arg_c * arg_i_ms + 20000UL;
+      }
+      unsigned long need = millis() + total_window;
+      if ((int32_t)(need - _serial_cli_async_expiry_ms) > 0) {
+        _serial_cli_async_expiry_ms = need;
+      }
+    }
+    // (target pubkey/name schon oben gesetzt bei state init)
+    char pkx[7];
+    mesh::Utils::toHex(pkx, cand.id.pub_key, 3);
+    char r[140];
+    snprintf(r, sizeof(r), "ping %s: sent (zero-hop), warte...", pkx);
+    pushCompanionMessage(r);
+    return;
+  }
+
+  // 2026-07-07 Wunschliste 2026-07-06: CLI 'tracepath <name|hex>'.
+  // Round-Trip TRACE ueber den gelernten Path zurueck zu uns.
+  // Voraussetzung: contact.out_path bekannt (path_len > 0 || direct).
+  // Ausgabe: RTT + SNR pro Hop (hin + Ziel + zurueck).
+  if (starts_with_word(cmd, "tracepath")) {
+    const char* rp = strchr(cmd, ' ');
+    if (!rp) {
+      pushCompanionMessage("Usage: tracepath <name-prefix|hex-prefix>");
+      return;
+    }
+    while (*rp == ' ' || *rp == '\t') rp++;
+    if (!*rp) {
+      pushCompanionMessage("Usage: tracepath <name-prefix|hex-prefix>");
+      return;
+    }
+    if (_cli_trace_tag != 0
+        && (int32_t)(millis() - _cli_trace_expiry_ms) < 0) {
+      pushCompanionMessage("tracepath: schon einer offen. bitte warten.");
+      return;
+    }
+    const char* rp_end = rp + strlen(rp);
+    while (rp_end > rp
+           && (rp_end[-1] == ' ' || rp_end[-1] == '\t'
+            || rp_end[-1] == '\r' || rp_end[-1] == '\n')) rp_end--;
+    size_t input_len = (size_t)(rp_end - rp);
+    // Hex-Detection wie bei ping
+    bool is_hex = (input_len >= 2 && (input_len % 2) == 0);
+    for (size_t i = 0; i < input_len && is_hex; i++) {
+      char c = rp[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+           || (c >= 'A' && c <= 'F'))) is_hex = false;
+    }
+    size_t hex_bytes = is_hex ? (input_len / 2) : 0;
+    uint8_t hex_target[16]; memset(hex_target, 0, sizeof(hex_target));
+    if (is_hex && hex_bytes <= sizeof(hex_target)) {
+      auto hexval = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      for (size_t i = 0; i < hex_bytes; i++) {
+        hex_target[i] = (uint8_t)((hexval(rp[i*2]) << 4) | hexval(rp[i*2+1]));
+      }
+    } else {
+      is_hex = false;
+    }
+
+    // Kontaktliste durchsuchen. Auch CHAT (Companion mit repeat) erlauben --
+    // sie forwarden und lassen sich damit tracen. Nur SENSOR ist definitiv
+    // ausgeschlossen (kein forward).
+    ContactInfo cand;
+    int n_role_match = 0;
+    bool has_exact = false;
+    ContactInfo cand_exact;
+    char ambig[180] = ""; size_t ambig_used = 0;
+    int total = getNumContacts();
+    // Bug-Fix wie bei ping: MAX_ANON_CONTACTS-Offset addieren.
+    for (int i = 0; i < total; i++) {
+      ContactInfo ci;
+      if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+      bool match = false;
+      if (is_hex) {
+        if (memcmp(ci.id.pub_key, hex_target, hex_bytes) == 0) match = true;
+      } else {
+        match = true;
+        for (size_t k = 0; k < input_len; k++) {
+          char a = ci.name[k], b = rp[k];
+          if (a == 0) { match = false; break; }
+          if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+          if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+          if (a != b) { match = false; break; }
+        }
+      }
+      if (!match) continue;
+      if (ci.type == ADV_TYPE_SENSOR) continue;  // forwarded nicht
+      if (!is_hex && strlen(ci.name) == input_len) {
+        cand_exact = ci; has_exact = true;
+      }
+      if (n_role_match == 0) cand = ci;
+      n_role_match++;
+      if (ambig_used + strlen(ci.name) + 3 < sizeof(ambig)) {
+        if (ambig_used > 0) {
+          ambig[ambig_used++] = ',';
+          ambig[ambig_used++] = ' ';
+        }
+        size_t nl = strlen(ci.name);
+        if (ambig_used + nl < sizeof(ambig) - 1) {
+          memcpy(ambig + ambig_used, ci.name, nl);
+          ambig_used += nl;
+          ambig[ambig_used] = 0;
+        }
+      }
+    }
+    // 2026-07-07: bei hex-only ohne Contact-Match: Roher-Path zero-hop.
+    // TRACE braucht keinen Contact -- Path = [hex_bytes, ...].
+    // Bei is_hex: raw-hex mode auch wenn Kontakte matched wuerden --
+    // der User hat klar einen hex-Prefix getippt, nicht einen Namen.
+    // Ausnahme: exakter Contact-Match (gesamter pubkey stimmt).
+    bool raw_hex_mode = false;
+    if (is_hex && n_role_match == 0) {
+      raw_hex_mode = true;
+    } else if (is_hex && n_role_match > 1 && !has_exact) {
+      // Bei Ambig mit hex-Input: raw-hex-mode nutzen statt anmeckern.
+      raw_hex_mode = true;
+    }
+    if (raw_hex_mode) {
+      memset(&cand, 0, sizeof(cand));
+      memcpy(cand.id.pub_key, hex_target, hex_bytes);
+      cand.out_path_len = 0;
+      cand.type = ADV_TYPE_REPEATER;
+      // Name = "raw-<hex>" mit genau hex_bytes Bytes.
+      char nb[10] = "raw-";
+      size_t np = strlen(nb);
+      for (size_t i = 0; i < hex_bytes && np + 3 < sizeof(nb); i++) {
+        np += snprintf(nb + np, sizeof(nb) - np, "%02x", hex_target[i]);
+      }
+      StrHelper::strzcpy(cand.name, nb, sizeof(cand.name));
+    } else if (n_role_match == 0) {
+      pushCompanionMessage(
+          "tracepath: kein forward-taugliches Ziel mit diesem Prefix.");
+      return;
+    } else if (n_role_match > 1 && !has_exact) {
+      char r[220];
+      snprintf(r, sizeof(r), "Mehrdeutig (%d): %s",
+               n_role_match, ambig);
+      pushCompanionMessage(r);
+      return;
+    }
+    if (has_exact) cand = cand_exact;
+
+    // Path bekannt? out_path_len == 0 = direct (gueltiger Zustand!).
+    // Bei UNKNOWN: pruefe advert_paths -- vielleicht kennen wir den
+    // Weg wie der Advert zu uns kam. Reverse davon = plausibler out_path.
+    // Wenn's nicht klappt, User sieht Timeout und kann discovery machen.
+    uint8_t adv_reversed[MAX_PATH_SIZE];
+    uint8_t adv_reversed_len = 0;
+    bool used_advert_path = false;
+    if (cand.out_path_len == OUT_PATH_UNKNOWN) {
+      for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
+        if (memcmp(advert_paths[i].pubkey_prefix, cand.id.pub_key, 7) != 0) continue;
+        adv_reversed_len = advert_paths[i].path_len;
+        for (uint8_t k = 0; k < adv_reversed_len; k++) {
+          adv_reversed[k] = advert_paths[i].path[adv_reversed_len - 1 - k];
+        }
+        used_advert_path = true;
+        break;
+      }
+      if (!used_advert_path) {
+        // Kein Path bekannt. Fuer Repeater/Room macht die App keine
+        // chat-Nachrichten, deshalb wird contact.out_path nie via chat
+        // gelernt. advert_paths[] cache (16 slots, evict oldest) ist die
+        // einzige Quelle -- bei Eviction gibt es keinen Weg den Path zu
+        // ergaenzen bis 'path discover' implementiert ist.
+        char r[180];
+        snprintf(r, sizeof(r),
+                 "tracepath: kein Path zu %s.\n"
+                 "advert_paths cache evicted. Braucht 'path discover' -\n"
+                 "noch nicht implementiert.",
+                 cand.name);
+        pushCompanionMessage(r);
+        return;
+      }
+    }
+    const uint8_t* fwd_path = used_advert_path ? adv_reversed : cand.out_path;
+    uint8_t fwd_path_len = used_advert_path ? adv_reversed_len : cand.out_path_len;
+
+    // Round-Trip-Path bauen:
+    //   [hin_bytes][target_hash][rev_bytes][self_hash]
+    // 2026-07-07: bei advert-path fallback OR raw-hex force hs=1 (backward-
+    // Kompat, wir kennen die Fremd-Firmware nicht). Sonst pref nutzen --
+    // auch bei direct-Kontakt (User's Wahl respektieren, Timeout wenn
+    // Ziel altere hs=1-only firmware hat).
+    uint8_t hash_size;
+    if (used_advert_path || raw_hex_mode) {
+      hash_size = 1;
+    } else {
+      hash_size = _prefs.path_hash_mode + 1;
+      if (hash_size < 1 || hash_size > 3) hash_size = 1;
+    }
+    if ((cand.out_path_len % 1) != 0) {  // (hier waer eigentl. %hash_size aber
+      // die App speichert seit v1.11 in path_hash_size==1 bytes; wir gehen
+      // konservativ von 1 aus.)
+    }
+    uint8_t hop_bytes = fwd_path_len;
+    // Bei zero-hop (hop_bytes==0): Path=[target] allein reicht (App-Style,
+    // target's forward-Echo triggert bei uns onTraceRecv). Kein self am
+    // Ende noetig -- self-Anker macht extra Forward-Round noetig und
+    // dedup verhindert dass wir SEHEN onTraceRecv.
+    // Bei multi-hop: full Round-Trip [hin, target, rueck, self].
+    size_t total_bytes = (hop_bytes == 0)
+        ? (size_t)hash_size                       // zero-hop: nur [target]
+        : ((size_t)hop_bytes * 2 + hash_size * 2); // multi: hin+ziel+rueck+self
+    if (total_bytes > MAX_PATH_SIZE) {
+      pushCompanionMessage("tracepath: Path zu lang.");
+      return;
+    }
+    uint8_t rt_path[MAX_PATH_SIZE];
+    size_t off = 0;
+    if (hop_bytes == 0) {
+      // Zero-hop: nur [target]. App-kompatibel.
+      memcpy(&rt_path[off], cand.id.pub_key, hash_size);
+      off += hash_size;
+    } else {
+      memcpy(&rt_path[off], fwd_path, hop_bytes); off += hop_bytes;
+      memcpy(&rt_path[off], cand.id.pub_key, hash_size); off += hash_size;
+      for (int i = hop_bytes - 1; i >= 0; i--) rt_path[off++] = fwd_path[i];
+      memcpy(&rt_path[off], self_id.pub_key, hash_size); off += hash_size;
+    }
+    // TRACE senden.
+    uint8_t tag_bytes[4], auth_bytes[4];
+    getRNG()->random(tag_bytes, 4);
+    getRNG()->random(auth_bytes, 4);
+    uint32_t tag, auth;
+    memcpy(&tag, tag_bytes, 4);
+    memcpy(&auth, auth_bytes, 4);
+    uint8_t flags = (uint8_t)(hash_size - 1);  // untere 2 Bit
+    auto pkt = createTrace(tag, auth, flags);
+    if (!pkt) {
+      pushCompanionMessage("tracepath: Packet-Pool voll.");
+      return;
+    }
+    // 2026-07-07: Timeout airtime-basiert, kompensiert langsame Modi (SF12).
+    // Formel: 3s base + 2 * airtime * (hops+1) + hops * 2s channel-wait.
+    // SF10 zero-hop (~0.5s airtime): 3 + 1 + 0 = 4s -> zu knapp,
+    //   deshalb minimum 5s.
+    // SF10 3 hops: 3 + 4 + 6 = 13s.
+    // SF12 zero-hop (~4s airtime): 3 + 8 = 11s.
+    // SF12 3 hops: 3 + 32 + 6 = 41s.
+    uint32_t t_air = _radio->getEstAirtimeFor(pkt->getRawLength());
+    uint8_t hop_count = hop_bytes / hash_size;
+    unsigned long trace_timeout_ms = 3000UL
+        + (unsigned long)t_air * 2UL * ((unsigned long)hop_count + 1UL)
+        + (unsigned long)hop_count * 2000UL;
+    if (trace_timeout_ms < 5000UL) trace_timeout_ms = 5000UL;
+    sendDirect(pkt, rt_path, (uint8_t)off);
+    _cli_trace_tag = tag;
+    _cli_trace_started_ms = millis();
+    _cli_trace_expiry_ms = millis() + trace_timeout_ms;
+    // Async-Output-Fenster fuer USB-CLI. Grosser Puffer, max-Regel damit
+    // andere Async nicht das Fenster verkuerzt.
+    if (_serial_cli_active) {
+      unsigned long need = millis() + trace_timeout_ms + 15000;
+      if ((int32_t)(need - _serial_cli_async_expiry_ms) > 0) {
+        _serial_cli_async_expiry_ms = need;
+      }
+    }
+    _cli_trace_hash_size = hash_size;
+    _cli_trace_forward_hops = hop_bytes;
+    _cli_trace_target_hex_len = raw_hex_mode ? (uint8_t)hex_bytes : 3;
+    memcpy(_cli_trace_target_pubkey, cand.id.pub_key, 32);
+    StrHelper::strzcpy(_cli_trace_target_name, cand.name,
+                       sizeof(_cli_trace_target_name));
+    char pkx[7];
+    uint8_t pkx_len = raw_hex_mode ? (uint8_t)hex_bytes : (uint8_t)3;
+    if (pkx_len > 3) pkx_len = 3;
+    if (pkx_len < 1) pkx_len = 1;
+    mesh::Utils::toHex(pkx, cand.id.pub_key, pkx_len);
+    char r[140];
+    snprintf(r, sizeof(r),
+             "tracepath %s: sent (%u hops rt, hs=%u), warte...",
+             pkx, (unsigned)(hop_bytes / hash_size), (unsigned)hash_size);
+    pushCompanionMessage(r);
+    return;
+  }
+
   if (starts_with_word(cmd, "discover")) {
     // Sub-Token-Resolver mit Prefix-Match. Damit funktionieren
     // Kuerzungen: 'rep' -> repeater, 'regi' -> regions, 'p' -> prefix,
@@ -22062,6 +23559,34 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // 2026-07-06 Upstream-Merge: set cad on|off. Hardware Channel Activity
+    // Detection (SX1262 Preamble-Detection). Ergaenzt int.thresh.
+    if (strcmp(key, "cad") == 0) {
+      int8_t v = -1;
+      if (strcmp(value_lc, "on") == 0 || strcmp(value_lc, "1") == 0) v = 1;
+      else if (strcmp(value_lc, "off") == 0 || strcmp(value_lc, "0") == 0) v = 0;
+      if (v < 0) {
+        pushCompanionMessage("cad: on|off erwartet");
+        return;
+      }
+      _prefs.cad_enabled = (uint8_t)v;
+      savePrefs();
+      bool is_full_normal_repeater = (_prefs.client_repeat != 0
+                                      && _prefs.repeater_profile == 1);
+      char r[140];
+      if (v == 1) {
+        snprintf(r, sizeof(r), "OK - cad = on (default)");
+      } else if (is_full_normal_repeater) {
+        snprintf(r, sizeof(r), "OK - cad = off");
+      } else {
+        snprintf(r, sizeof(r),
+                 "cad = off gespeichert,\n"
+                 "aber effektiv on (client oder\n"
+                 "defensive repeater -> forced).");
+      }
+      pushCompanionMessage(r);
+      return;
+    }
     // Wunschliste 45 (Reise 2026-06-09): set int.thresh <N>
     // RSSI-Margin (dB) ueber noise_floor. 0 = LBT off. Upstream-
     // Doku-Default 14. Praxis: 1..14 je nach Standort/SF.
@@ -22234,6 +23759,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                          _prefs.messages_append_scope_to_name, 0);
       emit_uint  ("int.thresh",          _prefs.interference_threshold, 14);
       emit_uint  ("agc.reset.interval",  _prefs.agc_reset_interval,    0);
+      emit_uint  ("cad",                 _prefs.cad_enabled,           1);
       // DL9SAU Wunschliste 89/90/91: Battery + USB-Power-Schutz.
       emit_uint  ("batt_chemistry",      _prefs.batt_chemistry,
 #ifdef T1000_E
@@ -22503,6 +24029,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "int.thresh") == 0 || strcmp(key, "int_thresh") == 0)
       snprintf(r, sizeof(r), "int.thresh = %u dB%s", (unsigned)_prefs.interference_threshold,
                _prefs.interference_threshold == 0 ? " (LBT off)" : "");
+    else if (strcmp(key, "cad") == 0) {
+      bool is_full_normal_repeater = (_prefs.client_repeat != 0
+                                      && _prefs.repeater_profile == 1);
+      const char* eff = getCADEnabled() ? "on" : "off";
+      if (_prefs.cad_enabled == 0 && !is_full_normal_repeater) {
+        snprintf(r, sizeof(r),
+                 "cad = off (aber effektiv %s -- forced)", eff);
+      } else {
+        snprintf(r, sizeof(r), "cad = %s", eff);
+      }
+    }
     else if (strcmp(key, "agc.reset.interval") == 0 || strcmp(key, "agc_reset_interval") == 0)
       snprintf(r, sizeof(r), "agc.reset.interval = %u (%u sec)%s",
                (unsigned)_prefs.agc_reset_interval,
@@ -23307,10 +24844,11 @@ cron_add_direct:
     uint32_t lbt_frc = getNumLbtForceSend();
     char lbt_s[16]; fmt_secs(lbt_s, sizeof(lbt_s), lbt_ms);
     snprintf(block, sizeof(block),
-             "lbt (int.thresh = %u dB):\n"
+             "lbt (int.thresh=%u dB, cad=%s):\n"
              "  n_defers = %lu   total_wait = %s\n"
              "  n_force_sends = %lu",
              (unsigned)_prefs.interference_threshold,
+             getCADEnabled() ? "on" : "off",
              (unsigned long)lbt_n, lbt_s, (unsigned long)lbt_frc);
     pushCompanionMessage(block);
     return;

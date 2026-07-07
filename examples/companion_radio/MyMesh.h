@@ -351,6 +351,7 @@ protected:
   float getAirtimeBudgetFactor() const override;
   int getInterferenceThreshold() const override;
   int getAGCResetInterval() const override;
+  bool getCADEnabled() const override;
   int calcRxDelay(float score, uint32_t air_time) const override;
   uint32_t getRetransmitDelay(const mesh::Packet *packet) override;
   uint32_t getDirectRetransmitDelay(const mesh::Packet *packet) override;
@@ -1173,6 +1174,53 @@ private:
   uint32_t pending_status;
   uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ
   uint32_t pending_req;   // pending _BINARY_REQ
+  // 2026-07-06: CLI 'ping' State. 0 = kein pending.
+  uint32_t _cli_ping_tag = 0;
+  unsigned long _cli_ping_started_ms = 0;
+  unsigned long _cli_ping_expiry_ms  = 0;
+  uint8_t  _cli_ping_target_pubkey[32] = {0};
+  char     _cli_ping_target_name[32]   = {0};
+  // 2026-07-07: Ping -c N -i M Stats.
+  uint16_t _cli_ping_count_target = 0;      // 0 = single, >0 = -c N mode
+  uint16_t _cli_ping_count_done = 0;
+  uint16_t _cli_ping_count_lost = 0;
+  unsigned long _cli_ping_interval_ms = 0;
+  unsigned long _cli_ping_next_at_ms = 0;
+  // Running stats: sum, sum_sq, min, max je field.
+  double   _cli_ping_rtt_sum = 0, _cli_ping_rtt_sq = 0;
+  double   _cli_ping_rtt_min = 0, _cli_ping_rtt_max = 0;
+  double   _cli_ping_hin_sum = 0, _cli_ping_hin_sq = 0;
+  double   _cli_ping_hin_min = 0, _cli_ping_hin_max = 0;
+  double   _cli_ping_rueck_sum = 0, _cli_ping_rueck_sq = 0;
+  double   _cli_ping_rueck_min = 0, _cli_ping_rueck_max = 0;
+  double   _cli_ping_rssi_sum = 0, _cli_ping_rssi_sq = 0;
+  double   _cli_ping_rssi_min = 0, _cli_ping_rssi_max = 0;
+  // 2026-07-07: CLI Last-Cmd Recall via '!!' (unix shell style).
+  char _cli_last_cmd[128] = {0};
+  // 2026-07-07: Einheitliche Regions-Result-Ausgabe (4 Sites konsolidiert).
+  void pushRegionsResult(const uint8_t* pubkey32, const char* name,
+                         const uint8_t* csv, size_t csv_len);
+  // 2026-07-07: TRACE-Ping an gespeichertes Ziel (fuer -c N Auto-Repeat).
+  bool sendCliPingToStoredTarget();
+  void resetCliPingStats();
+  void updateCliPingStats(double rtt_s, double hin, double rueck, int rssi);
+  void printCliPingStats();
+  // 2026-07-07: CLI 'tracepath' State.
+  uint32_t _cli_trace_tag = 0;
+  unsigned long _cli_trace_started_ms = 0;
+  unsigned long _cli_trace_expiry_ms  = 0;
+  uint8_t  _cli_trace_target_pubkey[32] = {0};
+  char     _cli_trace_target_name[32]   = {0};
+  uint8_t  _cli_trace_hash_size = 1;
+  uint8_t  _cli_trace_forward_hops = 0;   // Anzahl Hops im Hin-Weg (ohne Ziel)
+  uint8_t  _cli_trace_target_hex_len = 3; // Bytes fuer pkx-Ausgabe (variabel bei raw-hex)
+  // 2026-07-07: App-Piggyback fuer Ping/Trace (analog Discover-Piggyback).
+  uint32_t _app_ping_tag = 0;
+  unsigned long _app_ping_started_ms = 0;
+  uint8_t  _app_ping_target_pubkey[32] = {0};
+  uint32_t _app_trace_tag = 0;
+  unsigned long _app_trace_started_ms = 0;
+  uint8_t  _app_trace_target_pubkey[32] = {0};
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;
 

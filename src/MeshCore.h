@@ -71,6 +71,10 @@ public:
   virtual void tickOTA() { /* no op */ }
   virtual bool isOTAActive() { return false; }
   virtual void setOTAAuth(const char* user, const char* pass) { (void)user; (void)pass; }
+  // Upstream 2026-06+: LoRa FEM/LNA-Control (Frontend-Module fuer Antennenpfad).
+  virtual bool setLoRaFemLnaEnabled(bool enable) { return false; }
+  virtual bool canControlLoRaFemLna() const { return false; }
+  virtual bool isLoRaFemLnaEnabled() const { return false; }
 
   // Power management interface (boards with power management override these)
   virtual bool isExternalPowered() { return false; }

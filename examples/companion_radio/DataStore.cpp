@@ -508,6 +508,14 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
       _prefs.channel_no_scope_behavior = 1;  // direct
     }
 
+    // 2026-07-06 Upstream-Merge: cad_enabled. EOF-Sentinel 0xFF -> Default 1
+    // (an). Migration-Pattern wie channel_no_scope_behavior.
+    _prefs.cad_enabled = 0xFF;
+    file.read((uint8_t *)&_prefs.cad_enabled, sizeof(_prefs.cad_enabled));
+    if (_prefs.cad_enabled == 0xFF || _prefs.cad_enabled > 1) {
+      _prefs.cad_enabled = 1;  // an per Default
+    }
+
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
     // NRF52 nutzt DFU-Pfad statt WiFi-OTA).
@@ -749,6 +757,8 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // DL9SAU 2026-07-02: channel_no_scope_behavior.
     file.write((uint8_t *)&_prefs.channel_no_scope_behavior,
                sizeof(_prefs.channel_no_scope_behavior));
+    // 2026-07-06 Upstream-Merge: cad_enabled.
+    file.write((uint8_t *)&_prefs.cad_enabled, sizeof(_prefs.cad_enabled));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).
@@ -1049,7 +1059,7 @@ bool DataStore::putBlobByKey(const uint8_t key[], int key_len, const uint8_t src
     uint32_t pos = 0, found_pos = 0;
     uint32_t min_timestamp = 0xFFFFFFFF;
 
-    // search for matching key OR evict by oldest timestmap
+    // search for matching key OR evict by oldest timestamp
     BlobRec tmp;
     file.seek(0);
     while (file.read((uint8_t *) &tmp, sizeof(tmp)) == sizeof(tmp)) {

@@ -732,6 +732,14 @@ struct NodePrefs {  // persisted to file
   //   1          = direct (Default; zero-hop, kein Repeat)
   //   2          = flood (klassisch, unscoped Reichweite)
   uint8_t        channel_no_scope_behavior;
+  // 2026-07-06 Upstream-Merge: Hardware CAD (Channel Activity Detection)
+  // vor TX. SX1262 macht Preamble-Detection intern. Werte:
+  //   0xFF (EOF) = uninit -> Migration auf Default (1 = ein)
+  //   0          = aus
+  //   1          = an (Default)
+  // Cad ergaenzt int.thresh (RSSI-basiertes LBT) -- beide aktiv sinnvoll:
+  // CAD faengt Meshcore-Preambles, int.thresh das allgemeine RF-Level.
+  uint8_t        cad_enabled;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim
