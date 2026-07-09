@@ -13756,6 +13756,23 @@ bool MyMesh::sendCliPingToStoredTarget() {
 
 void MyMesh::handleCompanionCommand(const char* cmd) {
   if (cmd == NULL) return;
+  // 2026-07-09: Usage-Texte die an MEHREREN Stellen gezeigt werden EINMAL
+  // definieren (help-Topic + catch-all/bare/'?'), nie duplizieren -- sonst
+  // driften sie auseinander. Detail-Hilfen (help <topic>) duerfen darueber
+  // hinaus zusaetzliche Zeilen haben.
+  static const char CH_USAGE[] =
+    "channels: Liste + Verwaltung.\n"
+    "  channels                    -- Liste aller Channels\n"
+    "  channels add <#name>        -- Hashtag anlegen (Key=sha256(Name))\n"
+    "  channels remove <slot|name> -- loeschen (companion geschuetzt)\n"
+    "  channels delete <slot|name> -- Alias fuer remove";
+  static const char PATH_USAGE[] =
+    "path: Sub-Commands:\n"
+    "  ping <name|hex>   -- zero-hop TRACE Ping\n"
+    "  trace <name|hex>  -- Round-Trip TRACE\n"
+    "  clear <name|hex>  -- out_path -> UNKNOWN\n"
+    "  set <name|hex> .. -- out_path setzen (direct|hop-chain)\n"
+    "  show <name|hex>   -- zeigt in/out path";
   // Führende Whitespace überspringen
   while (*cmd == ' ' || *cmd == '\t') cmd++;
   if (*cmd == 0) {
@@ -14722,6 +14739,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  werden separat gelistet.");
         return;
       }
+      if (topic_prefix_match(topic, "channels")) {
+        pushCompanionMessage(CH_USAGE);
+        pushCompanionMessage(
+          "Nur Hashtags per CLI anlegbar (Key deterministisch aus Name).\n"
+          "Public=Default, private/custom brauchen geheimen Key (app-seitig).\n"
+          "Praktisch fuer headless Repeater + 'ch.hops'.");
+        return;
+      }
       if (topic_prefix_match(topic, "path")) {
         pushCompanionMessage(
           "path: Sub-Commands zur Path-Diagnose:\n"
@@ -14767,7 +14792,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  sind stumm auf Ping.");
         return;
       }
-      if (topic_prefix_match(topic, "tracepath")) {
+      // 2026-07-09: tracepath nur bei EINDEUTIGEM Prefix (Prefix von
+      // "tracepath" aber NICHT auch von "trace") -- sonst matchen 'trace'
+      // und 'tra' faelschlich tracepath statt trace. Konsistent mit dem
+      // Befehls-Resolver ('tra' -> trace). 'tracep'+ bleibt tracepath.
+      if (topic_prefix_match(topic, "tracepath") && !topic_prefix_match(topic, "trace")) {
         pushCompanionMessage(
           "tracepath <name-prefix|hex-prefix>:\n"
           "  Round-Trip-TRACE (rt) ueber gelernten Path.\n"
@@ -17151,7 +17180,125 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   //   companion ($companion-Magic), custom (anderes 128-bit PSK).
   if (starts_with_word(cmd, "channels")
       || starts_with_word(cmd, "chans")
-      || starts_with_word(cmd, "ch.list")) {
+      || starts_with_word(cmd, "ch.list")
+      || starts_with_word(cmd, "channel")) {
+    // 2026-07-09: 'channels add <#name>' -- Hashtag-Channel via CLI anlegen.
+    // NUR Hashtags: Key = sha256("#name")[0..16] deterministisch aus dem
+    // Namen. Public hat Default, private/custom braeuchten den geheimen Key
+    // (nicht uebers Klartext-CLI). Dedup: kein 2x #name. Erster freier Slot.
+    {
+      const char* aarg = strchr(cmd, ' ');
+      if (aarg) {
+        while (*aarg == ' ' || *aarg == '\t') aarg++;
+        static const CompanionChoice add_sub[] = { {"add", false} };
+        if (*aarg && match_choice(aarg, add_sub, 1, nullptr, 0) == 0) {
+          const char* tgt = strchr(aarg, ' ');
+          if (tgt) { while (*tgt == ' ' || *tgt == '\t') tgt++; }
+          char nm[32]; size_t nl = 0;
+          if (tgt) while (tgt[nl] && tgt[nl] != ' ' && tgt[nl] != '\t'
+                          && nl < sizeof(nm) - 1) { nm[nl] = tgt[nl]; nl++; }
+          nm[nl] = 0;
+          if (nm[0] == 0) { pushCompanionMessage("Usage: channels add <#name>"); return; }
+          if (nm[0] != '#') {
+            pushCompanionMessage("channels add: nur Hashtag (#name) -- Key wird aus dem Namen berechnet.");
+            return;
+          }
+          for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            ChannelDetails ex;
+            if (getChannel(i, ex) && ex.name[0] != 0 && strcmp(ex.name, nm) == 0) {
+              char r[80];
+              snprintf(r, sizeof(r), "channels add: '%s' existiert schon (Slot %d).", nm, i);
+              pushCompanionMessage(r);
+              return;
+            }
+          }
+          int fslot = -1;
+          for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            ChannelDetails ex;
+            if (!getChannel(i, ex) || ex.name[0] == 0) { fslot = i; break; }
+          }
+          if (fslot < 0) { pushCompanionMessage("channels add: kein freier Slot."); return; }
+          ChannelDetails nch; memset(&nch, 0, sizeof(nch));
+          StrHelper::strzcpy(nch.name, nm, sizeof(nch.name));
+          uint8_t h16[32];
+          mesh::Utils::sha256(h16, sizeof(h16), (const uint8_t*)nm, strlen(nm));
+          memcpy(nch.channel.secret, h16, 16);
+          if (setChannel(fslot, nch)) {   // hash wird automatisch recomputed
+            saveChannels();
+            char r[80];
+            snprintf(r, sizeof(r), "channel %d '%s' hinzugefuegt.", fslot, nm);
+            pushCompanionMessage(r);
+          } else {
+            pushCompanionMessage("channels add: setChannel fehlgeschlagen.");
+          }
+          return;
+        }
+      }
+    }
+    // 2026-07-09: 'channels remove|delete <slot|name>' -- Channel-Slot via
+    // CLI loeschen (bisher gab es NUR den Lister). Numerisch = Slot, sonst
+    // exakter Name. Companion-Channel ist geschuetzt.
+    {
+      const char* carg = strchr(cmd, ' ');
+      if (carg) {
+        while (*carg == ' ' || *carg == '\t') carg++;
+        static const CompanionChoice ch_sub[] = { {"remove", false}, {"delete", false} };
+        if (*carg && match_choice(carg, ch_sub, 2, nullptr, 0) >= 0) {
+          const char* tgt = strchr(carg, ' ');
+          if (tgt) { while (*tgt == ' ' || *tgt == '\t') tgt++; }
+          if (!tgt || !*tgt) {
+            pushCompanionMessage("Usage: channels remove <slot|name>");
+            return;
+          }
+          int slot = -1;
+          if (tgt[0] >= '0' && tgt[0] <= '9') {
+            int s = atoi(tgt);
+            if (s >= 0 && s < MAX_GROUP_CHANNELS) slot = s;
+          } else {
+            for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+              ChannelDetails ch;
+              if (getChannel(i, ch) && ch.name[0] != 0
+                  && strcmp(ch.name, tgt) == 0) { slot = i; break; }
+            }
+          }
+          ChannelDetails ch;
+          if (slot < 0 || !getChannel(slot, ch) || ch.name[0] == 0) {
+            char r[90];
+            snprintf(r, sizeof(r), "channel remove: '%s' nicht gefunden / Slot leer.", tgt);
+            pushCompanionMessage(r);
+            return;
+          }
+          if (memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0) {
+            pushCompanionMessage("companion-Channel ist geschuetzt, nicht entfernbar.");
+            return;
+          }
+          char rname[32]; StrHelper::strzcpy(rname, ch.name, sizeof(rname));
+          ChannelDetails empty; memset(&empty, 0, sizeof(empty));
+          if (setChannel(slot, empty)) {
+            saveChannels();
+            char r[80];
+            snprintf(r, sizeof(r), "channel %d '%s' entfernt.", slot, rname);
+            pushCompanionMessage(r);
+          } else {
+            pushCompanionMessage("channel remove: setChannel fehlgeschlagen.");
+          }
+          return;
+        }
+      }
+    }
+    // 2026-07-09: Beliebiges anderes Argument (?, help, unbekannt) -> EINE
+    // einheitliche Usage (konsistent mit path/path?/path foobar). Nur das
+    // arg-lose 'channels' listet.
+    {
+      const char* uarg = strchr(cmd, ' ');
+      if (uarg) {
+        while (*uarg == ' ' || *uarg == '\t') uarg++;
+        if (*uarg) {
+          pushCompanionMessage(CH_USAGE);
+          return;
+        }
+      }
+    }
     char buf[180];
     int n = 0;
     for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
@@ -20429,10 +20576,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   if (starts_with_word(cmd, "path")) {
     const char* sub = strchr(cmd, ' ');
     if (!sub) {
-      pushCompanionMessage(
-          "path: Sub-Commands\n"
-          "  path ping  <name|hex>  -- zero-hop\n"
-          "  path trace <name|hex>  -- round-trip");
+      pushCompanionMessage(PATH_USAGE);
       return;
     }
     while (*sub == ' ' || *sub == '\t') sub++;
@@ -20889,12 +21033,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
     }
     if (!canon) {
-      pushCompanionMessage(
-          "path: Sub-Commands:\n"
-          "  ping <name|hex>   -- zero-hop TRACE Ping\n"
-          "  trace <name|hex>  -- Round-Trip TRACE\n"
-          "  clear <name|hex>  -- out_path -> UNKNOWN\n"
-          "  show <name|hex>   -- zeigt in/out path");
+      pushCompanionMessage(PATH_USAGE);
       return;
     }
     snprintf(_path_synth_cmd, sizeof(_path_synth_cmd), "%s %s", canon, rest);
@@ -25584,6 +25723,28 @@ cron_add_direct:
       } else {
         pushCompanionMessage("Usage: trace all on | trace all off");
       }
+      return;
+    }
+
+    // 2026-07-09: 'trace set <maske>' -> ganze Bitmaske direkt setzen (dez
+    // oder 0xHEX). Schnelles Restore einer kompletten Trace-Auswahl (z.B. der
+    // Wert 'trace_flags_persistent' aus einem Backup) ohne jede Kategorie
+    // einzeln nachzutippen. Setzt aktiv + persistent.
+    if (starts_with_word(arg, "set")) {
+      const char* v = strchr(arg, ' ');
+      if (v) { while (*v == ' ') v++; }
+      if (!v || !*v) {
+        pushCompanionMessage("Usage: trace set <maske>  (dez oder 0xHEX, z.B. 14207 bzw. 0x377F)");
+        return;
+      }
+      uint32_t mask = (uint32_t)strtoul(v, NULL, 0) & TRACE_ALL_MASK;
+      _trace_flags                  = (uint16_t)mask;
+      _prefs.trace_flags_persistent = (uint16_t)mask;
+      savePrefs();
+      char r[80];
+      snprintf(r, sizeof(r), "OK - trace-Maske = 0x%04X = %u (aktiv + gespeichert).",
+               (unsigned)mask, (unsigned)mask);
+      pushCompanionMessage(r);
       return;
     }
 
