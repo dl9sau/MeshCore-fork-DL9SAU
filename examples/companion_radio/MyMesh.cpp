@@ -5575,7 +5575,7 @@ void MyMesh::discoverFinishAndPrint() {
     }
   } else if (n_cached > 0) {
     snprintf(header, sizeof(header),
-             "%s: %u frische Antworten + %u aus Cache:",
+             "%s: %u neue Antworten + %u aus Cache:",
              label, (unsigned)n_fresh, (unsigned)n_cached);
   } else {
     snprintf(header, sizeof(header),
