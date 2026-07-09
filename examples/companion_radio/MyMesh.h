@@ -280,7 +280,8 @@ struct AdvertPath {
 #define TRACE_BT        0x1000   // BLE-Diagnose (heap + disconnect-counter)
 #define TRACE_DISCOVER  0x2000   // discover regions ANON-RESP + leer-Diagnose
 #define TRACE_DBG_ANON  0x4000   // Bug-5-Debug: ANON-TX/RX hex-dump (CLI vs App)
-#define TRACE_ALL_MASK  0x7FFF
+#define TRACE_COALESCE  0x8000   // Resend-Coalescing: Timestamp aus Cache korrigiert / Eintrag entfernt
+#define TRACE_ALL_MASK  0xFFFF
 
 // Duty-Cycle-Schutz: regulatorische 10% TX-Airtime pro rollendem 1h-Fenster
 // (EU SRD 869 narrow). Sliding-Window mit 60 Slots à 1 Minute (millis-basiert,
@@ -1222,6 +1223,26 @@ private:
   unsigned long _app_trace_started_ms = 0;
   uint8_t  _app_trace_target_pubkey[32] = {0};
   uint8_t  _app_trace_hex_len = 3;  // Bytes fuer pkx-Ausgabe (= app_hash_size)
+  // 2026-07-08: Resend-Coalescing (aus stash@{3} reaktiviert 2026-07-09 zur
+  // Crash-Reproduktion mit scharfem Crash-Faenger). Channel: gleicher Text im
+  // gleichen Channel innerhalb Fenster -> Original-Timestamp -> identischer
+  // Hash -> Empfaenger dedupt. DM: gleicher Timestamp + attempt++ (anderer
+  // Hash propagiert, Empfaenger-App dedupt nach (Sender, Timestamp)).
+  struct ResendCoalesce {
+    uint32_t      key_hash;       // Channel: fnv1a32(secret); DM: fnv1a32(pubkey6)
+    uint32_t      text_hash;      // fnv1a32 des final gesendeten Texts
+    uint32_t      orig_timestamp; // Timestamp des ERSTEN Sends
+    unsigned long anchor_millis;  // millis() des letzten Sends (erneuert)
+    uint8_t       max_attempt;    // hoechster genutzter attempt (nur DM)
+    bool          is_dm;
+    bool          used;
+  };
+  static const int RESEND_COALESCE_N = 16;
+  ResendCoalesce _resend_coalesce[RESEND_COALESCE_N] = {};
+  // Gibt den zu nutzenden Timestamp zurueck. Bei DM (attempt != nullptr)
+  // wird *attempt bei einem Coalesce-Treffer hochgezaehlt.
+  uint32_t resendCoalesce(bool is_dm, uint32_t key_hash, uint32_t text_hash,
+                          uint32_t app_timestamp, uint8_t* attempt);
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;
 

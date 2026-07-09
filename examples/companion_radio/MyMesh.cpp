@@ -7096,6 +7096,14 @@ void MyMesh::handleCmdFrame(size_t len) {
         result = sendCommandData(*recipient, msg_timestamp, attempt, text, est_timeout);
         expected_ack = 0; // no Ack expected
       } else {
+        // 2026-07-08: Resend-Coalescing (DM). Gleicher Timestamp aber attempt++
+        // -> anderer Hash (propagiert zum Ziel), Empfaenger-App dedupt nach
+        // (Sender, Timestamp). Identischer Hash waere hier falsch (Relay wuerde
+        // den Resend verwerfen).
+        uint32_t rcpt_key = fnv1a32((const char*)recipient->id.pub_key, 6);
+        uint32_t txt_key = fnv1a32(text, (size_t)tlen);
+        msg_timestamp = resendCoalesce(/*is_dm=*/true, rcpt_key, txt_key,
+                                       msg_timestamp, &attempt);
         result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout);
       }
       // TODO: add expected ACK to table
@@ -7251,6 +7259,16 @@ void MyMesh::handleCmdFrame(size_t len) {
       }
       stripReplyMentionDecoration(mtext);
       int mlen = (int)strlen(mtext);
+      // 2026-07-08: Resend-Coalescing (Channel). Bei gleichem Text im gleichen
+      // Channel innerhalb Fenster den Original-Timestamp wiederverwenden ->
+      // identischer Paket-Hash -> Empfaenger dedupt, kein Doubletten-Spam bei
+      // manuellem Resend. Channel-Identitaet = fnv1a32(secret).
+      if (success) {
+        uint32_t ch_key = fnv1a32((const char*)channel.channel.secret, PUB_KEY_SIZE);
+        uint32_t txt_key = fnv1a32(mtext, (size_t)mlen);
+        msg_timestamp = resendCoalesce(/*is_dm=*/false, ch_key, txt_key,
+                                       msg_timestamp, /*attempt=*/nullptr);
+      }
       // Temporaerer Scope-Override fuer diesen Send. Companion-Radio ist
       // single-threaded, keine Race.
       TransportKey saved_send_scope = send_scope;
@@ -13566,8 +13584,54 @@ static const TraceCat trace_cats[] = {
   { "bt",       TRACE_BT,       "Bluetooth-Diagnose alle 5min: heap + disconnect-counter (default off)" },
   { "discover", TRACE_DISCOVER, "discover regions ANON-RESP-Empfang + leer-Diagnose" },
   { "debug-anon", TRACE_DBG_ANON, "Bug-5-Debug: ANON-TX/RX hex-dump (CLI vs App)" },
+  { "coalesce", TRACE_COALESCE, "Resend-Coalescing: Timestamp aus Cache korrigiert / Cache-Eintrag nach Echo/ACK entfernt" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
+
+// 2026-07-08: Resend-Coalescing (aus stash@{3} reaktiviert 2026-07-09 zur
+// Crash-Reproduktion). Fenster 10 min, Anker wird bei jedem Treffer erneuert
+// (langes Resend-Fenster ueber Standortwechsel). LRU-Eviction per anchor.
+uint32_t MyMesh::resendCoalesce(bool is_dm, uint32_t key_hash, uint32_t text_hash,
+                                uint32_t app_timestamp, uint8_t* attempt) {
+  const unsigned long WINDOW = 600000UL;  // 10 min
+  unsigned long now = millis();
+  // 1) Treffer im Fenster suchen -> coalesce.
+  for (int i = 0; i < RESEND_COALESCE_N; i++) {
+    ResendCoalesce& e = _resend_coalesce[i];
+    if (!e.used) continue;
+    if (e.is_dm != is_dm || e.key_hash != key_hash || e.text_hash != text_hash) continue;
+    if ((long)(now - e.anchor_millis) > (long)WINDOW) continue;  // abgelaufen
+    e.anchor_millis = now;  // Anker erneuern
+    if (is_dm && attempt) {
+      e.max_attempt++;
+      *attempt = e.max_attempt;
+    }
+    // Info nur bei Treffer (kein Hinweis bei Miss -- User-Wunsch).
+    traceCompanion(TRACE_COALESCE,
+                   "[coalesce] %s: Timestamp %lu->%lu aus Cache%s",
+                   is_dm ? "DM" : "CH",
+                   (unsigned long)app_timestamp, (unsigned long)e.orig_timestamp,
+                   (is_dm && attempt) ? " (attempt++)" : "");
+    return e.orig_timestamp;  // <-- Original-Timestamp wiederverwenden
+  }
+  // 2) Kein Treffer -> neuen Eintrag anlegen (freien Slot oder aeltesten).
+  int slot = 0;
+  long best_age = -1;
+  for (int i = 0; i < RESEND_COALESCE_N; i++) {
+    if (!_resend_coalesce[i].used) { slot = i; best_age = -1; break; }
+    long age = (long)(now - _resend_coalesce[i].anchor_millis);
+    if (age > best_age) { best_age = age; slot = i; }
+  }
+  ResendCoalesce& e = _resend_coalesce[slot];
+  e.used = true;
+  e.is_dm = is_dm;
+  e.key_hash = key_hash;
+  e.text_hash = text_hash;
+  e.orig_timestamp = app_timestamp;
+  e.anchor_millis = now;
+  e.max_attempt = (is_dm && attempt) ? *attempt : 0;
+  return app_timestamp;  // erster Send -> App-Timestamp unveraendert
+}
 
 // 2026-07-07: Einheitliche Regions-Result-Ausgabe. Ersetzt 4 zuvor
 // inkonsistente snprintf-Sites (chain-progressive, chain-empty, cli-manuell,
