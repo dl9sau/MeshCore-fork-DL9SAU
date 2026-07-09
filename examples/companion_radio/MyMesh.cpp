@@ -2550,13 +2550,23 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
       // gedroppt (40% Traffic, kein Erstkontakt-Use-Case).
       uint8_t cap = _prefs.flood_max_unscoped_companions;
       if (cap == CH_HOPS_OFF) cap = _prefs.flood_max_scope_region;
-      bool is_chat_advert =
-          (ptype == PAYLOAD_TYPE_ADVERT
-           && packet->payload_len > (int)(PUB_KEY_SIZE + 4 + SIGNATURE_SIZE)
-           && (packet->payload[PUB_KEY_SIZE + 4 + SIGNATURE_SIZE] & 0x0F) == ADV_TYPE_CHAT);
+      bool is_advert = (ptype == PAYLOAD_TYPE_ADVERT
+                        && packet->payload_len > (int)(PUB_KEY_SIZE + 4 + SIGNATURE_SIZE));
+      uint8_t adv_type = is_advert
+          ? (packet->payload[PUB_KEY_SIZE + 4 + SIGNATURE_SIZE] & 0x0F) : 0xFF;
+      bool is_chat_advert  = is_advert && (adv_type == ADV_TYPE_CHAT);
+      bool is_infra_advert = is_advert && (adv_type != ADV_TYPE_CHAT);  // REPEATER/ROOM/SENSOR
       bool is_user_txt = (ptype == PAYLOAD_TYPE_TXT_MSG);
-      if ((is_chat_advert || is_user_txt) && cap > 0
-          && packet->getPathHashCount() <= cap) {
+      if (is_infra_advert) {
+        // 2026-07-09: unscoped Infra-Advert (REPEATER/ROOM/SENSOR) -> ueber
+        // flood_max_infra weiterleiten (W24 oben hat hops>infra bereits
+        // gerejectet -> hier also <= Cap). Der Hop-Cap ist der Container, nicht
+        // das scoped/unscoped-Flag (Netz-Impact haengt an den Hops). Damit
+        // koennen sich Repeater/Room/Sensor regional bekannt machen, auch
+        // unscoped -- vorher fiel das faelschlich in den unscoped-Hardblock.
+        decision = true;
+      } else if ((is_chat_advert || is_user_txt) && cap > 0
+                 && packet->getPathHashCount() <= cap) {
         decision = true;
       } else {
         reject_reason = (cap == 0) ? "unscoped-companions-off"
@@ -2706,12 +2716,21 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
           reject_reason = "scope-not-allowed";
         }
       } else {
-        uint8_t cap = _prefs.flood_max_unscoped_companions;
-        if (cap == CH_HOPS_OFF) cap = _prefs.flood_max_scope_region;
-        if (cap == 0 || packet->getPathHashCount() > cap) {
-          decision = false;
-          reject_reason = (cap == 0) ? "unscoped-companions-off"
-                                      : "unscoped-companions-cap";
+        // 2026-07-09: Infra-Adverts (REPEATER/ROOM/SENSOR) sind bereits oben
+        // via flood_max_infra gecappt (W24) -> hier NICHT nochmal den engen
+        // companion-Cap anwenden, sonst wuerden sie faelschlich auf 3 gedeckelt.
+        // Nur echter companion-Traffic (CHAT-Advert/DM) faellt hier durch.
+        bool is_infra_advert2 = (ptype == PAYLOAD_TYPE_ADVERT
+            && packet->payload_len > (int)(PUB_KEY_SIZE + 4 + SIGNATURE_SIZE)
+            && (packet->payload[PUB_KEY_SIZE + 4 + SIGNATURE_SIZE] & 0x0F) != ADV_TYPE_CHAT);
+        if (!is_infra_advert2) {
+          uint8_t cap = _prefs.flood_max_unscoped_companions;
+          if (cap == CH_HOPS_OFF) cap = _prefs.flood_max_scope_region;
+          if (cap == 0 || packet->getPathHashCount() > cap) {
+            decision = false;
+            reject_reason = (cap == 0) ? "unscoped-companions-off"
+                                        : "unscoped-companions-cap";
+          }
         }
       }
     }
@@ -2771,6 +2790,21 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   // bereits erfasst, hier nur die TX-Seite.
   if (decision && _tx_blocked) decision = false;
 
+  // 2026-07-09: bei Adverts den Sub-Typ mitloggen (CHAT/REPEATER/ROOM/SENSOR),
+  // sonst suggeriert 'hops' die Ursache, wo oft der Typ entscheidet
+  // (z.B. reject reason=unscoped haengt am Typ, nicht an den Hops).
+  char type_str[24];
+  if (ptype == PAYLOAD_TYPE_ADVERT
+      && packet->payload_len > (int)(PUB_KEY_SIZE + 4 + SIGNATURE_SIZE)) {
+    uint8_t at = packet->payload[PUB_KEY_SIZE + 4 + SIGNATURE_SIZE] & 0x0F;
+    const char* atn = (at == ADV_TYPE_CHAT) ? "CHAT"
+                    : (at == ADV_TYPE_REPEATER) ? "REPEATER"
+                    : (at == ADV_TYPE_ROOM) ? "ROOM"
+                    : (at == ADV_TYPE_SENSOR) ? "SENSOR" : "?";
+    snprintf(type_str, sizeof(type_str), "ADV:%s", atn);
+  } else {
+    snprintf(type_str, sizeof(type_str), "%s", ptypeName(ptype));
+  }
   if (decision) {
     _tx_digi_count++;
     if (ptype < 16 && _repeat_by_ptype[ptype] < 0xFFFF) {
@@ -2784,11 +2818,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     _tx_repeat_airtime_ms += _radio->getEstAirtimeFor(
         packet->getPathByteLen() + packet->payload_len + 2);
     traceCompanion(TRACE_REPEAT, "[repeat] %s hops=%u scope=%s",
-                   ptypeName(ptype), (unsigned)packet->getPathHashCount(),
+                   type_str, (unsigned)packet->getPathHashCount(),
                    packet->hasTransportCodes() ? "yes" : "no");
   } else {
     traceCompanion(TRACE_FILTER, "[filter] reject %s hops=%u reason=%s",
-                   ptypeName(ptype), (unsigned)packet->getPathHashCount(),
+                   type_str, (unsigned)packet->getPathHashCount(),
                    reject_reason);
   }
   return decision;
