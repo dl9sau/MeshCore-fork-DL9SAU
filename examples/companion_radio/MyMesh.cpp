@@ -7227,18 +7227,34 @@ void MyMesh::handleCmdFrame(size_t len) {
           // funktioniert auch wenn der Sender-Cache leer ist (Reboot etc).
           // Fallback auf Cache-Lookup wenn kein Suffix da war.
           if (reply_scope_name[0]) {
-            int idx = dl9sau_find_region_index(reply_scope_name);
-            if (idx >= 0 && idx < _buildin_keys_count) {
-              memcpy(reply_scope_key, _buildin_keys[idx].key, 16);
+            if (strcmp(reply_scope_name, "*") == 0) {
+              // 2026-07-09: '#*' = Sender wurde UNSCOPED gehoert. Reply muss
+              // FLUTEN (unscoped) statt zero-hop-direct rauszugehen -- sonst
+              // erreicht die Antwort den Adressaten nie (er ist evtl. kein
+              // Nachbar, seine Nachricht kam ja geflutet an). Via #unscoped-
+              // Magic-Scope. #local/#lokal-Channel forct trotzdem #local/#lokal
+              // (applyLocalForce im send-Pfad). NUR '#*' -- unbekannte benannte
+              // Regionen (#wasauchimmer) fallen weiter auf die Hierarchie.
+              memcpy(reply_scope_key, _magic_unscoped_key.key, 16);
               have_reply_scope = true;
               traceCompanion(TRACE_SCOPE,
-                             "[reply-scope] '@%s' -> aus Bracket '#%s'",
-                             reply_name, reply_scope_name);
+                             "[reply-scope] '@%s' bracket #* (unscoped) -> "
+                             "#unscoped flood (Reply muss ankommen)",
+                             reply_name);
             } else {
-              traceCompanion(TRACE_SCOPE,
-                             "[reply-scope] '@%s' bracket '#%s' -- "
-                             "keine _buildin_keys Region",
-                             reply_name, reply_scope_name);
+              int idx = dl9sau_find_region_index(reply_scope_name);
+              if (idx >= 0 && idx < _buildin_keys_count) {
+                memcpy(reply_scope_key, _buildin_keys[idx].key, 16);
+                have_reply_scope = true;
+                traceCompanion(TRACE_SCOPE,
+                               "[reply-scope] '@%s' -> aus Bracket '#%s'",
+                               reply_name, reply_scope_name);
+              } else {
+                traceCompanion(TRACE_SCOPE,
+                               "[reply-scope] '@%s' bracket '#%s' -- keine "
+                               "Region, Fallback auf Hierarchie",
+                               reply_name, reply_scope_name);
+              }
             }
           }
           if (!have_reply_scope) {
