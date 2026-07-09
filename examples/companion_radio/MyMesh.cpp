@@ -665,19 +665,29 @@ void MyMesh::bootLogAppend() {
       && strchr(existing[0], '(') != NULL) {
     return;   // Pre-Reboot-Marker erkannt
   }
+  // 2026-07-08 DIAG (Datenverlust-Analyse): Channel-Zahl in den Boot-Eintrag,
+  // per `log read` auslesbar (Serial ist beim Boot nicht schnell genug
+  // verbunden). bootLogAppend() laeuft NACH loadChannels+setupCompanion ->
+  // ch=N = wie viele Channels beim Boot belegt waren. ch=2 (Public+companion)
+  // = beim Boot schon weg; ch=21 aber `channels` spaeter 2 = Verlust NACH Boot.
+  int _diag_nch = 0;
+  for (int _i = 0; _i < MAX_GROUP_CHANNELS; _i++) {
+    ChannelDetails _dch;
+    if (getChannel(_i, _dch) && _dch.name[0] != 0) _diag_nch++;
+  }
   // Neuen Eintrag bauen.
   char entry[96];
   if (_last_reset_reason == 1 /* COLD */
       || _last_session_uptime_ms == 0) {
-    snprintf(entry, sizeof(entry), "%lu %s",
-             (unsigned long)now_secs, getLastResetReasonStr());
+    snprintf(entry, sizeof(entry), "%lu %s ch=%d",
+             (unsigned long)now_secs, getLastResetReasonStr(), _diag_nch);
   } else {
     char dur[20];
     formatBootLogDuration(_last_session_uptime_ms, dur, sizeof(dur));
     // last_uptime= klar als vorige Session gekennzeichnet
     // (Feedback 2026-07-05: 'uptime=' klang als waere es die aktuelle).
-    snprintf(entry, sizeof(entry), "%lu %s last_uptime=%s",
-             (unsigned long)now_secs, getLastResetReasonStr(), dur);
+    snprintf(entry, sizeof(entry), "%lu %s last_uptime=%s ch=%d",
+             (unsigned long)now_secs, getLastResetReasonStr(), dur, _diag_nch);
   }
   // Schreiben: neuer Eintrag zuerst, dann max BOOT_LOG_MAX_ENTRIES-1
   // existing (aelteste fliegt raus).
@@ -725,9 +735,17 @@ void MyMesh::bootLogWritePreReboot(const char* cause) {
   }
   char dur[20];
   formatBootLogDuration(up_ms, dur, sizeof(dur));
+  // 2026-07-08 DIAG: Channel-Zahl auch an den Pre-Reboot-Marker (via
+  // `log read`). Der CLI-Reboot dedupt den Folge-Boot-Eintrag weg, daher
+  // muss die Zahl HIER dran -- zeigt wie viele Channels beim Reboot belegt.
+  int _diag_nch = 0;
+  for (int _i = 0; _i < MAX_GROUP_CHANNELS; _i++) {
+    ChannelDetails _dch;
+    if (getChannel(_i, _dch) && _dch.name[0] != 0) _diag_nch++;
+  }
   char entry[96];
-  snprintf(entry, sizeof(entry), "%lu %s uptime=%s",
-           (unsigned long)now_secs, cause, dur);
+  snprintf(entry, sizeof(entry), "%lu %s uptime=%s ch=%d",
+           (unsigned long)now_secs, cause, dur, _diag_nch);
   // Prepend wie bootLogAppend, aber ohne Dedup-Check und ohne Channel-
   // Push (der Reboot kommt sowieso gleich).
   char existing[BOOT_LOG_MAX_ENTRIES][96];
