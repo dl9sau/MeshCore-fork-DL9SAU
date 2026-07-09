@@ -4583,9 +4583,9 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
         formatPathBytes(pathbuf, sizeof(pathbuf), packet->path, packet->path_len);
       }
       traceCompanion(TRACE_DBG_ANON,
-                     "[discover] CTL rx snr=%d path_len=%u path=%s\n"
+                     "[discover] CTL rx snr=%.1fdB path_len=%u path=%s\n"
                      "  payload(%u)=%s%s",
-                     (int)(_radio->getLastSNR() * 4),
+                     (double)_radio->getLastSNR(),   // dB (nicht *4 -- das war Q4-Frame-Encoding, Display-Bug)
                      (unsigned)packet->path_len,
                      pathbuf[0] ? pathbuf : "-",
                      (unsigned)packet->payload_len, hex,
