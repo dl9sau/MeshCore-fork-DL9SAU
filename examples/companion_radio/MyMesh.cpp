@@ -4913,11 +4913,13 @@ void MyMesh::upsertCompletedRegion(const uint8_t* pubkey32,
                                    const uint8_t* csv_data, size_t csv_len) {
   uint32_t now_rtc = getRTCClock()->getCurrentTime();
   int8_t snr_q4 = (int8_t)(_radio->getLastSNR() * 4);
+  int8_t rssi_dbm = (int8_t)radio_driver.getLastRSSI();
   // 2026-07-06 REFACTOR: Slot in _discovery updaten. Leere CSV setzt nur
   // empty_deny flag, csv bleibt bei letztem guten Wert (Roll-Forward).
   DiscoveryEntry* de = discoveryFindOrAdd(pubkey32);
   if (!de) return;
   de->our_snr_q4 = snr_q4;
+  de->our_rssi_dbm = rssi_dbm;
   de->region_answered_at_rtc = now_rtc;
   de->region_query_tag = 0;
   de->last_seen_at_rtc = now_rtc;
@@ -5143,7 +5145,7 @@ void MyMesh::printDiscoveryLegendEntry(const DiscoveryEntry& e, bool verbose,
                      && (_discover_regions_chained || _app_discover_regions_mode));
   if (regions_ctx) {
     if (e.region_answered_at_rtc == 0) {
-      suffix = " (nicht geantwortet)";
+      suffix = " (regions: keine Antwort)";
     } else if (e.region_csv_empty_deny) {
       suffix = " (deny unscoped und keine Regionen!)";
     }
@@ -5153,19 +5155,33 @@ void MyMesh::printDiscoveryLegendEntry(const DiscoveryEntry& e, bool verbose,
   char name_buf[31];
   utf8ByteTruncate(name_buf, name, sizeof(name_buf));
   char line[160];
-  if (verbose && e.ctl_answered_at_rtc != 0) {
+  bool ctl_fresh = (e.ctl_answered_at_rtc >= _discover_round_started_rtc
+                   && e.ctl_answered_at_rtc != 0);
+  if (verbose && ctl_fresh) {
     snprintf(line, sizeof(line),
              "%s %s [%s %s] rx_him=%+.1fdB/%ddBm rx_us=%+.1fdB%s%s",
              prefix6, name_buf, role, qual,
              (double)e.our_snr_q4 / 4.0, (int)e.our_rssi_dbm,
              (double)e.their_snr_q4 / 4.0,
              dist_buf, suffix);
+  } else if (verbose && e.ctl_answered_at_rtc != 0) {
+    // CTL-RESP aus frueherer Runde (alt) -- SNR/RSSI kennzeichnen.
+    snprintf(line, sizeof(line),
+             "%s %s [%s %s] rx_him=%+.1fdB/%ddBm rx_us=%+.1fdB (alt)%s%s",
+             prefix6, name_buf, role, qual,
+             (double)e.our_snr_q4 / 4.0, (int)e.our_rssi_dbm,
+             (double)e.their_snr_q4 / 4.0,
+             dist_buf, suffix);
   } else if (verbose) {
-    // Kein CTL-RESP -> nur Chain-Vorab bekannt, rx_us wenn Regions-RESP.
+    // Kein CTL-RESP -> nur Chain-Vorab bekannt. rx_him (unsere Messung)
+    // stammt vom Regions-RESP-Empfang. rx_us (was ER berichtet) NICHT
+    // in Regions-RESP mitgesendet -- fehlt daher.
     if (e.region_answered_at_rtc != 0 && !e.region_csv_empty_deny) {
       snprintf(line, sizeof(line),
-               "%s %s [aus Cache] rx_us=%+.1fdB%s%s",
-               prefix6, name_buf, (double)e.our_snr_q4 / 4.0, dist_buf, suffix);
+               "%s %s [aus Cache] rx_him=%+.1fdB/%ddBm%s%s",
+               prefix6, name_buf,
+               (double)e.our_snr_q4 / 4.0, (int)e.our_rssi_dbm,
+               dist_buf, suffix);
     } else {
       snprintf(line, sizeof(line),
                "%s %s [aus Cache]%s%s",
@@ -5264,6 +5280,16 @@ void MyMesh::finalizeRegionsChain() {
       append_prefix(idx, prefix6);
     }
   }
+  // 2026-07-07: '*' immer als erstes (wichtige "unscoped accepted"-Info).
+  // Simple bubble: finde Slot mit name=="*" und swap nach Position 0.
+  for (uint8_t i = 1; i < agg_count; i++) {
+    if (agg[i].name[0] == '*' && agg[i].name[1] == 0) {
+      AggRegion tmp = agg[0];
+      agg[0] = agg[i];
+      agg[i] = tmp;
+      break;
+    }
+  }
 
   // Header. Wording 2026-06-14: 'Scopes' -> 'Regionen' (Repeater liefert
   // seine konfigurierten Regionen, das ist die Repeater-Sprech. 'Scope'
@@ -5348,7 +5374,8 @@ void MyMesh::finalizeRegionsChain() {
       if (pass == 0 && !has_csv) continue;
       if (pass == 1 && !has_empty) continue;
       if (pass == 2 && !no_resp) continue;
-      printDiscoveryLegendEntry(de, /*verbose=*/false);
+      // 2026-07-07: verbose=true damit rssi/snr angezeigt wird (analog App).
+      printDiscoveryLegendEntry(de, /*verbose=*/true);
     }
   }
 
@@ -5425,7 +5452,7 @@ void MyMesh::discoverFinishAndPrint() {
       if (region_with_csv > 0) {
         char r[160];
         snprintf(r, sizeof(r),
-                 "discover regions: 0 CTL-Antworten in 30s,\n"
+                 "discover regions: 0 DISC_REP_RESP in 30s,\n"
                  "aber %u Chain-Vorab-Ergebnis(se) im Cache\n"
                  "(siehe 'discover show').",
                  (unsigned)region_with_csv);
@@ -5437,12 +5464,18 @@ void MyMesh::discoverFinishAndPrint() {
       _regions_chain_finalize_at = 0;
       return;
     }
-    char r[160];
+    // Chain-Vorab-Anteil: befragt - (CTL-neu in dieser Runde die auch Regions
+    // bekamen). Vereinfachung: chain_prefetched = region_asked - ctl_this_round.
+    uint8_t chain_prefetched = (region_asked > ctl_this_round)
+                              ? (region_asked - ctl_this_round) : 0;
+    char r[200];
     snprintf(r, sizeof(r),
              "discover regions chain:\n"
-             "  Phase 1 (Repeaters): %u meldete(n) sich in 30s\n"
-             "  Phase 2 (Regions): %u/%u offen, %u fertig",
+             "  %u Repeater befragt (%u DISC_REP_RESP neu + %u Cache-Vorab)\n"
+             "  Regions: %u/%u offen, %u fertig",
+             (unsigned)region_asked,
              (unsigned)ctl_this_round,
+             (unsigned)chain_prefetched,
              (unsigned)region_open,
              (unsigned)region_asked,
              (unsigned)region_done);
@@ -5500,11 +5533,19 @@ void MyMesh::discoverFinishAndPrint() {
   if (n_fresh == 0 && n_cached == 0) {
     snprintf(header, sizeof(header), "%s: keine Antworten.", label);
   } else if (is_regions_mode) {
-    // Klar: was in DIESER Runde passierte vs was im Cache steht.
-    snprintf(header, sizeof(header),
-             "%s: %u/%u antworteten (Runde/Cache), %u mit Region-Info:",
-             label, (unsigned)n_fresh, (unsigned)(n_fresh + n_cached),
-             (unsigned)region_answered);
+    // Klar: CTL-Antworten (Repeater meldete sich) vs Region-Info (mit CSV).
+    // Cache = Slots die frueher schon CTL-antworteten (nicht in dieser Runde).
+    if (n_cached > 0) {
+      snprintf(header, sizeof(header),
+               "%s: %u DISC_REP_RESP aktuell (+ %u aus Cache),\n"
+               "  %u mit Region-Info:",
+               label, (unsigned)n_fresh, (unsigned)n_cached,
+               (unsigned)region_answered);
+    } else {
+      snprintf(header, sizeof(header),
+               "%s: %u DISC_REP_RESP, %u mit Region-Info:",
+               label, (unsigned)n_fresh, (unsigned)region_answered);
+    }
   } else if (n_cached > 0) {
     snprintf(header, sizeof(header),
              "%s: %u frische Antworten + %u aus Cache:",
@@ -5514,14 +5555,35 @@ void MyMesh::discoverFinishAndPrint() {
              "%s: %u Antworten:", label, (unsigned)n_fresh);
   }
   pushCompanionMessage(header);
-  // Pro Slot mit CTL-Answer eine Zeile. Bei is_regions_mode Suffix
-  // zeigen damit man sieht wer Regions geantwortet hat und wer nicht.
-  for (uint8_t i = 0; i < _discovery_count; i++) {
-    const DiscoveryEntry& de = _discovery[i];
-    if (de.ctl_answered_at_rtc == 0) continue;
-    if (adv_filter != 0 && (adv_filter & (1 << de.adv_type)) == 0) continue;
-    printDiscoveryLegendEntry(de, /*verbose=*/true,
-                              /*suppress_suffix=*/!is_regions_mode);
+  // Pro Slot mit CTL-Answer eine Zeile.
+  // Bei is_regions_mode: 3-Pass Sortierung (mit CSV / empty_deny /
+  //   nicht-geantwortet) analog Chain-Finalize + Suffix zeigen.
+  // Sonst: Insertion-Reihenfolge, kein Suffix.
+  if (is_regions_mode) {
+    uint32_t rstart = _discover_round_started_rtc;
+    for (uint8_t pass = 0; pass < 3; pass++) {
+      for (uint8_t i = 0; i < _discovery_count; i++) {
+        const DiscoveryEntry& de = _discovery[i];
+        if (de.ctl_answered_at_rtc == 0) continue;
+        if (adv_filter != 0 && (adv_filter & (1 << de.adv_type)) == 0) continue;
+        bool answered = (de.region_answered_at_rtc >= rstart
+                        && de.region_answered_at_rtc != 0);
+        bool has_csv = answered && !de.region_csv_empty_deny && de.region_csv[0];
+        bool is_empty = answered && de.region_csv_empty_deny;
+        bool is_no_resp = !answered;
+        if (pass == 0 && !has_csv) continue;
+        if (pass == 1 && !is_empty) continue;
+        if (pass == 2 && !is_no_resp) continue;
+        printDiscoveryLegendEntry(de, /*verbose=*/true, /*suppress_suffix=*/false);
+      }
+    }
+  } else {
+    for (uint8_t i = 0; i < _discovery_count; i++) {
+      const DiscoveryEntry& de = _discovery[i];
+      if (de.ctl_answered_at_rtc == 0) continue;
+      if (adv_filter != 0 && (adv_filter & (1 << de.adv_type)) == 0) continue;
+      printDiscoveryLegendEntry(de, /*verbose=*/true, /*suppress_suffix=*/true);
+    }
   }
 }
 
@@ -21453,10 +21515,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             }
           }
           static const int LINE_CAP = 125;
-          // Wildcard-Section: Repeater die '*' bedienen.
+          // Wildcard '*' -> als '#* (prefix, prefix)' Zeile analog Regionen
+          // in discover regions chain. Einheitlich mit CLI-chain Format.
           {
             char line[200];
-            int llen = snprintf(line, sizeof(line), "unscoped accepted: ");
+            int llen = snprintf(line, sizeof(line), "#* ");
             bool first_wc = true;
             for (uint8_t ci = 0; ci < _discovery_count; ci++) {
               const char* csv = _discovery[ci].region_csv;
@@ -21530,14 +21593,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             }
             if (blen > 0) pushCompanionMessage(block);
           }
-          // REPEATER-Details: pro Slot eine Zeile via printDiscoveryLegendEntry.
-          // Suppresse Regions-Suffix wenn keine Regions-Runde lief.
+          // REPEATER-Details: 3-Pass (with-csv / empty_deny / no-resp)
+          // analog discover regions chain.
           pushCompanionMessage("Repeater-Details:");
-          for (uint8_t pass = 0; pass < 2; pass++) {
+          for (uint8_t pass = 0; pass < 3; pass++) {
             for (uint8_t i = 0; i < _discovery_count; i++) {
               const DiscoveryEntry& de = _discovery[i];
-              bool has = de.region_csv[0] && !de.region_csv_empty_deny;
-              if ((pass == 0 && !has) || (pass == 1 && has)) continue;
+              bool has_csv = de.region_csv[0] && !de.region_csv_empty_deny;
+              bool has_empty = de.region_csv_empty_deny;
+              bool no_resp = !has_csv && !has_empty;
+              if (pass == 0 && !has_csv) continue;
+              if (pass == 1 && !has_empty) continue;
+              if (pass == 2 && !no_resp) continue;
               printDiscoveryLegendEntry(de, /*verbose=*/true,
                                         /*suppress_suffix=*/!any_regions_query);
             }
