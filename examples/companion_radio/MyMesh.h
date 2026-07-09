@@ -1760,8 +1760,12 @@ private:
   // Task 63: Reply-Scope-Cache lookup. Suche einen (channel_hash, name_h)
   // Slot; wenn gefunden und scope_key != null, kopiere Key nach out_key.
   // Returns true wenn Match mit gueltigem Key (Reply-Scope aktivierbar).
+  // out_scope_fnv1a (optional): scope_fnv1a des gefundenen Slots (0 wenn nicht
+  // gefunden). Sentinels: 0xFFFFFFFF = #* (unscoped), 0xFFFFFFFE = #? (unbekannt)
+  // -- erlaubt der Reply-Seite '#*' zu erkennen obwohl der Key null ist.
   bool channelSenderScopeLookup(uint32_t channel_hash, uint32_t name_fnv1a,
-                                uint8_t out_key[16]);
+                                uint8_t out_key[16],
+                                uint32_t* out_scope_fnv1a = nullptr);
 
   // Lazy-Mode Boot-Collection-Phase: bis zu 5 Kandidaten ueber 3 Min
   // sammeln, dann Cluster-Auswertung. RAM-only, einmal pro Boot.

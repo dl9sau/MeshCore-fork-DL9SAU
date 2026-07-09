@@ -3416,11 +3416,15 @@ bool MyMesh::channelSenderSeenLookupOrAdd(uint32_t channel_hash,
 // UND scope_key nicht null (Sender hatte einen bekannten Scope).
 bool MyMesh::channelSenderScopeLookup(uint32_t channel_hash,
                                       uint32_t name_fnv1a,
-                                      uint8_t out_key[16]) {
+                                      uint8_t out_key[16],
+                                      uint32_t* out_scope_fnv1a) {
+  if (out_scope_fnv1a) *out_scope_fnv1a = 0;
   for (uint8_t i = 0; i < _channel_sender_seen_count; i++) {
     const ChannelSenderSeen& e = _channel_sender_seen[i];
     if (e.channel_hash == channel_hash && e.name_fnv1a == name_fnv1a) {
-      // Key muss nicht-null sein damit Reply sinnvoll ist.
+      // Scope_fnv1a durchreichen (auch bei null-Key -> Reply erkennt '#*').
+      if (out_scope_fnv1a) *out_scope_fnv1a = e.scope_fnv1a;
+      // Key muss nicht-null sein damit ein Reply mit Scope-KEY sinnvoll ist.
       bool has_key = false;
       for (int k = 0; k < 16; k++) if (e.scope_key[k]) { has_key = true; break; }
       if (!has_key) return false;
@@ -7262,7 +7266,9 @@ void MyMesh::handleCmdFrame(size_t len) {
             uint32_t channel_h;
             memcpy(&channel_h, channel.channel.hash, sizeof(channel_h));
             if (channel_h == 0) channel_h = 1;
-            if (channelSenderScopeLookup(channel_h, name_h, reply_scope_key)) {
+            uint32_t cached_scope_fnv1a = 0;
+            if (channelSenderScopeLookup(channel_h, name_h, reply_scope_key,
+                                         &cached_scope_fnv1a)) {
               have_reply_scope = true;
               // 2026-07-06: Reverse-Lookup Scope-Name aus dem 16-Byte-Key.
               // Iteriere _buildin_keys und vergleiche.
@@ -7282,6 +7288,17 @@ void MyMesh::handleCmdFrame(size_t len) {
                                "[reply-scope] '@%s' -> cached scope aktiv (custom/unknown)",
                                reply_name);
               }
+            } else if (cached_scope_fnv1a == 0xFFFFFFFFUL) {
+              // 2026-07-09: Cache kennt den Sender als '#*' (unscoped gehoert) --
+              // scope_key ist null, aber der Sentinel sagt es. Wie beim Bracket-
+              // '#*'-Fall: Reply flutet unscoped statt zero-hop-direct, sonst
+              // erreicht die Antwort den (nicht-benachbarten) Sender nie.
+              memcpy(reply_scope_key, _magic_unscoped_key.key, 16);
+              have_reply_scope = true;
+              traceCompanion(TRACE_SCOPE,
+                             "[reply-scope] '@%s' cache #* (unscoped) -> "
+                             "#unscoped flood (Reply muss ankommen)",
+                             reply_name);
             } else {
               traceCompanion(TRACE_SCOPE,
                              "[reply-scope] '@%s' name_h=%08lx ch_h=%08lx "
