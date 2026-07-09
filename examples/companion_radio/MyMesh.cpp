@@ -7275,10 +7275,11 @@ void MyMesh::handleCmdFrame(size_t len) {
                              (unsigned)_channel_sender_seen_count);
             }
           }
-        } else {
-          traceCompanion(TRACE_SCOPE,
-                         "[reply-scope] extractReplyName: kein Reply erkannt");
         }
+        // 2026-07-09: 'kein Reply erkannt'-Trace entfernt -- feuerte bei JEDER
+        // normalen Channel-Message (ohne @) und machte den Trace undurchsichtig.
+        // Die @-Erkennung ist verifiziert; kein Bedarf fuer die Miss-Meldung.
+        // (War schon mal raus, kam per stash-Reapply wieder rein.)
       }
       stripReplyMentionDecoration(mtext);
       int mlen = (int)strlen(mtext);
