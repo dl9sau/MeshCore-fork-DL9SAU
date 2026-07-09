@@ -13098,6 +13098,39 @@ void MyMesh::bleManualToggleFromMenu() {
 
 void MyMesh::pushCompanionMessage(const char* text) {
   if (text == NULL || text[0] == 0) return;
+  // 2026-07-09: Auto-Umbruch gegen Truncation. Lange Hilfe-/Usage-Texte wurden
+  // am companion-Cap (~136 Byte, board-abhaengig) abgeschnitten. Hier wort- und
+  // zeilenweise in <=WRAP-Byte-Stuecke splitten und JEDES Stueck erneut pushen
+  // (Rekursion terminiert: Stueck <= WRAP -> kein Re-Split). Greift nur wenn zu
+  // lang; kurze Messages unveraendert. Interims bis zum vollen dest-aware
+  // Wrapper (companion 130 / usb-serial 76 / UTF-8, [[text-wrapper-helper]]).
+  {
+    const size_t WRAP = 128;
+    if (strlen(text) > WRAP) {
+      const char* s = text;
+      char buf[132];
+      while (*s) {
+        const char* nl = strchr(s, '\n');
+        size_t line_len = nl ? (size_t)(nl - s) : strlen(s);
+        size_t take;
+        if (line_len <= WRAP) {
+          take = line_len;                 // ganze Zeile passt
+        } else {
+          // an letzter Wortgrenze <= WRAP brechen; kein Space -> hart bei WRAP.
+          size_t b = WRAP;
+          while (b > 0 && s[b] != ' ') b--;
+          take = (b > 0) ? b : WRAP;
+        }
+        memcpy(buf, s, take);
+        buf[take] = 0;
+        pushCompanionMessage(buf);
+        s += take;
+        if (take == line_len && *s == '\n') s++;   // Zeilentrenner schlucken
+        else while (*s == ' ') s++;                 // Fortsetzungs-Spaces schlucken
+      }
+      return;
+    }
+  }
   // Wunschliste 10 (2026-06-11): USB-Serial CLI Output-Redirect. Waehrend
   // einer per Serial-CLI dispatchten Command-Ausfuehrung gehen alle
   // pushCompanionMessage-Aufrufe ueber den USB-Stream statt BLE-Frame.
