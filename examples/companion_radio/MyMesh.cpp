@@ -13684,7 +13684,7 @@ static const TraceCat trace_cats[] = {
   { "bt",       TRACE_BT,       "Bluetooth-Diagnose alle 5min: heap + disconnect-counter (default off)" },
   { "discover", TRACE_DISCOVER, "discover regions ANON-RESP-Empfang + leer-Diagnose" },
   { "debug-anon", TRACE_DBG_ANON, "Bug-5-Debug: ANON-TX/RX hex-dump (CLI vs App)" },
-  { "coalesce", TRACE_COALESCE, "Resend-Coalescing: Timestamp aus Cache korrigiert / Cache-Eintrag nach Echo/ACK entfernt" },
+  { "coalesce", TRACE_COALESCE, "Resend-Rueckdatierung: der Timestamp wurde mit dem urspruenglichen korrigiert, bzw. der Cache-Eintrag nach gehoertem Repeat oder DM-Ack entfernt" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
