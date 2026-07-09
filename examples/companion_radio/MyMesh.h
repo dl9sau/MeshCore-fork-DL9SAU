@@ -1221,6 +1221,7 @@ private:
   uint32_t _app_trace_tag = 0;
   unsigned long _app_trace_started_ms = 0;
   uint8_t  _app_trace_target_pubkey[32] = {0};
+  uint8_t  _app_trace_hex_len = 3;  // Bytes fuer pkx-Ausgabe (= app_hash_size)
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;
 

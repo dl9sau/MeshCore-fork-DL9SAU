@@ -5689,7 +5689,7 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     unsigned long rtt = millis() - _app_trace_started_ms;
     _app_trace_tag = 0;
     char pkx[7];
-    mesh::Utils::toHex(pkx, _app_trace_target_pubkey, 3);
+    mesh::Utils::toHex(pkx, _app_trace_target_pubkey, _app_trace_hex_len);
     char r[160];
     snprintf(r, sizeof(r),
              "app-ping %s: rtt=%.1fs, %u hops.",
@@ -8072,6 +8072,9 @@ void MyMesh::handleCmdFrame(size_t len) {
         if (path_len >= app_hash_size) {
           memcpy(_app_trace_target_pubkey, &cmd_frame[10], app_hash_size);
         }
+        // 2026-07-08: pkx-Laenge = app_hash_size, damit die rtt-Zeile
+        // spaeter nicht mit 0en auf 3 Byte auffuellt (78 statt 780000).
+        _app_trace_hex_len = (app_hash_size > 3) ? 3 : (app_hash_size ? app_hash_size : 1);
         {
           char pkx[7]; pkx[0] = 0;
           for (int i = 0; i < 3 && i < app_hash_size; i++) {
