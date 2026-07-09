@@ -23,6 +23,89 @@ void NRF52Board::begin() {
   startup_reason = BD_STARTUP_NORMAL;
 }
 
+// =====================================================================
+// DL9SAU 2026-07-09: Crash-Faenger. HardFault -> stacked PC/LR + CFSR/HFSR
+// in no-init RAM retten, dann Reset. Boot-Readout haengt PC/LR an den BootLog
+// -> `arm-none-eabi-addr2line -e firmware.elf 0x<pc>` zeigt die Wild-Write-
+// Zeile. Persistenz-Gotcha (siehe shutdown_pending-Bug): NICHT in Datei
+// (littlefs-Write-Cache flusht nicht vor Reset), sondern no-init RAM +
+// volatile + __DSB() vor NVIC_SystemReset (Cortex-M4 Write-Buffer). GPREGRET
+// (8 Bit) zu klein fuer 32-Bit-PC. -Os schafft den Flash-Platz fuer den Code.
+// Gated per -D NRF52_CRASH_CATCHER (nur companion-envs); braucht .noinit-
+// Section im Linker (boards/nrf52840_s140_v7_extrafs.ld).
+// =====================================================================
+#ifdef NRF52_CRASH_CATCHER
+#include <nrf.h>
+
+#define CRASH_CATCHER_MAGIC 0xC0FFEE42UL
+
+typedef struct {
+  uint32_t magic;
+  uint32_t pc;
+  uint32_t lr;
+  uint32_t cfsr;
+  uint32_t hfsr;
+  uint32_t count;
+} crash_info_t;
+
+// no-init: ueberlebt Soft-Reset, wird von der Startup-.bss-Zero-Schleife NICHT
+// genullt (liegt ausserhalb __bss_start__..__bss_end__).
+volatile crash_info_t __attribute__((section(".noinit"))) g_crash_info;
+
+// Vom naked HardFault_Handler mit r0 = Stack-Frame-Pointer aufgerufen.
+extern "C" void crash_catcher_from_fault(uint32_t* frame) {
+  // Cortex-M4 Exception-Frame: r0,r1,r2,r3,r12,lr,pc,xpsr (Woerter 0..7).
+  if (g_crash_info.magic != CRASH_CATCHER_MAGIC) {
+    g_crash_info.magic = CRASH_CATCHER_MAGIC;
+    g_crash_info.count = 0;
+  }
+  g_crash_info.pc   = frame[6];
+  g_crash_info.lr   = frame[5];
+  g_crash_info.cfsr = SCB->CFSR;
+  g_crash_info.hfsr = SCB->HFSR;
+  g_crash_info.count++;
+  __DSB();               // Store muss vor dem Reset im RAM landen.
+  NVIC_SystemReset();
+  while (1) { }          // unreachable
+}
+
+// Override des weak HardFault_Handler (gcc_startup_nrf52840.S:310).
+extern "C" __attribute__((naked)) void HardFault_Handler(void) {
+  __asm volatile (
+    "tst   lr, #4                        \n"   // EXC_RETURN Bit2: 0=MSP,1=PSP
+    "ite   eq                            \n"
+    "mrseq r0, msp                       \n"
+    "mrsne r0, psp                       \n"
+    "ldr   r1, =crash_catcher_from_fault \n"
+    "bx    r1                            \n"
+  );
+}
+
+// Boot-Readout: true + Werte wenn ein Crash gespeichert war; loescht Magic
+// (one-shot, nicht beim naechsten Boot wiederholen).
+extern "C" bool crash_catcher_take(uint32_t* pc, uint32_t* lr,
+                                   uint32_t* cfsr, uint32_t* count) {
+  if (g_crash_info.magic != CRASH_CATCHER_MAGIC) return false;
+  if (pc)    *pc    = g_crash_info.pc;
+  if (lr)    *lr    = g_crash_info.lr;
+  if (cfsr)  *cfsr  = g_crash_info.cfsr;
+  if (count) *count = g_crash_info.count;
+  g_crash_info.magic = 0;
+  __DSB();
+  return true;
+}
+
+// Selbsttest: loest absichtlich einen HardFault aus (undefined instruction),
+// um die Crash-Faenger-Kette zu verifizieren (Fault -> capture -> Reset ->
+// BootLog -> addr2line). Der gefangene PC zeigt genau hierher. Daten bleiben
+// (nur Soft-Reset). Aufruf via CLI 'crashtest now'.
+extern "C" void crash_catcher_selftest(void) {
+  __DSB();
+  __asm volatile ("udf #0" ::: "memory");  // undefined instr -> HardFault
+  while (1) { }                            // unreachable
+}
+#endif // NRF52_CRASH_CATCHER
+
 #ifdef NRF52_POWER_MANAGEMENT
 #include "nrf.h"
 

@@ -35,4 +35,22 @@ SECTIONS
   } > RAM
 } INSERT AFTER .data;
 
+/* DL9SAU 2026-07-09: no-init RAM fuer den Crash-Faenger (PC/LR/CFSR ueber
+ * Soft-Reset retten). Liegt HINTER .bss -> ausserhalb der Startup-.bss-Zero-
+ * Schleife (__bss_start__..__bss_end__), wird also nicht genullt und ueberlebt
+ * NVIC_SystemReset. NOLOAD: kein Flash-Load-Image. Siehe NRF52Board.cpp
+ * (g_crash_info, section ".noinit"). */
+SECTIONS
+{
+  .noinit (NOLOAD):
+  {
+    . = ALIGN(4);
+    PROVIDE(__start_noinit = .);
+    KEEP(*(.noinit))
+    KEEP(*(.noinit.*))
+    . = ALIGN(4);
+    PROVIDE(__stop_noinit = .);
+  } > RAM
+} INSERT AFTER .bss;
+
 INCLUDE "nrf52_common.ld"

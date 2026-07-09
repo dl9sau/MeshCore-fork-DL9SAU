@@ -35,3 +35,6 @@ Wunschliste-DL9SAU.txt
 /.claude/
 /compile-*.sh
 /resume.txt
+
+# DL9SAU: Crash-Faenger Debug-ELFs (addr2line), nicht committen
+.crash_elf/

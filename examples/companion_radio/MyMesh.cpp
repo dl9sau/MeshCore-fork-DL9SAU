@@ -618,6 +618,15 @@ uint32_t MyMesh::loadRtcPersist() {
 // in begin() nachdem Reset-Reason + RTC-Persist geladen sind.
 // Format pro Zeile: "<unixsec> <cause>[ uptime=<dur>]\n", max 95 Bytes.
 
+#ifdef NRF52_CRASH_CATCHER
+// DL9SAU 2026-07-09: Crash-Faenger-Readout (NRF52Board.cpp). true wenn letzter
+// Reset ein HardFault war; liefert PC/LR/CFSR/count, loescht Magic (one-shot).
+extern "C" bool crash_catcher_take(uint32_t* pc, uint32_t* lr,
+                                   uint32_t* cfsr, uint32_t* count);
+// Selbsttest: loest absichtlich einen HardFault aus (CLI 'crashtest now').
+extern "C" void crash_catcher_selftest(void);
+#endif
+
 int MyMesh::bootLogLoad(char dst[][96], int max_entries) {
   File f = _store->openRead("/boot_log.txt");
   if (!f) return 0;
@@ -675,19 +684,33 @@ void MyMesh::bootLogAppend() {
     ChannelDetails _dch;
     if (getChannel(_i, _dch) && _dch.name[0] != 0) _diag_nch++;
   }
+  // DL9SAU 2026-07-09: Crash-Faenger. War der letzte Reset ein HardFault,
+  // PC/LR an den Boot-Eintrag anhaengen -> `log read` + addr2line.
+  char crash_suffix[40] = "";
+#ifdef NRF52_CRASH_CATCHER
+  {
+    uint32_t _cpc = 0, _clr = 0, _ccfsr = 0, _ccnt = 0;
+    if (crash_catcher_take(&_cpc, &_clr, &_ccfsr, &_ccnt)) {
+      snprintf(crash_suffix, sizeof(crash_suffix), " CRASH pc=%08lX lr=%08lX",
+               (unsigned long)_cpc, (unsigned long)_clr);
+    }
+  }
+#endif
   // Neuen Eintrag bauen.
   char entry[96];
   if (_last_reset_reason == 1 /* COLD */
       || _last_session_uptime_ms == 0) {
-    snprintf(entry, sizeof(entry), "%lu %s ch=%d",
-             (unsigned long)now_secs, getLastResetReasonStr(), _diag_nch);
+    snprintf(entry, sizeof(entry), "%lu %s ch=%d%s",
+             (unsigned long)now_secs, getLastResetReasonStr(), _diag_nch,
+             crash_suffix);
   } else {
     char dur[20];
     formatBootLogDuration(_last_session_uptime_ms, dur, sizeof(dur));
     // last_uptime= klar als vorige Session gekennzeichnet
     // (Feedback 2026-07-05: 'uptime=' klang als waere es die aktuelle).
-    snprintf(entry, sizeof(entry), "%lu %s last_uptime=%s ch=%d",
-             (unsigned long)now_secs, getLastResetReasonStr(), dur, _diag_nch);
+    snprintf(entry, sizeof(entry), "%lu %s last_uptime=%s ch=%d%s",
+             (unsigned long)now_secs, getLastResetReasonStr(), dur, _diag_nch,
+             crash_suffix);
   }
   // Schreiben: neuer Eintrag zuerst, dann max BOOT_LOG_MAX_ENTRIES-1
   // existing (aelteste fliegt raus).
@@ -24553,6 +24576,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   }
 
   // ---------- reboot ----------------------------------------------------
+#ifdef NRF52_CRASH_CATCHER
+  // DL9SAU 2026-07-09: Crash-Faenger-Selbsttest. 'crashtest now' loest
+  // absichtlich einen HardFault aus -> Kette verifizieren (Fault -> capture
+  // -> Reset -> BootLog CRASH-Zeile -> addr2line). Bewusst mit 'now'-Arg
+  // gegen versehentlichen Aufruf. Daten bleiben (Soft-Reset).
+  if (starts_with_word(cmd, "crashtest")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    if (arg && *arg && starts_with_word(arg, "now")) {
+      crash_catcher_selftest();   // kehrt nie zurueck (Reset)
+    } else {
+      pushCompanionMessage(
+        "crashtest: verifiziert den Crash-Faenger -- loest ABSICHTLICH einen "
+        "HardFault aus, Geraet resettet (Daten bleiben). Danach 'log read' -> "
+        "CRASH pc=.. -> addr2line. Aufruf: 'crashtest now'.");
+    }
+    return;
+  }
+#endif
   if (starts_with_word(cmd, "reboot")) {
 #if defined(NRF52_PLATFORM)
     // 2026-06-16 T1000-E: NVIC_SystemReset() funktioniert doch -- das
