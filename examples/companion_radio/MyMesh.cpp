@@ -13116,10 +13116,20 @@ void MyMesh::pushCompanionMessage(const char* text) {
         if (line_len <= WRAP) {
           take = line_len;                 // ganze Zeile passt
         } else {
-          // an letzter Wortgrenze <= WRAP brechen; kein Space -> hart bei WRAP.
+          // an letzter Wortgrenze <= WRAP brechen (Space = ASCII -> safe).
           size_t b = WRAP;
           while (b > 0 && s[b] != ' ') b--;
-          take = (b > 0) ? b : WRAP;
+          if (b > 0) {
+            take = b;
+          } else {
+            // kein Space -> hart bei WRAP, aber NICHT mitten in einem UTF-8-
+            // Zeichen: auf Codepoint-Grenze zuruecksetzen (Continuation-Bytes
+            // 10xxxxxx = 0x80..0xBF vor dem Bruch ueberspringen). Verhindert
+            // zerrissene Umlaute (z.B. bei bluetooth-Name/neighbors-Kontaktnamen).
+            take = WRAP;
+            while (take > 0 && ((unsigned char)s[take] & 0xC0) == 0x80) take--;
+            if (take == 0) take = WRAP;   // Safety (unerreichbar bei <=4-Byte-UTF-8)
+          }
         }
         memcpy(buf, s, take);
         buf[take] = 0;
