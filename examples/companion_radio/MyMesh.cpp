@@ -15045,6 +15045,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "trace all on|off\n  setzt aktiv UND Auswahl auf alle/keine");
         pushCompanionMessage(
+          "trace set <maske>\n  ganze Auswahl als Zahl (dez/0xHEX), z.B. "
+          "14207 bzw. 0x377F -- schnelles Restore einer kompletten Auswahl");
+        pushCompanionMessage(
           "Spezial:\n"
           "  trace heard on [new|all]   default 'new'\n"
           "    all: alle direkt gehoerten zero-hop-Adverts"
@@ -25807,7 +25810,9 @@ cron_add_direct:
       pushCompanionMessage(r); return;
     }
     if (tc_idx < 0) {
-      pushCompanionMessage("Unbekannte trace-Kategorie. 'trace list' fuer Uebersicht.");
+      pushCompanionMessage(
+        "trace: list | on | off | all on|off | set <maske> | <cat> on|off\n"
+        "  'trace list' zeigt die Kategorien.");
       return;
     }
     const char* sub = strchr(arg, ' ');
