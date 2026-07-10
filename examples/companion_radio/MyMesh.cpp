@@ -2422,6 +2422,24 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     return false;
   }
 
+  // Trace-Self-Repeat (2026-07-10): die hash-basierte Abwehr oben versagt fuer
+  // TRACE-Pakete -- der Trace-Hash WANDERT pro Hop, weil sendDirect() den Pfad
+  // ans Payload haengt (Mesh.cpp:716) und calculatePacketHash() dieses wachsende
+  // Payload hasht (Packet.cpp:49). Ein gefluteter Rueckweg unseres eigenen
+  // Traces (FLOOD-geroutet -> landet hier in allowPacketForward) kommt daher mit
+  // anderem Hash zurueck und wuerde repeatet. Der einzige STABILE Griff ist der
+  // tag (Origination-Wert bei payload[0], Mesh.cpp:46). Traegt ein empfangener
+  // TRC unseren ausstehenden CLI-Trace-tag, ist es unser eigener -> nie repeaten.
+  if (ptype == PAYLOAD_TYPE_TRACE && _cli_trace_tag != 0 && packet->payload_len >= 4) {
+    uint32_t rtag;
+    memcpy(&rtag, &packet->payload[0], 4);
+    if (rtag == _cli_trace_tag) {
+      traceCompanion(TRACE_FILTER, "[filter] reject %s hops=%u reason=self-trace",
+                     ptypeName(ptype), (unsigned)packet->getPathHashCount());
+      return false;
+    }
+  }
+
   // Wunschliste 32 Pre-Flight: GRP-Cap-Check als Vor-Berechnung.
   // Cap-Encoding: CH_HOPS_OFF=skip / 0=immer droppen / 1..N=droppen wenn
   // path_hash_count > N. Restriktivster Match aus allen matchenden Slots +
