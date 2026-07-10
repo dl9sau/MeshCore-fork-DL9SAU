@@ -21812,10 +21812,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // der User hat klar einen hex-Prefix getippt, nicht einen Namen.
     // Ausnahme: exakter Contact-Match (gesamter pubkey stimmt).
     bool raw_hex_mode = false;
-    if (is_hex && n_role_match == 0) {
-      raw_hex_mode = true;
-    } else if (is_hex && n_role_match > 1 && !has_exact) {
-      // Bei Ambig mit hex-Input: raw-hex-mode nutzen statt anmeckern.
+    if (is_hex) {
+      // 2026-07-10: Hex-Eingabe = roher Hop (pubkey-Prefix), NIE zu einem
+      // Kontakt expandieren -- auch nicht wenn genau EIN Kontakt den Prefix
+      // teilt. Der User will exakt diesen Hop tracen, selbst wenn ein
+      // konkreterer Kontakt denselben Prefix hat (sonst kann man einen nur
+      // per 1-Byte-Prefix bekannten Knoten nicht tracen, wenn ein anderer
+      // Kontakt den Prefix teilt). Kontakt-Matching/Ambiguitaet gilt nur
+      // fuer NAMENS-Eingabe.
       raw_hex_mode = true;
     }
     if (raw_hex_mode) {
