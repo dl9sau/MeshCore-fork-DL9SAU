@@ -13947,7 +13947,7 @@ void MyMesh::printCliPingStats() {
 }
 
 bool MyMesh::sendCliPingToStoredTarget() {
-  uint8_t hash_size = 1;
+  uint8_t hash_size = _cli_ping_hash_size;  // gleiche Breite wie der Erst-Ping
   uint8_t ping_path[8];
   size_t ppo = 0;
   memcpy(&ping_path[ppo], _cli_ping_target_pubkey, hash_size); ppo += hash_size;
@@ -21560,14 +21560,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Target forwarded -- der forward-Echo trifft uns, path_snrs[0] = wie
     // stark WIR bei IHM ankamen. Unser Radio-SNR beim RX = wie stark ER
     // bei UNS ankam.
-    // Kontakt-Ping: hs=1 (backward-Kompat, App-Verhalten -- aeltere Repeater
-    // koennen nicht mit 2/3-byte-hashes umgehen). 2026-07-10: raw-hex-Ping
-    // nimmt die GETIPPTE Byte-Breite als hash_size (1-3) -> man kann einen
-    // praeziseren Hop pingen (pi eb2e -> 2-Byte-Hop). Opt-in durch die Eingabe.
-    uint8_t hash_size = 1;
+    // Kontakt-Ping: konfigurierte default-path-size (_prefs.path_hash_mode+1),
+    // wie tracepath -- User erwartet dass ping den eingestellten default nutzt
+    // (2026-07-10; frueher hart hs=1 fuer App-Paritaet). Timeout wenn Ziel nur
+    // hs=1-only-firmware hat = User's Wahl via default. raw-hex-Ping nimmt
+    // stattdessen die GETIPPTE Byte-Breite (1-3) -> praeziserer Hop (pi eb2e).
+    uint8_t hash_size = _prefs.path_hash_mode + 1;
+    if (hash_size < 1 || hash_size > 3) hash_size = 1;
     if (raw_hex_mode) {
       hash_size = (hex_bytes < 1) ? 1 : (hex_bytes > 3 ? 3 : (uint8_t)hex_bytes);
     }
+    _cli_ping_hash_size = hash_size;  // Folge-Pings (-c N) nutzen dieselbe Breite
     uint8_t ping_path[8];
     size_t ppo = 0;
     memcpy(&ping_path[ppo], cand.id.pub_key, hash_size); ppo += hash_size;
