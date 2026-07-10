@@ -14976,11 +14976,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Abkuerzungen: pa p, pa t, pa s, pa c.\n"
           "Auch als Top-Cmd 'ping' (pi..), 'tracepath' (tracep..).");
         pushCompanionMessage(
-          "Query-Anker fuer 'path show <hex,,>':\n"
-          "  aabb        -> substring irgendwo\n"
-          "  aabb,       -> beginnt mit aabb (mehr hops)\n"
-          "  ,aabb       -> endet mit aabb\n"
-          "  ,aabb,      -> Zwischenhop (weder Anfang noch Ende)");
+          "Query-Anker 'path show <hex,,>' (durchsucht out- UND in-Path):\n"
+          "  aabb,       -> Pfad beginnt mit aabb (mehr hops)\n"
+          "  ,aabb       -> Pfad endet mit aabb\n"
+          "  ,aabb,      -> Zwischenhop (weder Anfang noch Ende)\n"
+          "  Treffer zeigt out=.. und/oder in=.. (welcher Pfad matchte)");
         pushCompanionMessage(
           "Begriffe:\n"
           "  hs = hash-size (Bytes je Hop-Hash, 1..3)\n"
@@ -20929,46 +20929,59 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             }
             int found_n = 0;
             int tot = getNumContacts();
+            // Anker-Match-Helper: sucht needle in einem Pfad (bytes,len) und
+            // prueft die Start/End-Anker. Fuer out_path UND in_path genutzt.
+            auto anchored_match = [&](const uint8_t* path, uint8_t plen) -> bool {
+              if (plen < nl) return false;
+              int mp = -1;
+              int max_start = (int)plen - (int)nl;
+              for (int s = 0; s <= max_start; s++) {
+                if (memcmp(path + s, needle, nl) == 0) { mp = s; break; }
+              }
+              if (mp < 0) return false;
+              bool at_start = (mp == 0);
+              bool at_end   = (mp + (int)nl == plen);
+              if (anch_start && anch_end)   return true;                    // irgendwo
+              if (!anch_start && !anch_end) return (!at_start && !at_end);  // ',x,' mittig
+              if (anch_start && !anch_end)  return (at_start && !at_end);   // 'x,' beginnt
+              return at_end;                                               // ',x' endet
+            };
             for (int i = 0; i < tot; i++) {
               ContactInfo ci;
               if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
-              if (ci.out_path_len == 0 || ci.out_path_len == OUT_PATH_UNKNOWN) continue;
-              if (ci.out_path_len < nl) continue;
-              // Suche needle im out_path.
-              bool matches_pos = false;
-              int match_pos = -1;
-              int max_start = (int)ci.out_path_len - (int)nl;
-              for (int s = 0; s <= max_start; s++) {
-                if (memcmp(ci.out_path + s, needle, nl) == 0) {
-                  match_pos = s; break;
-                }
+              // out_path pruefen (falls gesetzt).
+              bool out_ok = (ci.out_path_len != 0
+                          && ci.out_path_len != OUT_PATH_UNKNOWN)
+                          && anchored_match(ci.out_path, ci.out_path_len);
+              // in_path aus advert_paths[] pruefen (2026-07-10: 'auch nach
+              // in_path suchen' -- welche Repeater via <hop> gehoert wurden).
+              const uint8_t* in_path = NULL; uint8_t in_len = 0;
+              for (int a = 0; a < ADVERT_PATH_TABLE_SIZE; a++) {
+                if (memcmp(advert_paths[a].pubkey_prefix, ci.id.pub_key,
+                           sizeof(advert_paths[a].pubkey_prefix)) != 0) continue;
+                in_path = advert_paths[a].path; in_len = advert_paths[a].path_len;
+                break;
               }
-              if (match_pos < 0) continue;
-              // Anker pruefen
-              bool at_start = (match_pos == 0);
-              bool at_end   = (match_pos + (int)nl == ci.out_path_len);
-              if (anch_start && anch_end) {
-                // 'aabb,' UND ',aabb' beides gesetzt = 'aabb' allein (kein Komma) = irgendwo
-                matches_pos = true;
-              } else if (!anch_start && !anch_end) {
-                // ',aabb,' -> mittig, weder start noch end
-                if (!at_start && !at_end) matches_pos = true;
-              } else if (anch_start && !anch_end) {
-                // 'aabb,' -> faengt mit aabb an, aber weitere Hops
-                if (at_start && !at_end) matches_pos = true;
-              } else if (!anch_start && anch_end) {
-                // ',aabb' -> endet mit aabb
-                if (at_end) matches_pos = true;
-              }
-              if (!matches_pos) continue;
+              bool in_ok = (in_path != NULL && in_len > 0)
+                        && anchored_match(in_path, in_len);
+              if (!out_ok && !in_ok) continue;
               char pkx[7];
               mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
               char line[220];
-              int lp = snprintf(line, sizeof(line), "  %s %s: ",
-                                pkx, ci.name);
-              for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++) {
-                lp += snprintf(line + lp, sizeof(line) - lp,
-                              "%s%02x", j == 0 ? "" : ",", ci.out_path[j]);
+              int lp = snprintf(line, sizeof(line), "  %s %s:", pkx, ci.name);
+              if (out_ok) {
+                lp += snprintf(line + lp, sizeof(line) - lp, " out=");
+                for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++) {
+                  lp += snprintf(line + lp, sizeof(line) - lp,
+                                "%s%02x", j == 0 ? "" : ",", ci.out_path[j]);
+                }
+              }
+              if (in_ok) {
+                lp += snprintf(line + lp, sizeof(line) - lp, " in=");
+                for (uint8_t j = 0; j < in_len && lp + 4 < (int)sizeof(line); j++) {
+                  lp += snprintf(line + lp, sizeof(line) - lp,
+                                "%s%02x", j == 0 ? "" : ",", in_path[j]);
+                }
               }
               if (found_n == 0) pushCompanionMessage("path show:");
               pushCompanionMessage(line);
