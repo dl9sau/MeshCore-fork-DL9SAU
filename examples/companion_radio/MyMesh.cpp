@@ -15027,6 +15027,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Hop den ich hoere. hs aus Token-Breite (2/4/6=hs\n"
           "  1/2/3), kein Mischen.");
         pushCompanionMessage(
+          "  bidi: tracepath bidi aa,bb -- haengt den Rueckweg\n"
+          "  automatisch an (reverse ohne letzten Hop):\n"
+          "  aa,bb -> aa,bb,aa ; aa,bb,cc -> aa,bb,cc,bb,aa.");
+        pushCompanionMessage(
           "  Timeout ist airtime-basiert:\n"
           "  3s + 2*airtime*(hops+1) + hops*2s (mind. 5s).\n"
           "  hs = hash-size (Bytes je Hop-Hash).");
@@ -21605,15 +21609,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     const char* rp = strchr(cmd, ' ');
     if (!rp) {
       pushCompanionMessage("Usage: tracepath <name|hex-prefix>\n"
-                           "   ODER given-path: tracepath aa,bb,cc,aa\n"
-                           "   (Hop-Kette woertlich, Komma-getrennt, unknown ok)");
+                           "   given-path: tracepath aa,bb,cc,aa (woertlich)\n"
+                           "   bidi:       tracepath bidi aa,bb  (Rueckweg auto)");
       return;
     }
     while (*rp == ' ' || *rp == '\t') rp++;
     if (!*rp) {
       pushCompanionMessage("Usage: tracepath <name|hex-prefix>\n"
-                           "   ODER given-path: tracepath aa,bb,cc,aa\n"
-                           "   (Hop-Kette woertlich, Komma-getrennt, unknown ok)");
+                           "   given-path: tracepath aa,bb,cc,aa (woertlich)\n"
+                           "   bidi:       tracepath bidi aa,bb  (Rueckweg auto)");
       return;
     }
     if (_cli_trace_tag != 0
@@ -21633,9 +21637,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // hash_size aus Token-Breite (2/4/6 Hex = hs 1/2/3), Mischen verboten
     // (Protokoll verlangt uniforme hash-size).
     {
+      // 'tracepath bidi aa,bb' -> Auto-Round-Trip: haengt reverse(fwd ohne
+      // letzten Hop) an, spart das Rueckweg-Tippen ('aa,bb' -> 'aa,bb,aa',
+      // 'aa,bb,cc' -> 'aa,bb,cc,bb,aa').
+      bool bidi_mode = false;
+      const char* path_arg = rp;
+      size_t path_len_in = input_len;
+      if (input_len > 5 && strncasecmp(rp, "bidi", 4) == 0
+          && (rp[4] == ' ' || rp[4] == '\t')) {
+        bidi_mode = true;
+        path_arg = rp + 4;
+        while (*path_arg == ' ' || *path_arg == '\t') path_arg++;
+        path_len_in = (size_t)(rp_end - path_arg);
+      }
       bool has_comma = false;
-      for (size_t i = 0; i < input_len; i++) if (rp[i] == ',') { has_comma = true; break; }
-      if (has_comma) {
+      for (size_t i = 0; i < path_len_in; i++) if (path_arg[i] == ',') { has_comma = true; break; }
+      if (bidi_mode || has_comma) {
         auto hexval = [](char c) -> int {
           if (c >= '0' && c <= '9') return c - '0';
           if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -21647,8 +21664,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         int tok_width = -1;   // in Hex-Zeichen, muss uniform sein
         int n_hops = 0;
         bool ok = true;
-        const char* p = rp;
-        const char* pend = rp + input_len;
+        const char* p = path_arg;
+        const char* pend = path_arg + path_len_in;
         while (p < pend && ok) {
           const char* ts = p;
           while (p < pend && *p != ',') p++;
@@ -21671,6 +21688,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           return;
         }
         uint8_t hs = (uint8_t)(tok_width / 2);
+        // bidi: reverse(fwd ohne letzten Hop) anhaengen -> Auto-Rueckweg.
+        if (bidi_mode && n_hops >= 2) {
+          int fwd_hops = n_hops;
+          for (int hidx = fwd_hops - 2; hidx >= 0; hidx--) {
+            if (gp_len + hs > sizeof(gp)) break;
+            memcpy(&gp[gp_len], &gp[(size_t)hidx * hs], hs);
+            gp_len += hs;
+            n_hops++;
+          }
+        }
         uint8_t tag_bytes[4], auth_bytes[4];
         getRNG()->random(tag_bytes, 4);
         getRNG()->random(auth_bytes, 4);
@@ -21698,14 +21725,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         _cli_trace_forward_hops = (uint8_t)gp_len;
         _cli_trace_target_hex_len = 0;
         memset(_cli_trace_target_pubkey, 0, 32);
-        size_t nl = (input_len < sizeof(_cli_trace_target_name) - 1)
-                    ? input_len : sizeof(_cli_trace_target_name) - 1;
-        memcpy(_cli_trace_target_name, rp, nl);
+        size_t nl = (path_len_in < sizeof(_cli_trace_target_name) - 1)
+                    ? path_len_in : sizeof(_cli_trace_target_name) - 1;
+        memcpy(_cli_trace_target_name, path_arg, nl);
         _cli_trace_target_name[nl] = 0;
         char r[140];
         snprintf(r, sizeof(r),
-                 "tracepath given-path: sent (%d hops, hs=%u), warte...",
-                 n_hops, (unsigned)hs);
+                 "tracepath %s: sent (%d hops, hs=%u), warte...",
+                 bidi_mode ? "bidi" : "given-path", n_hops, (unsigned)hs);
         pushCompanionMessage(r);
         return;
       }
@@ -22573,6 +22600,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       return false;
     };
+    // 2026-07-10: Query zusaetzlich als Hex-pubkey-Prefix interpretieren
+    // (falls gueltig Hex): 'co eb' findet Namens-Treffer UND Knoten mit
+    // pubkey-Prefix eb (EB2E31=Freifunk-Scherer) -- wie 'path show eb'.
+    uint8_t qhex[8]; size_t qhb = 0;
+    bool q_is_hex = (cpl >= 2 && (cpl % 2) == 0 && cpl <= 2 * sizeof(qhex));
+    for (size_t i = 0; i < cpl && q_is_hex; i++) {
+      char c = prefix[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+           || (c >= 'A' && c <= 'F'))) q_is_hex = false;
+    }
+    if (q_is_hex) {
+      auto hx = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return 0;
+      };
+      for (size_t i = 0; i + 1 < cpl; i += 2)
+        qhex[qhb++] = (uint8_t)((hx(prefix[i]) << 4) | hx(prefix[i+1]));
+    }
+    auto contact_matches = [&](const ContactInfo& ci) -> bool {
+      if (name_has(ci.name)) return true;
+      if (q_is_hex && qhb > 0 && memcmp(ci.id.pub_key, qhex, qhb) == 0) return true;
+      return false;
+    };
     if (!*arg) {
       int shown = 0;
       for (int i = 0; i < c_tot; i++) {
@@ -22601,7 +22653,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       ContactInfo ci;
       if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
       if (ci.type == ADV_TYPE_NONE) continue;
-      if (!name_has(ci.name)) continue;
+      if (!contact_matches(ci)) continue;
       if (!have_pk) { memcpy(match_pk, ci.id.pub_key, 32); have_pk = true; }
       c_nmatch++;
     }
