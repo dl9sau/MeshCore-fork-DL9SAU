@@ -1236,6 +1236,10 @@ private:
     uint8_t       max_attempt;    // hoechster genutzter attempt (nur DM)
     bool          is_dm;
     bool          used;
+    // 2026-07-10 Phase 2: Confirm-Handle. Channel = calcShortHash des gesendeten
+    // Pakets (Echo-Match in filterRecvFloodPacket); DM = expected_ack-Code
+    // (Match in processAck). 0 = noch keiner gesetzt.
+    uint32_t      confirm_key;
   };
   static const int RESEND_COALESCE_N = 16;
   ResendCoalesce _resend_coalesce[RESEND_COALESCE_N] = {};
@@ -1243,6 +1247,12 @@ private:
   // wird *attempt bei einem Coalesce-Treffer hochgezaehlt.
   uint32_t resendCoalesce(bool is_dm, uint32_t key_hash, uint32_t text_hash,
                           uint32_t app_timestamp, uint8_t* attempt);
+  // Phase 2: Confirm-Handle nachtragen (nach dem Send, wenn pkt-hash/ack da).
+  void noteCoalesceConfirm(bool is_dm, uint32_t key_hash, uint32_t text_hash,
+                           uint32_t confirm_key);
+  // Phase 2: Eintrag loeschen wenn Echo (Channel) bzw. ACK (DM) bestaetigt --
+  // damit ein spaeterer identischer Send NICHT faelschlich rueckdatiert wird.
+  bool dropCoalesceByConfirm(bool is_dm, uint32_t confirm_key);
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;
 

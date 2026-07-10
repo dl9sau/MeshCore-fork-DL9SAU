@@ -522,7 +522,8 @@ int  BaseChatMesh::sendCommandData(const ContactInfo& recipient, uint32_t timest
   return rc;
 }
 
-bool BaseChatMesh::sendGroupMessage(uint32_t timestamp, mesh::GroupChannel& channel, const char* sender_name, const char* text, int text_len) {
+bool BaseChatMesh::sendGroupMessage(uint32_t timestamp, mesh::GroupChannel& channel, const char* sender_name, const char* text, int text_len, uint32_t* out_pkt_hash) {
+  if (out_pkt_hash) *out_pkt_hash = 0;
   uint8_t temp[5+MAX_TEXT_LEN+32];
   memcpy(temp, &timestamp, 4);   // mostly an extra blob to help make packet_hash unique
   temp[4] = 0;  // TXT_TYPE_PLAIN
@@ -537,6 +538,13 @@ bool BaseChatMesh::sendGroupMessage(uint32_t timestamp, mesh::GroupChannel& chan
 
   auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, temp, 5 + prefix_len + text_len);
   if (pkt) {
+    // 2026-07-10: Paket-Hash rausgeben (Coalescing Phase 2: Echo-Erkennung der
+    // eigenen Channel-Nachricht via calcShortHash-Match in filterRecvFloodPacket).
+    if (out_pkt_hash) {
+      uint8_t h[MAX_HASH_SIZE];
+      pkt->calculatePacketHash(h);
+      memcpy(out_pkt_hash, h, 4);
+    }
     sendFloodScoped(channel, pkt);
     return true;
   }

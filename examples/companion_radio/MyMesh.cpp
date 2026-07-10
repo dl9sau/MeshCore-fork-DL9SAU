@@ -2109,6 +2109,13 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
       memcpy(&out_frame[5], &trip_time, 4);
       _serial->writeFrame(out_frame, 9);
 
+      // 2026-07-10 Phase 2: DM bestaetigt -> Coalesce-Eintrag loeschen (Match
+      // ueber den ack-Code = confirm_key). Ein spaeterer identischer DM ist
+      // dann frisch, nicht faelschlich rueckdatiert.
+      uint32_t ack_key;
+      memcpy(&ack_key, &expected_ack_table[i].ack, 4);
+      dropCoalesceByConfirm(/*is_dm=*/true, ack_key);
+
       // NOTE: the same ACK can be received multiple times!
       expected_ack_table[i].ack = 0; // clear expected hash, now that we have received ACK
       return expected_ack_table[i].contact;
@@ -2346,6 +2353,10 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
   } else if (m == 2 && _rx_us_repeated_count < 0xFFFF) {
     _rx_us_repeated_count++;
   }
+  // 2026-07-10 Phase 2: Echo einer eigenen Channel-Nachricht gehoert (h ==
+  // pkt-hash des Sends)? Laeuft VOR der hasSeen-Dedup, also sehen wir das Echo.
+  // Coalesce-Eintrag loeschen -> ein spaeterer identischer Send ist frisch.
+  dropCoalesceByConfirm(/*is_dm=*/false, h);
   // REVISIT: try to determine which Region (from transport_codes[1]) that Sender is indicating for replies/responses
   //    if unknown, fallback to finding Region from transport_codes[0], the 'scope' used by Sender
   return false;
@@ -7166,6 +7177,12 @@ void MyMesh::handleCmdFrame(size_t len) {
         msg_timestamp = resendCoalesce(/*is_dm=*/true, rcpt_key, txt_key,
                                        msg_timestamp, &attempt);
         result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout);
+        // 2026-07-10 Phase 2: expected_ack als Confirm-Handle -> processAck
+        // loescht den Coalesce-Eintrag bei ACK-Empfang (spaeterer identischer
+        // Send ist dann frisch, nicht faelschlich rueckdatiert).
+        if (expected_ack) {
+          noteCoalesceConfirm(/*is_dm=*/true, rcpt_key, txt_key, expected_ack);
+        }
       }
       // TODO: add expected ACK to table
       if (result == MSG_SEND_FAILED) {
@@ -7354,9 +7371,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       // Channel innerhalb Fenster den Original-Timestamp wiederverwenden ->
       // identischer Paket-Hash -> Empfaenger dedupt, kein Doubletten-Spam bei
       // manuellem Resend. Channel-Identitaet = fnv1a32(secret).
+      uint32_t ch_key = fnv1a32((const char*)channel.channel.secret, PUB_KEY_SIZE);
+      uint32_t txt_key = fnv1a32(mtext, (size_t)mlen);
       if (success) {
-        uint32_t ch_key = fnv1a32((const char*)channel.channel.secret, PUB_KEY_SIZE);
-        uint32_t txt_key = fnv1a32(mtext, (size_t)mlen);
         msg_timestamp = resendCoalesce(/*is_dm=*/false, ch_key, txt_key,
                                        msg_timestamp, /*attempt=*/nullptr);
       }
@@ -7368,10 +7385,16 @@ void MyMesh::handleCmdFrame(size_t len) {
         memcpy(send_scope.key, reply_scope_key, 16);
         send_unscoped = false;
       }
-      bool send_ok = success && sendGroupMessage(msg_timestamp, channel.channel, short_sender, mtext, mlen);
+      uint32_t sent_pkt_hash = 0;
+      bool send_ok = success && sendGroupMessage(msg_timestamp, channel.channel, short_sender, mtext, mlen, &sent_pkt_hash);
       if (have_reply_scope) {
         send_scope = saved_send_scope;
         send_unscoped = saved_send_unscoped;
+      }
+      // 2026-07-10 Phase 2: Confirm-Handle (pkt-hash des Sends) in den Coalesce-
+      // Eintrag -> beim Echo (filterRecvFloodPacket) wird der Eintrag geloescht.
+      if (send_ok && sent_pkt_hash) {
+        noteCoalesceConfirm(/*is_dm=*/false, ch_key, txt_key, sent_pkt_hash);
       }
       if (send_ok) {
         // Autolearn des TX-Scope-Override aus Channel-Sends wurde entfernt:
@@ -13764,7 +13787,43 @@ uint32_t MyMesh::resendCoalesce(bool is_dm, uint32_t key_hash, uint32_t text_has
   e.orig_timestamp = app_timestamp;
   e.anchor_millis = now;
   e.max_attempt = (is_dm && attempt) ? *attempt : 0;
+  e.confirm_key = 0;  // Phase 2: erst nach dem Send gesetzt (noteCoalesceConfirm)
   return app_timestamp;  // erster Send -> App-Timestamp unveraendert
+}
+
+// 2026-07-10 Phase 2: Confirm-Handle in den passenden Eintrag nachtragen.
+// (is_dm, key_hash, text_hash) identifiziert den Eintrag den resendCoalesce
+// gerade angelegt/aktualisiert hat. confirm_key = calcShortHash (Channel) bzw.
+// expected_ack (DM).
+void MyMesh::noteCoalesceConfirm(bool is_dm, uint32_t key_hash,
+                                 uint32_t text_hash, uint32_t confirm_key) {
+  for (int i = 0; i < RESEND_COALESCE_N; i++) {
+    ResendCoalesce& e = _resend_coalesce[i];
+    if (!e.used) continue;
+    if (e.is_dm == is_dm && e.key_hash == key_hash && e.text_hash == text_hash) {
+      e.confirm_key = confirm_key;
+      return;
+    }
+  }
+}
+
+// 2026-07-10 Phase 2: Eintrag loeschen wenn bestaetigt (Channel-Echo gehoert
+// bzw. DM-ACK empfangen). Match ueber confirm_key + is_dm. Nur bei tatsaechlicher
+// Loeschung loggen (sonst zu spammy). true = geloescht.
+bool MyMesh::dropCoalesceByConfirm(bool is_dm, uint32_t confirm_key) {
+  if (confirm_key == 0) return false;
+  for (int i = 0; i < RESEND_COALESCE_N; i++) {
+    ResendCoalesce& e = _resend_coalesce[i];
+    if (!e.used || e.is_dm != is_dm || e.confirm_key != confirm_key) continue;
+    e.used = false;
+    e.confirm_key = 0;
+    traceCompanion(TRACE_COALESCE,
+                   "[coalesce] %s: Eintrag geloescht (%s bestaetigt) -> "
+                   "naechster identischer Send ist frisch",
+                   is_dm ? "DM" : "CH", is_dm ? "ACK" : "Echo");
+    return true;
+  }
+  return false;
 }
 
 // 2026-07-07: Einheitliche Regions-Result-Ausgabe. Ersetzt 4 zuvor
