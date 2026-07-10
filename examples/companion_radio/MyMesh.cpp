@@ -7331,7 +7331,7 @@ void MyMesh::handleCmdFrame(size_t len) {
               have_reply_scope = true;
               traceCompanion(TRACE_SCOPE,
                              "[reply-scope] '@%s' bracket #* (unscoped) -> "
-                             "#unscoped flood (Reply muss ankommen)",
+                             "#unscoped flood",
                              reply_name);
             } else {
               int idx = dl9sau_find_region_index(reply_scope_name);
@@ -7385,7 +7385,7 @@ void MyMesh::handleCmdFrame(size_t len) {
               have_reply_scope = true;
               traceCompanion(TRACE_SCOPE,
                              "[reply-scope] '@%s' cache #* (unscoped) -> "
-                             "#unscoped flood (Reply muss ankommen)",
+                             "#unscoped flood",
                              reply_name);
             } else {
               traceCompanion(TRACE_SCOPE,
