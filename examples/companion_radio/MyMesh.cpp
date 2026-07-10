@@ -3156,8 +3156,26 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
       return;
     }
   }
+  // 2026-07-10: Scope-Name/Key im Trace (Diagnose reply-scope): eff_scope
+  // gegen default_scope + _buildin_keys reverse-lookuppen, sonst 3-Byte-Hex.
+  const char* eff_name = "?";
+  char eff_hex[7]; mesh::Utils::toHex(eff_hex, eff_scope.key, 3);
+  if (_prefs.default_scope_name[0]
+      && memcmp(eff_scope.key, _prefs.default_scope_key, 16) == 0) {
+    eff_name = _prefs.default_scope_name;
+  } else {
+    for (int k = 0; k < _buildin_keys_count; k++) {
+      if (memcmp(_buildin_keys[k].key, eff_scope.key, 16) == 0) {
+        const char* nm = NULL;
+        dl9sau_get_region((size_t)k, &nm, NULL, NULL, NULL, NULL);
+        if (nm) eff_name = nm;
+        break;
+      }
+    }
+  }
   traceCompanion(TRACE_SCOPE,
-                 "[send-ch] path=%s -> flood scoped", trace_path);
+                 "[send-ch] path=%s -> flood scoped #%s (%s)",
+                 trace_path, eff_name, eff_hex);
   sendFloodScoped(eff_scope, pkt, delay_millis);
 }
 
@@ -17382,19 +17400,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
     }
 
+    // 2026-07-10: 'known' (= gesamte NodeDB) war hier irrefuehrend --
+    // Nachbarn koennen Repeater/Sensor/Room sein; die DB-Gesamtzahl sagt
+    // nichts ueber die Nachbarschaft. Nur noch bekannt (Kontakt) vs.
+    // unbekannt (nur-via-discover) unter den Nachbarn.
     char summary[100];
     if (discover_shown > 0) {
       snprintf(summary, sizeof(summary),
-               "total: %d contacts + %d discover-only, %d known",
-               shown, discover_shown, num);
+               "total: %d bekannt, %d unbekannt", shown, discover_shown);
     } else if (has_last) {
       snprintf(summary, sizeof(summary),
-               "total: %d within %s, %d known",
-               shown, last_arg_buf, num);
+               "total: %d within %s", shown, last_arg_buf);
     } else {
       snprintf(summary, sizeof(summary),
-               "total: %d within 48h, %d known", shown, num);
+               "total: %d within 48h", shown);
     }
+    (void)num;
     add_line(summary);
     flush(true);
     return;
@@ -22544,9 +22565,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "discover regions <name-prefix>:\n"
           "  Namesuche, zero-hop direkt.\n"
           "  Nur direkte Nachbarn (protokoll-bedingt).");
-        pushCompanionMessage(
-          "Komplement 'discoverable':\n"
-          "  passive Antwort im full-rep-mode.");
         return;
       }
       else if (strcmp(canon, "prefix") == 0)   prefix_only = true;
