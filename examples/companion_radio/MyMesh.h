@@ -1181,6 +1181,7 @@ private:
   unsigned long _cli_ping_expiry_ms  = 0;
   uint8_t  _cli_ping_target_pubkey[32] = {0};
   char     _cli_ping_target_name[32]   = {0};
+  uint8_t  _cli_ping_target_hex_len = 3;  // Bytes fuer pkx-Ausgabe (variabel bei raw-hex)
   // 2026-07-07: Ping -c N -i M Stats.
   uint16_t _cli_ping_count_target = 0;      // 0 = single, >0 = -c N mode
   uint16_t _cli_ping_count_done = 0;

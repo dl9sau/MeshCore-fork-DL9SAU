@@ -5736,7 +5736,8 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     _cli_ping_tag = 0;
     _cli_ping_expiry_ms = 0;
     char pkx[7];
-    mesh::Utils::toHex(pkx, _cli_ping_target_pubkey, 3);
+    mesh::Utils::toHex(pkx, _cli_ping_target_pubkey,
+                       (_cli_ping_target_hex_len > 3) ? 3 : _cli_ping_target_hex_len);
     char name_buf[32];
     StrHelper::strzcpy(name_buf, _cli_ping_target_name, sizeof(name_buf));
     neighbors_utf8_truncate_to_visual(name_buf, 25);
@@ -8875,7 +8876,8 @@ void MyMesh::loop() {
   // 2026-07-06 CLI ping timeout check.
   if (_cli_ping_tag != 0 && (int32_t)(millis() - _cli_ping_expiry_ms) >= 0) {
     char pkx[7];
-    mesh::Utils::toHex(pkx, _cli_ping_target_pubkey, 3);
+    mesh::Utils::toHex(pkx, _cli_ping_target_pubkey,
+                       (_cli_ping_target_hex_len > 3) ? 3 : _cli_ping_target_hex_len);
     char r[220];
     if (_cli_ping_count_target > 1) {
       snprintf(r, sizeof(r),
@@ -21525,7 +21527,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memcpy(cand.id.pub_key, hex_target, hex_bytes);
       cand.out_path_len = 0;
       cand.type = ADV_TYPE_REPEATER;
-      char nb[10] = "raw-";
+      char nb[16] = "raw-";
       size_t np = strlen(nb);
       for (size_t i = 0; i < hex_bytes && np + 3 < sizeof(nb); i++)
         np += snprintf(nb + np, sizeof(nb) - np, "%02x", hex_target[i]);
@@ -21558,9 +21560,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Target forwarded -- der forward-Echo trifft uns, path_snrs[0] = wie
     // stark WIR bei IHM ankamen. Unser Radio-SNR beim RX = wie stark ER
     // bei UNS ankam.
-    // 2026-07-07: hs=1 fuer Ping (backward-Kompat, aeltere Repeater
-    // koennen nicht mit 2/3-byte-hashes umgehen). Analog App-Verhalten.
+    // Kontakt-Ping: hs=1 (backward-Kompat, App-Verhalten -- aeltere Repeater
+    // koennen nicht mit 2/3-byte-hashes umgehen). 2026-07-10: raw-hex-Ping
+    // nimmt die GETIPPTE Byte-Breite als hash_size (1-3) -> man kann einen
+    // praeziseren Hop pingen (pi eb2e -> 2-Byte-Hop). Opt-in durch die Eingabe.
     uint8_t hash_size = 1;
+    if (raw_hex_mode) {
+      hash_size = (hex_bytes < 1) ? 1 : (hex_bytes > 3 ? 3 : (uint8_t)hex_bytes);
+    }
     uint8_t ping_path[8];
     size_t ppo = 0;
     memcpy(&ping_path[ppo], cand.id.pub_key, hash_size); ppo += hash_size;
@@ -21582,6 +21589,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     _cli_ping_expiry_ms  = millis() + 10000;
     // 2026-07-07: -c N -i M state.
     memcpy(_cli_ping_target_pubkey, cand.id.pub_key, 32);
+    // 2026-07-10: bei raw-hex nur die tatsaechlich gepingten Bytes anzeigen
+    // (= hash_size; sonst pkx null-gepaddet -> 'EB0000' statt 'eb'). Kontakt: 3.
+    _cli_ping_target_hex_len = raw_hex_mode ? hash_size : 3;
     StrHelper::strzcpy(_cli_ping_target_name, cand.name,
                        sizeof(_cli_ping_target_name));
     _cli_ping_count_target = (uint16_t)arg_c;
@@ -21605,7 +21615,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     // (target pubkey/name schon oben gesetzt bei state init)
     char pkx[7];
-    mesh::Utils::toHex(pkx, cand.id.pub_key, 3);
+    mesh::Utils::toHex(pkx, cand.id.pub_key,
+                       (_cli_ping_target_hex_len > 3) ? 3 : _cli_ping_target_hex_len);
     char r[140];
     snprintf(r, sizeof(r), "ping %s: sent (zero-hop), warte...", pkx);
     pushCompanionMessage(r);
@@ -21839,7 +21850,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       cand.out_path_len = 0;
       cand.type = ADV_TYPE_REPEATER;
       // Name = "raw-<hex>" mit genau hex_bytes Bytes.
-      char nb[10] = "raw-";
+      char nb[16] = "raw-";
       size_t np = strlen(nb);
       for (size_t i = 0; i < hex_bytes && np + 3 < sizeof(nb); i++) {
         np += snprintf(nb + np, sizeof(nb) - np, "%02x", hex_target[i]);
@@ -21896,13 +21907,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     // Round-Trip-Path bauen:
     //   [hin_bytes][target_hash][rev_bytes]   (KEIN self_hash am Ende, 2026-07-10)
-    // 2026-07-07: bei advert-path fallback OR raw-hex force hs=1 (backward-
-    // Kompat, wir kennen die Fremd-Firmware nicht). Sonst pref nutzen --
-    // auch bei direct-Kontakt (User's Wahl respektieren, Timeout wenn
-    // Ziel altere hs=1-only firmware hat).
+    // advert-path fallback: hs=1 (Advert-Hops sind 1-byte). Sonst pref nutzen.
+    // 2026-07-10: raw-hex nimmt die GETIPPTE Byte-Breite (1-3) als hop-hash --
+    // 'tracepath eb2e' tract den 2-Byte-Hop eb2e (nicht nur eb). Opt-in durch
+    // die Eingabe; bei altem hs=1-only-Ziel gibt's dann Timeout (User's Wahl).
     uint8_t hash_size;
-    if (used_advert_path || raw_hex_mode) {
+    if (used_advert_path) {
       hash_size = 1;
+    } else if (raw_hex_mode) {
+      hash_size = (hex_bytes < 1) ? 1 : (hex_bytes > 3 ? 3 : (uint8_t)hex_bytes);
     } else {
       hash_size = _prefs.path_hash_mode + 1;
       if (hash_size < 1 || hash_size > 3) hash_size = 1;
