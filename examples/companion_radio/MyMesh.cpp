@@ -14964,9 +14964,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  path ping  <name|hex>  -- zero-hop Ping\n"
           "  path trace <name|hex>  -- Round-Trip TRACE");
         pushCompanionMessage(
-          "  path show <name|hex>   -- zeigt in/out Path\n"
+          "  path show <substr|hex> -- Path; <substr>=Namens-Substring-Suche\n"
           "  path show direct       -- alle mit out_path_len=0\n"
-          "  path show <hex,,>      -- Substring-Query mit Ankern");
+          "  path show <hex,,>      -- out_path Substring-Query mit Ankern");
         pushCompanionMessage(
           "  path clear <name|hex>  -- out_path -> UNKNOWN\n"
           "                            (naechster send macht flood-Disc.)\n"
@@ -20833,7 +20833,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         // path clear/show inline handhaben (kein synth cmd).
         if (!*rest) {
           pushCompanionMessage(m_clear ? "Usage: path clear <name|hex>"
-            : m_show ? "Usage: path show <name|hex|direct>"
+            : m_show ? "Usage: path show <name-substr|hex|direct>"
             : "Usage: path set <name|hex> <hex,hex,..|direct>");
           return;
         }
@@ -21028,6 +21028,32 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         } else {
           ih = false;
         }
+        // Substring-Needle (lowercase) fuer 'path show <str>' vorbereiten
+        // (2026-07-10): Nodedb-Suche findet den String IRGENDWO im Namen,
+        // nicht nur als Prefix ('berlin' -> auch 'DB0BER Berlin').
+        char needle_lc[32]; size_t needle_len = 0;
+        if (!ih) {
+          for (size_t k = 0; k < il && needle_len + 1 < sizeof(needle_lc); k++) {
+            char b = rp2[k];
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            needle_lc[needle_len++] = b;
+          }
+        }
+        needle_lc[needle_len] = 0;
+        auto name_contains_ci = [&](const char* name) -> bool {
+          if (needle_len == 0) return false;
+          for (const char* p = name; *p; p++) {
+            size_t k = 0;
+            while (k < needle_len && p[k]) {
+              char a = p[k];
+              if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+              if (a != needle_lc[k]) break;
+              k++;
+            }
+            if (k == needle_len) return true;
+          }
+          return false;
+        };
         // Contact-Suche
         ContactInfo found;
         bool got = false;
@@ -21039,6 +21065,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           bool ok = false;
           if (ih) {
             if (memcmp(ci.id.pub_key, ht, hb) == 0) ok = true;
+          } else if (m_show) {
+            // 'path show <str>': Substring (case-insensitive) IRGENDWO im
+            // Namen -- Nodedb-Suche. set/clear bleiben strikt Prefix (else).
+            ok = name_contains_ci(ci.name);
           } else {
             ok = true;
             for (size_t k = 0; k < il; k++) {
