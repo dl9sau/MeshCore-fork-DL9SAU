@@ -13983,7 +13983,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "  trace <name|hex>  -- Round-Trip TRACE\n"
     "  clear <name|hex>  -- out_path -> UNKNOWN\n"
     "  set <name|hex> .. -- out_path setzen (direct|hop-chain)\n"
-    "  show <name|hex>   -- zeigt in/out path";
+    "  show <substr|hex|direct> -- Path/Nodedb-Suche (Name=Substring)\n"
+    "  show via <hop>    -- Kontakte deren Pfad via <hop> laeuft\n"
+    "  show <hex,,>      -- Pfad-Anker-Query (Position)";
   // Führende Whitespace überspringen
   while (*cmd == ' ' || *cmd == '\t') cmd++;
   if (*cmd == 0) {
@@ -14968,7 +14970,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "  path show <substr|hex> -- Path; <substr>=Namens-Substring-Suche\n"
           "  path show direct       -- alle mit out_path_len=0\n"
-          "  path show <hex,,>      -- out_path Substring-Query mit Ankern");
+          "  path show via <hex>    -- Kontakte deren Pfad via <hop> laeuft\n"
+          "  path show <hex,,>      -- Pfad-Anker-Query (Position)");
         pushCompanionMessage(
           "  path clear <name|hex>  -- out_path -> UNKNOWN\n"
           "                            (naechster send macht flood-Disc.)\n"
@@ -14978,7 +14981,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Abkuerzungen: pa p, pa t, pa s, pa c.\n"
           "Auch als Top-Cmd 'ping' (pi..), 'tracepath' (tracep..).");
         pushCompanionMessage(
-          "Query-Anker 'path show <hex,,>' (durchsucht out- UND in-Path):\n"
+          "Pfad-Hop-Suche 'path show ..' (durchsucht out- UND in-Path):\n"
+          "  via aabb    -> aabb IRGENDWO im Pfad (bequem, ohne Position)\n"
           "  aabb,       -> Pfad beginnt mit aabb (mehr hops)\n"
           "  ,aabb       -> Pfad endet mit aabb\n"
           "  ,aabb,      -> Zwischenhop (weder Anfang noch Ende)\n"
@@ -20875,6 +20879,87 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             snprintf(sum, sizeof(sum), "  %d Kontakte direct.", found_n);
             pushCompanionMessage(sum);
           }
+          return;
+        }
+        // 2026-07-10: 'path show via <hex>' -- Hop IRGENDWO im Pfad (in+out),
+        // ohne Positions-Anker. Beantwortet 'welche Repeater via <hop> gehoert'
+        // -- der bequeme 'anywhere'-Modus (Anker-Formen brauchen Position).
+        if (m_show && strncasecmp(rest, "via", 3) == 0
+            && (rest[3] == ' ' || rest[3] == '\t')) {
+          const char* vp = rest + 3;
+          while (*vp == ' ' || *vp == '\t') vp++;
+          const char* ve = vp + strlen(vp);
+          while (ve > vp && (ve[-1] == ' ' || ve[-1] == '\t'
+                          || ve[-1] == '\r' || ve[-1] == '\n')) ve--;
+          size_t vhl = (size_t)(ve - vp);
+          bool ok_hex = (vhl >= 2 && (vhl % 2) == 0);
+          for (size_t i = 0; i < vhl && ok_hex; i++) {
+            char c = vp[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                 || (c >= 'A' && c <= 'F'))) ok_hex = false;
+          }
+          if (!ok_hex) {
+            pushCompanionMessage("path show via: Hex-Hop noetig (gerade Anzahl), z.B. 'via eb'.");
+            return;
+          }
+          auto hv = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+          };
+          uint8_t vneedle[32]; size_t vnl = 0;
+          for (size_t i = 0; i < vhl && vnl < sizeof(vneedle); i += 2) {
+            vneedle[vnl++] = (uint8_t)((hv(vp[i]) << 4) | hv(vp[i+1]));
+          }
+          auto contains = [&](const uint8_t* path, uint8_t plen) -> bool {
+            if (plen < vnl) return false;
+            for (int s = 0; s <= (int)plen - (int)vnl; s++) {
+              if (memcmp(path + s, vneedle, vnl) == 0) return true;
+            }
+            return false;
+          };
+          int found_n = 0;
+          int tot = getNumContacts();
+          for (int i = 0; i < tot; i++) {
+            ContactInfo ci;
+            if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+            bool out_ok = (ci.out_path_len != 0
+                        && ci.out_path_len != OUT_PATH_UNKNOWN)
+                        && contains(ci.out_path, ci.out_path_len);
+            const uint8_t* in_path = NULL; uint8_t in_len = 0;
+            for (int a = 0; a < ADVERT_PATH_TABLE_SIZE; a++) {
+              if (memcmp(advert_paths[a].pubkey_prefix, ci.id.pub_key,
+                         sizeof(advert_paths[a].pubkey_prefix)) != 0) continue;
+              in_path = advert_paths[a].path; in_len = advert_paths[a].path_len;
+              break;
+            }
+            bool in_ok = (in_path != NULL && in_len > 0)
+                      && contains(in_path, in_len);
+            if (!out_ok && !in_ok) continue;
+            char pkx[7];
+            mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
+            char line[220];
+            int lp = snprintf(line, sizeof(line), "  %s %s:", pkx, ci.name);
+            if (out_ok) {
+              lp += snprintf(line + lp, sizeof(line) - lp, " out=");
+              for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++)
+                lp += snprintf(line + lp, sizeof(line) - lp,
+                              "%s%02x", j == 0 ? "" : ",", ci.out_path[j]);
+            }
+            if (in_ok) {
+              lp += snprintf(line + lp, sizeof(line) - lp, " in=");
+              for (uint8_t j = 0; j < in_len && lp + 4 < (int)sizeof(line); j++)
+                lp += snprintf(line + lp, sizeof(line) - lp,
+                              "%s%02x", j == 0 ? "" : ",", in_path[j]);
+            }
+            if (found_n == 0) pushCompanionMessage("path show via:");
+            pushCompanionMessage(line);
+            found_n++;
+          }
+          char sum[80];
+          snprintf(sum, sizeof(sum), "  %d Treffer.", found_n);
+          pushCompanionMessage(sum);
           return;
         }
         // 2026-07-07: 'path show <hex[,hex...]>' mit Anker-Kommas.
