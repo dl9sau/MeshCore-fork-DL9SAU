@@ -13984,8 +13984,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "  clear <name|hex>  -- out_path -> UNKNOWN\n"
     "  set <name|hex> .. -- out_path setzen (direct|hop-chain)\n"
     "  show <substr|hex|direct> -- Path/Nodedb-Suche (Name=Substring)\n"
-    "  show via <hop>    -- Kontakte deren Pfad via <hop> laeuft\n"
-    "  show <hex,,>      -- Pfad-Anker-Query (Position)";
+    "  show via <hop>[,] -- Pfad-Hop-Suche (Komma=Positions-Anker)";
   // Führende Whitespace überspringen
   while (*cmd == ' ' || *cmd == '\t') cmd++;
   if (*cmd == 0) {
@@ -14970,8 +14969,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "  path show <substr|hex> -- Path; <substr>=Namens-Substring-Suche\n"
           "  path show direct       -- alle mit out_path_len=0\n"
-          "  path show via <hex>    -- Kontakte deren Pfad via <hop> laeuft\n"
-          "  path show <hex,,>      -- Pfad-Anker-Query (Position)");
+          "  path show via <hop>    -- Pfad-Hop-Suche (Komma=Positions-Anker)");
         pushCompanionMessage(
           "  path clear <name|hex>  -- out_path -> UNKNOWN\n"
           "                            (naechster send macht flood-Disc.)\n"
@@ -14981,11 +14979,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Abkuerzungen: pa p, pa t, pa s, pa c.\n"
           "Auch als Top-Cmd 'ping' (pi..), 'tracepath' (tracep..).");
         pushCompanionMessage(
-          "Pfad-Hop-Suche 'path show ..' (durchsucht out- UND in-Path):\n"
-          "  via aabb    -> aabb IRGENDWO im Pfad (bequem, ohne Position)\n"
-          "  aabb,       -> Pfad beginnt mit aabb (mehr hops)\n"
-          "  ,aabb       -> Pfad endet mit aabb\n"
-          "  ,aabb,      -> Zwischenhop (weder Anfang noch Ende)\n"
+          "'path show via <hop>' Pfad-Hop-Suche (out- UND in-Path):\n"
+          "  via aabb    -> aabb IRGENDWO im Pfad\n"
+          "  via aabb,   -> Pfad beginnt mit aabb (mehr hops)\n"
+          "  via ,aabb   -> Pfad endet mit aabb\n"
+          "  via ,aabb,  -> Zwischenhop (weder Anfang noch Ende)\n"
           "  Treffer zeigt out=.. und/oder in=.. (welcher Pfad matchte)");
         pushCompanionMessage(
           "Begriffe:\n"
@@ -20881,25 +20879,44 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           }
           return;
         }
-        // 2026-07-10: 'path show via <hex>' -- Hop IRGENDWO im Pfad (in+out),
-        // ohne Positions-Anker. Beantwortet 'welche Repeater via <hop> gehoert'
-        // -- der bequeme 'anywhere'-Modus (Anker-Formen brauchen Position).
+        // 2026-07-10: 'path show via <hopspec>' -- Pfad-Hop-Suche (in+out).
+        // Kommas als Positions-Anker (ersetzt den frueheren nackten <hex,,>):
+        //   via aabb   -> aabb IRGENDWO im Pfad
+        //   via aabb,  -> Pfad beginnt mit aabb (mehr hops folgen)
+        //   via ,aabb  -> Pfad endet mit aabb
+        //   via ,aabb, -> aabb Zwischenhop (weder Anfang noch Ende)
         if (m_show && strncasecmp(rest, "via", 3) == 0
             && (rest[3] == ' ' || rest[3] == '\t')) {
-          const char* vp = rest + 3;
-          while (*vp == ' ' || *vp == '\t') vp++;
-          const char* ve = vp + strlen(vp);
-          while (ve > vp && (ve[-1] == ' ' || ve[-1] == '\t'
-                          || ve[-1] == '\r' || ve[-1] == '\n')) ve--;
-          size_t vhl = (size_t)(ve - vp);
-          bool ok_hex = (vhl >= 2 && (vhl % 2) == 0);
-          for (size_t i = 0; i < vhl && ok_hex; i++) {
-            char c = vp[i];
+          const char* qs = rest + 3;
+          while (*qs == ' ' || *qs == '\t') qs++;
+          const char* qe = qs + strlen(qs);
+          while (qe > qs && (qe[-1] == ' ' || qe[-1] == '\t'
+                          || qe[-1] == '\r' || qe[-1] == '\n')) qe--;
+          if (qe == qs) {
+            pushCompanionMessage("path show via <hop>: Hex-Hop noetig, z.B. 'via eb'.");
+            return;
+          }
+          // Kommas am Rand = Positions-Anker.
+          bool anch_start = (*qs != ',');
+          bool anch_end   = (qe[-1] != ',');
+          const char* ss = qs; const char* se = qe;
+          if (ss < se && *ss == ',') ss++;
+          if (se > ss && se[-1] == ',') se--;
+          // Alle Kommas raus -> reine Hex-Bytes.
+          char clean[80]; size_t cl = 0;
+          for (const char* p = ss; p < se && cl + 1 < sizeof(clean); p++) {
+            if (*p != ',') clean[cl++] = *p;
+          }
+          clean[cl] = 0;
+          bool ok_hex = (cl >= 2 && (cl % 2) == 0);
+          for (size_t i = 0; i < cl && ok_hex; i++) {
+            char c = clean[i];
             if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
                  || (c >= 'A' && c <= 'F'))) ok_hex = false;
           }
           if (!ok_hex) {
-            pushCompanionMessage("path show via: Hex-Hop noetig (gerade Anzahl), z.B. 'via eb'.");
+            pushCompanionMessage("path show via: Hex-Hop noetig (gerade Anzahl),\n"
+                                 "z.B. 'via eb' (irgendwo) / ',eb' (Ende) / 'eb,' (Anfang).");
             return;
           }
           auto hv = [](char c) -> int {
@@ -20908,16 +20925,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             if (c >= 'A' && c <= 'F') return c - 'A' + 10;
             return -1;
           };
-          uint8_t vneedle[32]; size_t vnl = 0;
-          for (size_t i = 0; i < vhl && vnl < sizeof(vneedle); i += 2) {
-            vneedle[vnl++] = (uint8_t)((hv(vp[i]) << 4) | hv(vp[i+1]));
+          uint8_t needle[32]; size_t nl = 0;
+          for (size_t i = 0; i < cl && nl < sizeof(needle); i += 2) {
+            needle[nl++] = (uint8_t)((hv(clean[i]) << 4) | hv(clean[i+1]));
           }
-          auto contains = [&](const uint8_t* path, uint8_t plen) -> bool {
-            if (plen < vnl) return false;
-            for (int s = 0; s <= (int)plen - (int)vnl; s++) {
-              if (memcmp(path + s, vneedle, vnl) == 0) return true;
+          // Anker-Match-Helper (out_path UND in_path).
+          auto anchored_match = [&](const uint8_t* path, uint8_t plen) -> bool {
+            if (plen < nl) return false;
+            int mp = -1;
+            int max_start = (int)plen - (int)nl;
+            for (int s = 0; s <= max_start; s++) {
+              if (memcmp(path + s, needle, nl) == 0) { mp = s; break; }
             }
-            return false;
+            if (mp < 0) return false;
+            bool at_start = (mp == 0);
+            bool at_end   = (mp + (int)nl == plen);
+            if (anch_start && anch_end)   return true;                    // irgendwo
+            if (!anch_start && !anch_end) return (!at_start && !at_end);  // ',x,' mittig
+            if (anch_start && !anch_end)  return (at_start && !at_end);   // 'x,' beginnt
+            return at_end;                                               // ',x' endet
           };
           int found_n = 0;
           int tot = getNumContacts();
@@ -20926,7 +20952,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
             bool out_ok = (ci.out_path_len != 0
                         && ci.out_path_len != OUT_PATH_UNKNOWN)
-                        && contains(ci.out_path, ci.out_path_len);
+                        && anchored_match(ci.out_path, ci.out_path_len);
             const uint8_t* in_path = NULL; uint8_t in_len = 0;
             for (int a = 0; a < ADVERT_PATH_TABLE_SIZE; a++) {
               if (memcmp(advert_paths[a].pubkey_prefix, ci.id.pub_key,
@@ -20935,7 +20961,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
               break;
             }
             bool in_ok = (in_path != NULL && in_len > 0)
-                      && contains(in_path, in_len);
+                      && anchored_match(in_path, in_len);
             if (!out_ok && !in_ok) continue;
             char pkx[7];
             mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
@@ -20961,124 +20987,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           snprintf(sum, sizeof(sum), "  %d Treffer.", found_n);
           pushCompanionMessage(sum);
           return;
-        }
-        // 2026-07-07: 'path show <hex[,hex...]>' mit Anker-Kommas.
-        // 'aabb'       -> substring irgendwo im out_path
-        // 'aabb,'      -> path faengt mit aabb an (mehr hops folgen)
-        // ',aabb'      -> path endet mit aabb
-        // ',aabb,'     -> aabb ist Zwischenhop
-        if (m_show) {
-          bool query_looks_hex = true;
-          for (const char* p = rest; *p; p++) {
-            if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f')
-                 || (*p >= 'A' && *p <= 'F') || *p == ',')) {
-              query_looks_hex = false; break;
-            }
-          }
-          bool has_comma = false;
-          for (const char* p = rest; *p; p++) if (*p == ',') { has_comma = true; break; }
-          if (query_looks_hex && has_comma) {
-            // Anker-Query!
-            const char* qs = rest;
-            const char* qe = qs + strlen(qs);
-            while (qe > qs && (qe[-1] == ' ' || qe[-1] == '\t'
-                            || qe[-1] == '\r' || qe[-1] == '\n')) qe--;
-            bool anch_start = (*qs != ',');
-            bool anch_end   = (qe > qs && qe[-1] != ',');
-            // Strip leading/trailing commas fuer den Suchstring.
-            const char* ss = qs;
-            const char* se = qe;
-            if (*ss == ',') ss++;
-            if (se > ss && se[-1] == ',') se--;
-            // Alle Kommas dazwischen weg -> reine hex-bytes.
-            char clean[80]; size_t cl = 0;
-            for (const char* p = ss; p < se && cl + 1 < sizeof(clean); p++) {
-              if (*p != ',') clean[cl++] = *p;
-            }
-            clean[cl] = 0;
-            if (cl == 0 || (cl % 2) != 0) {
-              pushCompanionMessage("path show: hex-hop braucht gerade Anzahl.");
-              return;
-            }
-            uint8_t needle[32]; size_t nl = 0;
-            auto hv = [](char c) -> int {
-              if (c >= '0' && c <= '9') return c - '0';
-              if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-              if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-              return -1;
-            };
-            for (size_t i = 0; i < cl && nl < sizeof(needle); i += 2) {
-              int a = hv(clean[i]), b = hv(clean[i+1]);
-              if (a < 0 || b < 0) {
-                pushCompanionMessage("path show: bad hex."); return;
-              }
-              needle[nl++] = (uint8_t)((a << 4) | b);
-            }
-            int found_n = 0;
-            int tot = getNumContacts();
-            // Anker-Match-Helper: sucht needle in einem Pfad (bytes,len) und
-            // prueft die Start/End-Anker. Fuer out_path UND in_path genutzt.
-            auto anchored_match = [&](const uint8_t* path, uint8_t plen) -> bool {
-              if (plen < nl) return false;
-              int mp = -1;
-              int max_start = (int)plen - (int)nl;
-              for (int s = 0; s <= max_start; s++) {
-                if (memcmp(path + s, needle, nl) == 0) { mp = s; break; }
-              }
-              if (mp < 0) return false;
-              bool at_start = (mp == 0);
-              bool at_end   = (mp + (int)nl == plen);
-              if (anch_start && anch_end)   return true;                    // irgendwo
-              if (!anch_start && !anch_end) return (!at_start && !at_end);  // ',x,' mittig
-              if (anch_start && !anch_end)  return (at_start && !at_end);   // 'x,' beginnt
-              return at_end;                                               // ',x' endet
-            };
-            for (int i = 0; i < tot; i++) {
-              ContactInfo ci;
-              if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
-              // out_path pruefen (falls gesetzt).
-              bool out_ok = (ci.out_path_len != 0
-                          && ci.out_path_len != OUT_PATH_UNKNOWN)
-                          && anchored_match(ci.out_path, ci.out_path_len);
-              // in_path aus advert_paths[] pruefen (2026-07-10: 'auch nach
-              // in_path suchen' -- welche Repeater via <hop> gehoert wurden).
-              const uint8_t* in_path = NULL; uint8_t in_len = 0;
-              for (int a = 0; a < ADVERT_PATH_TABLE_SIZE; a++) {
-                if (memcmp(advert_paths[a].pubkey_prefix, ci.id.pub_key,
-                           sizeof(advert_paths[a].pubkey_prefix)) != 0) continue;
-                in_path = advert_paths[a].path; in_len = advert_paths[a].path_len;
-                break;
-              }
-              bool in_ok = (in_path != NULL && in_len > 0)
-                        && anchored_match(in_path, in_len);
-              if (!out_ok && !in_ok) continue;
-              char pkx[7];
-              mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
-              char line[220];
-              int lp = snprintf(line, sizeof(line), "  %s %s:", pkx, ci.name);
-              if (out_ok) {
-                lp += snprintf(line + lp, sizeof(line) - lp, " out=");
-                for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++) {
-                  lp += snprintf(line + lp, sizeof(line) - lp,
-                                "%s%02x", j == 0 ? "" : ",", ci.out_path[j]);
-                }
-              }
-              if (in_ok) {
-                lp += snprintf(line + lp, sizeof(line) - lp, " in=");
-                for (uint8_t j = 0; j < in_len && lp + 4 < (int)sizeof(line); j++) {
-                  lp += snprintf(line + lp, sizeof(line) - lp,
-                                "%s%02x", j == 0 ? "" : ",", in_path[j]);
-                }
-              }
-              if (found_n == 0) pushCompanionMessage("path show:");
-              pushCompanionMessage(line);
-              found_n++;
-            }
-            char sum[80];
-            snprintf(sum, sizeof(sum), "  %d Treffer.", found_n);
-            pushCompanionMessage(sum);
-            return;
-          }
         }
         // Bei 'set': trenne target vom path-arg.
         const char* set_path_arg = NULL;
