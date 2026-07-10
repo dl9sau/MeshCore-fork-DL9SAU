@@ -21202,10 +21202,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           return;
         }
         // path show
+        // A: 3-Byte-Hex-Prefix des pubkey mit anzeigen (Identifikation).
+        char pkx3[7];
+        mesh::Utils::toHex(pkx3, found.id.pub_key, 3);
+        // B: type-Name annotieren (ADV_TYPE_*: 0=none 1=chat 2=repeater
+        //    3=room 4=sensor) -- 'type=2' allein sagt dem User nichts.
+        uint8_t ft = found.type;
+        const char* ftn = (ft == ADV_TYPE_CHAT)     ? "CHAT"
+                        : (ft == ADV_TYPE_REPEATER)  ? "REPEATER"
+                        : (ft == ADV_TYPE_ROOM)      ? "ROOM"
+                        : (ft == ADV_TYPE_SENSOR)    ? "SENSOR"
+                        : (ft == ADV_TYPE_NONE)      ? "none" : "?";
         char hdr[180];
-        snprintf(hdr, sizeof(hdr), "path %s:\n  type=%u, out_path_len=%u",
-                 found.name, (unsigned)found.type,
-                 (unsigned)found.out_path_len);
+        // C: bei OUT_PATH_UNKNOWN (0xff) keinen rohen '255' zeigen -- sonst
+        //    denkt der User der Weg sei 255 Hops lang. Marker als 'unknown'.
+        if (found.out_path_len == OUT_PATH_UNKNOWN) {
+          snprintf(hdr, sizeof(hdr),
+                   "path %s (%s):\n  type=%u (%s), out_path_len=unknown",
+                   found.name, pkx3, (unsigned)ft, ftn);
+        } else {
+          snprintf(hdr, sizeof(hdr),
+                   "path %s (%s):\n  type=%u (%s), out_path_len=%u",
+                   found.name, pkx3, (unsigned)ft, ftn,
+                   (unsigned)found.out_path_len);
+        }
         pushCompanionMessage(hdr);
         // out_path
         char out_line[220] = "  out=";
