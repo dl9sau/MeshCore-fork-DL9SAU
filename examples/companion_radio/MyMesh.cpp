@@ -15021,6 +15021,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  oder advert_paths[] Fallback). Bei hex-only\n"
           "  ohne Contact -> raw-hex zero-hop TRACE.");
         pushCompanionMessage(
+          "  Given-path: tracepath aa,bb,cc,aa -- Hop-Kette\n"
+          "  WOERTLICH (Komma-getrennt), kein Nodedb-Lookup,\n"
+          "  Repeater unknown ok. Erster=Start, letzter=Rueck-\n"
+          "  Hop den ich hoere. hs aus Token-Breite (2/4/6=hs\n"
+          "  1/2/3), kein Mischen.");
+        pushCompanionMessage(
           "  Timeout ist airtime-basiert:\n"
           "  3s + 2*airtime*(hops+1) + hops*2s (mind. 5s).\n"
           "  hs = hash-size (Bytes je Hop-Hash).");
@@ -21598,12 +21604,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   if (starts_with_word(cmd, "tracepath")) {
     const char* rp = strchr(cmd, ' ');
     if (!rp) {
-      pushCompanionMessage("Usage: tracepath <name-prefix|hex-prefix>");
+      pushCompanionMessage("Usage: tracepath <name|hex-prefix>\n"
+                           "   ODER given-path: tracepath aa,bb,cc,aa\n"
+                           "   (Hop-Kette woertlich, Komma-getrennt, unknown ok)");
       return;
     }
     while (*rp == ' ' || *rp == '\t') rp++;
     if (!*rp) {
-      pushCompanionMessage("Usage: tracepath <name-prefix|hex-prefix>");
+      pushCompanionMessage("Usage: tracepath <name|hex-prefix>\n"
+                           "   ODER given-path: tracepath aa,bb,cc,aa\n"
+                           "   (Hop-Kette woertlich, Komma-getrennt, unknown ok)");
       return;
     }
     if (_cli_trace_tag != 0
@@ -21616,6 +21626,90 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
            && (rp_end[-1] == ' ' || rp_end[-1] == '\t'
             || rp_end[-1] == '\r' || rp_end[-1] == '\n')) rp_end--;
     size_t input_len = (size_t)(rp_end - rp);
+    // 2026-07-10 (Wunschliste #82): given-path tracepath. Argument MIT Komma =
+    // explizite Hop-Kette (z.B. aa,bb,cc,aa), WOERTLICH als rt_path abgelaufen
+    // -- kein Nodedb-Lookup, Repeater duerfen unknown sein. Erster Token =
+    // Start (mein Nachbar), letzter = Rueckweg-Hop den ich wieder hoere.
+    // hash_size aus Token-Breite (2/4/6 Hex = hs 1/2/3), Mischen verboten
+    // (Protokoll verlangt uniforme hash-size).
+    {
+      bool has_comma = false;
+      for (size_t i = 0; i < input_len; i++) if (rp[i] == ',') { has_comma = true; break; }
+      if (has_comma) {
+        auto hexval = [](char c) -> int {
+          if (c >= '0' && c <= '9') return c - '0';
+          if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+          if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+          return -1;
+        };
+        uint8_t gp[MAX_PATH_SIZE];
+        size_t gp_len = 0;
+        int tok_width = -1;   // in Hex-Zeichen, muss uniform sein
+        int n_hops = 0;
+        bool ok = true;
+        const char* p = rp;
+        const char* pend = rp + input_len;
+        while (p < pend && ok) {
+          const char* ts = p;
+          while (p < pend && *p != ',') p++;
+          size_t tw = (size_t)(p - ts);
+          if (p < pend) p++;   // Komma ueberspringen
+          if (tw == 0 || (tw % 2) != 0 || tw > 6) { ok = false; break; }
+          if (tok_width < 0) tok_width = (int)tw;
+          else if ((int)tw != tok_width) { ok = false; break; }   // Mischen
+          for (size_t i = 0; i < tw && ok; i += 2) {
+            int a = hexval(ts[i]), b = hexval(ts[i+1]);
+            if (a < 0 || b < 0 || gp_len >= sizeof(gp)) { ok = false; break; }
+            gp[gp_len++] = (uint8_t)((a << 4) | b);
+          }
+          n_hops++;
+        }
+        if (!ok || tok_width < 0 || n_hops == 0) {
+          pushCompanionMessage(
+            "tracepath given-path: aa,bb,cc (uniforme Hex-Breite\n"
+            "2/4/6 = hs 1/2/3, kein Mischen, max 3 Byte/Hop).");
+          return;
+        }
+        uint8_t hs = (uint8_t)(tok_width / 2);
+        uint8_t tag_bytes[4], auth_bytes[4];
+        getRNG()->random(tag_bytes, 4);
+        getRNG()->random(auth_bytes, 4);
+        uint32_t tag, auth;
+        memcpy(&tag, tag_bytes, 4);
+        memcpy(&auth, auth_bytes, 4);
+        uint8_t flags = (uint8_t)(hs - 1);
+        auto pkt = createTrace(tag, auth, flags);
+        if (!pkt) { pushCompanionMessage("tracepath: Packet-Pool voll."); return; }
+        uint32_t t_air = _radio->getEstAirtimeFor(pkt->getRawLength());
+        unsigned long trace_timeout_ms = 3000UL
+            + (unsigned long)t_air * 2UL * ((unsigned long)n_hops + 1UL)
+            + (unsigned long)n_hops * 2000UL;
+        if (trace_timeout_ms < 5000UL) trace_timeout_ms = 5000UL;
+        sendDirect(pkt, gp, (uint8_t)gp_len);
+        _cli_trace_tag = tag;
+        _cli_trace_started_ms = millis();
+        _cli_trace_expiry_ms = millis() + trace_timeout_ms;
+        if (_serial_cli_active) {
+          unsigned long need = millis() + trace_timeout_ms + 15000;
+          if ((int32_t)(need - _serial_cli_async_expiry_ms) > 0)
+            _serial_cli_async_expiry_ms = need;
+        }
+        _cli_trace_hash_size = hs;
+        _cli_trace_forward_hops = (uint8_t)gp_len;
+        _cli_trace_target_hex_len = 0;
+        memset(_cli_trace_target_pubkey, 0, 32);
+        size_t nl = (input_len < sizeof(_cli_trace_target_name) - 1)
+                    ? input_len : sizeof(_cli_trace_target_name) - 1;
+        memcpy(_cli_trace_target_name, rp, nl);
+        _cli_trace_target_name[nl] = 0;
+        char r[140];
+        snprintf(r, sizeof(r),
+                 "tracepath given-path: sent (%d hops, hs=%u), warte...",
+                 n_hops, (unsigned)hs);
+        pushCompanionMessage(r);
+        return;
+      }
+    }
     // Hex-Detection wie bei ping
     bool is_hex = (input_len >= 2 && (input_len % 2) == 0);
     for (size_t i = 0; i < input_len && is_hex; i++) {
