@@ -70,6 +70,17 @@ extern "C" void crash_catcher_from_fault(uint32_t* frame) {
 }
 
 // Override des weak HardFault_Handler (gcc_startup_nrf52840.S:310).
+// 2026-07-10 DEAKTIVIERT (SoftDevice-inkompatibel): dieser naked-Override
+// bricht den SoftDevice-SYSTEMOFF-Pfad -- beim Eintritt in
+// sd_power_system_off() feuert er (faengt seinen EIGENEN Stoerfall) ->
+// NVIC_SystemReset statt Power-Off -> 'shutdown' rebootet sofort. Tage-lang
+// gejagt; Bisect 2026-07-10 hat es bewiesen: Override AUS -> shutdown erreicht
+// sauber SYSTEMOFF (auf Batterie: bleibt aus). Der Crash-Faenger hat den
+// urspruenglich gejagten first-boot Wild-Write ohnehin NIE gefangen -> die
+// Jagd laeuft statisch (Punchlist #1). g_crash_info/crash_catcher_take unten
+// bleiben stehen fuer ein spaeteres SoftDevice-KOMPATIBLES Redesign (capture
+// + zum SD-HardFault-Handler CHAINEN statt ihn zu ersetzen).
+#if 0  // SoftDevice-inkompatibel -- bricht sd_power_system_off(), siehe oben
 extern "C" __attribute__((naked)) void HardFault_Handler(void) {
   __asm volatile (
     "tst   lr, #4                        \n"   // EXC_RETURN Bit2: 0=MSP,1=PSP
@@ -80,6 +91,7 @@ extern "C" __attribute__((naked)) void HardFault_Handler(void) {
     "bx    r1                            \n"
   );
 }
+#endif
 
 // Boot-Readout: true + Werte wenn ein Crash gespeichert war; loescht Magic
 // (one-shot, nicht beim naechsten Boot wiederholen).
