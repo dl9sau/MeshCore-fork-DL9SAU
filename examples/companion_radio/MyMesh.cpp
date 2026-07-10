@@ -21701,7 +21701,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint8_t fwd_path_len = used_advert_path ? adv_reversed_len : cand.out_path_len;
 
     // Round-Trip-Path bauen:
-    //   [hin_bytes][target_hash][rev_bytes][self_hash]
+    //   [hin_bytes][target_hash][rev_bytes]   (KEIN self_hash am Ende, 2026-07-10)
     // 2026-07-07: bei advert-path fallback OR raw-hex force hs=1 (backward-
     // Kompat, wir kennen die Fremd-Firmware nicht). Sonst pref nutzen --
     // auch bei direct-Kontakt (User's Wahl respektieren, Timeout wenn
@@ -21722,10 +21722,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // target's forward-Echo triggert bei uns onTraceRecv). Kein self am
     // Ende noetig -- self-Anker macht extra Forward-Round noetig und
     // dedup verhindert dass wir SEHEN onTraceRecv.
-    // Bei multi-hop: full Round-Trip [hin, target, rueck, self].
+    // Bei multi-hop (2026-07-10): SELBE Logik -- [hin, target, rueck] OHNE
+    // self am Ende. Der letzte rueck-Hop (unser direkter Nachbar) broadcastet,
+    // wir HOEREN das direkt -> offset>=len -> onTraceRecv. Der fruehere
+    // self-Anker war redundant (App-Experiment mit vorgegebenen Hops zeigte:
+    // der letzte Repeater repeatet, self wird direkt gehoert) UND liess uns
+    // via isHashMatch unseren eigenen Trace forwarden (Self-Repeat).
     size_t total_bytes = (hop_bytes == 0)
         ? (size_t)hash_size                       // zero-hop: nur [target]
-        : ((size_t)hop_bytes * 2 + hash_size * 2); // multi: hin+ziel+rueck+self
+        : ((size_t)hop_bytes * 2 + hash_size);    // multi: hin+ziel+rueck (kein self)
     if (total_bytes > MAX_PATH_SIZE) {
       pushCompanionMessage("tracepath: Path zu lang.");
       return;
@@ -21740,7 +21745,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memcpy(&rt_path[off], fwd_path, hop_bytes); off += hop_bytes;
       memcpy(&rt_path[off], cand.id.pub_key, hash_size); off += hash_size;
       for (int i = hop_bytes - 1; i >= 0; i--) rt_path[off++] = fwd_path[i];
-      memcpy(&rt_path[off], self_id.pub_key, hash_size); off += hash_size;
+      // KEIN self_hash am Ende (2026-07-10): siehe total_bytes-Kommentar oben.
+      // Der letzte rueck-Hop broadcastet -> wir hoeren ihn -> onTraceRecv.
     }
     // TRACE senden.
     uint8_t tag_bytes[4], auth_bytes[4];
