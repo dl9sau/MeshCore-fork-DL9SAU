@@ -14995,16 +14995,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "ping")) {
         pushCompanionMessage(
-          "ping <name-prefix|hex-prefix>:\n"
-          "  Zero-hop direct-REQ an einen REPEATER/ROOM.\n"
-          "  Zeigt RTT + rx_him (SNR/RSSI der Antwort).");
+          "ping <name|hex-prefix>:\n"
+          "  Zero-hop TRACE an einen Node (App-kompatibel,\n"
+          "  NICHT verschluesselt). Zeigt RTT + rx_him (SNR/RSSI).");
         pushCompanionMessage(
-          "  Namensuche case-insensitive, Prefix reicht.\n"
-          "  Beispiele: ping F Zio -- ping 02d4aa.\n"
-          "  Path wird nicht angetastet (Zero-Hop-Test).");
+          "  NAME -> Kontakt (case-insensitiv, Prefix reicht).\n"
+          "  HEX-Prefix -> roher Hop, kein Kontakt noetig\n"
+          "  (wie tracepath). Beispiele: ping Zio -- ping eb.");
         pushCompanionMessage(
-          "  Nur Repeater/Room antworten -- Clients/Sensoren\n"
-          "  sind stumm auf Ping.");
+          "  Antwort von jedem forwardenden Node auf dem Hop\n"
+          "  (Repeater/Room/Companion-mit-repeat). Path wird\n"
+          "  nicht angetastet (Zero-Hop-Test).");
         return;
       }
       // 2026-07-09: tracepath nur bei EINDEUTIGEM Prefix (Prefix von
@@ -21325,10 +21326,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // fall through zu den bestehenden ping/tracepath Handlern unten.
   }
 
-  // 2026-07-06 Wunschliste 2026-07-06: CLI 'ping <name-prefix|hex-prefix>'.
-  // Zero-hop direct REQ_TYPE_GET_STATUS an einen Repeater/Room-Server.
-  // Zeigt RTT + rx_him (unsere Sicht seiner RESP). Ping antastet den
-  // Path nicht -- fuer path-Test 'tracepath'.
+  // 2026-07-06 Wunschliste 2026-07-06: CLI 'ping <name|hex-prefix>'.
+  // Zero-hop TRACE (App-kompatibel) an einen Node -- NICHT REQ_TYPE_GET_STATUS
+  // (das ging anfangs nicht; auf zero-hop-Trace umgestellt, unverschluesselt).
+  // Zeigt RTT + rx_him (unsere Sicht). Hex-Prefix = roher Hop (kein Kontakt
+  // noetig); Name = Kontakt. Ping antastet den Path nicht -- fuer path-Test
+  // 'tracepath'.
   // Direkt via 'ping' oder ueber 'path ping'/'pa p' (via synth cmd).
   if (starts_with_word(cmd, "ping")) {
     const char* rp = strchr(cmd, ' ');
@@ -21512,7 +21515,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       ambig_used = ambig_role_used;
       n_total_match = n_role_match;  // Ambig-Count auf role-set
     }
-    if (n_total_match == 0) {
+    // 2026-07-10: Hex-Eingabe = roher Hop, kein Kontakt noetig (wie tracepath).
+    // ping ist ein zero-hop TRACE (unverschluesselt) -> braucht keinen pubkey;
+    // der Hex-Prefix IST der Hop. Kontakt-Matching/Ambig gilt nur fuer NAMEN.
+    bool raw_hex_mode = false;
+    if (is_hex) {
+      raw_hex_mode = true;
+      memset(&cand, 0, sizeof(cand));
+      memcpy(cand.id.pub_key, hex_target, hex_bytes);
+      cand.out_path_len = 0;
+      cand.type = ADV_TYPE_REPEATER;
+      char nb[10] = "raw-";
+      size_t np = strlen(nb);
+      for (size_t i = 0; i < hex_bytes && np + 3 < sizeof(nb); i++)
+        np += snprintf(nb + np, sizeof(nb) - np, "%02x", hex_target[i]);
+      StrHelper::strzcpy(cand.name, nb, sizeof(cand.name));
+    }
+    if (!raw_hex_mode && n_total_match == 0) {
       // 2026-07-07: temporaer immer als $companion-msg damit User Bug findet.
       {
         char msg[180];
@@ -21536,14 +21555,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    if (n_total_match > 1 && !has_exact) {
+    if (!raw_hex_mode && n_total_match > 1 && !has_exact) {
       char r[220];
       snprintf(r, sizeof(r), "Mehrdeutig (%d): %s",
                n_total_match, ambig);
       pushCompanionMessage(r);
       return;
     }
-    if (has_exact) cand = cand_exact;
+    if (!raw_hex_mode && has_exact) cand = cand_exact;
 
     // 2026-07-07: zero-hop TRACE (App-kompatibel). Path = [target] allein.
     // Target forwarded -- der forward-Echo trifft uns, path_snrs[0] = wie
