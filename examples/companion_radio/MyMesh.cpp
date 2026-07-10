@@ -22462,15 +22462,37 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
            : (t == ADV_TYPE_ROOM)     ? "room"
            : (t == ADV_TYPE_SENSOR)   ? "sensor" : "?";
     };
-    // 2026-07-10: 'contact <prefix>' (ohne 'type ...') listet ALLE
-    // case-sensitive Prefix-Treffer, nicht nur den ersten (wie 'path show').
+    // 2026-07-10: 'contact <str>' sucht case-insensitive SUBSTRING (wie
+    // 'path show'), nicht mehr case-sensitive Prefix. 'ber' findet 'Berlin'
+    // UND '...ber...' mitten im Namen. Ohne 'type ...' -> alle Treffer.
+    char cneedle[32]; size_t cnl = 0;
+    for (size_t k = 0; k < cpl && cnl + 1 < sizeof(cneedle); k++) {
+      char b = prefix[k];
+      if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+      cneedle[cnl++] = b;
+    }
+    cneedle[cnl] = 0;
+    auto name_has = [&](const char* name) -> bool {
+      if (cnl == 0) return false;
+      for (const char* p = name; *p; p++) {
+        size_t k = 0;
+        while (k < cnl && p[k]) {
+          char a = p[k];
+          if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+          if (a != cneedle[k]) break;
+          k++;
+        }
+        if (k == cnl) return true;
+      }
+      return false;
+    };
     if (!*arg) {
       int shown = 0;
       for (int i = 0; i < c_tot; i++) {
         ContactInfo ci;
         if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
         if (ci.type == ADV_TYPE_NONE) continue;
-        if (strncmp(ci.name, prefix, cpl) != 0) continue;
+        if (!name_has(ci.name)) continue;
         char r[140];
         snprintf(r, sizeof(r), "  %s: type = %s (%u)",
                  ci.name, type_name_of(ci.type), (unsigned)ci.type);
@@ -22484,27 +22506,36 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       return;
     }
-    // Ab hier 'type ...' setzen -> Eindeutigkeit noetig (destruktiv, sonst
-    // wuerde der Typ auf einen beliebigen ersten Treffer gesetzt).
-    ContactInfo* c = searchContactsByPrefix(prefix);
-    if (!c) {
+    // Ab hier 'type ...' setzen -> eindeutiger Substring-Treffer noetig
+    // (destruktiv, sonst wuerde der Typ auf einen beliebigen gesetzt).
+    int c_nmatch = 0;
+    uint8_t match_pk[32]; bool have_pk = false;
+    for (int i = 0; i < c_tot; i++) {
+      ContactInfo ci;
+      if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+      if (ci.type == ADV_TYPE_NONE) continue;
+      if (!name_has(ci.name)) continue;
+      if (!have_pk) { memcpy(match_pk, ci.id.pub_key, 32); have_pk = true; }
+      c_nmatch++;
+    }
+    if (c_nmatch == 0) {
       char r[100];
       snprintf(r, sizeof(r), "Kein Kontakt gefunden: '%s'", prefix);
       pushCompanionMessage(r);
       return;
     }
-    int c_nmatch = 0;
-    for (int i = 0; i < c_tot; i++) {
-      ContactInfo ci;
-      if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
-      if (ci.type == ADV_TYPE_NONE) continue;
-      if (strncmp(ci.name, prefix, cpl) == 0) c_nmatch++;
-    }
     if (c_nmatch > 1) {
       char r[150];
       snprintf(r, sizeof(r),
                "'%s' mehrdeutig (%d Treffer) - type-Setzen braucht "
-               "Eindeutigkeit. Praezisiere den Prefix.", prefix, c_nmatch);
+               "Eindeutigkeit. Praezisiere die Suche.", prefix, c_nmatch);
+      pushCompanionMessage(r);
+      return;
+    }
+    ContactInfo* c = lookupContactByPubKey(match_pk, 32);
+    if (!c) {
+      char r[100];
+      snprintf(r, sizeof(r), "Kein Kontakt gefunden: '%s'", prefix);
       pushCompanionMessage(r);
       return;
     }
