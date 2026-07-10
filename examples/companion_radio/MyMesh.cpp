@@ -15017,9 +15017,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Round-Trip-TRACE (rt) ueber gelernten Path.\n"
           "  Zeigt RTT + SNR pro Hop (hin + Ziel + zurueck).");
         pushCompanionMessage(
-          "  Voraussetzung: Path bekannt (contact.out_path\n"
-          "  oder advert_paths[] Fallback). Bei hex-only\n"
-          "  ohne Contact -> raw-hex zero-hop TRACE.");
+          "  Aufloesung: NAME -> Kontakt (nutzt dessen\n"
+          "  out_path/advert_paths, auch multi-hop).\n"
+          "  HEX-Prefix -> IMMER roher Hop (zero-hop),\n"
+          "  NIE zu einem Kontakt expandiert (trace ist\n"
+          "  unverschluesselt, braucht keinen pubkey).");
         pushCompanionMessage(
           "  Given-path: tracepath aa,bb,cc,aa -- Hop-Kette\n"
           "  WOERTLICH (Komma-getrennt), kein Nodedb-Lookup,\n"
