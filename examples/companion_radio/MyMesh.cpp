@@ -14845,11 +14845,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "contact")) {
         pushCompanionMessage(
-          "contact <name-prefix> type [<chat|repeater|sensor|room>]\n"
-          "Diagnose-CLI: setzt ADV_TYPE eines gespeicherten Kontakts um."
+          "contact <name-prefix> [type <chat|repeater|sensor|room>]\n"
+          "Diagnose-CLI: listet Kontakte / setzt ADV_TYPE eines Kontakts um."
         );
         pushCompanionMessage(
-          "Ohne 'type ...' -> aktuellen Typ anzeigen.\n"
+          "Ohne 'type ...' -> ALLE Prefix-Treffer + deren Typ listen\n"
+          "  (case-sensitiv, wie 'path show' aber Namens-Prefix).\n"
+          "Mit 'type ...' -> Typ setzen; Prefix muss eindeutig sein.\n"
           "Beispiel: contact DL9SAU type sensor"
         );
         pushCompanionMessage(
@@ -22431,8 +22433,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
     if (!arg || *arg == 0) {
       pushCompanionMessage(
-        "Usage: contact <name-prefix> type <chat|repeater|sensor|room>\n"
-        "Ohne 'type ...' -> aktuellen Typ anzeigen.");
+        "Usage: contact <name-prefix> [type <chat|repeater|sensor|room>]\n"
+        "Ohne 'type ...' -> ALLE Prefix-Treffer + deren Typ listen.\n"
+        "Mit 'type ...' -> Typ setzen (Prefix muss eindeutig sein).");
       return;
     }
     // Prefix bis Whitespace extrahieren. Suche im raw_cmd damit Case
@@ -22451,6 +22454,38 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     while (*arg && *arg != ' ' && *arg != '\t') arg++;
     while (*arg == ' ' || *arg == '\t') arg++;
 
+    size_t cpl = strlen(prefix);
+    int c_tot = getNumContacts();
+    auto type_name_of = [](uint8_t t) -> const char* {
+      return (t == ADV_TYPE_CHAT)     ? "chat"
+           : (t == ADV_TYPE_REPEATER) ? "repeater"
+           : (t == ADV_TYPE_ROOM)     ? "room"
+           : (t == ADV_TYPE_SENSOR)   ? "sensor" : "?";
+    };
+    // 2026-07-10: 'contact <prefix>' (ohne 'type ...') listet ALLE
+    // case-sensitive Prefix-Treffer, nicht nur den ersten (wie 'path show').
+    if (!*arg) {
+      int shown = 0;
+      for (int i = 0; i < c_tot; i++) {
+        ContactInfo ci;
+        if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+        if (ci.type == ADV_TYPE_NONE) continue;
+        if (strncmp(ci.name, prefix, cpl) != 0) continue;
+        char r[140];
+        snprintf(r, sizeof(r), "  %s: type = %s (%u)",
+                 ci.name, type_name_of(ci.type), (unsigned)ci.type);
+        pushCompanionMessage(r);
+        shown++;
+      }
+      if (shown == 0) {
+        char r[100];
+        snprintf(r, sizeof(r), "Kein Kontakt gefunden: '%s'", prefix);
+        pushCompanionMessage(r);
+      }
+      return;
+    }
+    // Ab hier 'type ...' setzen -> Eindeutigkeit noetig (destruktiv, sonst
+    // wuerde der Typ auf einen beliebigen ersten Treffer gesetzt).
     ContactInfo* c = searchContactsByPrefix(prefix);
     if (!c) {
       char r[100];
@@ -22458,14 +22493,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
-    const char* type_name = (c->type == ADV_TYPE_CHAT)     ? "chat"
-                          : (c->type == ADV_TYPE_REPEATER) ? "repeater"
-                          : (c->type == ADV_TYPE_ROOM)     ? "room"
-                          : (c->type == ADV_TYPE_SENSOR)   ? "sensor"
-                          : "?";
-    if (!*arg) {
-      char r[120];
-      snprintf(r, sizeof(r), "%s: type = %s (%u)", c->name, type_name, c->type);
+    int c_nmatch = 0;
+    for (int i = 0; i < c_tot; i++) {
+      ContactInfo ci;
+      if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
+      if (ci.type == ADV_TYPE_NONE) continue;
+      if (strncmp(ci.name, prefix, cpl) == 0) c_nmatch++;
+    }
+    if (c_nmatch > 1) {
+      char r[150];
+      snprintf(r, sizeof(r),
+               "'%s' mehrdeutig (%d Treffer) - type-Setzen braucht "
+               "Eindeutigkeit. Praezisiere den Prefix.", prefix, c_nmatch);
       pushCompanionMessage(r);
       return;
     }
