@@ -21532,16 +21532,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       StrHelper::strzcpy(cand.name, nb, sizeof(cand.name));
     }
     if (!raw_hex_mode && n_total_match == 0) {
-      // 2026-07-07: temporaer immer als $companion-msg damit User Bug findet.
-      {
-        char msg[180];
-        snprintf(msg, sizeof(msg),
-                 "[ping-diag] input_len=%u is_hex=%d hex_bytes=%u total=%d "
-                 "hex_target=%02x%02x%02x",
-                 (unsigned)input_len, (int)is_hex, (unsigned)hex_bytes, total,
-                 hex_target[0], hex_target[1], hex_target[2]);
-        pushCompanionMessage(msg);
-      }
       // Klare Fehlermeldung + Empfehlung path trace (braucht keinen pubkey).
       char r[200];
       char input_copy[80];
