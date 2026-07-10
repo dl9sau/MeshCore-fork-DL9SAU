@@ -13986,7 +13986,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "  clear <name|hex>  -- out_path -> UNKNOWN\n"
     "  set <name|hex> .. -- out_path setzen (direct|hop-chain)\n"
     "  show <substr|hex|direct> -- Path/Nodedb-Suche (Name=Substring)\n"
-    "  show via <hop>[,] -- Pfad-Hop-Suche (Komma=Positions-Anker)";
+    "  show via <pat>    -- Hop-Suche; Anker ^Anfang $Ende ^..$exakt";
   // Führende Whitespace überspringen
   while (*cmd == ' ' || *cmd == '\t') cmd++;
   if (*cmd == 0) {
@@ -14971,7 +14971,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "  path show <substr|hex> -- Path; <substr>=Namens-Substring-Suche\n"
           "  path show direct       -- alle mit out_path_len=0\n"
-          "  path show via <hop>    -- Pfad-Hop-Suche (Komma=Positions-Anker)");
+          "  path show via <pat>    -- Hop-Suche; Anker ^Anfang $Ende ^..$exakt");
         pushCompanionMessage(
           "  path clear <name|hex>  -- out_path -> UNKNOWN\n"
           "                            (naechster send macht flood-Disc.)\n"
@@ -14981,11 +14981,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Abkuerzungen: pa p, pa t, pa s, pa c.\n"
           "Auch als Top-Cmd 'ping' (pi..), 'tracepath' (tracep..).");
         pushCompanionMessage(
-          "'path show via <hop>' Pfad-Hop-Suche (out- UND in-Path):\n"
-          "  via aabb    -> aabb IRGENDWO im Pfad\n"
-          "  via aabb,   -> Pfad beginnt mit aabb (mehr hops)\n"
-          "  via ,aabb   -> Pfad endet mit aabb\n"
-          "  via ,aabb,  -> Zwischenhop (weder Anfang noch Ende)\n"
+          "'path show via <pattern>' Hop-Suche (out+in), Regex-Anker ^/$:\n"
+          "  via aabb    -> aabb IRGENDWO im Pfad (substring)\n"
+          "  via ^aabb   -> Pfad BEGINNT mit aabb\n"
+          "  via aabb$   -> Pfad ENDET mit aabb\n"
+          "  via ^aabb$  -> EXAKT [aabb] (direkte Nutzer, kein Zwischenhop)\n"
+          "  Komma = Hop-Trenner: '^aa,bb$' = exakt [aa][bb].\n"
           "  Treffer zeigt out=.. und/oder in=.. (welcher Pfad matchte)");
         pushCompanionMessage(
           "Begriffe:\n"
@@ -20894,12 +20895,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           }
           return;
         }
-        // 2026-07-10: 'path show via <hopspec>' -- Pfad-Hop-Suche (in+out).
-        // Kommas als Positions-Anker (ersetzt den frueheren nackten <hex,,>):
-        //   via aabb   -> aabb IRGENDWO im Pfad
-        //   via aabb,  -> Pfad beginnt mit aabb (mehr hops folgen)
-        //   via ,aabb  -> Pfad endet mit aabb
-        //   via ,aabb, -> aabb Zwischenhop (weder Anfang noch Ende)
+        // 2026-07-10: 'path show via <pattern>' -- Pfad-Hop-Suche (in+out).
+        // Regex-artige Anker ^/$ (Komma = NUR Hop-Trenner, nicht mehr Anker):
+        //   via aabb    -> aabb IRGENDWO im Pfad (substring)
+        //   via ^aabb   -> Pfad BEGINNT mit aabb
+        //   via aabb$   -> Pfad ENDET mit aabb
+        //   via ^aabb$  -> EXAKT [aabb] (direkte Nutzer, keine Zwischenhops)
+        //   via ^aa,bb$ -> exakt [aa][bb] (Komma trennt Hops)
         if (m_show && strncasecmp(rest, "via", 3) == 0
             && (rest[3] == ' ' || rest[3] == '\t')) {
           const char* qs = rest + 3;
@@ -20908,18 +20910,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           while (qe > qs && (qe[-1] == ' ' || qe[-1] == '\t'
                           || qe[-1] == '\r' || qe[-1] == '\n')) qe--;
           if (qe == qs) {
-            pushCompanionMessage("path show via <hop>: Hex-Hop noetig, z.B. 'via eb'.");
+            pushCompanionMessage("path show via <pattern>: z.B. 'via eb' (irgendwo),\n"
+                                 "'via ^eb$' (exakt), '^eb' (Anfang), 'eb$' (Ende).");
             return;
           }
-          // Kommas am Rand = Positions-Anker.
-          bool anch_start = (*qs != ',');
-          bool anch_end   = (qe[-1] != ',');
-          const char* ss = qs; const char* se = qe;
-          if (ss < se && *ss == ',') ss++;
-          if (se > ss && se[-1] == ',') se--;
-          // Alle Kommas raus -> reine Hex-Bytes.
+          // Regex-Anker: fuehrendes '^' = muss am Pfad-Anfang, abschliessendes
+          // '$' = muss am Pfad-Ende. Kein Anker -> irgendwo. Beide -> exakt.
+          bool need_start = false, need_end = false;
+          if (qs < qe && *qs == '^') { need_start = true; qs++; }
+          if (qe > qs && qe[-1] == '$') { need_end = true; qe--; }
+          // Kommas raus (nur Hop-Trenner) -> reine Hex-Bytes.
           char clean[80]; size_t cl = 0;
-          for (const char* p = ss; p < se && cl + 1 < sizeof(clean); p++) {
+          for (const char* p = qs; p < qe && cl + 1 < sizeof(clean); p++) {
             if (*p != ',') clean[cl++] = *p;
           }
           clean[cl] = 0;
@@ -20930,8 +20932,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  || (c >= 'A' && c <= 'F'))) ok_hex = false;
           }
           if (!ok_hex) {
-            pushCompanionMessage("path show via: Hex-Hop noetig (gerade Anzahl),\n"
-                                 "z.B. 'via eb' (irgendwo) / ',eb' (Ende) / 'eb,' (Anfang).");
+            pushCompanionMessage("path show via: Hex-Hop noetig (gerade Anzahl).\n"
+                                 "Anker: ^ Anfang, $ Ende, ^..$ exakt, keiner=irgendwo.");
             return;
           }
           auto hv = [](char c) -> int {
@@ -20944,21 +20946,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           for (size_t i = 0; i < cl && nl < sizeof(needle); i += 2) {
             needle[nl++] = (uint8_t)((hv(clean[i]) << 4) | hv(clean[i+1]));
           }
-          // Anker-Match-Helper (out_path UND in_path).
+          // Regex-Anker-Match (out_path UND in_path):
+          //   ^ und $  -> exakt (Pfad == needle)
+          //   ^        -> beginnt mit needle
+          //   $        -> endet mit needle
+          //   keiner   -> irgendwo (substring)
           auto anchored_match = [&](const uint8_t* path, uint8_t plen) -> bool {
             if (plen < nl) return false;
-            int mp = -1;
-            int max_start = (int)plen - (int)nl;
-            for (int s = 0; s <= max_start; s++) {
-              if (memcmp(path + s, needle, nl) == 0) { mp = s; break; }
+            if (need_start && need_end) {
+              return (plen == nl) && (memcmp(path, needle, nl) == 0);
             }
-            if (mp < 0) return false;
-            bool at_start = (mp == 0);
-            bool at_end   = (mp + (int)nl == plen);
-            if (anch_start && anch_end)   return true;                    // irgendwo
-            if (!anch_start && !anch_end) return (!at_start && !at_end);  // ',x,' mittig
-            if (anch_start && !anch_end)  return (at_start && !at_end);   // 'x,' beginnt
-            return at_end;                                               // ',x' endet
+            if (need_start) return memcmp(path, needle, nl) == 0;
+            if (need_end)   return memcmp(path + (plen - nl), needle, nl) == 0;
+            for (int s = 0; s <= (int)plen - (int)nl; s++) {
+              if (memcmp(path + s, needle, nl) == 0) return true;
+            }
+            return false;
           };
           int found_n = 0;
           int tot = getNumContacts();
