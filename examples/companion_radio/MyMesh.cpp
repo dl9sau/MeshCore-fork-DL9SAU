@@ -15102,6 +15102,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Komma = Hop-Trenner: '^aa,bb$' = exakt [aa][bb].\n"
           "  Treffer zeigt out=.. und/oder in=.. (welcher Pfad matchte)");
         pushCompanionMessage(
+          "Richtung: der naechste direkte Nachbar steht bei out=\n"
+          "an ERSTER Stelle, bei in= an LETZTER.");
+        pushCompanionMessage(
           "Begriffe:\n"
           "  hs = hash-size (Bytes je Hop-Hash, 1..3)\n"
           "  rt = round-trip (hin + zurueck)\n"
@@ -15424,6 +15427,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
     // (Wunschliste 40). Sehen Kommentare bei den Handlern.
+    return;
+  }
+
+  // ---------- magic-scopes (Doku-Topic als bare Befehl) -----------------
+  // 2026-07-11: 'magic-scopes' steht in der 'Befehle:'-Liste, war aber nur
+  // ein help-Topic -> bare Eingabe ergab 'unbekannter Befehl' (User-Report).
+  // Als echten Befehl auf die Topic-Hilfe umleiten. raw_cmd ist lokal, daher
+  // ist der rekursive Aufruf gefahrlos. Aliase magic-channels/magic mit.
+  if (starts_with_word(cmd, "magic-scopes")
+      || starts_with_word(cmd, "magic-channels")
+      || starts_with_word(cmd, "magic")) {
+    handleCompanionCommand("help magic-scopes");
     return;
   }
 
