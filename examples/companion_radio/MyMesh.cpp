@@ -26526,8 +26526,13 @@ cron_add_direct:
     int cm = match_on_off(sub);
     if (cm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
     if (cm == 1) {
-      _trace_flags                  |= trace_cats[tc_idx].flag;
       _prefs.trace_flags_persistent |= trace_cats[tc_idx].flag;
+      // Fix 2026-07-11 (User-Bug "trace ergaenzen ersetzt die bisherige"):
+      // aktiv = volle gespeicherte Auswahl (resume + ergaenzen), NICHT nur
+      // diese eine Kategorie. Sonst macht '<cat> on' bei pausiertem trace
+      // (aktiv=0) aus der ganzen Liste nur die neue Kategorie. Jetzt schaltet
+      // '<cat> on' trace an und behaelt die bestehende Auswahl + die neue.
+      _trace_flags = _prefs.trace_flags_persistent;
       // Spezial-Erweiterung 'trace heard on [new|all]' (User-Wunsch
       // 2026-05-30): default 'new' (nur neue Direct-Nodes loggen) oder
       // 'all' (jeder Empfang inkl. bekannten Nodes).
