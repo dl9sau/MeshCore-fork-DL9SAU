@@ -4824,10 +4824,11 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
   // mit '(filter & (1<<TYPE)) != 0', stoeren also nicht an anderen Bits.
   if (filter == 0) filter = 0xFE;
   // 2026-07-06 REFACTOR: unified _discovery[] mit TTL-Purge.
-  // Purge Slots die > 15min alt sind (roll-forward Cache). Neue
+  // Purge Slots die > 1h alt sind (roll-forward Cache). Neue
   // Anfragen setzen queried_at_rtc; Antworten setzen answered_at_rtc.
   // Alte answers bleiben erhalten wenn Repeater in dieser Runde stumm.
-  discoveryPurgeStale(15UL * 60UL);
+  // DL9SAU 2026-07-11: 15min -> 1h (User-Wunsch, laengeres Cache-Fenster).
+  discoveryPurgeStale(60UL * 60UL);
   // Per-Runde State auf alle verbleibenden Slots reseten:
   //   region_query_tag = 0  (kein pending mehr)
   //   chain_send_at_ms = 0  (keine delayed sends aus vorheriger Runde)
@@ -4970,17 +4971,21 @@ void MyMesh::discoverStart(uint8_t filter, bool prefix_only) {
 }
 
 void MyMesh::discoverHandleResp(mesh::Packet *packet) {
-  if (!_discover_active) return;
   if (packet->payload_len < 6) return;
   // Layout: [0]type|adv_type, [1]snr, [2..5]tag, [6..]pub_key
   uint8_t node_type = packet->payload[0] & 0x0F;
   int8_t  their_snr_q4 = (int8_t)packet->payload[1];
   uint32_t echo_tag;
   memcpy(&echo_tag, &packet->payload[2], 4);
-  // Piggyback: sowohl CLI-Tag (_discover_tag) als auch App-Tag
-  // (_app_discover_tag) matchen. App-getriggerte Discovers werden
-  // damit auch in _discover_entries[] gesammelt.
-  if (echo_tag != _discover_tag && echo_tag != _app_discover_tag) return;
+  // Piggyback: CLI-Tag (_discover_tag) UND App-Tag (_app_discover_tag) matchen.
+  // DL9SAU 2026-07-11 Stufe B: CTL-DISCOVER-RESP ist Klartext + zero-hop ->
+  // auch Antworten auf FREMDE Discovery passiv mitlernen. 'active' = Antwort
+  // auf UNSERE Runde -> bidirektional bewiesen (setzt ctl_answered). Passiv
+  // (Fremd-Tag) = nur Empfang bewiesen, wie ein Advert -> ctl_answered bleibt 0.
+  // Unser eigener Tag ausserhalb einer laufenden Runde ist stale -> verwerfen.
+  bool our_tag = (echo_tag == _discover_tag || echo_tag == _app_discover_tag);
+  bool active  = our_tag && _discover_active;
+  if (our_tag && !_discover_active) return;
   // Pub_key extrahieren (nur full 32-Byte akzeptieren -- _discovery-Slot
   // braucht vollen pubkey fuer sichere Identifizierung. Short-8-Byte-Antworten
   // gab es nur bei prefix_only-Discover; strukturell selten und wir ignorieren
@@ -4997,7 +5002,7 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   if (!de) return;  // Array voll und kein LRU-Kandidat -- selten
   de->adv_type = node_type;
   de->full_pubkey = true;
-  de->ctl_answered_at_rtc = now_rtc;
+  if (active) de->ctl_answered_at_rtc = now_rtc;  // nur aktiv = bidirektional
   de->their_snr_q4 = their_snr_q4;
   de->our_snr_q4 = our_snr_q4;
   de->our_rssi_dbm = our_rssi_dbm;
@@ -5037,7 +5042,10 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
     ContactInfo* cp = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
     if (cp != NULL) {
       cp->lastmod = now_rtc;
-      if (cp->out_path_len != 0) {
+      // out_path=direct NUR bei aktiv (bidirektional bewiesen -- unser REQ hat
+      // sie erreicht). Passiv (Fremd-Discovery mitgehoert) beweist nur Empfang,
+      // NICHT dass wir sie erreichen -> kein out_path-Claim (wie ein Advert).
+      if (active && cp->out_path_len != 0) {
         cp->out_path_len = 0;        // = direct (kein Pfad)
         memset(cp->out_path, 0, sizeof(cp->out_path));
         dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
@@ -5048,7 +5056,7 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
   // Chain-Modus: 'discover regions' (no args) hat den CTL-REQ getriggert.
   // Pro REPEATER-RESP sofort eine zero-hop ANON_REQ_TYPE_REGIONS abfeuern.
   // Sensors koennen REGIONS-Antworten nicht handhaben -- skip.
-  if (_discover_regions_chained && e.full_pubkey && e.adv_type == ADV_TYPE_REPEATER) {
+  if (active && _discover_regions_chained && e.full_pubkey && e.adv_type == ADV_TYPE_REPEATER) {
     ContactInfo* known = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
     // 2026-07-06 REFACTOR: Slot markieren als 'per CTL-RESP getriggert'
     // + queried_at setzen (fuer Dedup gegen nachfolgende Chain-Vorab).
@@ -15419,23 +15427,29 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // 'Befehle: ...' war zu lang fuer MAX_TEXT_LEN (160 inkl. 'Sender: '-
     // Prefix, effektiv ~145 Bytes). Output wurde bei 'time' abgeschnitten.
     // -> in 3 BLE-Messages gesplittet (mit stats-Varianten Sichtbarkeit).
+    // DL9SAU 2026-07-11: alphabetisch sortiert (User-Wunsch -- schnelleres
+    // Finden). 'help [topic]' fuer Detail-Hilfen.
     pushCompanionMessage(
-      "Befehle: help [topic], status, uptime, sensors, neighbors,\n"
-      "  advert, autoadv, repeater, duty, scope, gps,"
+      "Befehle (alphabetisch), 'help [topic]' fuer Details:\n"
+      "  advert, at, autoadv, backup, bluetooth, board,"
     );
     pushCompanionMessage(
-      "  stats, stats-core, stats-radio, stats-packets,\n"
-      "  trace, chatname, prefs, set, get, ch.hops, clock, time,"
+      "  ch.hops, chatname, clear, clock, contact,\n"
+      "  crashtest, cron, dfu, discover, duty,"
     );
     pushCompanionMessage(
-      "  messages, logging,\n"
-      "  contact, backup, save, discover, path,\n"
-      "  tempradio,\n"
-      "  filter, remote, bluetooth, serial-cli,"
+      "  filter, get, gps, help, logging, magic-scopes,\n"
+      "  messages, neighbors,"
     );
     pushCompanionMessage(
-      "  ver, board, clear, reboot, shutdown, dfu,\n"
-      "  at, cron, magic-scopes.\n"
+      "  path, prefs, reboot, reformat, remote, repeater,\n"
+      "  save, scope, sensors, serial-cli, set, shutdown,"
+    );
+    pushCompanionMessage(
+      "  stats, stats-core, stats-packets, stats-radio,\n"
+      "  status, tempradio, time, trace, uptime, ver."
+    );
+    pushCompanionMessage(
       "  '!!' - letzten Befehl wiederholen (shell-style)."
     );
     // Versteckt (ENTFERNBAR): 'bleinfo', 'debugscope' -- Diagnose-Tools
@@ -20987,8 +21001,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     while (*sub == ' ' || *sub == '\t') sub++;
     if (!*sub) {
-      pushCompanionMessage(
-          "path <ping|trace> <name|hex>");
+      pushCompanionMessage(PATH_USAGE);   // 2026-07-11: einheitlich, kein Duplikat
       return;
     }
     // sub-token isolieren
@@ -22189,7 +22202,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     static const char* const DISC_WORDS[] = {
       "regions", "owner", "basic",
       "help", "prefix", "repeater", "sensor", "all",
-      "show"  // 2026-07-05: gecachte Ergebnisse (auch aus App-Piggyback)
+      "show",  // 2026-07-05: gecachte Ergebnisse (auch aus App-Piggyback)
+      "clear"  // 2026-07-11: _discovery-Cache (Repeater+Regionen) leeren
     };
     static const int DISC_N = (int)(sizeof(DISC_WORDS) / sizeof(DISC_WORDS[0]));
     auto disc_resolve = [&](const char* tok, size_t tlen,
@@ -22235,6 +22249,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             n += snprintf(e + n, sizeof(e) - n, " %s", ambig[i]);
           }
           pushCompanionMessage(e);
+          return;
+        }
+        // 2026-07-11 'discover clear': _discovery-Cache (Repeater +
+        // Regionen) leeren. Kein Radio-TX. Naechste Anfrage baut neu auf.
+        if (canon && strcmp(canon, "clear") == 0) {
+          uint8_t n = _discovery_count;
+          _discovery_count = 0;
+          char r[80];
+          snprintf(r, sizeof(r), "discover clear: %u Eintraege geleert.", n);
+          pushCompanionMessage(r);
           return;
         }
         // 'discover show': gecachten Firmware-State zeigen. Enthaelt
@@ -22707,6 +22731,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "discover regions <name-prefix>:\n"
           "  Namesuche, zero-hop direkt.\n"
           "  Nur direkte Nachbarn (protokoll-bedingt).");
+        pushCompanionMessage(
+          "discover show:  gecachte Ergebnisse zeigen (kein TX).\n"
+          "discover clear: Cache (Repeater+Regionen) leeren.\n"
+          "Cache-Verfall: 1h.");
         return;
       }
       else if (strcmp(canon, "prefix") == 0)   prefix_only = true;
