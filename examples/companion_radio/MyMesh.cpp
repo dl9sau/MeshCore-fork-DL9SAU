@@ -696,21 +696,34 @@ void MyMesh::bootLogAppend() {
     }
   }
 #endif
+  // DL9SAU 2026-07-11: rohe RESETREAS an den Boot-Eintrag haengen. Der
+  // COLD/WARM-Bucket ist mehrdeutig (COLD = OFF|POR|BOR|r==0). Fuer die
+  // Button-Wake-Diagnose (eigene Erweiterung, aktuell intermittierend)
+  // brauchen wir das OFF-Bit (rr=00010000 = GPIO-System-OFF-Wake) explizit.
+  // rr=00000004 SREQ, 00000002 DOG, 00000001 RESETPIN, 00000000 POR/BOR.
+  char rr_suffix[20] = "";
+#if defined(NRF52_PLATFORM)
+  {
+    extern uint32_t s_nrf52_resetreas_captured;
+    snprintf(rr_suffix, sizeof(rr_suffix), " rr=%08lX",
+             (unsigned long)s_nrf52_resetreas_captured);
+  }
+#endif
   // Neuen Eintrag bauen.
-  char entry[96];
+  char entry[112];
   if (_last_reset_reason == 1 /* COLD */
       || _last_session_uptime_ms == 0) {
-    snprintf(entry, sizeof(entry), "%lu %s ch=%d%s",
+    snprintf(entry, sizeof(entry), "%lu %s ch=%d%s%s",
              (unsigned long)now_secs, getLastResetReasonStr(), _diag_nch,
-             crash_suffix);
+             rr_suffix, crash_suffix);
   } else {
     char dur[20];
     formatBootLogDuration(_last_session_uptime_ms, dur, sizeof(dur));
     // last_uptime= klar als vorige Session gekennzeichnet
     // (Feedback 2026-07-05: 'uptime=' klang als waere es die aktuelle).
-    snprintf(entry, sizeof(entry), "%lu %s last_uptime=%s ch=%d%s",
+    snprintf(entry, sizeof(entry), "%lu %s last_uptime=%s ch=%d%s%s",
              (unsigned long)now_secs, getLastResetReasonStr(), dur, _diag_nch,
-             crash_suffix);
+             rr_suffix, crash_suffix);
   }
   // Schreiben: neuer Eintrag zuerst, dann max BOOT_LOG_MAX_ENTRIES-1
   // existing (aelteste fliegt raus).
