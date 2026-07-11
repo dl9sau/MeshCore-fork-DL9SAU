@@ -22736,6 +22736,40 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
 
+  // DL9SAU 2026-07-11: FS-Reparatur bei korrupter/voller InternalFS (Symptom:
+  // Prefs/Settings speichern nicht mehr durch -- savePrefs schreibt, aber nach
+  // Reboot Default). Formatiert das Dateisystem (loescht Korruption) und
+  // schreibt Identity + Prefs + Contacts + Channels SOFORT frisch zurueck ->
+  // Daten bleiben, FS sauber. (Upstream-'rebuild'-Logik, aber ehrlich benannt +
+  // erreichbar + mit Bestaetigung. NICHT wie 'erase', das alles inkl. Identity
+  // wischt.)
+  if (starts_with_word(cmd, "reformat")) {
+    const char* arg = strchr(cmd, ' ');
+    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
+    if (!arg || strcmp(arg, "yes") != 0) {
+      pushCompanionMessage(
+        "reformat: FS formatieren + Daten sofort neu schreiben.\n"
+        "-> Identity, Contacts, Channels BLEIBEN. Prefs = aktueller Stand.\n"
+        "Behebt korrupte/volle FS (Settings speichern nicht mehr durch).");
+      pushCompanionMessage("Bestaetigen mit: 'reformat yes'");
+      return;
+    }
+    pushCompanionMessage("reformat: formatiere FS + schreibe Daten neu ...");
+    bool ok = _store->formatFileSystem();
+    if (ok) {
+      _store->saveMainIdentity(self_id);
+      savePrefs();
+      saveContacts();
+      saveChannels();
+      pushCompanionMessage(
+        "OK - FS neu formatiert. Identity/Contacts/Channels behalten.\n"
+        "Jetzt Prefs-Backup einspielen + 'save'. Danach reboot-Test.");
+    } else {
+      pushCompanionMessage("FEHLER: Format fehlgeschlagen (Flash-Problem?).");
+    }
+    return;
+  }
+
   if (starts_with_word(cmd, "contact")) {
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }

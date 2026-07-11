@@ -196,18 +196,10 @@ bool DataStore::saveMainIdentity(const mesh::LocalIdentity &identity) {
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) {
-#if defined(NRF52_PLATFORM) && defined(NRF52_REMOVE_PREFS_ONCE)
-  // DL9SAU 2026-06-16: T1000-E InternalFS-prefs-Recovery. Wenn die
-  // prefs-Datei korrupt ist (nach gescheitertem dfu serial Versuch
-  // hing loadPrefsInt im LFS-read), loescht dieser Flag /new_prefs
-  // und /node_prefs einmalig. Identity in /main_identity bleibt.
-  // Nach erfolgreichem Boot diesen Flag wieder rausnehmen, sonst
-  // werden bei JEDEM Boot prefs auf Default zurueckgesetzt.
-  Serial.println("\r\n# [T1000-E diag] RP1 remove /new_prefs (one-shot)"); Serial.flush();
-  _fs->remove("/new_prefs");
-  _fs->remove("/node_prefs");
-  Serial.println("# [T1000-E diag] RP2 done"); Serial.flush();
-#endif
+  // DL9SAU 2026-07-11: NRF52_REMOVE_PREFS_ONCE (boot-time One-Shot-Loeschen von
+  // /new_prefs + /node_prefs) entfernt -- abgeloest durch den CLI-Befehl
+  // 'reformat yes'. War gefaehrlich (bei versehentlich aktivem Flag Prefs-
+  // Wipe bei JEDEM Boot).
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] LP1 in loadPrefs"); Serial.flush();
   bool ex_new = _fs->exists("/new_prefs");

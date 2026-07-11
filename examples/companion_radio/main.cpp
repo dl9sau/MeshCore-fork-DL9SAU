@@ -485,20 +485,9 @@ void setup() {
       DIAG_MARK("M8 pre ExtraFS.begin");
       ExtraFS.begin();
       DIAG_MARK("M8 post ExtraFS.begin");
-   #if defined(NRF52_FORMAT_EXTRAFS_ONCE)
-      // DL9SAU 2026-06-16: T1000-E hatte Meshtastic-Garbage in der
-      // ExtraFS-Partition. UF2-Upload ersetzt nur die App-Partition,
-      // FS-Partition bleibt mit alten Inhalten -- LFS mountet das
-      // 'ok', aber file.read haengt im LFS-Layer.
-      // Mit diesem Flag wird ExtraFS einmalig formatiert.
-      // Nach erfolgreichem Boot DIESEN BUILD-FLAG WIEDER ENTFERNEN
-      // damit kein Endless-Format passiert.
-      DIAG_MARK("FX1 pre ExtraFS.format (one-shot)");
-      ExtraFS.format();
-      DIAG_MARK("FX2 post ExtraFS.format");
-      ExtraFS.begin();
-      DIAG_MARK("FX3 post ExtraFS.begin (re-mount)");
-   #endif
+      // DL9SAU 2026-07-11: NRF52_FORMAT_EXTRAFS_ONCE (boot-time One-Shot-Format)
+      // entfernt -- abgeloest durch den erreichbaren CLI-Befehl 'reformat yes'
+      // (formatFileSystem: InternalFS + ExtraFS, + Daten-Rewrite).
   #endif
   #endif
   DIAG_MARK("M9 pre store.begin");
