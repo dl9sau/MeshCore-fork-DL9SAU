@@ -1389,6 +1389,21 @@ static bool ciUtf8EndsWith(const char* t, size_t tl,
   return false;
 }
 
+// Erster Byte-Offset in t wo p (case-fold) beginnt, sonst (size_t)-1.
+// Iteriert nur an Codepoint-Grenzen (wie ciUtf8Contains). Fuer Multi-*-Glob.
+static size_t ciUtf8Find(const char* t, size_t tl, const char* p, size_t pl) {
+  if (pl == 0) return 0;
+  size_t ti = 0;
+  while (ti < tl) {
+    if (ciUtf8StartsWith(t + ti, tl - ti, p, pl)) return ti;
+    size_t step;
+    utf8Decode(t + ti, tl - ti, &step);
+    if (step == 0) break;
+    ti += step;
+  }
+  return (size_t)-1;
+}
+
 static bool tokenGlobMatch(const char* pat, size_t pl,
                            const char* tok, size_t tl) {
   if (pl == 0) return false;
@@ -1424,14 +1439,14 @@ bool MyMesh::pubkeyFilterMatch(const uint8_t* key,
   return false;
 }
 
-bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) {
-  size_t pl = strlen(e.pattern);
-  if (pl == 0 || !s) return false;
-  size_t sl = strlen(s);
-  if (sl == 0) return false;
-  bool anchor_start = (e.flags & 0x01) != 0;
-  bool anchor_end   = (e.flags & 0x02) != 0;
-
+// 2026-07-11: Kern des Text-Pattern-Matchers extrahiert (User-Wunsch:
+// wiederverwendbar fuer contacts/neighbors/path show ...). Token-Subsequenz
+// mit '*'-Wildcards + case-insensitive UTF-8. Anker (^/$) kommen als bools
+// rein -- Filter hat sie in flags, CLI-Suche parst sie inline (textMatchesPattern).
+static bool patternTokenMatch(const char* pattern, size_t pl,
+                              const char* s, size_t sl,
+                              bool anchor_start, bool anchor_end) {
+  if (pl == 0 || sl == 0) return false;
   // Tokenize Pattern und Text strikt by Hard-Sep (Whitespace).
   // Tokens bleiben literal -- kein Edge-Trim. User-Pattern matched
   // gegen Token byte-genau (mit case-fold + UTF-8). Flexibilitaet
@@ -1443,10 +1458,10 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   {
     size_t i = 0;
     while (i < pl && pat_count < MAX_PAT_TOKENS) {
-      while (i < pl && isFilterHardSep((unsigned char)e.pattern[i])) i++;
+      while (i < pl && isFilterHardSep((unsigned char)pattern[i])) i++;
       if (i >= pl) break;
       size_t st = i;
-      while (i < pl && !isFilterHardSep((unsigned char)e.pattern[i])) i++;
+      while (i < pl && !isFilterHardSep((unsigned char)pattern[i])) i++;
       pat_off[pat_count] = (uint16_t)st;
       pat_len[pat_count] = (uint16_t)(i - st);
       pat_count++;
@@ -1483,7 +1498,7 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
   for (uint8_t st = start_min; st <= start_max; st++) {
     bool ok = true;
     for (uint8_t k = 0; k < pat_count; k++) {
-      if (!tokenGlobMatch(e.pattern + pat_off[k], pat_len[k],
+      if (!tokenGlobMatch(pattern + pat_off[k], pat_len[k],
                           s + txt_off[st + k], txt_len[st + k])) {
         ok = false;
         break;
@@ -1492,6 +1507,84 @@ bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) 
     if (ok) return true;
   }
   return false;
+}
+
+// Filter-Aufrufer: Anker stecken vorab in e.flags (^/$ beim Anlegen geparst).
+bool MyMesh::filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s) {
+  if (!s) return false;
+  return patternTokenMatch(e.pattern, strlen(e.pattern), s, strlen(s),
+                           (e.flags & 0x01) != 0, (e.flags & 0x02) != 0);
+}
+
+// 2026-07-11: wiederverwendbarer Text-Pattern-Match fuer CLI-Suchen
+// (contacts/neighbors/path show ...). STRING-Ebene (nicht Token wie der
+// Filter): bloszer Text = Substring (irgendwo, ueber Leerzeichen hinweg),
+// '^' = Anfang, '$' = Ende, '^x$' = exakt, '*' = Wildcard-Luecke. UTF-8
+// case-insensitive (A-Z, Ä/Ö/Ü). Bewusst getrennt von filterPatternMatch,
+// dessen Token-exakt-Semantik unangetastet bleibt.
+//   contacts ber      -> Berlin, Oberhausen (enthaelt)
+//   contacts ^ber     -> Berlin (beginnt)
+//   contacts ber$     -> DB0BER (endet)
+//   contacts ^berlin$ -> exakt
+//   contacts *ei*ns*  -> Wildcard-Glob
+bool MyMesh::textMatchesPattern(const char* pattern, const char* text) {
+  if (!pattern || !text) return false;
+  const char* p = pattern;
+  size_t pl = strlen(p);
+  size_t tl = strlen(text);
+  // Anker abschneiden.
+  bool anchor_start = false, anchor_end = false;
+  if (pl > 0 && p[0] == '^')        { anchor_start = true; p++; pl--; }
+  if (pl > 0 && p[pl - 1] == '$')   { anchor_end   = true; pl--; }
+  if (pl == 0) {
+    // nur "^", "$" oder "^$": exakt-leer nur bei beiden Ankern sinnvoll.
+    return (anchor_start && anchor_end) ? (tl == 0) : false;
+  }
+  // Ein fuehrendes/abschliessendes '*' hebt den jeweiligen Anker wieder auf.
+  bool need_start = anchor_start && p[0] != '*';
+  bool need_end   = anchor_end   && p[pl - 1] != '*';
+  // In literale Segmente an '*' zerlegen (leere durch '**'/Rand ignoriert).
+  const uint8_t MAXSEG = 8;
+  const char* seg[MAXSEG];
+  size_t seglen[MAXSEG];
+  uint8_t nseg = 0;
+  {
+    size_t a = 0;
+    while (a < pl && nseg < MAXSEG) {
+      while (a < pl && p[a] == '*') a++;
+      if (a >= pl) break;
+      size_t st = a;
+      while (a < pl && p[a] != '*') a++;
+      seg[nseg] = p + st;
+      seglen[nseg] = a - st;
+      nseg++;
+    }
+  }
+  if (nseg == 0) return true;  // reines '*'-Pattern -> alles matcht
+  // Segmente der Reihe nach matchen. pos = Byte-Cursor im Text. Casefold ist
+  // byte-laengen-erhaltend (A-Z, Ä/Ö/Ü), daher = seglen im Text vorschieben.
+  size_t pos = 0;
+  for (uint8_t k = 0; k < nseg; k++) {
+    bool s = (k == 0)        && need_start;
+    bool e = (k == nseg - 1) && need_end;
+    if (s && e) {                      // ^x$ -> exakt der ganze Rest
+      if (!ciUtf8Equal(seg[k], seglen[k], text + pos, tl - pos)) return false;
+      pos = tl;
+    } else if (s) {                    // ^x  -> am Anfang
+      if (!ciUtf8StartsWith(text, tl, seg[k], seglen[k])) return false;
+      pos = seglen[k];
+    } else if (e) {                    // x$  -> am Ende (und ab pos)
+      if (tl < seglen[k] || (tl - seglen[k]) < pos) return false;
+      if (!ciUtf8Equal(seg[k], seglen[k], text + tl - seglen[k], seglen[k]))
+        return false;
+      pos = tl;
+    } else {                           // irgendwo ab pos
+      size_t idx = ciUtf8Find(text + pos, tl - pos, seg[k], seglen[k]);
+      if (idx == (size_t)-1) return false;
+      pos += idx + seglen[k];
+    }
+  }
+  return true;
 }
 
 // channel-filter (Wunschliste 46 Phase 2/5, 2026-06-10):
@@ -14597,7 +14690,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (topic_prefix_match(topic, "neighbors")) {
         pushCompanionMessage(
           "neighbors [<role>...] [hops <N>] [km <D>]\n"
-          "          [deg <X>|<FROM>-<TO>] [last <N>d|h]:\n"
+          "          [deg <X>|<FROM>-<TO>] [last <N>d|h]\n"
+          "          [name <muster>]:\n"
           "  ohne Arg: nur direkt-gehoerte.");
         pushCompanionMessage(
           "  <role>: repeater|companion|sensor|room\n"
@@ -14987,7 +15081,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  path ping  <name|hex>  -- zero-hop Ping\n"
           "  path trace <name|hex>  -- Round-Trip TRACE");
         pushCompanionMessage(
-          "  path show <substr|hex> -- Path; <substr>=Namens-Substring-Suche\n"
+          "  path show <muster|hex> -- Path; Namens-Muster oder pubkey-hex\n"
+          "     Muster: Substring. ^: Anfang, $: Ende, ^x$: exakt, *: Wildcard\n"
           "  path show direct       -- alle mit out_path_len=0\n"
           "  path show via <pat>    -- Hop-Suche; Anker ^Anfang $Ende ^..$exakt");
         pushCompanionMessage(
@@ -16866,6 +16961,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     bool   has_km   = false;
     bool   has_deg  = false;
     bool   has_last = false;
+    // 2026-07-11: Namens-Muster-Filter (textMatchesPattern, AND wie die
+    // anderen). c.name aus dem Kontakt-Join. Substring/^/$/* wie contacts.
+    bool   has_name = false;
+    char   name_pat[32];
+    name_pat[0] = 0;
     // User-Wunsch 2026-06-14: 'last <N>d|h' Fenster statt fixe 48h.
     // Default = CR_HEARD_MAX_AGE_SECS (48h). Mit 'last 7d' z.B. werden
     // Kontakte die in den letzten 7 Tagen ein Advert hatten gelistet
@@ -16901,7 +17001,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           pushCompanionMessage(
             "neighbors [<role>...] [hops <N>] [km <D>]\n"
             "          [deg <X> | <FROM>-<TO>]\n"
-            "          [last <N>d|h]:");
+            "          [last <N>d|h] [name <muster>]:");
           pushCompanionMessage(
             "  <role>: repeater|companion|sensor|room\n"
             "    (abkuerzbar+kombinierbar, z.B. 'rep')");
@@ -16916,6 +17016,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             "  last <N>d|h: Zeit-Fenster (Default 48h).\n"
             "    z.B. 'last 7d' (1..30 Tage),\n"
             "         'last 24h' (1..720 Stunden).");
+          pushCompanionMessage(
+            "  name <muster>: Namens-Suche. Substring;\n"
+            "    ^: Anfang, $: Ende, ^x$: exakt, *: Wildcard.");
           pushCompanionMessage(
             "  Mehrere Filter = UND-Verknuepfung.\n"
             "  ohne Filter -> nur direct-gehoerte.\n"
@@ -17011,6 +17114,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           has_km = true;
           while (*arg && *arg != ' ' && *arg != '\t') arg++;
           while (*arg == ' ' || *arg == '\t') arg++;
+          continue;
+        }
+        if (consume_word(arg, "name")) {
+          // name <muster> -- Token bis Whitespace, Case bleibt (Matcher
+          // ist case-insensitive). Muster: Substring; ^ $ ^x$ *.
+          const char* tok = arg;
+          while (*arg && *arg != ' ' && *arg != '\t') arg++;
+          size_t tlen = (size_t)(arg - tok);
+          while (*arg == ' ' || *arg == '\t') arg++;
+          if (tlen == 0 || tlen >= sizeof(name_pat)) {
+            pushCompanionMessage("Usage: ... name <muster>");
+            return;
+          }
+          memcpy(name_pat, tok, tlen);
+          name_pat[tlen] = 0;
+          has_name = true;
           continue;
         }
         if (consume_word(arg, "deg")) {
@@ -17166,7 +17285,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       // Filter-Liste: ohne Filter heisst 'direct only'; mit Filter wird
       // AND-verkettet angezeigt (Wunschliste/User-Spec 2026-06-13).
-      bool any_filter = has_hops || has_km || has_deg;
+      bool any_filter = has_hops || has_km || has_deg || has_name;
       if (!any_filter) {
         hp += snprintf(h + hp, sizeof(h) - hp, "direct");
       } else {
@@ -17178,6 +17297,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (has_hops) { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "<=%d hops", max_hops); }
         if (has_km)   { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "<=%.0fkm", max_km); }
         if (has_deg)  { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "deg %s", deg_arg_buf); }
+        if (has_name) { sep(); hp += snprintf(h + hp, sizeof(h) - hp, "name '%s'", name_pat); }
       }
       // Wunschliste-Erweiterung 2026-06-14: Window-Anzeige '< 48h' wird
       // dynamisch -- Default 48h, mit 'last N' der User-Wert.
@@ -17216,11 +17336,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
       // Role-Filter (OR-Set ueber Bit-Mask) -- immer aktiv.
       if ((role_mask & (1 << c.type)) == 0) continue;
+      // 2026-07-11: Namens-Muster-Filter (AND). Greift unabhaengig von der
+      // km/hops/deg-direct-Semantik.
+      if (has_name && !textMatchesPattern(name_pat, c.name)) continue;
       // Filter-Semantik (User-Spec 2026-06-13): ohne Filter -> nur direct;
       // mit Filter -> AND-Verknuepfung aller angegebenen Filter (km,
       // hops, deg). Direkte Knoten ohne GPS fallen damit unter km/deg
       // bewusst raus, weil km/deg sich auf bekannte Position beziehen.
-      bool any_filter = has_hops || has_km || has_deg;
+      bool any_filter = has_hops || has_km || has_deg || has_name;
       bool include;
       if (!any_filter) {
         include = (c.out_path_len == 0);  // direct only
@@ -20874,7 +20997,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         // path clear/show inline handhaben (kein synth cmd).
         if (!*rest) {
           pushCompanionMessage(m_clear ? "Usage: path clear <name|hex>"
-            : m_show ? "Usage: path show <name-substr|hex|direct>"
+            : m_show ? "Usage: path show <muster|hex|direct|via ...>\n"
+                       "muster: Substring. ^: Anfang, $: Ende, ^x$: exakt, *: Wildcard"
             : "Usage: path set <name|hex> <hex,hex,..|direct>");
           return;
         }
@@ -20953,7 +21077,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  || (c >= 'A' && c <= 'F'))) ok_hex = false;
           }
           if (!ok_hex) {
-            pushCompanionMessage("path show via: Hex-Hop noetig (gerade Anzahl).\n"
+            pushCompanionMessage("path show via <hop[,hop..]>: je Hop 2/4/6 Hex\n"
+                                 "(1-3 Byte, je hash-size), komma-getrennt.\n"
                                  "Anker: ^ Anfang, $ Ende, ^..$ exakt, keiner=irgendwo.");
             return;
           }
@@ -21075,31 +21200,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         } else {
           ih = false;
         }
-        // Substring-Needle (lowercase) fuer 'path show <str>' vorbereiten
-        // (2026-07-10): Nodedb-Suche findet den String IRGENDWO im Namen,
-        // nicht nur als Prefix ('berlin' -> auch 'DB0BER Berlin').
-        char needle_lc[32]; size_t needle_len = 0;
+        // 2026-07-11: 'path show <str>' nutzt den String-Pattern-Matcher
+        // (textMatchesPattern): Substring-default wie bisher, zusaetzlich
+        // ^ Anfang, $ Ende, ^x$ exakt, * Wildcard. rp2 ist nicht zwingend
+        // am il-Ende null-terminiert -> in nq kopieren (Case bleibt, Matcher
+        // ist case-insensitive).
+        char nq[32]; size_t nqn = 0;
         if (!ih) {
-          for (size_t k = 0; k < il && needle_len + 1 < sizeof(needle_lc); k++) {
-            char b = rp2[k];
-            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-            needle_lc[needle_len++] = b;
-          }
+          for (size_t k = 0; k < il && nqn + 1 < sizeof(nq); k++) nq[nqn++] = rp2[k];
         }
-        needle_lc[needle_len] = 0;
+        nq[nqn] = 0;
         auto name_contains_ci = [&](const char* name) -> bool {
-          if (needle_len == 0) return false;
-          for (const char* p = name; *p; p++) {
-            size_t k = 0;
-            while (k < needle_len && p[k]) {
-              char a = p[k];
-              if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-              if (a != needle_lc[k]) break;
-              k++;
-            }
-            if (k == needle_len) return true;
-          }
-          return false;
+          if (nqn == 0) return false;
+          return textMatchesPattern(nq, name);
         };
         // Contact-Suche
         ContactInfo found;
@@ -21227,7 +21340,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                    && *sp != '\r' && *sp != '\n') sp++;
             size_t hlen = (size_t)(sp - hs);
             if (hlen == 0 || (hlen % 2) != 0) {
-              pushCompanionMessage("path set: hex hop muss gerade Anzahl chars sein.");
+              pushCompanionMessage("path set <hop,hop,..>: je Hop 2/4/6 Hex\n"
+                                   "(1-3 Byte, je hash-size), komma-getrennt.");
               return;
             }
             size_t hbytes = hlen / 2;
@@ -22599,9 +22713,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
     if (!arg || *arg == 0) {
       pushCompanionMessage(
-        "Usage: contact <name-prefix> [type <chat|repeater|sensor|room>]\n"
-        "Ohne 'type ...' -> ALLE Prefix-Treffer + deren Typ listen.\n"
-        "Mit 'type ...' -> Typ setzen (Prefix muss eindeutig sein).");
+        "Usage: contact <muster> [type <chat|repeater|sensor|room>]\n"
+        "Ohne 'type' -> alle Treffer + Typ. Mit 'type' -> setzen (eindeutig).");
+      pushCompanionMessage(
+        "<muster>: Substring. ^: Anfang, $: Ende, ^x$: exakt, *: Wildcard.");
       return;
     }
     // Prefix bis Whitespace extrahieren. Suche im raw_cmd damit Case
@@ -22628,29 +22743,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
            : (t == ADV_TYPE_ROOM)     ? "room"
            : (t == ADV_TYPE_SENSOR)   ? "sensor" : "?";
     };
-    // 2026-07-10: 'contact <str>' sucht case-insensitive SUBSTRING (wie
-    // 'path show'), nicht mehr case-sensitive Prefix. 'ber' findet 'Berlin'
-    // UND '...ber...' mitten im Namen. Ohne 'type ...' -> alle Treffer.
-    char cneedle[32]; size_t cnl = 0;
-    for (size_t k = 0; k < cpl && cnl + 1 < sizeof(cneedle); k++) {
-      char b = prefix[k];
-      if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-      cneedle[cnl++] = b;
-    }
-    cneedle[cnl] = 0;
+    // 2026-07-11: 'contact <str>' nutzt jetzt den String-Pattern-Matcher
+    // (textMatchesPattern): bloszer Text = case-insensitive Substring (wie
+    // bisher, 'ber' -> Berlin/Oberhausen), zusaetzlich ^ Anfang, $ Ende,
+    // ^x$ exakt, * Wildcard.
     auto name_has = [&](const char* name) -> bool {
-      if (cnl == 0) return false;
-      for (const char* p = name; *p; p++) {
-        size_t k = 0;
-        while (k < cnl && p[k]) {
-          char a = p[k];
-          if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-          if (a != cneedle[k]) break;
-          k++;
-        }
-        if (k == cnl) return true;
-      }
-      return false;
+      return textMatchesPattern(prefix, name);
     };
     // 2026-07-10: Query zusaetzlich als Hex-pubkey-Prefix interpretieren
     // (falls gueltig Hex): 'co eb' findet Namens-Treffer UND Knoten mit

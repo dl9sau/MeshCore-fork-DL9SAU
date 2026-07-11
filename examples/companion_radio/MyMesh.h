@@ -1059,6 +1059,9 @@ private:
   // pattern + flags (bit0=anchor start, bit1=anchor end, both=exact,
   // none=substring). Returnt true wenn s das Pattern matched.
   static bool filterPatternMatch(const NodePrefs::FilterEntry& e, const char* s);
+  // 2026-07-11: rohes Text-Pattern-Match (^/$ inline geparst) fuer CLI-Suchen
+  // in contacts/neighbors/path show. Selbe Engine wie filterPatternMatch.
+  static bool textMatchesPattern(const char* pattern, const char* text);
   // Wunschliste 46 Phase 4 (2026-06-11): Pubkey-Prefix-Match.
   // Returns true wenn key gegen einen der ersten cnt Eintraege matched.
   static bool pubkeyFilterMatch(const uint8_t* key,
