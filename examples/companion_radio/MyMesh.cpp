@@ -16873,9 +16873,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
 #endif
       if (!usable) {
-        pushCompanionMessage("Keine GPS-Position (noch nie ein Fix, GPS aus, oder "
-                             "Provider haelt keine). 'gps sync' -> Fix abwarten -> "
-                             "nochmal 'gps setloc'.");
+        // DL9SAU 2026-07-12: kontext-abhaengige Meldung (User-Feedback). GPS-
+        // Zustand kennt die Firmware selbst -> bei GPS-aus das konkret sagen;
+        // bei GPS-an nicht erwaehnen (und "schlaeft" interessiert nicht).
+#if ENV_INCLUDE_GPS == 1
+        if (!_prefs.gps_enabled) {
+          pushCompanionMessage("GPS ist aus. Mit 'gps on' (oder 'gps sync' fuer "
+                               "einmalig) aktivieren, Fix abwarten (siehe 'gps'), "
+                               "dann 'gps setloc'.");
+        } else {
+          pushCompanionMessage("Keine GPS-Position (noch nie ein Fix). Nach Befehl "
+                               "'gps sync' Fix abwarten (siehe 'gps') und 'gps "
+                               "setloc' nochmals versuchen.");
+        }
+#else
+        pushCompanionMessage("GPS in diesem Build nicht verfuegbar.");
+#endif
         return;
       }
       sensors.node_lat = cur_lat;
