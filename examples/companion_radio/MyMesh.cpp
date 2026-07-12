@@ -10524,6 +10524,19 @@ void MyMesh::applyShutdownPendingCheck() {
 #endif
 }
 
+bool MyMesh::requestButtonShutdown() {
+  // DL9SAU 2026-07-12: Gate fuer den Button-Long-Press-Shutdown. NUR diese
+  // Stelle ist gated -- CLI-/Companion-'shutdown', USB-Loss und Batt-Low
+  // laufen unabhaengig. Schutz gegen versehentliches Aussperren, solange
+  // Button-Wake nicht funktioniert (kein Ladekabel dabei = kein Wieder-An).
+  if (_prefs.button_press_allow_shutdown == 0) {
+    MESH_DEBUG_PRINTLN("UITask: button shutdown blocked by pref");
+    pushCompanionMessage("Button shutdown is disabled (set button_press_allow_shutdown 1)");
+    return false;
+  }
+  return true;
+}
+
 void MyMesh::setShutdownSentinel() {
 #if defined(NRF52_PLATFORM)
   // Layered defense gegen Phantom-Wake nach shutdown + USB-Pull:

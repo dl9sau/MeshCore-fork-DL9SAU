@@ -345,6 +345,9 @@ public:
   void handleCmdFrame(size_t len);
   bool advert();
   void enterCLIRescue();
+  // DL9SAU 2026-07-12: Button-Long-Press-Gate. true = Shutdown erlaubt.
+  // Bei Sperre (button_press_allow_shutdown==0) Serial-Log + $companion-Meldung.
+  bool requestButtonShutdown();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
