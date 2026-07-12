@@ -502,12 +502,6 @@ void setup() {
   );
 
   DIAG_MARK("M11 post the_mesh.begin");
-  // DL9SAU 2026-07-12 (Power Weg A): HW-Comparator (LPCOMP+VBUS) fuer den
-  // Recovery-Wake HIER armieren -- Prefs sind geladen (the_mesh.begin), und
-  // so ist der Comparator nach JEDEM Boot aktuell konfiguriert, auch wenn der
-  // User nie 'set batt_min_mv_boot' aufruft oder die LPCOMP-Config nach einem
-  // Reset verloren ging. No-op ohne NRF52_POWER_MANAGEMENT / chemistry=none.
-  the_mesh.configureBatteryWake();
   // DL9SAU 2026-06-20: Wunschliste 90 Phase 2 stay-off (RESETREAS-
   // Filter) wurde komplett entfernt. shutdown_pending-Sentinel-
   // Mechanismus (siehe applyShutdownPendingCheck nach
@@ -528,6 +522,13 @@ void setup() {
   DIAG_MARK("M14 pre the_mesh.startInterface");
   the_mesh.startInterface(serial_interface);
   DIAG_MARK("M15 post the_mesh.startInterface");
+  // DL9SAU 2026-07-12 (Power Weg A): HW-Comparator (LPCOMP+VBUS) armieren --
+  // NACH serial_interface.begin (SoftDevice UP), damit configureVoltageWake
+  // den SD-Pfad nutzt und KEIN Pre-SD-Register-Konflikt entsteht (fruehere
+  // Stelle vor dem SD-Init war riskant). Vor applyShutdownPendingCheck, damit
+  // der Wake vor einem evtl. Re-Sleep armiert ist. Prefs sind laengst geladen.
+  // No-op ohne NRF52_POWER_MANAGEMENT / chemistry=none.
+  the_mesh.configureBatteryWake();
   // DL9SAU 2026-06-20: shutdown_pending-Check NACH serial_interface.
   // begin -- jetzt ist Bluefruit aktiv = SoftDevice up = USB-PHY hat
   // VBUS-Detect-Hardware enabled (isExternalPowered() stable).

@@ -6496,6 +6496,25 @@ void MyMesh::begin(bool has_display) {
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10d pre loadPrefs"); Serial.flush();
 #endif
+#ifdef NRF52_RECOVER_FORMAT_INTERNALFS
+  // DL9SAU 2026-07-12 EINMALIGE RECOVERY: /new_prefs war littlefs-korrupt und
+  // liess sich NICHT loeschen (remove failte, Datei blieb). Deshalb InternalFS
+  // FORMATIEREN (wipe /new_prefs + Identity + /shutdown_pending) und die
+  // Identity aus dem RAM (self_id, bei loadMainIdentity oben geladen) sofort
+  // zurueckschreiben -> Pubkey bleibt erhalten. ExtraFS (Kontakte/Channels)
+  // bleibt unangetastet. NUR fuer EINEN Recovery-Flash aktivieren, danach AUS!
+  #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("\r\n# [T1000-E diag] RCVF1 pre InternalFS format"); Serial.flush();
+  #endif
+  _store->getPrimaryFS()->format();
+  #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("# [T1000-E diag] RCVF2 post format, saveMainIdentity"); Serial.flush();
+  #endif
+  _store->saveMainIdentity(self_id);
+  #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("# [T1000-E diag] RCVF3 identity restored -- boot laeuft weiter"); Serial.flush();
+  #endif
+#endif
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
   loadCronFromFile();   // Wunschliste 88 Phase 2: Cron-Persistenz
   // Hinweis: shutdown-pending-Check wird in main.cpp NACH
@@ -10294,7 +10313,11 @@ void MyMesh::manageBatteryAndUsb() {
         if (elapsed >= limit) {
           pushDebugLog("[batt] USB-loss timeout (%u min) -> powerOff\n",
                        (unsigned)_prefs.usb_loss_shutdown_min);
-          savePrefs();
+          // DL9SAU 2026-07-12: savePrefs() hier ENTFERNT. War ein Ueberrest aus
+          // der Zeit, als shutdown_pending ein PREFS-BYTE war -- jetzt separate
+          // Datei (setShutdownSentinel). Prefs aendern sich beim Shutdown nicht
+          // -> redundant UND ein /new_prefs-KORRUPTIONS-Trigger: 8KB temp+rename
+          // direkt vor SYSTEMOFF auf grenzwertigem FS. (Ursache des Boot-Hangs.)
           // Wunschliste 94: Shutdown-Piep via UITask. Fallback auf
           // stilles board.powerOff() wenn kein UI initialisiert.
           setShutdownSentinel();
@@ -10353,7 +10376,9 @@ void MyMesh::manageBatteryAndUsb() {
       _batt_low_consecutive++;
       if (_batt_low_consecutive >= 3) {
         pushDebugLog("[batt] 3x LOW confirmed -> powerOff\n");
-        savePrefs();
+        // DL9SAU 2026-07-12: savePrefs() ENTFERNT -- selber Ueberrest wie im
+        // usb_loss-Pfad (shutdown_pending ist jetzt eine Datei, gecleart via
+        // rm; Prefs unveraendert). War redundant + Korruptions-Trigger.
         // Wunschliste 94: Shutdown-Piep via UITask.
         setShutdownSentinel();
         if (_ui) _ui->shutdown(false);

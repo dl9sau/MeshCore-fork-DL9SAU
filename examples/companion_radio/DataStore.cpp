@@ -221,6 +221,10 @@ bool DataStore::saveMainIdentity(const mesh::LocalIdentity &identity) {
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) {
+  // DL9SAU 2026-07-12: (RCV-remove-Recovery hier wieder entfernt -- littlefs
+  // remove() failt auf einer datenblock-korrupten Datei, half nicht. Der
+  // funktionierende Weg ist Format+Identity-Rettung, siehe MyMesh::begin
+  // NRF52_RECOVER_FORMAT_INTERNALFS.)
   // DL9SAU 2026-07-11: NRF52_REMOVE_PREFS_ONCE (boot-time One-Shot-Loeschen von
   // /new_prefs + /node_prefs) entfernt -- abgeloest durch den CLI-Befehl
   // 'reformat yes'. War gefaehrlich (bei versehentlich aktivem Flag Prefs-
@@ -249,10 +253,19 @@ void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) 
 
 void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& node_lat, double& node_lon) {
   File file = openRead(_fs, filename);
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.print("\r\n# [T1000-E diag] LP5 post openRead file=");
+  Serial.print(((bool)file) ? "ok" : "null");
+  if (file) { Serial.print(" size="); Serial.print((unsigned long)file.size()); }
+  Serial.println(); Serial.flush();
+#endif
   if (file) {
     uint8_t pad[8];
 
     file.read((uint8_t *)&_prefs.airtime_factor, sizeof(float));                           // 0
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("# [T1000-E diag] LP6 post first field read"); Serial.flush();
+#endif
     file.read((uint8_t *)_prefs.node_name, sizeof(_prefs.node_name));                      // 4
     file.read(pad, 4);                                                                     // 36
     file.read((uint8_t *)&node_lat, sizeof(node_lat));                                     // 40
