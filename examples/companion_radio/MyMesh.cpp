@@ -10280,6 +10280,11 @@ void MyMesh::configureBatteryWake() {
   uint16_t mv = getEffectiveBootMinMv();
   if (mv == 0) return;    // Chemie nicht gesetzt -> Feature aus
   board.armBatteryWake(mv);   // T1000eBoard: mappt mV -> LPCOMP-refsel + VBUS
+  // DL9SAU 2026-07-12: Arming-Info ins RAM-Debug-Log (via 'log' lesbar, nach
+  // dem ~5s-Serial-Reconnect) -- refsel + geschaetzte Weck-Akkuspannung fuer
+  // die PWRMGT_VDD_MV-Kalibrierung. KEIN File-/Prefs-Write.
+  pushDebugLog("[pwr] batt-wake armed: LPCOMP refsel=%u ~%umV est (target %umV) -- CALIBRATE PWRMGT_VDD_MV\n",
+               (unsigned)board.wakeRefsel(), (unsigned)board.wakeEstMv(), (unsigned)mv);
 #endif
 }
 

@@ -45,6 +45,8 @@ void T1000eBoard::armBatteryWake(uint16_t recovery_mv) {
   uint32_t est_wake_mv = (eighths * (uint32_t)PWRMGT_VDD_MV / 8) * 2;  // zurueck auf Akku
   configureVoltageWake(PWRMGT_LPCOMP_AIN, refsel);           // LPCOMP + VBUS
   _wake_keep_3v3 = true;   // powerOff() haelt PIN_3V3_EN HIGH fuer den Divider
+  _wake_refsel   = refsel;                 // fuer CLI-Anzeige / Kalibrierung
+  _wake_est_mv   = (uint16_t)est_wake_mv;
   MESH_DEBUG_PRINTLN("PWRMGT: batt-wake armed refsel=%u (~%lumV est, target %umV) -- CALIBRATE PWRMGT_VDD_MV",
                      (unsigned)refsel, (unsigned long)est_wake_mv, (unsigned)recovery_mv);
 #else

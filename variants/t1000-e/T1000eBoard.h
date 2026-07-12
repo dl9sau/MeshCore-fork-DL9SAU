@@ -11,6 +11,10 @@ protected:
   // Batterie-Divider im SYSTEMOFF versorgt bleibt und der LPCOMP-Wake
   // (armBatteryWake) die Spannung lesen kann. Wird in armBatteryWake gesetzt.
   bool _wake_keep_3v3 = false;
+  // DL9SAU 2026-07-12: letzter armierter LPCOMP-refsel + geschaetzte Weck-
+  // Akkuspannung (fuer CLI-Anzeige/Kalibrierung). 0xFF/0 = nicht armiert.
+  uint8_t  _wake_refsel  = 0xFF;
+  uint16_t _wake_est_mv  = 0;
 
 public:
   T1000eBoard() : NRF52Board("T1000E_OTA") {}
@@ -19,6 +23,9 @@ public:
   // armieren (mappt mV -> refsel via PWRMGT_VDD_MV). No-op ohne
   // NRF52_POWER_MANAGEMENT bzw. recovery_mv==0.
   void armBatteryWake(uint16_t recovery_mv);
+  // Letzter armierter refsel (0xFF = nicht armiert) + geschaetzte Weck-mV.
+  uint8_t  wakeRefsel() const { return _wake_refsel; }
+  uint16_t wakeEstMv()  const { return _wake_est_mv; }
 
   uint16_t getBattMilliVolts() override {
   #ifdef BATTERY_PIN
