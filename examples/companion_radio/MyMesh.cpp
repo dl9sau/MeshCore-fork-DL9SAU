@@ -5251,35 +5251,54 @@ bool MyMesh::sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_n
 // (alles wo (b & 0xC0) != 0x80) zaehlen je 1; Continuation-Bytes 0.
 // Naeherung: 1 Codepoint == 1 visueller Char. Fuer CJK / Emoji im
 // Companion-Channel-Use ausreichend genau (kein Wide-Char-Display).
+// DL9SAU 2026-07-12: Display-Breite eines Codepoints in Terminal-Spalten
+// (wcwidth-Heuristik): Emoji + CJK + Fullwidth = 2, sonst 1. NUR fuer die
+// Konsolen-Spalten-Ausrichtung -- NICHT fuer $companion-Byte-Limits (dort
+// zaehlen echte Bytes, sonst wird die BLE-Message abgeschnitten!).
+// Ambivalent (Terminal-abhaengig, v.a. U+2600-Bereich Text-vs-Emoji-
+// Presentation), aber deckt die ueblichen Repeater-Namen-Emoji ab.
+static int utf8_cp_display_width(uint32_t cp) {
+  if ( (cp >= 0x1100 && cp <= 0x115F) ||   // Hangul Jamo
+       (cp >= 0x2600 && cp <= 0x27BF) ||   // Misc Symbols + Dingbats (☀ ...)
+       (cp >= 0x2B00 && cp <= 0x2BFF) ||   // Symbols & Arrows
+       (cp >= 0x2E80 && cp <= 0xA4CF) ||   // CJK Radicals .. Yi
+       (cp >= 0xAC00 && cp <= 0xD7A3) ||   // Hangul Syllables
+       (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK Compat Ideographs
+       (cp >= 0xFE30 && cp <= 0xFE4F) ||   // CJK Compat Forms
+       (cp >= 0xFF00 && cp <= 0xFF60) ||   // Fullwidth Forms
+       (cp >= 0xFFE0 && cp <= 0xFFE6) ||   // Fullwidth Signs
+       (cp >= 0x1F000) )                   // Emoji-Ebenen (🏠 ...)
+    return 2;
+  return 1;
+}
+
+// Summe der Display-Spalten (nicht Codepoints, nicht Bytes). Emoji -> 2.
 static size_t neighbors_utf8_visual_count(const char* s) {
-  size_t n = 0;
-  while (*s) {
-    if (((unsigned char)*s & 0xC0) != 0x80) n++;
-    s++;
+  size_t n = 0, i = 0, len = strlen(s);
+  while (i < len) {
+    size_t consumed = 0;
+    int cp = utf8Decode(s + i, len - i, &consumed);
+    if (consumed == 0) break;
+    n += (cp >= 0) ? (size_t)utf8_cp_display_width((uint32_t)cp) : 1;
+    i += consumed;
   }
   return n;
 }
 
-// UTF-8-sichere In-Place-Truncation auf max_visual visuelle Zeichen
-// (Codepoints), nicht Bytes. Schuetzt vor mid-Sequence-Cut + ist
-// Spalten-genau (User-Bug 2026-06-14 -- nach erstem Fix war noch
-// 1-Char-Drift in der age-Spalte, weil das vorige byte-basierte
-// truncate+%-25s die Multi-Byte-Codepoints im Padding miszaehlt hat).
+// UTF-8-sichere In-Place-Truncation auf max_visual DISPLAY-Spalten (nicht
+// Bytes, nicht Codepoints). Schuetzt vor mid-Sequence-Cut + ist spalten-genau.
+// (User-Bug 2026-06-14: byte-basiert -> 1-Char-Drift bei Umlauten; 2026-07-12:
+// Codepoint-Zaehlung driftete noch bei Emoji, die 2 Spalten breit sind.)
 static void neighbors_utf8_truncate_to_visual(char* s, size_t max_visual) {
-  size_t bytes = 0;
-  size_t visual = 0;
-  while (s[bytes]) {
-    unsigned char c = (unsigned char)s[bytes];
-    if ((c & 0xC0) == 0x80) {        // Continuation -- mit-konsumieren
-      bytes++;
-      continue;
-    }
-    if (visual >= max_visual) {
-      s[bytes] = 0;
-      return;
-    }
-    bytes++;
-    visual++;
+  size_t i = 0, visual = 0, len = strlen(s);
+  while (i < len) {
+    size_t consumed = 0;
+    int cp = utf8Decode(s + i, len - i, &consumed);
+    if (consumed == 0) break;
+    int w = (cp >= 0) ? utf8_cp_display_width((uint32_t)cp) : 1;
+    if (visual + (size_t)w > max_visual) { s[i] = 0; return; }
+    visual += (size_t)w;
+    i += consumed;
   }
   // s war kuerzer als max_visual -- nichts zu schneiden.
 }
