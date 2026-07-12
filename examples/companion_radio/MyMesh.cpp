@@ -6233,6 +6233,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   // Wunschliste 89/90/91: Sentinel-Pre-Init.
   _prefs.batt_chemistry        = 0xFF;
   _prefs.batt_min_mv           = 0xFFFF;
+  _prefs.batt_min_mv_boot      = 0xFFFF;   // DL9SAU 2026-07-12 -> Default je Chemie
   _prefs.usb_loss_shutdown_min = 0xFF;
   _prefs.button_press_allow_shutdown = 0xFF;  // DL9SAU 2026-07-12 -> Default 1
   _prefs._reserved_usb_wake_action = 0xFF;   // Wunschliste 90 Phase 2 (entfernt 2026-06-20)
@@ -6546,6 +6547,7 @@ void MyMesh::begin(bool has_display) {
   }
 #endif
   if (_prefs.batt_min_mv == 0xFFFF) _prefs.batt_min_mv = 0;
+  if (_prefs.batt_min_mv_boot == 0xFFFF) _prefs.batt_min_mv_boot = 0;
   if (_prefs.usb_loss_shutdown_min == 0xFF) _prefs.usb_loss_shutdown_min = 0;
   if (_prefs.button_press_allow_shutdown == 0xFF
       || _prefs.button_press_allow_shutdown > 1) _prefs.button_press_allow_shutdown = 1;
@@ -10218,6 +10220,49 @@ void MyMesh::doNightFloodAdvert() {
 // zwischen den anderen static helpers).
 static uint8_t getBattChargePctForCurve(uint8_t chemistry, uint16_t mv);
 static uint16_t getBattDefaultMinMv(uint8_t chemistry);
+static uint16_t getBattDefaultBootMv(uint8_t chemistry);       // DL9SAU 2026-07-12
+static uint16_t getMvForBattPct(uint8_t chemistry, uint8_t pct); // DL9SAU 2026-07-12
+
+// DL9SAU 2026-07-12: Effektive Boot/Recovery-Schwelle (mV) fuer den LPCOMP-
+// Wake nach Low-Battery-Shutdown. = konfigurierter batt_min_mv_boot (bzw.
+// Chemie-Default), ABER immer mind. ~12 Ladeprozent UEBER der Poweroff-
+// Schwelle batt_min_mv -- egal was der User gesetzt hat (sonst Boot-Reboot-
+// Loop). Der Clamp greift zur Nutzungszeit = harte Garantie, auch bei
+// spaeterem 'set batt_min_mv' oder Backup-Restore mit ungueltigen Werten.
+// Rueckgabe 0 = Chemie nicht gesetzt -> Feature deaktiviert.
+uint16_t MyMesh::getEffectiveBootMinMv() const {
+  uint8_t chem = _prefs.batt_chemistry;
+  if (chem != 1 && chem != 2) return 0;   // keine Chemie -> aus
+  uint16_t base = (_prefs.batt_min_mv != 0) ? _prefs.batt_min_mv
+                                            : getBattDefaultMinMv(chem);
+  uint16_t want = (_prefs.batt_min_mv_boot != 0) ? _prefs.batt_min_mv_boot
+                                                 : getBattDefaultBootMv(chem);
+  // Mindestabstand: 12 Ladeprozent ueber base (prozent-basiert ueber die
+  // Kurve -- korrekt auch fuer das flache LiFePO4-Plateau).
+  uint8_t base_pct = getBattChargePctForCurve(chem, base);
+  uint16_t floor_mv;
+  if (base_pct != 0xFF) {
+    uint8_t target_pct = (base_pct <= 88) ? (uint8_t)(base_pct + 12) : 100;
+    floor_mv = getMvForBattPct(chem, target_pct);
+  } else {
+    floor_mv = base + 200;   // Fallback ohne Kurve
+  }
+  return (want > floor_mv) ? want : floor_mv;
+}
+
+// DL9SAU 2026-07-12: HW-Comparator (LPCOMP) + VBUS-Wake mit der effektiven
+// Recovery-Schwelle (getEffectiveBootMinMv) armieren. Aufruf beim BOOT (nach
+// Prefs-Einlesen) UND bei 'set batt_min_mv_boot' -- so ist der Comparator
+// immer aktuell konfiguriert, auch wenn der User nie 'set' aufruft oder die
+// LPCOMP-Config nach einem Reset verloren ging. Phase 2 (Board) mappt mV ->
+// refsel + haelt PIN_3V3_EN im SYSTEMOFF fuer den Divider hoch.
+void MyMesh::configureBatteryWake() {
+#if defined(NRF52_POWER_MANAGEMENT)
+  uint16_t mv = getEffectiveBootMinMv();
+  if (mv == 0) return;    // Chemie nicht gesetzt -> Feature aus
+  // Phase 2: board.armBatteryWake(mv);  // T1000eBoard mappt mV -> LPCOMP-refsel
+#endif
+}
 
 // Wunschliste 89/90/91 (2026-06-18): Battery + USB-Power State-Machine.
 // Tick alle Loop-Iterationen, leichtgewichtig (Sample nur alle 10min,
@@ -11336,6 +11381,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("rx_disabled",           _prefs.rx_disabled);   // Wunschliste 83
   kv_uint("batt_chemistry",        _prefs.batt_chemistry);          // Wunschliste 91
   kv_uint("batt_min_mv",           _prefs.batt_min_mv);             // Wunschliste 91
+  kv_uint("batt_min_mv_boot",      _prefs.batt_min_mv_boot);        // DL9SAU 2026-07-12
   kv_uint("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min);   // Wunschliste 90
   kv_uint("button_press_allow_shutdown", _prefs.button_press_allow_shutdown); // DL9SAU 2026-07-12
   // usb_wake_action entfernt 2026-06-20 -- kein backup-export.
@@ -12279,6 +12325,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "rx_disabled") == 0)           { _prefs.rx_disabled           = (uint8_t)as_uint() ? 1 : 0; _br_applied++; return; }   // Wunschliste 83
       if (strcmp(key, "batt_chemistry") == 0)        { uint8_t v=(uint8_t)as_uint(); if (v>2) v=0; _prefs.batt_chemistry=v; _br_applied++; return; }       // Wunschliste 91
       if (strcmp(key, "batt_min_mv") == 0)           { _prefs.batt_min_mv           = (uint16_t)as_uint(); _br_applied++; return; }                       // Wunschliste 91
+      if (strcmp(key, "batt_min_mv_boot") == 0)      { _prefs.batt_min_mv_boot      = (uint16_t)as_uint(); _br_applied++; return; }                       // DL9SAU 2026-07-12
       if (strcmp(key, "usb_loss_shutdown_min") == 0) { uint32_t v=as_uint(); if (v>240) v=240; _prefs.usb_loss_shutdown_min=(uint8_t)v; _br_applied++; return; }  // Wunschliste 90
       if (strcmp(key, "button_press_allow_shutdown") == 0) { _prefs.button_press_allow_shutdown = (uint8_t)as_uint() ? 1 : 0; _br_applied++; return; }  // DL9SAU 2026-07-12
       // usb_wake_action entfernt 2026-06-20 -- restore-ignore.
@@ -13792,6 +13839,32 @@ static uint16_t getBattDefaultMinMv(uint8_t chemistry) {
   if (chemistry == 2) return 2700;  // LiFePO4 Reserve
   return 0;
 }
+// DL9SAU 2026-07-12: Boot/Recovery-Schwelle pro Chemie (~30% Ladung). Nach
+// einem Low-Battery-Aus bleibt das Geraet aus, bis diese Spannung erreicht ist
+// (Auto-Boot). Liegt DEUTLICH ueber getBattDefaultMinMv (Hysterese).
+static uint16_t getBattDefaultBootMv(uint8_t chemistry) {
+  if (chemistry == 1) return 3500;  // Li-Ion/Li-Po ~30%
+  if (chemistry == 2) return 3100;  // LiFePO4    ~30%
+  return 0;
+}
+// Inverse Ladekurve: mV fuer gegebenen Prozent-Wert (Reverse-Interpolation
+// derselben Stuetzstellen). Fuer den prozent-basierten Hysterese-Abstand.
+static uint16_t getMvForBattPct(uint8_t chemistry, uint8_t pct) {
+  const BattCurvePoint* tab; size_t n;
+  if (chemistry == 1)      { tab = BATT_CURVE_LIPO;     n = sizeof(BATT_CURVE_LIPO)    / sizeof(BattCurvePoint); }
+  else if (chemistry == 2) { tab = BATT_CURVE_LIFEPO4;  n = sizeof(BATT_CURVE_LIFEPO4) / sizeof(BattCurvePoint); }
+  else                     return 0;
+  if (pct >= tab[0].pct) return tab[0].mv;   // >= 100%
+  for (size_t i = 1; i < n; i++) {
+    if (pct >= tab[i].pct) {                  // zwischen i-1 (hoeher) und i
+      uint16_t span_mv  = tab[i-1].mv  - tab[i].mv;
+      uint8_t  span_pct = tab[i-1].pct - tab[i].pct;
+      uint8_t  dpct     = pct - tab[i].pct;
+      return tab[i].mv + (uint16_t)((uint32_t)dpct * span_mv / span_pct);
+    }
+  }
+  return tab[n-1].mv;                          // <= niedrigster %-Stuetzpunkt
+}
 
 // Compact-Formatter: 30 -> "30s", 90 -> "1m30s", 3700 -> "1h2m", 90061 -> "1d1h".
 // Buffer-Bedarf: 16 Byte reicht. Greift "die groesste sinnvolle Unit" und
@@ -14825,7 +14898,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Battery + USB-Power:\n"
           "  batt_chemistry (none|lion|lipo|lifepo4),\n"
-          "  batt_min_mv (0=Default je Chemie)");
+          "  batt_min_mv (0=Default je Chemie)\n"
+          "  batt_min_mv_boot (0=Default, Recovery-Wake)");
         pushCompanionMessage(
           "  usb_loss_shutdown_min (0=off, 1..240)\n"
           "  button_press_allow_shutdown (0|1)");
@@ -24065,6 +24139,35 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(r);
       return;
     }
+    // DL9SAU 2026-07-12: Battery-Recovery/Boot-Schwelle (LPCOMP-Wake nach
+    // Low-Battery-Shutdown). 0 = Default je Chemie (~30%). Wird IMMER auf
+    // mind. ~12% ueber batt_min_mv geklemmt (getEffectiveBootMinMv).
+    if (strcmp(key, "batt_min_mv_boot") == 0) {
+      int v = atoi(value_lc);
+      if (v != 0 && (v < 2000 || v > 4300)) {
+        pushCompanionMessage("Wert 0 (Default je Chemie) oder 2000..4300 mV.");
+        return;
+      }
+      _prefs.batt_min_mv_boot = (uint16_t)v;
+      savePrefs();
+      configureBatteryWake();   // HW-Comparator sofort neu konfigurieren
+      uint16_t eff = getEffectiveBootMinMv();
+      char r[170];
+      if (eff == 0) {
+        snprintf(r, sizeof(r),
+                 "OK - batt_min_mv_boot = %d\n  Achtung: chemistry=none -> Recovery-Wake inaktiv.", v);
+      } else if (v != 0 && (uint16_t)v != eff) {
+        snprintf(r, sizeof(r),
+                 "OK - batt_min_mv_boot = %d -> effektiv %u mV\n  (auf >=12%% ueber batt_min_mv geklemmt, gegen Reboot-Loop).",
+                 v, (unsigned)eff);
+      } else {
+        snprintf(r, sizeof(r),
+                 "OK - batt_min_mv_boot%s -> effektiv %u mV (LPCOMP-Recovery-Wake).",
+                 (v == 0 ? " = 0 (Default)" : ""), (unsigned)eff);
+      }
+      pushCompanionMessage(r);
+      return;
+    }
     // Wunschliste 90: USB-Loss-Shutdown-Timer.
     if (strcmp(key, "usb_loss_shutdown_min") == 0) {
       int v = atoi(value_lc);
@@ -24914,6 +25017,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                                                        0);
 #endif
       emit_uint  ("batt_min_mv",         _prefs.batt_min_mv,           0);
+      emit_uint  ("batt_min_mv_boot",    _prefs.batt_min_mv_boot,      0);  // DL9SAU 2026-07-12
       emit_uint  ("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min, 0);
       emit_uint  ("button_press_allow_shutdown", _prefs.button_press_allow_shutdown, 1);  // DL9SAU 2026-07-12 (Default 1)
       // DL9SAU Wunschliste 81 Phase 1+3 / 83: GPS-Profile + Lead + RX.
@@ -25241,6 +25345,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       } else {
         snprintf(r, sizeof(r), "batt_min_mv = %u mV (User-Override)",
                  (unsigned)_prefs.batt_min_mv);
+      }
+    }
+    else if (strcmp(key, "batt_min_mv_boot") == 0) {
+      // DL9SAU 2026-07-12: konfigurierter Wert + effektiver (geklemmter).
+      uint16_t eff = getEffectiveBootMinMv();
+      if (eff == 0) {
+        snprintf(r, sizeof(r), "batt_min_mv_boot = %u (chemistry=none -> Recovery-Wake aus)",
+                 (unsigned)_prefs.batt_min_mv_boot);
+      } else if (_prefs.batt_min_mv_boot == 0) {
+        snprintf(r, sizeof(r), "batt_min_mv_boot = 0 -> Default, effektiv %u mV (Recovery-Wake)",
+                 (unsigned)eff);
+      } else if (_prefs.batt_min_mv_boot != eff) {
+        snprintf(r, sizeof(r), "batt_min_mv_boot = %u -> effektiv %u mV (auf >=12%% ueber batt_min_mv geklemmt)",
+                 (unsigned)_prefs.batt_min_mv_boot, (unsigned)eff);
+      } else {
+        snprintf(r, sizeof(r), "batt_min_mv_boot = %u mV (Recovery-Wake)",
+                 (unsigned)eff);
       }
     }
     else if (strcmp(key, "usb_loss_shutdown_min") == 0) {

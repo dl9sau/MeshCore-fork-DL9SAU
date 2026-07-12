@@ -542,6 +542,11 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
         || _prefs.button_press_allow_shutdown > 1) {
       _prefs.button_press_allow_shutdown = 1;
     }
+    // DL9SAU 2026-07-12: batt_min_mv_boot (uint16, EOF-Sentinel 0xFFFF ->
+    // Default je Chemie). APPEND ans Ende -- NICHT bei batt_min_mv einfuegen.
+    _prefs.batt_min_mv_boot = 0xFFFF;
+    file.read((uint8_t *)&_prefs.batt_min_mv_boot, sizeof(_prefs.batt_min_mv_boot));
+    if (_prefs.batt_min_mv_boot == 0xFFFF) _prefs.batt_min_mv_boot = 0;
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
@@ -811,6 +816,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // DL9SAU 2026-07-12: button_press_allow_shutdown.
     file.write((uint8_t *)&_prefs.button_press_allow_shutdown,
                sizeof(_prefs.button_press_allow_shutdown));
+    // DL9SAU 2026-07-12: batt_min_mv_boot (uint16). APPEND ans Ende.
+    file.write((uint8_t *)&_prefs.batt_min_mv_boot,
+               sizeof(_prefs.batt_min_mv_boot));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).

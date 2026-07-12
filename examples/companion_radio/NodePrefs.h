@@ -711,6 +711,13 @@ struct NodePrefs {  // persisted to file
   // 0xFF im File = EOF-Sentinel -> Migration in begin() zu defaults.
   uint8_t        batt_chemistry;
   uint16_t       batt_min_mv;
+  // DL9SAU 2026-07-12: batt_min_mv_boot -- LPCOMP-Recovery-Schwelle (mV).
+  //   Nach Low-Battery-Shutdown bleibt das Geraet aus, bis die Spannung
+  //   diesen Wert ueberschreitet (Hardware-Comparator weckt = Auto-Boot).
+  //   0 = Default je Chemie (~30%). Wird zur Nutzungszeit IMMER auf mind.
+  //   ~12 Ladeprozent ueber batt_min_mv geklemmt (getEffectiveBootMinMv),
+  //   egal was gesetzt ist -- sonst Boot-Reboot-Loop.
+  uint16_t       batt_min_mv_boot;
   uint8_t        usb_loss_shutdown_min;
   // DL9SAU 2026-07-12: button_press_allow_shutdown -- 0 = Long-Press-Button
   //   loest KEINEN Shutdown aus (Schutz gegen versehentliches Aussperren,

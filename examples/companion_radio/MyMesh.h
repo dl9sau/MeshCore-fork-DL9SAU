@@ -1164,6 +1164,10 @@ private:
   void manageRxPower();
   // Wunschliste 89/90/91: Battery-Schutz + USB-Loss-Timer Tick.
   void manageBatteryAndUsb();
+  // DL9SAU 2026-07-12: geklemmte Boot/Recovery-Schwelle (mV) fuer LPCOMP-Wake.
+  uint16_t getEffectiveBootMinMv() const;
+  // HW-Comparator (LPCOMP+VBUS) mit der effektiven Schwelle armieren.
+  void configureBatteryWake();
 
   // Dispatcher hooks: per-packet TX-param override (CR5 / reduced power) used
   // for repeated packets and our automatic adverts. Eigene Direct-Messages
