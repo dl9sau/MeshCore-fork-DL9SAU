@@ -946,22 +946,45 @@ void DataStore::loadChannels(DataStoreHost* host) {
 }
 
 void DataStore::saveChannels(DataStoreHost* host) {
-  File file = openWrite(_getContactsChannelsFS(), "/channels2");
-  if (file) {
+  // DL9SAU 2026-07-12: temp+rename statt in-place (analog savePrefs). Ein
+  // WDT-Reset/Absturz MITTEN im Write laesst nur die tmp zurueck -> die echte
+  // /channels2 bleibt intakt. Channels ist klein (68B/Record) und liegt auf
+  // dem ExtraFS (39.5KB frei) -> 2x passt problemlos. Der Record-Writer
+  // trackt bereits den Erfolg (success &=) -> kein Magic-Trailer noetig, der
+  // Loop-Erfolg gated den rename. Fallback (FS voll/Fehler): tmp weg +
+  // Direkt-Write wie zuvor. writeBody ist idempotent (getChannelForSave liest
+  // per Index aus der RAM-Tabelle) -> im Fallback zweiter Aufruf ok.
+  FILESYSTEM* fs = _getContactsChannelsFS();
+  const char* TMP  = "/channels2.tmp";
+  const char* REAL = "/channels2";
+  auto writeBody = [&](File& file) -> bool {
     uint8_t channel_idx = 0;
     ChannelDetails ch;
     uint8_t unused[4];
     memset(unused, 0, 4);
-
     while (host->getChannelForSave(channel_idx, ch)) {
       bool success = (file.write(unused, 4) == 4);
       success = success && (file.write((uint8_t *)ch.name, 32) == 32);
       success = success && (file.write((uint8_t *)ch.channel.secret, 32) == 32);
-
-      if (!success) break; // write failed
+      if (!success) return false; // write failed (FS voll)
       channel_idx++;
     }
+    return true;
+  };
+
+  bool ok = false;
+  File file = openWrite(fs, TMP);
+  if (file) {
+    ok = writeBody(file);
     file.close();
+  }
+  if (ok) {
+    ok = fs->rename(TMP, REAL);   // littlefs: atomar, ersetzt existierende
+  }
+  if (!ok) {
+    fs->remove(TMP);
+    File f = openWrite(fs, REAL);
+    if (f) { writeBody(f); f.close(); }
   }
 }
 
