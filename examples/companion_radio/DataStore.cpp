@@ -551,14 +551,28 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
 void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_lon) {
   // DL9SAU 2026-07-12: temp+rename statt in-place-Write. Der Body (unten,
   // unveraendert) steckt in einer Lambda, damit er zweimal aufrufbar ist:
-  //   1) nach /new_prefs.tmp -> Magic-Trailer -> Reopen-Verify -> atomarer
-  //      rename ueber /new_prefs. Ein WDT-Reset/Absturz MITTEN im Write
-  //      laesst nur die tmp zurueck; die echte Datei bleibt intakt -- das
-  //      war die Ursache des Config-Verlusts.
-  //   2) Fallback (FS voll, Verify/rename scheitert): tmp weg + Direkt-
-  //      Write wie frueher (kein Extra-Platzbedarf, best-guess-Degradierung).
-  static const uint8_t PREFS_MAGIC[4] = { 'P','R','F','1' };
-  auto writeBody = [&](File& file) {
+  //   1) nach /new_prefs.tmp -> bei VOLLSTAENDIGEM Write atomar rename ueber
+  //      /new_prefs. Ein WDT-Reset/Absturz MITTEN im Write laesst nur die tmp
+  //      zurueck; die echte Datei bleibt intakt -- das war die Config-Verlust-
+  //      Ursache.
+  //   2) Fallback (FS voll -> ein write kurz / rename scheitert): tmp weg +
+  //      Direkt-Write wie frueher (best-guess-Degradierung).
+  // Vollstaendigkeit NICHT ueber einen Marker im File (der wuerde den tolerant
+  // wachsenden Parser irritieren), sondern ueber die write()-Rueckgabe ==
+  // erwartete Laenge. CountingWriter kapselt file.write() und merkt sich, ob
+  // je ein Write weniger lieferte (Adafruit kappt lfs-Fehler auf 0). close()
+  // ist void -> nicht pruefbar, aber littlefs schreibt Bloecke schon WAEHREND
+  // write() -> FS-voll schlaegt bereits dort zu.
+  struct CountingWriter {
+    File&  f;
+    bool   ok;
+    size_t write(const uint8_t* p, size_t n) {
+      size_t w = f.write(p, n);
+      if (w != n) ok = false;
+      return w;
+    }
+  };
+  auto writeBody = [&](CountingWriter& file) {
     uint8_t pad[8];
     memset(pad, 0, sizeof(pad));
 
@@ -790,9 +804,6 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.ota_pending,
                sizeof(_prefs.ota_pending));
 #endif
-    // DL9SAU 2026-07-12: 4-Byte-Magic-Trailer als Vollstaendigkeits-Marke.
-    // loadPrefsInt liest feldweise + ignoriert Ueberhang -> unsichtbar.
-    file.write((uint8_t *)PREFS_MAGIC, sizeof(PREFS_MAGIC));
   };  // Ende writeBody-Lambda
 
   const char* TMP  = "/new_prefs.tmp";
@@ -800,35 +811,23 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
   bool ok = false;
   File file = openWrite(_fs, TMP);
   if (file) {
-    writeBody(file);
+    CountingWriter cw{ file, true };
+    writeBody(cw);
     file.close();
-    // Reopen + Trailer verifizieren = Beweis fuer vollstaendig + committed
-    // (faengt FS-voll mitten im Body UND Close-Commit-Fehler ab).
-    File chk = openRead(_fs, TMP);
-    if (chk) {
-      uint32_t sz = chk.size();
-      if (sz >= sizeof(PREFS_MAGIC)) {
-        uint8_t tail[4];
-        chk.seek(sz - sizeof(PREFS_MAGIC));
-        if (chk.read(tail, sizeof(PREFS_MAGIC)) == (int)sizeof(PREFS_MAGIC)
-            && memcmp(tail, PREFS_MAGIC, sizeof(PREFS_MAGIC)) == 0) {
-          ok = true;
-        }
-      }
-      chk.close();
-    }
+    ok = cw.ok;   // jeder write() lieferte die erwartete Laenge
   }
   if (ok) {
     ok = _fs->rename(TMP, REAL);   // littlefs: atomar, ersetzt existierende
   }
   if (!ok) {
-    // Verify/rename gescheitert (FS voll o.ae.) -> tmp weg, Direkt-Write in
-    // die echte Datei wie frueher. openWrite(REAL) gibt den alten 8KB-Block
-    // frei -> genug Platz fuer den Direkt-Write (best guess).
+    // Write unvollstaendig oder rename gescheitert (FS voll o.ae.) -> tmp weg,
+    // Direkt-Write in die echte Datei wie frueher. openWrite(REAL) gibt den
+    // alten 8KB-Block frei -> genug Platz fuer den Direkt-Write (best guess).
     _fs->remove(TMP);
     File f = openWrite(_fs, REAL);
     if (f) {
-      writeBody(f);
+      CountingWriter cw{ f, true };
+      writeBody(cw);
       f.close();
     }
   }
