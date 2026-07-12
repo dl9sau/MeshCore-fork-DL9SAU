@@ -5414,6 +5414,14 @@ void MyMesh::printDiscoveryLegendEntry(const DiscoveryEntry& e, bool verbose,
              "%s %s [%s %s]%s%s",
              prefix6, name_buf, role, qual, dist_buf, suffix);
   }
+  // DL9SAU 2026-07-12 Stufe A: passiv-gelernte Slots (Stufe B: fremde
+  // Discovery mitgehoert -> ctl_answered_at_rtc bleibt 0) kennzeichnen.
+  // Nur Empfang bewiesen (einseitig), nicht bidirektional wie ein aktiver
+  // CTL-RESP. Ein Punkt statt Aenderung an allen Zweigen oben.
+  if (e.ctl_answered_at_rtc == 0) {
+    size_t L = strlen(line);
+    snprintf(line + L, sizeof(line) - L, " (passiv)");
+  }
   pushCompanionMessage(line);
 }
 
@@ -17524,22 +17532,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         && (now - _discover_last_at_rtc) <= CR_HEARD_MAX_AGE_SECS
         && _discovery_count > 0
         && !has_km && !has_deg) {
-      char dage[16];
-      uint32_t s = now - _discover_last_at_rtc;
-      if      (s < 60)     snprintf(dage, sizeof(dage), "%us", (unsigned)s);
-      else if (s < 3600)   snprintf(dage, sizeof(dage), "%umin", (unsigned)(s / 60));
-      else if (s < 86400)  snprintf(dage, sizeof(dage), "%uh%02um",
-                                    (unsigned)(s / 3600), (unsigned)((s % 3600) / 60));
-      else                 snprintf(dage, sizeof(dage), "%ud%02uh",
-                                    (unsigned)(s / 86400), (unsigned)((s % 86400) / 3600));
-
-      // 2026-07-06 REFACTOR: iteriere _discovery, nur Slots mit CTL-Answer.
+      // 2026-07-06 REFACTOR: iteriere _discovery. DL9SAU 2026-07-12 Stufe A:
+      // passive Slots (ctl_answered_at_rtc==0 -- via Stufe B fremde Discovery
+      // mitgehoert) NICHT mehr skippen, sondern mit "(passiv)" zeigen. Age
+      // pro Eintrag aus last_seen_at_rtc (die globale Discover-Zeit passt fuer
+      // passive Slots nicht -- sie koennen zu anderer Zeit gehoert worden sein).
       for (uint8_t i = 0; i < _discovery_count; i++) {
         const DiscoveryEntry& e = _discovery[i];
-        if (e.ctl_answered_at_rtc == 0) continue;
         ContactInfo* known = lookupContactByPubKey(e.pubkey, PUB_KEY_SIZE);
         if (known) continue;
         if ((role_mask & (1 << e.adv_type)) == 0) continue;
+        bool passive = (e.ctl_answered_at_rtc == 0);
 
         const char* dtname;
         switch (e.adv_type) {
@@ -17559,13 +17562,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         } else {
           snprintf(dsnr, sizeof(dsnr), "      --");
         }
+        // Age pro Eintrag (statt global) -- korrekt fuer aktiv + passiv.
+        char dage_e[16];
+        uint32_t es = (now >= e.last_seen_at_rtc) ? (now - e.last_seen_at_rtc) : 0;
+        if      (es < 60)    snprintf(dage_e, sizeof(dage_e), "%us", (unsigned)es);
+        else if (es < 3600)  snprintf(dage_e, sizeof(dage_e), "%umin", (unsigned)(es / 60));
+        else if (es < 86400) snprintf(dage_e, sizeof(dage_e), "%uh%02um",
+                                      (unsigned)(es / 3600), (unsigned)((es % 3600) / 60));
+        else                 snprintf(dage_e, sizeof(dage_e), "%ud%02uh",
+                                      (unsigned)(es / 86400), (unsigned)((es % 86400) / 3600));
         char line[160];
         if (!has_hops) {
           snprintf(line, sizeof(line), "  %s %-25.25s %6s %s",
-                   dtname, did, dage, dsnr);
+                   dtname, did, dage_e, dsnr);
         } else {
           snprintf(line, sizeof(line), "  %s %-25.25s %6s %s hops=0",
-                   dtname, did, dage, dsnr);
+                   dtname, did, dage_e, dsnr);
+        }
+        if (passive) {
+          size_t L = strlen(line);
+          snprintf(line + L, sizeof(line) - L, " (passiv)");
         }
         add_line(line);
         discover_shown++;
