@@ -712,6 +712,11 @@ struct NodePrefs {  // persisted to file
   uint8_t        batt_chemistry;
   uint16_t       batt_min_mv;
   uint8_t        usb_loss_shutdown_min;
+  // DL9SAU 2026-07-12: button_press_allow_shutdown -- 0 = Long-Press-Button
+  //   loest KEINEN Shutdown aus (Schutz gegen versehentliches Aussperren,
+  //   solange Button-Wake nicht funktioniert -- kein Ladekabel dabei = kein
+  //   Wieder-An). 1 = erlaubt (Default). 0xFF/>1 im File -> Default 1.
+  uint8_t        button_press_allow_shutdown;
   // DL9SAU 2026-06-20: usb_wake_action wurde nach erfolgreicher
   // shutdown_pending-Sentinel-Implementierung entfernt (Wunschliste
   // 90 Phase 2). Pref-Byte bleibt als 'reserved' im Layout damit

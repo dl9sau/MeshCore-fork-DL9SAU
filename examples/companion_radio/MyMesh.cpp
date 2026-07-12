@@ -6212,6 +6212,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.batt_chemistry        = 0xFF;
   _prefs.batt_min_mv           = 0xFFFF;
   _prefs.usb_loss_shutdown_min = 0xFF;
+  _prefs.button_press_allow_shutdown = 0xFF;  // DL9SAU 2026-07-12 -> Default 1
   _prefs._reserved_usb_wake_action = 0xFF;   // Wunschliste 90 Phase 2 (entfernt 2026-06-20)
   _prefs.shutdown_pending      = 0xFF;
   _prefs.airtime_factor = 1.0;
@@ -6524,6 +6525,8 @@ void MyMesh::begin(bool has_display) {
 #endif
   if (_prefs.batt_min_mv == 0xFFFF) _prefs.batt_min_mv = 0;
   if (_prefs.usb_loss_shutdown_min == 0xFF) _prefs.usb_loss_shutdown_min = 0;
+  if (_prefs.button_press_allow_shutdown == 0xFF
+      || _prefs.button_press_allow_shutdown > 1) _prefs.button_press_allow_shutdown = 1;
   // usb_wake_action entfernt (2026-06-20) -- reserved-Byte braucht keine Migration.
   if (_prefs.shutdown_pending == 0xFF)      _prefs.shutdown_pending = 0;
 
@@ -11299,6 +11302,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("batt_chemistry",        _prefs.batt_chemistry);          // Wunschliste 91
   kv_uint("batt_min_mv",           _prefs.batt_min_mv);             // Wunschliste 91
   kv_uint("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min);   // Wunschliste 90
+  kv_uint("button_press_allow_shutdown", _prefs.button_press_allow_shutdown); // DL9SAU 2026-07-12
   // usb_wake_action entfernt 2026-06-20 -- kein backup-export.
   kv_uint("repeat_scope_mode",     _prefs.repeat_scope_mode);
   kv_uint("msg_store_flash",       _prefs.msg_store_flash);
@@ -12241,6 +12245,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "batt_chemistry") == 0)        { uint8_t v=(uint8_t)as_uint(); if (v>2) v=0; _prefs.batt_chemistry=v; _br_applied++; return; }       // Wunschliste 91
       if (strcmp(key, "batt_min_mv") == 0)           { _prefs.batt_min_mv           = (uint16_t)as_uint(); _br_applied++; return; }                       // Wunschliste 91
       if (strcmp(key, "usb_loss_shutdown_min") == 0) { uint32_t v=as_uint(); if (v>240) v=240; _prefs.usb_loss_shutdown_min=(uint8_t)v; _br_applied++; return; }  // Wunschliste 90
+      if (strcmp(key, "button_press_allow_shutdown") == 0) { _prefs.button_press_allow_shutdown = (uint8_t)as_uint() ? 1 : 0; _br_applied++; return; }  // DL9SAU 2026-07-12
       // usb_wake_action entfernt 2026-06-20 -- restore-ignore.
       if (strcmp(key, "repeat_scope_mode") == 0)     { _prefs.repeat_scope_mode     = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "msg_store_flash") == 0)       { _prefs.msg_store_flash       = (uint8_t)as_uint(); _br_applied++; return; }
@@ -14787,7 +14792,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  batt_chemistry (none|lion|lipo|lifepo4),\n"
           "  batt_min_mv (0=Default je Chemie)");
         pushCompanionMessage(
-          "  usb_loss_shutdown_min (0=off, 1..240)");
+          "  usb_loss_shutdown_min (0=off, 1..240)\n"
+          "  button_press_allow_shutdown (0|1)");
         pushCompanionMessage(
           "Repeat:\n"
           "  repeat,\n"
@@ -23314,6 +23320,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Geraet sauber ab. USB wieder an -> Timer cancel.");
         return;
       }
+      if (strcmp(key, "button_press_allow_shutdown") == 0) {
+        pushCompanionMessage(
+          "set button_press_allow_shutdown <0|1>:\n"
+          "  1 = Long-Press-Button schaltet ab (Default).\n"
+          "  0 = Button loest KEINEN Shutdown aus.");
+        pushCompanionMessage(
+          "  Schutz gegen versehentliches Aussperren, solange\n"
+          "  Button-Wake nicht geht (kein Ladekabel = kein An).\n"
+          "  CLI/Companion-'shutdown' bleiben unberuehrt.");
+        return;
+      }
       if (strcmp(key, "path_hash_mode") == 0 || strcmp(key, "path.hash.mode") == 0) {
         pushCompanionMessage(
           "set path_hash_mode <0..2>:\n"
@@ -24026,6 +24043,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (v == 0) snprintf(r, sizeof(r), "OK - usb_loss_shutdown disabled.");
       else        snprintf(r, sizeof(r), "OK - usb_loss_shutdown_min = %d (powerOff %d min nach USB-Loss).", v, v);
       pushCompanionMessage(r);
+      return;
+    }
+    // DL9SAU 2026-07-12: Button-Shutdown-Sperre (Schutz gegen Aussperren).
+    if (strcmp(key, "button_press_allow_shutdown") == 0) {
+      int v = atoi(value_lc);
+      if (v != 0 && v != 1) {
+        pushCompanionMessage("Wert 0 oder 1 (0 = Button-Shutdown gesperrt).");
+        return;
+      }
+      _prefs.button_press_allow_shutdown = (uint8_t)v;
+      savePrefs();
+      if (v == 0) pushCompanionMessage("OK - button_press_allow_shutdown = 0 (Long-Press schaltet NICHT ab).");
+      else        pushCompanionMessage("OK - button_press_allow_shutdown = 1 (Long-Press schaltet ab, Default).");
       return;
     }
     // Wunschliste 24: Hop-Cap fuer Nicht-Chat-Adverts (Repeater/Sensor/
@@ -24850,6 +24880,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 #endif
       emit_uint  ("batt_min_mv",         _prefs.batt_min_mv,           0);
       emit_uint  ("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min, 0);
+      emit_uint  ("button_press_allow_shutdown", _prefs.button_press_allow_shutdown, 1);  // DL9SAU 2026-07-12 (Default 1)
       // DL9SAU Wunschliste 81 Phase 1+3 / 83: GPS-Profile + Lead + RX.
       emit_uint  ("gps_profile",         _prefs.gps_profile,           0);
       emit_uint  ("gps_lead_secs",       _prefs.gps_lead_secs,         300);
@@ -25180,6 +25211,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "usb_loss_shutdown_min") == 0) {
       snprintf(r, sizeof(r), "usb_loss_shutdown_min = %u",
                (unsigned)_prefs.usb_loss_shutdown_min);
+    }
+    else if (strcmp(key, "button_press_allow_shutdown") == 0) {
+      snprintf(r, sizeof(r), "button_press_allow_shutdown = %u (%s)",
+               (unsigned)_prefs.button_press_allow_shutdown,
+               _prefs.button_press_allow_shutdown ? "Button schaltet ab"
+                                                   : "Button-Shutdown gesperrt");
     }
     else if (strcmp(key, "shutdown_pending") == 0) {
       // DL9SAU 2026-07-12: Sentinel ist jetzt die Datei /shutdown_pending

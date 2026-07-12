@@ -467,6 +467,14 @@ void UITask::handleButtonLongPress() {
   if (millis() - ui_started_at < 8000) {   // long press in first 8 seconds since startup -> CLI/rescue
     the_mesh.enterCLIRescue();
   } else {
-    shutdown();
+    // DL9SAU 2026-07-12: Button-Shutdown-Sperre. Schuetzt gegen versehentliches
+    // Aussperren, solange Button-Wake nicht funktioniert (kein Ladekabel dabei
+    // = kein Wieder-An). Nur DIESE Button-Stelle ist gated -- CLI/Companion-
+    // 'shutdown', USB-Loss- und Batt-Low-Shutdown laufen unveraendert.
+    if (the_mesh.getNodePrefs()->button_press_allow_shutdown == 0) {
+      MESH_DEBUG_PRINTLN("UITask: button shutdown blocked by pref");
+    } else {
+      shutdown();
+    }
   }
 }

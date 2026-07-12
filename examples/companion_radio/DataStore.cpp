@@ -532,6 +532,16 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     if (_prefs.cad_enabled == 0xFF || _prefs.cad_enabled > 1) {
       _prefs.cad_enabled = 1;  // an per Default
     }
+    // DL9SAU 2026-07-12: button_press_allow_shutdown. EOF-Sentinel 0xFF ->
+    // Default 1 (erlaubt); der >1-Clamp faengt Altdaten ab (inkl. eines
+    // evtl. Magic-Rest-Bytes aus /new_prefs von Commit 3735122a).
+    _prefs.button_press_allow_shutdown = 0xFF;
+    file.read((uint8_t *)&_prefs.button_press_allow_shutdown,
+              sizeof(_prefs.button_press_allow_shutdown));
+    if (_prefs.button_press_allow_shutdown == 0xFF
+        || _prefs.button_press_allow_shutdown > 1) {
+      _prefs.button_press_allow_shutdown = 1;
+    }
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Pending-Flag (ESP32-only,
@@ -798,6 +808,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.channel_no_scope_behavior));
     // 2026-07-06 Upstream-Merge: cad_enabled.
     file.write((uint8_t *)&_prefs.cad_enabled, sizeof(_prefs.cad_enabled));
+    // DL9SAU 2026-07-12: button_press_allow_shutdown.
+    file.write((uint8_t *)&_prefs.button_press_allow_shutdown,
+               sizeof(_prefs.button_press_allow_shutdown));
 
 #ifdef ESP_PLATFORM
     // DL9SAU 2026-06-16: Reboot-into-OTA Flag (ESP32-only).
