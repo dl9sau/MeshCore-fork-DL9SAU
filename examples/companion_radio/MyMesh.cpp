@@ -16879,7 +16879,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 #if ENV_INCLUDE_GPS == 1
         if (!_prefs.gps_enabled) {
           pushCompanionMessage("GPS ist aus. Mit 'gps on' aktivieren, Fix "
-                               "abwarten (siehe 'gps'), dann 'gps setloc'.");
+                               "abwarten (siehe 'gps'), 'gps setloc', danach "
+                               "'gps off' wieder aus.");
         } else {
           pushCompanionMessage("Keine GPS-Position (noch nie ein Fix). Nach Befehl "
                                "'gps sync' Fix abwarten (siehe 'gps') und 'gps "
