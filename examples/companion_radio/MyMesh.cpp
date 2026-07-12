@@ -15908,6 +15908,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else if (_gps_fix_seen_this_wake) gps_src = "LIVE";
       else if (_gps_had_fix_ever)       gps_src = "LAST-FIX";
       else                              gps_src = "PREFS (no fix yet)";
+      // DL9SAU 2026-07-12: bei LIVE/LAST-FIX die GPS-EIGENE Position (loc)
+      // zeigen -- nicht sensors.node_lat/lon (fixe/Config-Position). Sonst
+      // stand bei 'src=LAST-FIX' irrefuehrend die fixe Position (User-Bug:
+      // GPS im Sleep zeigte die restaurierte Backup-Location statt des Fixes).
+      double disp_lat = sensors.node_lat, disp_lon = sensors.node_lon;
+#if ENV_INCLUDE_GPS == 1
+      {
+        LocationProvider* dloc = sensors.getLocationProvider();
+        if (_prefs.gps_enabled && dloc && (dloc->isValid() || _gps_had_fix_ever)) {
+          double la = ((double)dloc->getLatitude())  / 1000000.0;
+          double lo = ((double)dloc->getLongitude()) / 1000000.0;
+          if (la != 0.0 || lo != 0.0) { disp_lat = la; disp_lon = lo; }
+        }
+      }
+#endif
       // Wunschliste 87 Refactor: formatDurationCompact + " ago" Suffix.
       char age_buf[24];
       if (_gps_last_fix_at_millis == 0) {
@@ -15949,7 +15964,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(rd, sizeof(rd),
                "  gps     = %.6f, %.6f\n"
                "    src=%s  last_fix=%s",
-               sensors.node_lat, sensors.node_lon, gps_src, age_buf);
+               disp_lat, disp_lon, gps_src, age_buf);
       pushCompanionMessage(rd);
 #else
       snprintf(rd, sizeof(rd),
@@ -15960,7 +15975,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       snprintf(rd, sizeof(rd),
                "  gps     = %.6f, %.6f\n"
                "    src=%s  last_fix=%s",
-               sensors.node_lat, sensors.node_lon, gps_src, age_buf);
+               disp_lat, disp_lon, gps_src, age_buf);
       pushCompanionMessage(rd);
 #endif
       return;
@@ -16836,16 +16851,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _gps_user_override_until_advert = true;
       pushCompanionMessage("OK - GPS sync request (wach bis naechster Advert).");
     } else if (gps_idx == 3) {    // setloc
-      // Aktuelle GPS-Position in sensors.node_lat/lon persistieren. Sinn:
-      // EnvironmentSensorManager schreibt zwar laufend node_lat/lon aus
-      // dem Live-Fix, savePrefs wird dabei aber nicht getriggert. Bei
-      // GPS-off oder Cycle-Sleep bleibt dann irgendwann ein stale Wert
-      // im Flash. 'gps setloc' macht aus der aktuellen Position einen
-      // expliziten persistenten Anker.
-      double cur_lat, cur_lon;
-      if (!getEffectiveLatLon(cur_lat, cur_lon)) {
-        pushCompanionMessage("Keine gueltige Position (GPS aus, kein Fix, "
-                             "und keine fixe Position konfiguriert).");
+      // Aktuelle GPS-Position als expliziten persistenten Anker speichern.
+      // DL9SAU 2026-07-12 BUGFIX (User-Befund): der GPS-EIGENEN Position (loc)
+      // trauen, AUCH wenn GPS schlaeft (!isValid()) solange _gps_had_fix_ever
+      // -- MicroNMEA haelt den letzten Fix. Vorher nahm es getEffectiveLatLon(),
+      // das bei schlafendem GPS auf sensors.node_lat/lon (fixe/aus dem Backup
+      // restaurierte Position) zurueckfiel und die STILL festnagelte (Ostfriesland
+      // statt des Berlin-Fixes). node_lat/lon wird NICHT als GPS-Quelle genommen.
+      double cur_lat = 0.0, cur_lon = 0.0;
+      bool usable = false;
+      const char* src = "GPS";
+#if ENV_INCLUDE_GPS == 1
+      LocationProvider* loc = sensors.getLocationProvider();
+      if (_prefs.gps_enabled && loc && (loc->isValid() || _gps_had_fix_ever)) {
+        double la = ((double)loc->getLatitude())  / 1000000.0;
+        double lo = ((double)loc->getLongitude()) / 1000000.0;
+        if (la != 0.0 || lo != 0.0) {   // Sanity: Provider haelt echt eine Position
+          cur_lat = la; cur_lon = lo; usable = true;
+          src = _gps_fix_seen_this_wake ? "LIVE" : "letzter GPS-Fix (Sleep)";
+        }
+      }
+#endif
+      if (!usable) {
+        pushCompanionMessage("Keine GPS-Position (noch nie ein Fix, GPS aus, oder "
+                             "Provider haelt keine). 'gps sync' -> Fix abwarten -> "
+                             "nochmal 'gps setloc'.");
         return;
       }
       sensors.node_lat = cur_lat;
@@ -16856,9 +16886,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _adv_prefs_lat = cur_lat;
       _adv_prefs_lon = cur_lon;
       savePrefs();
-      char line[100];
-      snprintf(line, sizeof(line), "OK - position persistiert: %.6f, %.6f",
-               cur_lat, cur_lon);
+      char line[120];
+      snprintf(line, sizeof(line), "OK - Position persistiert (%s): %.6f, %.6f",
+               src, cur_lat, cur_lon);
       pushCompanionMessage(line);
       // Geo-Recommendation neu auswerten (analog CMD_SET_ADVERT_LATLON)
       maybePushGeoRecommendation(cur_lat, cur_lon);
