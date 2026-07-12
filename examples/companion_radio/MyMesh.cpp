@@ -2461,7 +2461,7 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
   }
   // 2026-07-10 Phase 2: Echo einer eigenen Channel-Nachricht gehoert (h ==
   // pkt-hash des Sends)? Laeuft VOR der hasSeen-Dedup, also sehen wir das Echo.
-  // Coalesce-Eintrag loeschen -> ein spaeterer identischer Send ist frisch.
+  // Coalesce-Eintrag loeschen -> ein spaeterer identischer Text wird mit aktuellem timestamp gesendet
   dropCoalesceByConfirm(/*is_dm=*/false, h);
   // REVISIT: try to determine which Region (from transport_codes[1]) that Sender is indicating for replies/responses
   //    if unknown, fallback to finding Region from transport_codes[0], the 'scope' used by Sender
@@ -13985,8 +13985,7 @@ bool MyMesh::dropCoalesceByConfirm(bool is_dm, uint32_t confirm_key) {
     e.used = false;
     e.confirm_key = 0;
     traceCompanion(TRACE_COALESCE,
-                   "[coalesce] %s: Eintrag geloescht (%s bestaetigt) -> "
-                   "naechster identischer Send ist frisch",
+                   "[coalesce] %s: Eintrag geloescht (%s bestaetigt)",
                    is_dm ? "DM" : "CH", is_dm ? "ACK" : "Echo");
     return true;
   }
@@ -17520,18 +17519,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       shown++;
     }
 
-    // Discover-Augmentation: wenn innerhalb 48h ein 'discover' lief und
-    // dabei Antworten gesammelt wurden, liste jene Knoten nach die NICHT
-    // in der Kontaktliste sind. Discover-Antworten sind protokoll-bedingt
-    // zero-hop -- passen also zu hops-Filter (out_path_len effektiv 0).
-    // km/deg-Filter koennen ohne GPS aber nicht entschieden werden, also
-    // bei aktivem km/deg ueberspringen (Semantik 2026-06-13: AND).
+    // Discover-Augmentation: liste _discovery-Knoten nach die NICHT in der
+    // Kontaktliste sind. Discover-Antworten sind protokoll-bedingt zero-hop
+    // -- passen also zu hops-Filter (out_path_len effektiv 0). km/deg-Filter
+    // koennen ohne GPS nicht entschieden werden, also bei aktivem km/deg
+    // ueberspringen (Semantik 2026-06-13: AND).
+    // DL9SAU 2026-07-12: NICHT mehr an einen eigenen 'discover' innerhalb 48h
+    // gekoppelt (_discover_last_at_rtc) -- sonst waeren rein passiv gelernte
+    // Slots (Stufe B, ohne eigene Runde) hier unsichtbar. Stattdessen pro
+    // Eintrag gegen das neighbors-Zeitfenster (last_age_secs, Default 48h)
+    // gefiltert -- unabhaengig von der Purge-Kadenz (die laeuft nur beim
+    // 'discover'-Kommando).
     int discover_shown = 0;
-    if (_discover_last_at_rtc > 0
-        && now >= _discover_last_at_rtc
-        && (now - _discover_last_at_rtc) <= CR_HEARD_MAX_AGE_SECS
-        && _discovery_count > 0
-        && !has_km && !has_deg) {
+    if (_discovery_count > 0 && !has_km && !has_deg) {
       // 2026-07-06 REFACTOR: iteriere _discovery. DL9SAU 2026-07-12 Stufe A:
       // passive Slots (ctl_answered_at_rtc==0 -- via Stufe B fremde Discovery
       // mitgehoert) NICHT mehr skippen, sondern mit "(passiv)" zeigen. Age
@@ -17543,6 +17543,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (known) continue;
         if ((role_mask & (1 << e.adv_type)) == 0) continue;
         bool passive = (e.ctl_answered_at_rtc == 0);
+        // Per-Eintrag gegen das neighbors-Zeitfenster (last_age_secs, Default
+        // 48h, respektiert 'last <N>d|h') filtern -- ersetzt die alte
+        // Kopplung an _discover_last_at_rtc. Purge laeuft nur beim 'discover'-
+        // Kommando, daher hier die Altersgrenze selbst durchsetzen.
+        uint32_t es = (now >= e.last_seen_at_rtc) ? (now - e.last_seen_at_rtc) : 0;
+        if (es > last_age_secs) continue;
 
         const char* dtname;
         switch (e.adv_type) {
@@ -17562,9 +17568,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         } else {
           snprintf(dsnr, sizeof(dsnr), "      --");
         }
-        // Age pro Eintrag (statt global) -- korrekt fuer aktiv + passiv.
+        // Age-String pro Eintrag (es oben berechnet + gefiltert).
         char dage_e[16];
-        uint32_t es = (now >= e.last_seen_at_rtc) ? (now - e.last_seen_at_rtc) : 0;
         if      (es < 60)    snprintf(dage_e, sizeof(dage_e), "%us", (unsigned)es);
         else if (es < 3600)  snprintf(dage_e, sizeof(dage_e), "%umin", (unsigned)(es / 60));
         else if (es < 86400) snprintf(dage_e, sizeof(dage_e), "%uh%02um",
