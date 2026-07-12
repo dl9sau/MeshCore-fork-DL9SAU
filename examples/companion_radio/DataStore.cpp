@@ -135,6 +135,25 @@ uint32_t DataStore::getStorageTotalKb() const {
 #endif
 }
 
+// DL9SAU 2026-07-12: Belegung beider FS in Bytes -- fuer 'fsinfo' + die
+// temp+rename-Platzentscheidung (temp braucht temporaer 2x die groesste Datei).
+void DataStore::getFsInfo(uint32_t& int_total, uint32_t& int_used,
+                          uint32_t& ext_total, uint32_t& ext_used) const {
+  int_total = int_used = ext_total = ext_used = 0;
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  {
+    const lfs_config* c = _fs->_getFS()->cfg;
+    int_total = (uint32_t)(c->block_size) * (uint32_t)(c->block_count);
+    int_used  = (uint32_t)(c->block_size) * (uint32_t)_getLfsUsedBlockCount(_fs);
+  }
+  if (_fsExtra) {
+    const lfs_config* c = _fsExtra->_getFS()->cfg;
+    ext_total = (uint32_t)(c->block_size) * (uint32_t)(c->block_count);
+    ext_used  = (uint32_t)(c->block_size) * (uint32_t)_getLfsUsedBlockCount(_fsExtra);
+  }
+#endif
+}
+
 File DataStore::openRead(const char* filename) {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   return _fs->open(filename, FILE_O_READ);
@@ -167,6 +186,12 @@ bool DataStore::removeFile(const char* filename) {
 
 bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
   return fs->remove(filename);
+}
+
+// DL9SAU 2026-07-12: Existenz-Check ohne Oeffnen/Parsen -- fuer den
+// /shutdown_pending-Datei-Sentinel (touch=pending / rm=gecleart).
+bool DataStore::fileExists(const char* filename) const {
+  return _fs->exists(filename);
 }
 
 bool DataStore::formatFileSystem() {
@@ -524,8 +549,16 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
 }
 
 void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_lon) {
-  File file = openWrite(_fs, "/new_prefs");
-  if (file) {
+  // DL9SAU 2026-07-12: temp+rename statt in-place-Write. Der Body (unten,
+  // unveraendert) steckt in einer Lambda, damit er zweimal aufrufbar ist:
+  //   1) nach /new_prefs.tmp -> Magic-Trailer -> Reopen-Verify -> atomarer
+  //      rename ueber /new_prefs. Ein WDT-Reset/Absturz MITTEN im Write
+  //      laesst nur die tmp zurueck; die echte Datei bleibt intakt -- das
+  //      war die Ursache des Config-Verlusts.
+  //   2) Fallback (FS voll, Verify/rename scheitert): tmp weg + Direkt-
+  //      Write wie frueher (kein Extra-Platzbedarf, best-guess-Degradierung).
+  static const uint8_t PREFS_MAGIC[4] = { 'P','R','F','1' };
+  auto writeBody = [&](File& file) {
     uint8_t pad[8];
     memset(pad, 0, sizeof(pad));
 
@@ -757,8 +790,47 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.ota_pending,
                sizeof(_prefs.ota_pending));
 #endif
+    // DL9SAU 2026-07-12: 4-Byte-Magic-Trailer als Vollstaendigkeits-Marke.
+    // loadPrefsInt liest feldweise + ignoriert Ueberhang -> unsichtbar.
+    file.write((uint8_t *)PREFS_MAGIC, sizeof(PREFS_MAGIC));
+  };  // Ende writeBody-Lambda
 
+  const char* TMP  = "/new_prefs.tmp";
+  const char* REAL = "/new_prefs";
+  bool ok = false;
+  File file = openWrite(_fs, TMP);
+  if (file) {
+    writeBody(file);
     file.close();
+    // Reopen + Trailer verifizieren = Beweis fuer vollstaendig + committed
+    // (faengt FS-voll mitten im Body UND Close-Commit-Fehler ab).
+    File chk = openRead(_fs, TMP);
+    if (chk) {
+      uint32_t sz = chk.size();
+      if (sz >= sizeof(PREFS_MAGIC)) {
+        uint8_t tail[4];
+        chk.seek(sz - sizeof(PREFS_MAGIC));
+        if (chk.read(tail, sizeof(PREFS_MAGIC)) == (int)sizeof(PREFS_MAGIC)
+            && memcmp(tail, PREFS_MAGIC, sizeof(PREFS_MAGIC)) == 0) {
+          ok = true;
+        }
+      }
+      chk.close();
+    }
+  }
+  if (ok) {
+    ok = _fs->rename(TMP, REAL);   // littlefs: atomar, ersetzt existierende
+  }
+  if (!ok) {
+    // Verify/rename gescheitert (FS voll o.ae.) -> tmp weg, Direkt-Write in
+    // die echte Datei wie frueher. openWrite(REAL) gibt den alten 8KB-Block
+    // frei -> genug Platz fuer den Direkt-Write (best guess).
+    _fs->remove(TMP);
+    File f = openWrite(_fs, REAL);
+    if (f) {
+      writeBody(f);
+      f.close();
+    }
   }
 }
 

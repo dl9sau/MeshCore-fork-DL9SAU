@@ -10475,7 +10475,10 @@ void MyMesh::loadCronFromFile() {
 
 void MyMesh::applyShutdownPendingCheck() {
 #if defined(NRF52_PLATFORM)
-  if (!_prefs.shutdown_pending) return;
+  // DL9SAU 2026-07-12: Sentinel = Existenz der Datei /shutdown_pending
+  // (nicht mehr _prefs.shutdown_pending). Frueh + billig pruefbar (kein
+  // Full-Prefs-Parse), und Clearen (rm) fasst die Settings nicht an.
+  if (!_store->fileExists("/shutdown_pending")) return;
   // Button-Press / Hardware-Reset = expliziter User-Wake -> immer
   // booten, unabhaengig vom USB-State. RESETREAS_OFF wird gesetzt
   // bei GPIO-Sense-Wake (BUTTON_PIN via nrf_gpio_cfg_sense_input
@@ -10487,8 +10490,7 @@ void MyMesh::applyShutdownPendingCheck() {
                               | POWER_RESETREAS_RESETPIN_Msk)) != 0;
   if (user_button_wake) {
     bootLogWritePreReboot("shutdown-pending(button-wake)");
-    _prefs.shutdown_pending = 0;
-    savePrefs();
+    _store->removeFile("/shutdown_pending");
     return;  // boot weiter
   }
   // 50 USB-Samples ueber 500ms -- nur clearen wenn alle stable da.
@@ -10501,12 +10503,13 @@ void MyMesh::applyShutdownPendingCheck() {
     char buf[60];
     snprintf(buf, sizeof(buf), "shutdown-pending(%d/50 usb)", stable_usb);
     bootLogWritePreReboot(buf);
+    // Datei bleibt bestehen (bleibt aus) -> naechster Boot re-prueft.
     board.powerOff();
     // returns nicht (sd_power_system_off jetzt funktional nach
     // SD-Init in serial_interface.begin)
   }
-  _prefs.shutdown_pending = 0;
-  savePrefs();
+  // USB stabil da -> booten, Sentinel loeschen.
+  _store->removeFile("/shutdown_pending");
 #endif
 }
 
@@ -10514,14 +10517,18 @@ void MyMesh::setShutdownSentinel() {
 #if defined(NRF52_PLATFORM)
   // Layered defense gegen Phantom-Wake nach shutdown + USB-Pull:
   // (1) GPREGRET: schnell, BOR-zerstoerbar
-  // (2) NodePrefs.shutdown_pending: BOR-robust via savePrefs() ins
-  //     Flash. Wird in MyMesh::begin() ausgewertet -- bei !USB -> aus.
+  // (2) DL9SAU 2026-07-12: /shutdown_pending als EIGENE Datei (touch)
+  //     statt NodePrefs.shutdown_pending. Entkoppelt vom grossen Prefs-
+  //     File -> Clearen (rm) reisst die Settings NICHT mit (das war die
+  //     Ursache des Config-Verlusts) und der Boot-Check braucht kein
+  //     Full-Prefs-Load. littlefs-Metadaten (create) committen synchron
+  //     + atomar -> BOR-robust wie das alte savePrefs, ohne die 8KB.
   uint8_t sd_en = 0;
   sd_softdevice_is_enabled(&sd_en);
   if (sd_en) sd_power_gpregret_set(0, 0xAB);
   else       NRF_POWER->GPREGRET = 0xAB;
-  _prefs.shutdown_pending = 1;
-  savePrefs();
+  File f = _store->openWriteFile("/shutdown_pending");
+  if (f) f.close();
 #endif
 }
 
@@ -15438,8 +15445,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       "  crashtest, cron, dfu, discover, duty,"
     );
     pushCompanionMessage(
-      "  filter, get, gps, help, logging, magic-scopes,\n"
-      "  messages, neighbors,"
+      "  filter, fsinfo, get, gps, help, logging,\n"
+      "  magic-scopes, messages, neighbors,"
     );
     pushCompanionMessage(
       "  path, prefs, reboot, reformat, remote, repeater,\n"
@@ -22757,6 +22764,36 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // gesamte NodePrefs-Struktur (DL9SAU + Main). Synonym zu 'prefs save'
   // ohne Namespace-Verwirrung. Speichert NICHT Channels/Contacts/Identity
   // (haben eigene Speicher-Pfade).
+  // DL9SAU 2026-07-12: 'fsinfo' -- FS-Belegung beider Partitionen + Groesse
+  // von /new_prefs. Grundlage fuer die temp+rename-Platzentscheidung (temp
+  // braucht temporaer 2x die Datei) und die Hilfe-in-Datei-Frage.
+  if (starts_with_word(cmd, "fsinfo")) {
+    uint32_t it = 0, iu = 0, et = 0, eu = 0;
+    _store->getFsInfo(it, iu, et, eu);
+    char r[200];
+    snprintf(r, sizeof(r),
+      "fsinfo (Bytes):\n  InternalFS: %lu/%lu belegt, %lu frei",
+      (unsigned long)iu, (unsigned long)it, (unsigned long)(it - iu));
+    pushCompanionMessage(r);
+    if (et > 0) {
+      snprintf(r, sizeof(r),
+        "  ExtraFS: %lu/%lu belegt, %lu frei",
+        (unsigned long)eu, (unsigned long)et, (unsigned long)(et - eu));
+      pushCompanionMessage(r);
+    } else {
+      pushCompanionMessage("  (kein ExtraFS)");
+    }
+    // Groesse der Prefs-Datei (fuer 2x-Abschaetzung bei temp+rename).
+    File pf = _store->openRead("/new_prefs");
+    uint32_t psz = pf ? (uint32_t)pf.size() : 0;
+    if (pf) pf.close();
+    snprintf(r, sizeof(r),
+      "  /new_prefs: %lu B (temp+rename braucht 2x = %lu B frei)",
+      (unsigned long)psz, (unsigned long)(psz * 2));
+    pushCompanionMessage(r);
+    return;
+  }
+
   if (starts_with_word(cmd, "save")) {
     savePrefs();
     pushCompanionMessage("OK - settings (DL9SAU + Main) persistent gespeichert.\n"
@@ -25124,8 +25161,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                (unsigned)_prefs.usb_loss_shutdown_min);
     }
     else if (strcmp(key, "shutdown_pending") == 0) {
-      snprintf(r, sizeof(r), "shutdown_pending = %u (RAM/Flash sentinel)",
-               (unsigned)_prefs.shutdown_pending);
+      // DL9SAU 2026-07-12: Sentinel ist jetzt die Datei /shutdown_pending
+      // (touch/rm), nicht mehr das Prefs-Byte. Existenz = pending.
+      snprintf(r, sizeof(r), "shutdown_pending = %u (/shutdown_pending file)",
+               _store->fileExists("/shutdown_pending") ? 1u : 0u);
     }
     else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0
              || strcmp(key, "flood.max.advert") == 0) {

@@ -48,8 +48,15 @@ public:
   File openWriteFile(const char* filename);   // Wunschliste 19 Phase C: msg-bucket-persist
   bool removeFile(const char* filename);
   bool removeFile(FILESYSTEM* fs, const char* filename);
+  // DL9SAU 2026-07-12: Existenz-Check auf der Primary-FS (InternalFS) --
+  // fuer den /shutdown_pending-Datei-Sentinel (touch/rm statt Prefs-Byte).
+  bool fileExists(const char* filename) const;
   uint32_t getStorageUsedKb() const;
   uint32_t getStorageTotalKb() const;
+  // DL9SAU 2026-07-12: Belegung BEIDER Partitionen in Bytes (fuer 'fsinfo' +
+  // die temp+rename-Platzentscheidung). ext_* = 0 wenn kein ExtraFS.
+  void getFsInfo(uint32_t& int_total, uint32_t& int_used,
+                 uint32_t& ext_total, uint32_t& ext_used) const;
 
 private:
   FILESYSTEM* _getContactsChannelsFS() const { if (_fsExtra) return _fsExtra; return _fs;};
