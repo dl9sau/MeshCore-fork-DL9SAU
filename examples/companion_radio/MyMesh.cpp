@@ -16878,9 +16878,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         // bei GPS-an nicht erwaehnen (und "schlaeft" interessiert nicht).
 #if ENV_INCLUDE_GPS == 1
         if (!_prefs.gps_enabled) {
-          pushCompanionMessage("GPS ist aus. Mit 'gps on' (oder 'gps sync' fuer "
-                               "einmalig) aktivieren, Fix abwarten (siehe 'gps'), "
-                               "dann 'gps setloc'.");
+          pushCompanionMessage("GPS ist aus. Mit 'gps on' aktivieren, Fix "
+                               "abwarten (siehe 'gps'), dann 'gps setloc'.");
         } else {
           pushCompanionMessage("Keine GPS-Position (noch nie ein Fix). Nach Befehl "
                                "'gps sync' Fix abwarten (siehe 'gps') und 'gps "
