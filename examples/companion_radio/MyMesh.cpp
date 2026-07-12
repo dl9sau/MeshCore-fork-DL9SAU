@@ -5258,16 +5258,19 @@ bool MyMesh::sendAnonQueryZeroHop(const uint8_t* pubkey32, const char* display_n
 // Ambivalent (Terminal-abhaengig, v.a. U+2600-Bereich Text-vs-Emoji-
 // Presentation), aber deckt die ueblichen Repeater-Namen-Emoji ab.
 static int utf8_cp_display_width(uint32_t cp) {
+  // NUR eindeutig doppelt-breite Codepoints. Die BMP-Symbol-/Dingbat-/Arrow-
+  // Bereiche (U+2600-27BF wie ☀, U+2B00-2BFF) sind ABSICHTLICH NICHT dabei:
+  // sie rendern in Monospace-Terminals (Text-Presentation, ohne VS16) meist
+  // als 1 Spalte -- als 2 gezaehlt drifteten die ☀-Zeilen (User 2026-07-12).
+  // Echte Emoji leben in der Astral-Ebene (>= U+1F000, z.B. 🏠) = zuverlaessig 2.
   if ( (cp >= 0x1100 && cp <= 0x115F) ||   // Hangul Jamo
-       (cp >= 0x2600 && cp <= 0x27BF) ||   // Misc Symbols + Dingbats (☀ ...)
-       (cp >= 0x2B00 && cp <= 0x2BFF) ||   // Symbols & Arrows
        (cp >= 0x2E80 && cp <= 0xA4CF) ||   // CJK Radicals .. Yi
        (cp >= 0xAC00 && cp <= 0xD7A3) ||   // Hangul Syllables
        (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK Compat Ideographs
        (cp >= 0xFE30 && cp <= 0xFE4F) ||   // CJK Compat Forms
        (cp >= 0xFF00 && cp <= 0xFF60) ||   // Fullwidth Forms
        (cp >= 0xFFE0 && cp <= 0xFFE6) ||   // Fullwidth Signs
-       (cp >= 0x1F000) )                   // Emoji-Ebenen (🏠 ...)
+       (cp >= 0x1F000) )                   // Astral-Emoji (🏠 ...)
     return 2;
   return 1;
 }
