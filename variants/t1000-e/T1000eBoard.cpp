@@ -27,3 +27,27 @@ void T1000eBoard::begin() {
 
   delay(10);   // give sx1262 some time to power up
 }
+
+// DL9SAU 2026-07-12 (Weg A): LPCOMP + VBUS als Recovery-Wake armieren. Nach
+// einem Low-Battery-SYSTEMOFF weckt der HW-Comparator, sobald die Akkuspannung
+// recovery_mv ueberschreitet (Auto-Boot). VBUS weckt zusaetzlich beim USB-Plug.
+// mV -> refsel: AIN0 = Akku/2 (ADC_MULTIPLIER), LPCOMP vergleicht gegen
+// refsel-Bruchteile von PWRMGT_VDD_MV (KALIBRIER-Knopf). refsel wird auf die
+// kleinste /8-Stufe aufgerundet, deren Schwelle >= Ziel liegt (nie zu frueh).
+void T1000eBoard::armBatteryWake(uint16_t recovery_mv) {
+#ifdef NRF52_POWER_MANAGEMENT
+  if (recovery_mv == 0) return;   // Feature aus (chemistry=none)
+  uint32_t ain_mv  = (uint32_t)recovery_mv / 2;
+  uint32_t eighths = (ain_mv * 8 + (PWRMGT_VDD_MV - 1)) / PWRMGT_VDD_MV;  // ceil
+  if (eighths < 1) eighths = 1;
+  if (eighths > 7) eighths = 7;
+  uint8_t  refsel      = (uint8_t)(eighths - 1);              // 0..6 = 1/8..7/8 VDD
+  uint32_t est_wake_mv = (eighths * (uint32_t)PWRMGT_VDD_MV / 8) * 2;  // zurueck auf Akku
+  configureVoltageWake(PWRMGT_LPCOMP_AIN, refsel);           // LPCOMP + VBUS
+  _wake_keep_3v3 = true;   // powerOff() haelt PIN_3V3_EN HIGH fuer den Divider
+  MESH_DEBUG_PRINTLN("PWRMGT: batt-wake armed refsel=%u (~%lumV est, target %umV) -- CALIBRATE PWRMGT_VDD_MV",
+                     (unsigned)refsel, (unsigned long)est_wake_mv, (unsigned)recovery_mv);
+#else
+  (void)recovery_mv;
+#endif
+}

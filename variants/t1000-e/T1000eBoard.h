@@ -7,10 +7,18 @@
 class T1000eBoard : public NRF52BoardDCDC {
 protected:
   uint8_t btn_prev_state;
+  // DL9SAU 2026-07-12: true = powerOff() haelt PIN_3V3_EN HIGH, damit der
+  // Batterie-Divider im SYSTEMOFF versorgt bleibt und der LPCOMP-Wake
+  // (armBatteryWake) die Spannung lesen kann. Wird in armBatteryWake gesetzt.
+  bool _wake_keep_3v3 = false;
 
 public:
   T1000eBoard() : NRF52Board("T1000E_OTA") {}
   void begin();
+  // DL9SAU 2026-07-12 (Weg A): LPCOMP+VBUS-Recovery-Wake mit recovery_mv
+  // armieren (mappt mV -> refsel via PWRMGT_VDD_MV). No-op ohne
+  // NRF52_POWER_MANAGEMENT bzw. recovery_mv==0.
+  void armBatteryWake(uint16_t recovery_mv);
 
   uint16_t getBattMilliVolts() override {
   #ifdef BATTERY_PIN
@@ -63,7 +71,9 @@ public:
     #endif
 
     #ifdef PIN_3V3_EN
-        digitalWrite(PIN_3V3_EN, LOW);
+        // DL9SAU 2026-07-12: bei armiertem LPCOMP-Wake HIGH lassen, damit der
+        // Batterie-Divider im SYSTEMOFF versorgt bleibt (Weg A). Sonst LOW.
+        digitalWrite(PIN_3V3_EN, _wake_keep_3v3 ? HIGH : LOW);
     #endif
 
     #ifdef PIN_3V3_ACC_EN

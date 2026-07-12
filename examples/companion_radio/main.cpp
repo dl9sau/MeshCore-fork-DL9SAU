@@ -502,6 +502,12 @@ void setup() {
   );
 
   DIAG_MARK("M11 post the_mesh.begin");
+  // DL9SAU 2026-07-12 (Power Weg A): HW-Comparator (LPCOMP+VBUS) fuer den
+  // Recovery-Wake HIER armieren -- Prefs sind geladen (the_mesh.begin), und
+  // so ist der Comparator nach JEDEM Boot aktuell konfiguriert, auch wenn der
+  // User nie 'set batt_min_mv_boot' aufruft oder die LPCOMP-Config nach einem
+  // Reset verloren ging. No-op ohne NRF52_POWER_MANAGEMENT / chemistry=none.
+  the_mesh.configureBatteryWake();
   // DL9SAU 2026-06-20: Wunschliste 90 Phase 2 stay-off (RESETREAS-
   // Filter) wurde komplett entfernt. shutdown_pending-Sentinel-
   // Mechanismus (siehe applyShutdownPendingCheck nach

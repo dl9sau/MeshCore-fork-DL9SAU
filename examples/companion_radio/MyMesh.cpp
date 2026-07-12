@@ -10260,7 +10260,7 @@ void MyMesh::configureBatteryWake() {
 #if defined(NRF52_POWER_MANAGEMENT)
   uint16_t mv = getEffectiveBootMinMv();
   if (mv == 0) return;    // Chemie nicht gesetzt -> Feature aus
-  // Phase 2: board.armBatteryWake(mv);  // T1000eBoard mappt mV -> LPCOMP-refsel
+  board.armBatteryWake(mv);   // T1000eBoard: mappt mV -> LPCOMP-refsel + VBUS
 #endif
 }
 

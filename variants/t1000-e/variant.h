@@ -33,6 +33,15 @@
 
 #define AREF_VOLTAGE            (3.0)
 
+// DL9SAU 2026-07-12: Power-Mgmt (LPCOMP-Recovery-Wake, Weg A). BATTERY_PIN
+// P0.2 = AIN0. PWRMGT_VDD_MV ist der KALIBRIER-Knopf: der LPCOMP vergleicht
+// AIN0 (= Akku/2 wegen ADC_MULTIPLIER) gegen refsel-Bruchteile von VDD.
+// Reales VDD messen und hier eintragen, dann stimmt die mV->refsel-Abbildung
+// in T1000eBoard::armBatteryWake. Default 3000 (System laeuft ~3.0V, ADC-Ref
+// AR_INTERNAL_3_0). ACHTUNG: refsel ist grob (/8 = ~375mV/Akku) -> HW-Test.
+#define PWRMGT_LPCOMP_AIN       (0)      // AIN0 = P0.2 = BATTERY_PIN
+#define PWRMGT_VDD_MV           (3000)   // KALIBRIEREN: reales VDD in mV
+
 ////////////////////////////////////////////////////////////////////////////////
 // Number of pins
 
