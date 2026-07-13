@@ -263,8 +263,23 @@ struct AdvertPath {
 // der genau auf einer Bundesland-Grenze parkt, bleibt ruhig.
 #define CR_GEO_RECO_REEVAL_DIST_M  10000.0
 // Trace-Flags: RAM-only Bitmask die selektiv Events als Companion-Channel-
-// Messages pusht. Setzen via "trace <cat> on/off" Befehl. Reset bei Reboot,
-// damit man nicht versehentlich eine Trace-Kategorie auf-Dauer aktiv lässt.
+// Messages pusht. Setzen via "trace <cat> <0..3>" Befehl.
+//
+// DL9SAU 2026-07-13 (Level-Umbau): Jede Kategorie hat jetzt ein 4-stufiges
+// LEVEL statt nur an/aus -- 0=aus, 1=wichtig, 2=verbose, 3=debug (2 Bit pro
+// Kategorie, gepackt in NodePrefs.trace_levels uint64). Eine Meldung wird
+// ausgegeben, wenn Kategorie-Level >= Meldungs-Level ist (Default-Meldungs-
+// level = 1, siehe traceCompanion vs traceCompanionL). Die #define-Werte
+// unten sind weiterhin Einzel-Bits: sie dienen (a) als Kategorie-IDENTITAET
+// (Bit-Index = __builtin_ctz(flag) = 2-Bit-Slot-Index in trace_levels) und
+// (b) als abgeleitete Aktiv-Bitmaske _trace_flags (Bit gesetzt wenn Level>0
+// und nicht pausiert) fuer die vielen bestehenden 'traceCompanion(FLAG,..)'
+// und '_trace_flags & FLAG'-Checks (= Level >= 1).
+//
+// Persistenz: trace_levels (uint64) ueberlebt Reboot und wird beim Boot
+// via recomputeTraceFlags() wieder aktiv (fruher: bewusst Reset-bei-Reboot;
+// aufgegeben zugunsten 'delivery immer an'-Wunsch). Pausieren ohne Verlust
+// der Auswahl via 'trace off' (_trace_paused, RAM-only).
 #define TRACE_GPS       0x0001
 #define TRACE_ADVERTS   0x0002
 #define TRACE_REPEAT    0x0004
@@ -281,7 +296,10 @@ struct AdvertPath {
 #define TRACE_DISCOVER  0x2000   // discover regions ANON-RESP + leer-Diagnose
 #define TRACE_DBG_ANON  0x4000   // Bug-5-Debug: ANON-TX/RX hex-dump (CLI vs App)
 #define TRACE_COALESCE  0x8000   // Resend-Coalescing: Timestamp aus Cache korrigiert / Eintrag entfernt
-#define TRACE_ALL_MASK  0xFFFF
+#define TRACE_DELIVERY  0x10000  // Verbreitung eigener Sends: gehoerte Repeats (Channel) + DM-ACK
+#define TRACE_GEO       0x20000  // Geo-Status-Meldung (frueher immer-an) als eigene Kategorie
+#define TRACE_CAT_N     18       // Anzahl Kategorien (= hoechster Bit-Index + 1); passt in uint64 (max 32)
+#define TRACE_ALL_MASK  0x3FFFF
 
 // Duty-Cycle-Schutz: regulatorische 10% TX-Airtime pro rollendem 1h-Fenster
 // (EU SRD 869 narrow). Sliding-Window mit 60 Slots à 1 Minute (millis-basiert,
@@ -1043,8 +1061,20 @@ private:
   // von Prefix-Tokens; wird beim REQ_TYPE_ADMIN_CMD-Handler konsultiert.
   bool isAdminCmdAllowedForGuest(const char* cmd) const;
   // Pusht eine Trace-Message in den Companion-Channel — aber nur wenn das
-  // entsprechende Flag in _trace_flags gesetzt ist. No-op sonst.
-  void traceCompanion(uint16_t flag, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+  // entsprechende Flag in _trace_flags gesetzt ist (= Kategorie-Level >= 1
+  // und nicht pausiert). No-op sonst. Meldungs-Level implizit 1 ("wichtig").
+  void traceCompanion(uint32_t flag, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+  // Kategorie-KLASSE (2-Bit-Slot in _prefs.trace_levels): 1=wichtig, 2=verbose,
+  // 3=debug, 0=aus. flag = Einzel-Bit (TRACE_*); Slot-Index = __builtin_ctz(flag).
+  uint8_t traceLevelOf(uint32_t flag) const;   // 0..3, Klasse (ignoriert pause + globalen Schnitt)
+  void    setTraceLevel(uint32_t flag, uint8_t lvl);  // setzt Klasse + recomputeTraceFlags()
+  // Globaler View-Level (Schnitt) 1..3: es werden nur Kategorien mit Klasse <= N
+  // aktiv. Gespeichert in trace_levels Bits 62-63 (0=ungesetzt -> Default 3).
+  uint8_t traceViewLevel() const;
+  void    setTraceViewLevel(uint8_t n);
+  // Rechnet _trace_flags (aktive Bitmaske: 0<Klasse<=View-Level, nicht pausiert)
+  // + _prefs.trace_flags_persistent (Low-16-Spiegel) aus _prefs.trace_levels.
+  void    recomputeTraceFlags();
   // Baut einen Status-Suffix für TRACE_GPS Messages: pos, alt, valid-Flags,
   // RTC-Zeit. Wird an [gps] wake/sleep/first-fix angehaengt damit der User
   // GPS-Zustandsuebergaenge mit Position/Hoehe/Zeit korrelieren kann.
@@ -1553,10 +1583,17 @@ private:
   // beim Boot wieder bei 0). At-Jobs sind RAM-only by design.
   void saveCronToFile();
   void loadCronFromFile();
-  // Bitmask aktiver Trace-Kategorien (siehe TRACE_*-Konstanten). RAM-only,
-  // reset bei Reboot — verhindert dass eine Trace-Kategorie versehentlich
-  // unbegrenzt die Offline-Queue mit Events flutet.
-  uint16_t      _trace_flags;
+  // Abgeleitete Aktiv-Bitmaske (Bit gesetzt wenn Kategorie-Level>0 UND nicht
+  // pausiert). RAM-only, via recomputeTraceFlags() aus _prefs.trace_levels
+  // berechnet -- beim Boot (Restore der persistenten Level) und bei jeder
+  // Level-/Pause-Aenderung. uint32: Platz fuer bis zu 32 Kategorien (18 in
+  // Benutzung, TRACE_DELIVERY/TRACE_GEO > 0xFFFF). Alle bestehenden
+  // '_trace_flags & FLAG'-Checks bedeuten damit weiterhin "Level >= 1".
+  uint32_t      _trace_flags;
+  // DL9SAU 2026-07-13: 'trace off' pausiert ALLE Traces ohne die gespeicherte
+  // Level-Auswahl (trace_levels) zu verlieren. RAM-only, Default false (Boot =
+  // nicht pausiert -> gespeicherte Level sind aktiv).
+  bool          _trace_paused;
   // Modus fuer TRACE_HEARD: false (Default) = nur NEUE Direct-Nodes loggen
   // (HeardList-Insertion); true = jeder Direct-Empfang loggen auch wenn
   // der Node schon bekannt ist. CLI: 'trace heard on new|all'.
@@ -1701,6 +1738,10 @@ private:
   // Hash-Helper (4-Byte truncated MAX_HASH_SIZE=8).
   uint32_t calcShortHash(const mesh::Packet* packet) const;
   void     markSelfInitiated(const mesh::Packet* packet);
+  // Gibt ein gehoertes Echo eines EIGENEN Sends direkt als [deliv]-Zeile aus
+  // (Repeater = letzter Path-Eintrag in eigener path-hash-size; Channel-Name
+  // aus payload[0]-Hash via channels-Liste). Kein State ausser dem self-hash-Ring.
+  void     deliveryTraceEcho(mesh::Packet* packet);
   void     markSelfRepeated(const mesh::Packet* packet);
   // Lookup-Resultat: 0=kein Match, 1=self-initiated, 2=repeated.
   uint8_t  matchSelfHash(uint32_t h) const;

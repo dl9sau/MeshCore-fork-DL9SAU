@@ -2221,6 +2221,15 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
       uint32_t ack_key;
       memcpy(&ack_key, &expected_ack_table[i].ack, 4);
       dropCoalesceByConfirm(/*is_dm=*/true, ack_key);
+      // DL9SAU 2026-07-13 (TRACE_DELIVERY): DM vom Ziel bestaetigt (echtes ACK).
+      // Empfaenger-Name aus der ACK-Tabelle (kein neuer State). Bei DM gibt es
+      // keine Repeater-Echo-Zeilen (sendMessage liefert keinen pkt-hash) -- das
+      // ACK IST das Delivery-Signal.
+      if (traceLevelOf(TRACE_DELIVERY) > 0) {
+        ContactInfo* dc = expected_ack_table[i].contact;
+        traceCompanion(TRACE_DELIVERY, "[deliv] DM to %s: ACK final",
+                       dc ? dc->name : "?");
+      }
 
       // NOTE: the same ACK can be received multiple times!
       expected_ack_table[i].ack = 0; // clear expected hash, now that we have received ACK
@@ -2437,6 +2446,51 @@ void MyMesh::markSelfRepeated(const mesh::Packet* packet) {
   _self_repeated_head = (uint8_t)((_self_repeated_head + 1) % 128);
 }
 
+// DL9SAU 2026-07-13 (TRACE_DELIVERY): ein gehoertes Echo eines EIGENEN Sends
+// (ein Repeater hat mein Paket weitergesendet) direkt ausgeben. Repeater =
+// letzter Path-Eintrag, in MEINER path-hash-size (getPathHashSize). Channel-
+// Name aus payload[0] (channel-hash) via channels-Liste -- best effort (1-Byte-
+// Hash kann kollidieren; exakte Gewissheit braeuchte Decrypt, gilt fuer public/
+// hashtag/private gleich), daher wird der Channel-Hash mit angezeigt.
+void MyMesh::deliveryTraceEcho(mesh::Packet* packet) {
+  uint8_t cnt = packet->getPathHashCount();
+  uint8_t sz  = packet->getPathHashSize();
+  char rephex[16];
+  if (cnt >= 1 && sz >= 1) {
+    const uint8_t* rep = &packet->path[(cnt - 1) * sz];
+    int p = 0;
+    for (uint8_t b = 0; b < sz && b < 4 && p < (int)sizeof(rephex) - 2; b++)
+      p += snprintf(rephex + p, sizeof(rephex) - p, "%02x", rep[b]);
+  } else {
+    strncpy(rephex, "direct", sizeof(rephex));  // path_len==0: kein Repeater angehaengt
+  }
+  uint8_t ptype = packet->getPayloadType();
+  if ((ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
+      && packet->payload_len >= 1) {
+    uint8_t ch_hash = packet->payload[0];
+    char chname[34]; chname[0] = 0;
+    for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
+      ChannelDetails ch;
+      if (!getChannel(ci, ch)) continue;
+      if (ch.name[0] == 0) continue;
+      if (ch.channel.hash[0] == ch_hash) {
+        strncpy(chname, ch.name, sizeof(chname) - 1);
+        chname[sizeof(chname) - 1] = 0;
+        break;
+      }
+    }
+    if (chname[0])
+      traceCompanion(TRACE_DELIVERY, "[deliv] ch %s (#%02x) repeat via %s hop=%u",
+                     chname, ch_hash, rephex, cnt);
+    else
+      traceCompanion(TRACE_DELIVERY, "[deliv] ch #%02x repeat via %s hop=%u",
+                     ch_hash, rephex, cnt);
+  } else {
+    traceCompanion(TRACE_DELIVERY, "[deliv] %s repeat via %s hop=%u",
+                   ptypeName(ptype), rephex, cnt);
+  }
+}
+
 uint8_t MyMesh::matchSelfHash(uint32_t h) const {
   if (h == 0) return 0;
   for (int i = 0; i < 32; i++) {
@@ -2458,6 +2512,13 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
     _rx_us_self_initiated_count++;
   } else if (m == 2 && _rx_us_repeated_count < 0xFFFF) {
     _rx_us_repeated_count++;
+  }
+  // DL9SAU 2026-07-13 (TRACE_DELIVERY): Echo eines EIGENEN Sends gehoert (ein
+  // Repeater hat mein Paket weitergesendet). Laeuft VOR der hasSeen-Dedup, also
+  // sehen wir JEDEN Repeater (mehrere Zeilen bei mehreren Repeatern). Direkt
+  // ausgeben, kein State ausser dem self-hash-Ring.
+  if (m == 1 && traceLevelOf(TRACE_DELIVERY) > 0) {
+    deliveryTraceEcho(packet);
   }
   // 2026-07-10 Phase 2: Echo einer eigenen Channel-Nachricht gehoert (h ==
   // pkt-hash des Sends)? Laeuft VOR der hasSeen-Dedup, also sehen wir das Echo.
@@ -6134,6 +6195,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _geo_reco_anchor_lon = 0.0;
   _companion_channel_idx = 0xFF;
   _trace_flags = 0;
+  _trace_paused = false;      // Boot = nicht pausiert (gespeicherte Level werden aktiv)
   _trace_heard_all = false;   // 'trace heard' default mode = new-only
   // Wunschliste 25 (2026-07-02): jetzt aus persistentem Pref
   // channel_no_scope_behavior geladen (1=direct, 2=flood). Init auf true
@@ -6516,6 +6578,11 @@ void MyMesh::begin(bool has_display) {
   #endif
 #endif
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  // DL9SAU 2026-07-13 (Level-Umbau): gespeicherte Trace-Level nach dem Laden
+  // aktivieren (Boot-Restore). Fruher blieb _trace_flags auf 0 bis 'trace on'
+  // -- jetzt sind die persistenten Level sofort aktiv (Wunsch 'delivery immer
+  // an'). Pausieren ohne Verlust via 'trace off'.
+  recomputeTraceFlags();
   loadCronFromFile();   // Wunschliste 88 Phase 2: Cron-Persistenz
   // Hinweis: shutdown-pending-Check wird in main.cpp NACH
   // serial_interface.begin() gemacht -- da ist USB-PHY initialisiert
@@ -7600,6 +7667,10 @@ void MyMesh::handleCmdFrame(size_t len) {
       // Eintrag -> beim Echo (filterRecvFloodPacket) wird der Eintrag geloescht.
       if (send_ok && sent_pkt_hash) {
         noteCoalesceConfirm(/*is_dm=*/false, ch_key, txt_key, sent_pkt_hash);
+        // DL9SAU 2026-07-13 (TRACE_DELIVERY): KEIN eigener Ring-Add noetig --
+        // applyPacketTxOverrides (zentraler TX-Hook) fuellt _self_initiated_hashes
+        // schon fuer jedes ausgehende Paket. Beim Echo feuert m==1 in
+        // filterRecvFloodPacket -> deliveryTraceEcho.
       }
       if (send_ok) {
         // Autolearn des TX-Scope-Override aus Channel-Sends wurde entfernt:
@@ -11182,15 +11253,13 @@ void MyMesh::maybePushGeoRecommendation(double lat, double lon) {
   // Wunschliste 21 (2026-05-30): durch logging-channel-Master-Switch
   // gegated -- bei 'logging channel off' wird die Info-Push unterdrueckt
   // (vorher kam sie auch bei trace-off + logging-usb-off durch).
-  if (!(_prefs.log_flags & 0x02)) {
-    // Wunschliste 78 Buffer-Audit: "GEO-SCOPE @ %s: %s" mit ll (~24B
-    // formatLatLonDM) + buf (Scope-Name max ~30B) + Praefix ~14B = max
-    // ~70B. pushCompanionMessage cappt eh bei 145; 160 reicht mit
-    // Sicherheit. Vorher 256 -- 96 Byte Stack-Gewinn.
-    char chat[160];
-    snprintf(chat, sizeof(chat), "GEO-SCOPE @ %s: %s", ll, buf);
-    pushCompanionMessage(chat);
-  }
+  // DL9SAU 2026-07-13 (Level-Umbau): die GEO-Scope-Empfehlung im Companion-
+  // Channel ist jetzt eine eigene Trace-Kategorie TRACE_GEO (frueher kam sie
+  // immer, nur durch den log-Master-Switch gegated). traceCompanion prueft die
+  // aktive Bitmaske (Klasse>0, <=View-Level, nicht pausiert) UND den log_flags-
+  // Master-Switch. Default-Klasse 0 = aus -> mit 'trace geo 1' einschalten. Der
+  // USB-Debug-Log oben (pushDebugLog) bleibt unabhaengig davon.
+  traceCompanion(TRACE_GEO, "GEO-SCOPE @ %s: %s", ll, buf);
 }
 
 // Helper-Implementation. Siehe Header fuer Format-Doku.
@@ -11404,6 +11473,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("advert_role",           _prefs.advert_role);
   kv_str ("owner_info",            _prefs.owner_info);
   kv_uint("trace_flags_persistent",_prefs.trace_flags_persistent);
+  kv_uint64_hex("trace_levels",    _prefs.trace_levels);   // DL9SAU 2026-07-13: authoritative 2-Bit/Kat
   kv_uint("gps_power_mode",        _prefs.gps_power_mode);
   kv_uint("gps_lead_min",          _prefs.gps_lead_min);
   kv_uint("gps_lead_secs",         _prefs.gps_lead_secs);   // Wunschliste 81 Phase 3
@@ -11740,6 +11810,10 @@ void MyMesh::backupRestoreFinish(const char* reason) {
     memcpy(&_prefs, &_br_prefs_snapshot, sizeof(_prefs));
     _br_prefs_snapshot_taken = false;
   }
+  // DL9SAU 2026-07-13 (Level-Umbau): Trace-Aktiv-Bitmaske aus den (evtl.
+  // restaurierten) trace_levels neu berechnen, damit restaurierte Level SOFORT
+  // aktiv sind (nicht erst nach Reboot). Spiegelt auch trace_flags_persistent.
+  recomputeTraceFlags();
   // End-Statusmeldung. Bei reboot-relevanten Feldern (Radio-Params,
   // prv_key) wird zusaetzlich ein Reboot-Hinweis angehaengt -- kein
   // auto-Reboot, User entscheidet.
@@ -12347,7 +12421,18 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
         _br_applied++; return;
       }
       if (strcmp(key, "advert_role") == 0)           { _prefs.advert_role           = (uint8_t)as_uint(); _br_applied++; return; }
-      if (strcmp(key, "trace_flags_persistent") == 0){ _prefs.trace_flags_persistent= (uint16_t)as_uint(); _br_applied++; return; }
+      if (strcmp(key, "trace_flags_persistent") == 0){
+        // Legacy: 16-Bit-Maske -> auch trace_levels migrieren (Level 1 je Bit).
+        // Ein spaeter im Backup folgender 'trace_levels'-Key ueberschreibt das
+        // (autoritativ). Alte Backups OHNE trace_levels behalten so ihre Auswahl.
+        uint16_t v = (uint16_t)as_uint();
+        _prefs.trace_flags_persistent = v;
+        uint64_t mig = 0;
+        for (uint8_t k = 0; k < 16; k++) if (v & (1u << k)) mig |= ((uint64_t)1 << (2 * k));
+        _prefs.trace_levels = mig;
+        _br_applied++; return;
+      }
+      if (strcmp(key, "trace_levels") == 0)          { char hexbuf[24]; brExtractString(val_start, val_len, hexbuf, sizeof(hexbuf)); _prefs.trace_levels = strtoull(hexbuf, NULL, 0); _br_applied++; return; }
       if (strcmp(key, "gps_power_mode") == 0)        { _prefs.gps_power_mode        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_lead_min") == 0)          { _prefs.gps_lead_min          = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_lead_secs") == 0)         { _prefs.gps_lead_secs         = (uint32_t)as_uint(); _br_applied++; return; }  // Wunschliste 81 Phase 3
@@ -13963,8 +14048,8 @@ bool MyMesh::dutyHardReached() const {
   return getTxAirLastHour() >= getDutyHardLimitMs();
 }
 
-void MyMesh::traceCompanion(uint16_t flag, const char* fmt, ...) {
-  if ((_trace_flags & flag) == 0) return;
+void MyMesh::traceCompanion(uint32_t flag, const char* fmt, ...) {
+  if ((_trace_flags & flag) == 0) return;   // = Kategorie-Level >= 1 und nicht pausiert
   // Channel-Output Master-Switch (Wunschliste 21, asymmetrisch zu USB):
   // _prefs.log_flags bit 1 = $companion-Output ABGESCHALTET (1 = off).
   // Default 0 = AN. 'logging channel off' setzt bit 1.
@@ -13977,6 +14062,60 @@ void MyMesh::traceCompanion(uint16_t flag, const char* fmt, ...) {
   if (n <= 0) return;
   if (n >= (int)sizeof(buf)) buf[sizeof(buf) - 1] = 0;
   pushCompanionMessage(buf);
+}
+
+// DL9SAU 2026-07-13 (Level-Umbau): wie traceCompanion, aber mit explizitem
+// 2-Bit-Level-Slot fuer eine Kategorie lesen. flag = Einzel-Bit (TRACE_*),
+// Slot-Index = __builtin_ctz(flag). Liefert den PERSISTENTEN Level (0..3),
+// ignoriert _trace_paused (Aufrufer entscheidet).
+uint8_t MyMesh::traceLevelOf(uint32_t flag) const {
+  if (flag == 0) return 0;
+  uint8_t idx = (uint8_t)__builtin_ctz(flag);
+  return (uint8_t)((_prefs.trace_levels >> (2 * idx)) & 0x3);
+}
+
+// Level einer Kategorie setzen (0..3) + Aktiv-Bitmaske neu berechnen.
+void MyMesh::setTraceLevel(uint32_t flag, uint8_t lvl) {
+  if (flag == 0) return;
+  if (lvl > 3) lvl = 3;
+  uint8_t idx = (uint8_t)__builtin_ctz(flag);
+  _prefs.trace_levels &= ~((uint64_t)0x3 << (2 * idx));
+  _prefs.trace_levels |=  ((uint64_t)lvl << (2 * idx));
+  recomputeTraceFlags();
+}
+
+// Abgeleitete Aktiv-Bitmaske _trace_flags (Bit gesetzt wenn Level>0 UND nicht
+// pausiert) + Low-16-Spiegel _prefs.trace_flags_persistent (Backup/Status)
+// aus _prefs.trace_levels berechnen. Boot-Restore ruft das (nicht pausiert
+// -> gespeicherte Level werden aktiv).
+void MyMesh::recomputeTraceFlags() {
+  // DL9SAU 2026-07-13 (Level-Modell): Kategorie-Level = KLASSE (1=wichtig,
+  // 2=verbose, 3=debug, 0=aus). Globaler 'trace level' N = Schnitt: eine
+  // Kategorie ist aktiv wenn 0 < Klasse <= N. Runterdrehen von N blendet
+  // verbose/debug-Kategorien aus, ohne ihre Klassen-Zuordnung zu verlieren.
+  uint8_t vN = traceViewLevel();
+  uint32_t bm = 0;
+  for (uint8_t idx = 0; idx < TRACE_CAT_N; idx++) {
+    uint8_t cl = (uint8_t)((_prefs.trace_levels >> (2 * idx)) & 0x3);
+    if (cl != 0 && cl <= vN) bm |= (1u << idx);
+  }
+  _prefs.trace_flags_persistent = (uint16_t)(bm & 0xFFFF);
+  _trace_flags = _trace_paused ? 0 : bm;
+}
+
+// Globaler View-Level (Schnitt) 1..3. Gespeichert in trace_levels Bits 62-63
+// (die Kategorie-Slots belegen nur Bits 0..35) -> kein neues Pref-Feld, faehrt
+// automatisch in 'prefs'/Backup mit. 0 = ungesetzt -> Default 3 (alles zeigen).
+uint8_t MyMesh::traceViewLevel() const {
+  uint8_t v = (uint8_t)((_prefs.trace_levels >> 62) & 0x3);
+  return v == 0 ? 3 : v;
+}
+void MyMesh::setTraceViewLevel(uint8_t n) {
+  if (n < 1) n = 1;
+  if (n > 3) n = 3;
+  _prefs.trace_levels &= ~((uint64_t)0x3 << 62);
+  _prefs.trace_levels |=  ((uint64_t)n   << 62);
+  recomputeTraceFlags();
 }
 
 void MyMesh::appendGpsTraceStatus(char* out, size_t out_size) {
@@ -14013,7 +14152,7 @@ void MyMesh::appendGpsTraceStatus(char* out, size_t out_size) {
 // Trace-Kategorien-Tabelle für die CLI (Name + Flag + Beschreibung).
 struct TraceCat {
   const char* name;
-  uint16_t flag;
+  uint32_t flag;
   const char* desc;
 };
 // Format ms als Sekunden mit 1 Nachkommastelle. 12345 -> "12.3s".
@@ -14035,6 +14174,17 @@ static int append_rate_hint(char* out, size_t n, uint32_t total, uint64_t uptime
   return snprintf(out, n, " (%.1f/h, %.1f/d)", per_h, per_d);
 }
 
+// DL9SAU 2026-07-13: Klartext zum Level (Anzeige). Legende gehoert in 'trace ?'
+// / help, nicht in jede Einzel-Meldung.
+static const char* trace_level_name(uint8_t lvl) {
+  switch (lvl & 0x3) {
+    case 0:  return "aus";
+    case 1:  return "wichtig";
+    case 2:  return "verbose";
+    default: return "debug";
+  }
+}
+
 static const TraceCat trace_cats[] = {
   { "gps",     TRACE_GPS,     "GPS power on/off, first fix, fix loss" },
   { "adverts", TRACE_ADVERTS, "eigene Adverts (periodic zero-hop, nightly flood, manual). Fremde Adverts via 'repeat'." },
@@ -14052,6 +14202,8 @@ static const TraceCat trace_cats[] = {
   { "discover", TRACE_DISCOVER, "discover regions ANON-RESP-Empfang + leer-Diagnose" },
   { "debug-anon", TRACE_DBG_ANON, "Bug-5-Debug: ANON-TX/RX hex-dump (CLI vs App)" },
   { "coalesce", TRACE_COALESCE, "Resend-Rueckdatierung: der Timestamp wurde mit dem urspruenglichen korrigiert, bzw. der Cache-Eintrag nach gehoertem Repeat oder DM-Ack entfernt" },
+  { "delivery", TRACE_DELIVERY, "Verbreitung EIGENER Sends: je gehoertem Repeat des Channel-Pakets eine Zeile (Repeater-Hex + hop) + DM-ACK final" },
+  { "geo",      TRACE_GEO,      "Geo-Status (Position/Zeit) -- war frueher immer an, jetzt Level-steuerbar" },
 };
 static const size_t TRACE_CAT_COUNT = sizeof(trace_cats) / sizeof(trace_cats[0]);
 
@@ -15534,34 +15686,42 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "trace")) {
         pushCompanionMessage(
-          "trace: selektives Live-Logging in den Companion-Chat. "
-          "Es gibt eine *gespeicherte Auswahl* (Reboot-fest) und einen "
-          "*aktiven* Zustand im RAM (startet bei Boot leer)."
+          "trace: selektives Live-Logging in den Companion-Chat. Jede Kategorie "
+          "hat eine KLASSE 0..3 (0=aus 1=wichtig 2=verbose 3=debug). Der globale "
+          "'trace level N' ist der Schnitt: aktiv sind Kategorien mit Klasse <= N."
         );
         pushCompanionMessage(
-          "trace list\n  Kategorien-Uebersicht");
+          "Beispiel: 'trace debug-anon 3' klassifiziert debug-anon als debug. "
+          "Bei 'trace level 2' bleibt es aussen vor, bei 'trace level 3' ist es dabei."
+        );
         pushCompanionMessage(
-          "trace <cat> on|off\n  Kategorie ein/aus (in Auswahl + aktiv)");
+          "Reboot-fest, beim Boot sofort aktiv. 'trace off' pausiert ALLES ohne "
+          "die Klassen-Auswahl zu verlieren."
+        );
         pushCompanionMessage(
-          "trace on\n  aktiv = gespeicherte Auswahl (resume)");
+          "trace\n  globaler Level + aktive/ausgeblendete Kategorien");
         pushCompanionMessage(
-          "trace off\n  aktiv = leer (pause; Auswahl bleibt)");
+          "trace list\n  alle Kategorien mit aktueller [Klasse] + Beschreibung");
         pushCompanionMessage(
-          "trace all on|off\n  setzt aktiv UND Auswahl auf alle/keine");
+          "trace level <1..3>\n  globaler Schnitt: 1=nur wichtig, 2=+verbose, 3=+debug");
         pushCompanionMessage(
-          "trace set <maske>\n  ganze Auswahl als Zahl (dez/0xHEX), z.B. "
-          "14207 bzw. 0x377F -- schnelles Restore einer kompletten Auswahl");
+          "trace <kategorie>\n  zeigt die aktuelle Klasse dieser Kategorie");
+        pushCompanionMessage(
+          "trace <kategorie> <0..3>\n  Klasse setzen (on=1, off=0 als Alias)");
+        pushCompanionMessage(
+          "trace on | off\n  fortsetzen | pausieren (Auswahl bleibt)");
+        pushCompanionMessage(
+          "trace all <0..3>\n  alle Kategorien auf dieselbe Klasse (View-Level bleibt)");
+        pushCompanionMessage(
+          "trace set <hex>\n  kompletter trace_levels-Wert (wie 'prefs'/Backup, "
+          "inkl. globalem Level) -> Restore in einem Rutsch");
         pushCompanionMessage(
           "Spezial:\n"
-          "  trace heard on [new|all]   default 'new'\n"
+          "  trace heard <1..3> [new|all]   default 'new'\n"
           "    all: alle direkt gehoerten zero-hop-Adverts"
         );
         pushCompanionMessage(
           "    new: nur direkt gehoerte zero-hop-Adverts von bisher unbekannten Nodes"
-        );
-        pushCompanionMessage(
-          "Nach Reboot ist aktiv = 0 (keine Logs), bis 'trace on' die "
-          "gespeicherte Auswahl wiederherstellt."
         );
         return;
       }
@@ -18117,6 +18277,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memset(_prefs.override_scope_key,  0, sizeof(_prefs.override_scope_key));
       _prefs.override_expiry = 0;
       _prefs.trace_flags_persistent = 0;
+      _prefs.trace_levels = 0;   // DL9SAU 2026-07-13: Level-Umbau, alle Kategorien aus
       _prefs.gps_power_mode = 0;
       _prefs.gps_lead_min = 5;
       // repeat_scope_mode auf ALLOWLIST (Default). Reise-Wunsch 2026-06-08:
@@ -18166,6 +18327,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       _prefs.bluetooth_active  = 0x01;           // on (cycle)
       _prefs.tz_mode           = 0;              // auto-eu Default
       _prefs.tz_offset_min     = 60;             // CET Basis
+      _trace_paused = false;
       _trace_flags = 0;  // RAM-only auch resetten (sonst inkonsistent)
       savePrefs();
       pushCompanionMessage("OK - DL9SAU prefs auf Defaults zurueckgesetzt.\n"
@@ -18335,13 +18497,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.owner_info[0] != 0) non_default_count++;
     }
-    // trace persistent
-    if (show_all || _prefs.trace_flags_persistent != 0) {
-      snprintf(tmp, sizeof(tmp), "  trace_flags_persistent = 0x%04X%s",
-               (unsigned)_prefs.trace_flags_persistent,
-               _prefs.trace_flags_persistent == 0 ? " [default]" : " (default: 0x0000)");
+    // trace levels (authoritative, 2 Bit/Kategorie). DL9SAU 2026-07-13.
+    if (show_all || _prefs.trace_levels != 0) {
+      snprintf(tmp, sizeof(tmp), "  trace_levels = 0x%08lx%08lx%s",
+               (unsigned long)((_prefs.trace_levels >> 32) & 0xFFFFFFFFul),
+               (unsigned long)(_prefs.trace_levels & 0xFFFFFFFFul),
+               _prefs.trace_levels == 0 ? " [default]" : " (default: 0x0)");
       add_line(tmp);
-      if (_prefs.trace_flags_persistent != 0) non_default_count++;
+      if (_prefs.trace_levels != 0) non_default_count++;
     }
     // gps power
     if (show_all || _prefs.gps_power_mode != 0) {
@@ -26144,10 +26307,10 @@ cron_add_direct:
     }
     snprintf(block, sizeof(block),
              "  lastReset = %s\n"
-             "  trace     = 0x%04X (%s)",
+             "  trace     = 0x%05X (%s)",
              getLastResetReasonStr(),
              (unsigned)_trace_flags,
-             _trace_flags ? "active" : "off");
+             _trace_paused ? "paused" : (_trace_flags ? "active" : "off"));
     pushCompanionMessage(block);
     return;
   }
@@ -26713,122 +26876,172 @@ cron_add_direct:
     const char* arg = strchr(cmd, ' ');
     if (arg) { while (*arg == ' ') arg++; }
 
-    // -- Status (kein Arg) --
-    // C4+C5: User-Wunsch klarere Wording. 'active' war frueher als
-    // 'aktive Kategorien' verwendet -- jetzt 'trace ist ON/OFF' als
-    // erstes Wort, und die Sektionsliste daneben. Plus: wenn trace OFF
-    // ist UND persistent != 0, in einer Message ausgeben (statt zwei).
+    // DL9SAU 2026-07-13 (Level-Umbau): Level-Token parsen. 0/off=aus,
+    // 1/on=wichtig, 2=verbose, 3=debug. Rueckgabe -2 = fehlt, -3 = ungueltig.
+    auto parse_level = [&](const char* s) -> int {
+      if (!s || !*s) return -2;
+      if ((s[0] >= '0' && s[0] <= '3') && s[1] == 0) return s[0] - '0';
+      int on = match_on_off(s);
+      if (on == 1) return 1;
+      if (on == 0) return 0;
+      return -3;
+    };
+
+    // -- Status (kein Arg) -- globaler View-Level + aktive Kategorien (Klasse
+    // <= Level). name = Klasse 1, name/2 = verbose, name/3 = debug. Kategorien
+    // mit Klasse > Level werden separat als 'ausgeblendet' gezeigt.
     if (!arg || *arg == 0) {
-      char line[160]; int used;
-      bool tr_on = (_trace_flags != 0);
-      if (tr_on) {
-        used = snprintf(line, sizeof(line), "trace ist ON\naktiv:");
+      uint8_t vN = traceViewLevel();
+      char line[220]; int used;
+      if (_trace_paused) {
+        used = snprintf(line, sizeof(line), "trace PAUSIERT (level %u)\ngespeichert:", vN);
+        bool any = false;
         for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
-          if (_trace_flags & trace_cats[k].flag) {
-            used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
-          }
+          uint8_t cl = traceLevelOf(trace_cats[k].flag);
+          if (cl == 0) continue;
+          any = true;
+          if (cl == 1) used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
+          else         used += snprintf(line + used, sizeof(line) - used, " %s/%u", trace_cats[k].name, cl);
         }
+        if (!any) used += snprintf(line + used, sizeof(line) - used, " (keine)");
         pushCompanionMessage(line);
-      } else {
-        // trace OFF -- wenn persistent gesetzt, Hinweis in derselben Message.
-        if (_prefs.trace_flags_persistent != 0) {
-          used = snprintf(line, sizeof(line),
-                          "trace ist OFF\nNach 'trace on' wieder aktiv:");
-          for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
-            if (_prefs.trace_flags_persistent & trace_cats[k].flag) {
-              used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
-            }
-          }
-          pushCompanionMessage(line);
+        return;
+      }
+      used = snprintf(line, sizeof(line), "trace ist ON (level %u)\naktiv:", vN);
+      bool any_active = false, any_hidden = false;
+      char hidden[160]; int hu = 0; hidden[0] = 0;
+      for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
+        uint8_t cl = traceLevelOf(trace_cats[k].flag);
+        if (cl == 0) continue;
+        if (cl <= vN) {
+          any_active = true;
+          if (cl == 1) used += snprintf(line + used, sizeof(line) - used, " %s", trace_cats[k].name);
+          else         used += snprintf(line + used, sizeof(line) - used, " %s/%u", trace_cats[k].name, cl);
         } else {
-          pushCompanionMessage("trace ist OFF (keine Kategorien gespeichert).");
+          any_hidden = true;
+          hu += snprintf(hidden + hu, sizeof(hidden) - hu, " %s/%u", trace_cats[k].name, cl);
         }
+      }
+      if (!any_active) used += snprintf(line + used, sizeof(line) - used, " (keine)");
+      pushCompanionMessage(line);
+      if (any_hidden) {
+        char h2[200];
+        snprintf(h2, sizeof(h2), "ausgeblendet (Klasse >%u):%s", vN, hidden);
+        pushCompanionMessage(h2);
       }
       return;
     }
 
-    // 'list' (mit Prefix-Match -> 'li' / 'lis' / 'list' alle ok). Test-
-    // Bericht B1: 'tra li' soll funktionieren.
+    // 'list' -> alle Kategorien + aktueller Level [n] + Beschreibung.
     {
       static const CompanionChoice tr_subs[] = { { "list", false } };
       char ambig[32];
       int m = match_choice(arg, tr_subs, 1, ambig, sizeof(ambig));
       if (m == 0) {
         for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
-          char line[160];
-          snprintf(line, sizeof(line), "  %s - %s", trace_cats[k].name, trace_cats[k].desc);
+          char line[180];
+          snprintf(line, sizeof(line), "  %s [%u] - %s",
+                   trace_cats[k].name, traceLevelOf(trace_cats[k].flag), trace_cats[k].desc);
           pushCompanionMessage(line);
         }
         return;
       }
-      // m == -1 = mehrdeutig (kann hier nicht passieren -- nur ein Eintrag).
-      // m < 0  = kein Match (nicht 'list') -> faellt durch zu on/off/all/<cat>.
     }
 
-    // 'trace on/off' -> active = persistent (resume) / active = 0 (pause)
+    // 'trace on/off' -> pausieren/fortsetzen ohne die Level-Auswahl zu verlieren.
     {
       int tm = match_on_off(arg);
       if (tm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
       if (tm == 1) {
-        _trace_flags = _prefs.trace_flags_persistent;
-        pushCompanionMessage("OK - trace an (gespeicherte Auswahl wird verwendet).");
+        _trace_paused = false; recomputeTraceFlags();
+        pushCompanionMessage("OK - trace an (gespeicherte Level aktiv).");
         return;
       }
       if (tm == 0) {
-        _trace_flags = 0;
-        pushCompanionMessage("OK - trace pausiert (Auswahl bleibt gespeichert).");
+        _trace_paused = true; recomputeTraceFlags();
+        pushCompanionMessage("OK - trace pausiert (Level bleiben gespeichert).");
         return;
       }
     }
 
-    // 'trace all on/off' -> active UND persistent
-    if (starts_with_word(arg, "all")) {
-      const char* sub = strchr(arg, ' ');
-      if (sub) { while (*sub == ' ') sub++; }
-      int am = match_on_off(sub);
-      if (am == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
-      if (am == 1) {
-        _trace_flags = TRACE_ALL_MASK;
-        _prefs.trace_flags_persistent = TRACE_ALL_MASK;
-        savePrefs();
-        pushCompanionMessage("OK - alle traces an (und gespeichert).");
-      } else if (am == 0) {
-        _trace_flags = 0;
-        _prefs.trace_flags_persistent = 0;
-        savePrefs();
-        pushCompanionMessage("OK - alle traces aus (und gespeichert).");
-      } else {
-        pushCompanionMessage("Usage: trace all on | trace all off");
-      }
-      return;
-    }
-
-    // 2026-07-09: 'trace set <maske>' -> ganze Bitmaske direkt setzen (dez
-    // oder 0xHEX). Schnelles Restore einer kompletten Trace-Auswahl (z.B. der
-    // Wert 'trace_flags_persistent' aus einem Backup) ohne jede Kategorie
-    // einzeln nachzutippen. Setzt aktiv + persistent.
-    if (starts_with_word(arg, "set")) {
+    // 'trace level <1..3>' -> GLOBALER Schnitt: zeige nur Kategorien mit
+    // Klasse <= N (1=nur wichtig, 2=+verbose, 3=+debug=alle). Beruehrt die
+    // per-Kategorie-Klassen NICHT -- nur die Sicht.
+    if (starts_with_word(arg, "level")) {
       const char* v = strchr(arg, ' ');
       if (v) { while (*v == ' ') v++; }
       if (!v || !*v) {
-        pushCompanionMessage("Usage: trace set <maske>  (dez oder 0xHEX, z.B. 14207 bzw. 0x377F)");
+        uint8_t n = traceViewLevel();
+        char r[100];
+        snprintf(r, sizeof(r), "trace level = %u (zeigt Kategorie-Klassen <= %u: %s).",
+                 n, n, trace_level_name(n));
+        pushCompanionMessage(r); return;
+      }
+      if (!(v[0] >= '1' && v[0] <= '3') || v[1] != 0) {
+        pushCompanionMessage("Usage: trace level 1|2|3  (1=nur wichtig, 2=+verbose, 3=+debug)");
         return;
       }
-      uint32_t mask = (uint32_t)strtoul(v, NULL, 0) & TRACE_ALL_MASK;
-      _trace_flags                  = (uint16_t)mask;
-      _prefs.trace_flags_persistent = (uint16_t)mask;
+      setTraceViewLevel((uint8_t)(v[0] - '0'));   // recomputet bereits
       savePrefs();
-      char r[80];
-      snprintf(r, sizeof(r), "OK - trace-Maske = 0x%04X = %u (aktiv + gespeichert).",
-               (unsigned)mask, (unsigned)mask);
+      char r[100];
+      snprintf(r, sizeof(r), "OK - trace level = %c (Kategorie-Klassen <= %c aktiv).", v[0], v[0]);
       pushCompanionMessage(r);
       return;
     }
 
-    // 'trace <cat> on/off' -> bit in BEIDEN (User-Selektion).
-    // Wandeln trace_cats[] in CompanionChoice[] (alle abkuerzbar) — damit
-    // 'trace gp on' (gp -> gps) auch geht. Ambiguity-Beispiel: 'r' matcht
-    // repeat UND rtc -> Warnung.
+    // 'trace all <level>' -> alle Kategorien auf dieselbe KLASSE (on=1..3, off=0).
+    // Der globale View-Level (trace level) bleibt erhalten.
+    if (starts_with_word(arg, "all")) {
+      const char* sub = strchr(arg, ' ');
+      if (sub) { while (*sub == ' ') sub++; }
+      int lvl = parse_level(sub);
+      if (lvl < 0) { pushCompanionMessage("Usage: trace all on|off | trace all 0..3"); return; }
+      uint8_t vN = traceViewLevel();   // View-Level bewahren (Bits 62-63)
+      uint64_t v = 0;
+      if (lvl > 0) {
+        for (uint8_t idx = 0; idx < TRACE_CAT_N; idx++)
+          v |= ((uint64_t)lvl << (2 * idx));
+      }
+      _prefs.trace_levels = v;
+      setTraceViewLevel(vN);           // View-Level zurueckschreiben + recompute
+      _trace_paused = false;
+      recomputeTraceFlags();
+      savePrefs();
+      char r[80];
+      snprintf(r, sizeof(r), lvl > 0 ? "OK - alle Kategorien Klasse %d (gespeichert)."
+                                     : "OK - alle traces aus (gespeichert).", lvl);
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // 'trace set <maske>' -> LEGACY 16-Bit-Bitmaske (Backup-Restore alter
+    // trace_flags_persistent-Werte). Gesetztes Bit -> Level 1; delivery/geo
+    // (Bit 16/17) bleiben unberuehrt. Neue Backups nutzen trace_levels.
+    if (starts_with_word(arg, "set")) {
+      const char* v = strchr(arg, ' ');
+      if (v) { while (*v == ' ') v++; }
+      if (!v || !*v) {
+        pushCompanionMessage(
+          "Usage: trace set <hex>  (voller trace_levels-Wert, 2 Bit/Kat, wie in "
+          "'prefs' / Backup, z.B. 0x5b7dafaa5)");
+        return;
+      }
+      // DL9SAU 2026-07-13: nimmt den kompletten trace_levels (uint64) direkt --
+      // round-trip mit 'prefs' / Backup ('trace_levels': 0x...). Gibt den
+      // gesetzten Wert zurueck (Anzeige des OR'ten Ergebnisses).
+      _prefs.trace_levels = (uint64_t)strtoull(v, NULL, 0);
+      _trace_paused = false;
+      recomputeTraceFlags();
+      savePrefs();
+      char r[90];
+      snprintf(r, sizeof(r), "OK - trace_levels = 0x%08lx%08lx (aktiv + gespeichert).",
+               (unsigned long)((_prefs.trace_levels >> 32) & 0xFFFFFFFFul),
+               (unsigned long)(_prefs.trace_levels & 0xFFFFFFFFul));
+      pushCompanionMessage(r);
+      return;
+    }
+
+    // 'trace <cat> <level>' -> Level 0..3 (on=1, off=0) fuer eine Kategorie.
     CompanionChoice tc_choices[TRACE_CAT_COUNT];
     for (size_t k = 0; k < TRACE_CAT_COUNT; k++) {
       tc_choices[k].name      = trace_cats[k].name;
@@ -26842,61 +27055,67 @@ cron_add_direct:
       pushCompanionMessage(r); return;
     }
     if (tc_idx < 0) {
-      pushCompanionMessage(
-        "trace: list | on | off | all on|off | set <maske> | <cat> on|off\n"
-        "  'trace list' zeigt die Kategorien.");
+      // arg ist ein Wort, das KEINE Kategorie ist (list/on/off/all/set sind
+      // oben abgehandelt). Konkret benennen statt generischer Usage -- 'cat'
+      // ist der Platzhalter, keine echte Kategorie (User-Stolperstein).
+      char firstw[24]; int wi = 0;
+      for (const char* p = arg; *p && *p != ' ' && wi < (int)sizeof(firstw) - 1; p++)
+        firstw[wi++] = *p;
+      firstw[wi] = 0;
+      char r[180];
+      snprintf(r, sizeof(r),
+        "Unbekannte Kategorie '%s'. 'trace list' zeigt alle.\n"
+        "trace <kategorie> <0..3>   (0=aus 1=wichtig 2=verbose 3=debug)", firstw);
+      pushCompanionMessage(r);
       return;
     }
     const char* sub = strchr(arg, ' ');
     if (sub) { while (*sub == ' ') sub++; }
-    int cm = match_on_off(sub);
-    if (cm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
-    if (cm == 1) {
-      _prefs.trace_flags_persistent |= trace_cats[tc_idx].flag;
-      // Fix 2026-07-11 (User-Bug "trace ergaenzen ersetzt die bisherige"):
-      // aktiv = volle gespeicherte Auswahl (resume + ergaenzen), NICHT nur
-      // diese eine Kategorie. Sonst macht '<cat> on' bei pausiertem trace
-      // (aktiv=0) aus der ganzen Liste nur die neue Kategorie. Jetzt schaltet
-      // '<cat> on' trace an und behaelt die bestehende Auswahl + die neue.
-      _trace_flags = _prefs.trace_flags_persistent;
-      // Spezial-Erweiterung 'trace heard on [new|all]' (User-Wunsch
-      // 2026-05-30): default 'new' (nur neue Direct-Nodes loggen) oder
-      // 'all' (jeder Empfang inkl. bekannten Nodes).
-      bool heard_mode_set = false;
-      if (strcmp(trace_cats[tc_idx].name, "heard") == 0) {
-        const char* mode_arg = sub ? strchr(sub, ' ') : NULL;
-        if (mode_arg) { while (*mode_arg == ' ') mode_arg++; }
-        if (mode_arg && *mode_arg) {
-          if (strcmp(mode_arg, "all") == 0)      { _trace_heard_all = true;  heard_mode_set = true; }
-          else if (strcmp(mode_arg, "new") == 0) { _trace_heard_all = false; heard_mode_set = true; }
-          else {
-            pushCompanionMessage("Usage: trace heard on [new|all]   (default: new)");
-            return;
-          }
-        } else {
-          _trace_heard_all = false;  // 'trace heard on' default = new
-        }
-      }
-      savePrefs();
-      char r[100];
-      if (strcmp(trace_cats[tc_idx].name, "heard") == 0) {
-        snprintf(r, sizeof(r), "OK - trace heard an, mode = %s%s.",
-                 _trace_heard_all ? "all" : "new",
-                 heard_mode_set ? "" : " (default)");
-      } else {
-        snprintf(r, sizeof(r), "OK - trace %s an.", trace_cats[tc_idx].name);
-      }
-      pushCompanionMessage(r);
-    } else if (cm == 0) {
-      _trace_flags                  &= ~trace_cats[tc_idx].flag;
-      _prefs.trace_flags_persistent &= ~trace_cats[tc_idx].flag;
-      savePrefs();
-      char r[80]; snprintf(r, sizeof(r), "OK - trace %s aus.", trace_cats[tc_idx].name);
-      pushCompanionMessage(r);
-    } else {
-      char r[80]; snprintf(r, sizeof(r), "Usage: trace %s on|off", trace_cats[tc_idx].name);
-      pushCompanionMessage(r);
+    int lvl = parse_level(sub);
+    if (lvl == -2) {
+      // Kein Level angegeben -> aktuellen Wert ausgeben (statt nichtssagender
+      // Usage; ersetzt ein 'get'). Bei 'heard' zusaetzlich den Modus.
+      uint8_t cur = traceLevelOf(trace_cats[tc_idx].flag);
+      char r[110];
+      if (strcmp(trace_cats[tc_idx].name, "heard") == 0)
+        snprintf(r, sizeof(r), "trace heard = %u (%s), mode = %s",
+                 cur, trace_level_name(cur), _trace_heard_all ? "all" : "new");
+      else
+        snprintf(r, sizeof(r), "trace %s = %u (%s)",
+                 trace_cats[tc_idx].name, cur, trace_level_name(cur));
+      pushCompanionMessage(r); return;
     }
+    if (lvl < 0) { pushCompanionMessage("Level 0..3 bzw. on/off"); return; }
+
+    setTraceLevel(trace_cats[tc_idx].flag, (uint8_t)lvl);
+    if (lvl > 0) _trace_paused = false;   // Setzen einer Kategorie hebt Pause auf
+    recomputeTraceFlags();
+
+    // Spezial 'trace heard <on> [new|all]' (Modus): bei Level>0 Mode parsen.
+    bool heard_mode_set = false;
+    bool is_heard = (strcmp(trace_cats[tc_idx].name, "heard") == 0);
+    if (is_heard && lvl > 0) {
+      const char* mode_arg = sub ? strchr(sub, ' ') : NULL;
+      if (mode_arg) { while (*mode_arg == ' ') mode_arg++; }
+      if (mode_arg && *mode_arg) {
+        if (strcmp(mode_arg, "all") == 0)      { _trace_heard_all = true;  heard_mode_set = true; }
+        else if (strcmp(mode_arg, "new") == 0) { _trace_heard_all = false; heard_mode_set = true; }
+        else { pushCompanionMessage("Usage: trace heard on [new|all]   (default: new)"); return; }
+      } else {
+        _trace_heard_all = false;  // default = new
+      }
+    }
+    savePrefs();
+    char r[110];
+    if (is_heard && lvl > 0) {
+      snprintf(r, sizeof(r), "OK - trace heard = %d (%s), mode = %s%s.",
+               lvl, trace_level_name((uint8_t)lvl),
+               _trace_heard_all ? "all" : "new", heard_mode_set ? "" : " (default)");
+    } else {
+      snprintf(r, sizeof(r), "OK - trace %s = %d (%s).",
+               trace_cats[tc_idx].name, lvl, trace_level_name((uint8_t)lvl));
+    }
+    pushCompanionMessage(r);
     return;
   }
 

@@ -191,7 +191,20 @@ struct NodePrefs {  // persisted to file
   // active = trace_flags_persistent wiederhergestellt. Damit ist eine
   // einmalige Auswahl ueber Reboots stabil ohne dass die Firmware
   // automatisch wieder zu loggen anfaengt.
+  // DL9SAU 2026-07-13: LEGACY nach Level-Umbau. Bleibt an dieser Datei-
+  // Position (Migration alter Files + Backup-Kompat) und wird als Low-16-
+  // Spiegel von trace_levels gehalten (Bit gesetzt wenn Level>0). Die
+  // authoritative Quelle ist jetzt trace_levels (unten, ans Datei-Ende
+  // angehaengt).
   uint16_t trace_flags_persistent;
+  // DL9SAU 2026-07-13 (Level-Umbau): 2 Bit pro Kategorie (0=aus,1=wichtig,
+  // 2=verbose,3=debug), gepackt -- Slot k = Bits [2k..2k+1], k=__builtin_ctz
+  // (TRACE_*-Flag). 32 Kategorien passen in uint64 (18 in Benutzung).
+  // AUTHORITATIVE persistente Trace-Konfiguration. Wird ans Datei-Ende
+  // angehaengt (siehe DataStore); alte Files ohne dieses Feld -> Migration
+  // aus trace_flags_persistent (jedes gesetzte Bit -> Level 1). Beim Boot
+  // via recomputeTraceFlags() aktiv (ueberlebt Reboot).
+  uint64_t trace_levels;
   // GPS Power-Management Konfiguration:
   //   gps_power_mode = 0 (cycle, Default) -> Power-Cycle aktiv,
   //                                          GPS schlaeft zwischen Adverts

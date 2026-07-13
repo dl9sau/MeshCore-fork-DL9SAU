@@ -572,6 +572,27 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     if (_prefs.ota_pending == 0xFF) _prefs.ota_pending = 0;
 #endif
 
+    // DL9SAU 2026-07-13 (Level-Umbau): trace_levels (uint64, 2 Bit/Kategorie).
+    // APPEND ans Datei-Ende -- auf beiden Plattformen letztes Feld (nach dem
+    // ESP-only ota_pending). Alte Datei ohne dieses Feld: file.read liefert
+    // < 8 Bytes -> Migration aus trace_flags_persistent (jedes gesetzte Bit
+    // -> Level 1). Kein 0xFF..-Sentinel, weil ein voll auf Level 3 gesetztes
+    // 32-Kategorien-File tatsaechlich all-FF waere -- die Lese-Laenge ist der
+    // eindeutige "Feld vorhanden?"-Marker.
+    {
+      uint64_t tl = 0;
+      if (file.read((uint8_t *)&tl, sizeof(tl)) == sizeof(tl)) {
+        _prefs.trace_levels = tl;
+      } else {
+        // Migration: alte an/aus-Bits -> Level 1.
+        uint64_t mig = 0;
+        for (uint8_t k = 0; k < 16; k++) {
+          if (_prefs.trace_flags_persistent & (1u << k)) mig |= ((uint64_t)1 << (2 * k));
+        }
+        _prefs.trace_levels = mig;
+      }
+    }
+
     file.close();
   }
 }
@@ -838,6 +859,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.ota_pending,
                sizeof(_prefs.ota_pending));
 #endif
+    // DL9SAU 2026-07-13 (Level-Umbau): trace_levels (uint64). APPEND ans Ende
+    // -- letztes Feld auf beiden Plattformen (siehe loadPrefsInt).
+    file.write((uint8_t *)&_prefs.trace_levels,
+               sizeof(_prefs.trace_levels));
   };  // Ende writeBody-Lambda
 
   const char* TMP  = "/new_prefs.tmp";
