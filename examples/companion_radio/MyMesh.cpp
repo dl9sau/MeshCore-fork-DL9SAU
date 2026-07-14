@@ -17037,28 +17037,35 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("OK - GPS sync request (wach bis naechster Advert).");
     } else if (gps_idx == 3) {    // setloc
       // Aktuelle GPS-Position als expliziten persistenten Anker speichern.
-      // DL9SAU 2026-07-12 BUGFIX (User-Befund): der GPS-EIGENEN Position (loc)
-      // trauen, AUCH wenn GPS schlaeft (!isValid()) solange _gps_had_fix_ever
-      // -- MicroNMEA haelt den letzten Fix. Vorher nahm es getEffectiveLatLon(),
-      // das bei schlafendem GPS auf sensors.node_lat/lon (fixe/aus dem Backup
-      // restaurierte Position) zurueckfiel und die STILL festnagelte (Ostfriesland
-      // statt des Berlin-Fixes). node_lat/lon wird NICHT als GPS-Quelle genommen.
+      // DL9SAU 2026-07-14: ZWEISTUFIG.
+      //  (1) LIVE-Fix (loc->isValid) = frischeste Position.
+      //  (2) Kein Live-Fix, aber es gab schon einen (_gps_had_fix_ever) ->
+      //      sensors.node_lat/lon: die haelt EnvironmentSensorManager bei JEDEM
+      //      gueltigen Fix aktuell (nur bei isValid ueberschrieben), das IST die
+      //      'LAST-FIX'-Position, die 'gps'/'sensor' anzeigen. Ein 2 min alter
+      //      Fix ist als expliziter User-Anker voellig ok (User-Vorgabe).
+      // Der 2026-07-12-Fix nahm hier faelschlich loc->getLatitude() AUCH im
+      // Sleep, in der Annahme "MicroNMEA haelt den letzten Fix" -- die ist FALSCH:
+      // clear() (bei stop/begin, also jedem Sleep) setzt _latitude=999000000
+      // (jetzt via Wrapper 0). loc liefert im Sleep also NICHT den letzten Fix.
+      // node_lat ist die korrekte Sleep-Quelle. isValidGpsCoord haelt Muell
+      // (999/-678/0,0) beidseitig raus -> nie eine ungueltige Position persistieren.
       double cur_lat = 0.0, cur_lon = 0.0;
       bool usable = false;
       const char* src = "GPS";
 #if ENV_INCLUDE_GPS == 1
       LocationProvider* loc = sensors.getLocationProvider();
-      if (_prefs.gps_enabled && loc && (loc->isValid() || _gps_had_fix_ever)) {
+      if (_prefs.gps_enabled && loc && loc->isValid()) {
         double la = ((double)loc->getLatitude())  / 1000000.0;
         double lo = ((double)loc->getLongitude()) / 1000000.0;
-        // DL9SAU 2026-07-14: NUR eine gueltige Position persistieren. Der alte
-        // "!= 0.0"-Check liess den 999-Sentinel durch -> setloc nagelte 999,999
-        // in node_lat fest und ueberschrieb den guten Fix (das Gegenteil des
-        // Ziels). isValidGpsCoord faengt 999/Out-of-Range/0,0.
         if (isValidGpsCoord(la, lo)) {
-          cur_lat = la; cur_lon = lo; usable = true;
-          src = _gps_fix_seen_this_wake ? "LIVE" : "letzter GPS-Fix (Sleep)";
+          cur_lat = la; cur_lon = lo; usable = true; src = "LIVE";
         }
+      }
+      if (!usable && _prefs.gps_enabled && _gps_had_fix_ever
+          && isValidGpsCoord(sensors.node_lat, sensors.node_lon)) {
+        cur_lat = sensors.node_lat; cur_lon = sensors.node_lon; usable = true;
+        src = "letzter GPS-Fix";
       }
 #endif
       if (!usable) {
