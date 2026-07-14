@@ -5367,6 +5367,16 @@ static void neighbors_utf8_truncate_to_visual(char* s, size_t max_visual) {
   // s war kuerzer als max_visual -- nichts zu schneiden.
 }
 
+// DL9SAU 2026-07-14: gueltige GPS-Koordinate? Faengt den MicroNMEA-"kein Fix"-
+// Sentinel 999 (getLatitude()==999000000 -> /1e6 = 999.0) UND Out-of-Range
+// (z.B. -678 aus einem verunglueckten Fix) UND das unbelegte 0,0. Ersetzt den
+// alten "la != 0.0 || lo != 0.0"-Sanity-Check, der 999 durchliess -> setloc
+// persistierte 999 in node_lat, sensor-Anzeige zeigte 999.
+static inline bool isValidGpsCoord(double lat, double lon) {
+  return lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0
+         && !(lat == 0.0 && lon == 0.0);
+}
+
 // Haversine-Distanz in km zwischen zwei lat/lon-Paaren (in degrees).
 static double dl9sau_haversine_km(double lat1, double lon1, double lat2, double lon2) {
   const double R = 6371.0;
@@ -9470,9 +9480,11 @@ bool MyMesh::getEffectiveLatLon(double& lat, double& lon) const {
   if (_prefs.gps_enabled) {
     LocationProvider* loc = sensors.getLocationProvider();
     if (loc && loc->isValid()) {
-      lat = ((double)loc->getLatitude()) / 1000000.0;
-      lon = ((double)loc->getLongitude()) / 1000000.0;
-      return true;
+      double la = ((double)loc->getLatitude()) / 1000000.0;
+      double lo = ((double)loc->getLongitude()) / 1000000.0;
+      // DL9SAU 2026-07-14: defensiv gegen 999-Sentinel/Out-of-Range -- NIE eine
+      // ungueltige Position advertisen; sonst node_lat-Fallback unten.
+      if (isValidGpsCoord(la, lo)) { lat = la; lon = lo; return true; }
     }
   }
 #endif
@@ -16090,7 +16102,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (_prefs.gps_enabled && dloc && (dloc->isValid() || _gps_had_fix_ever)) {
           double la = ((double)dloc->getLatitude())  / 1000000.0;
           double lo = ((double)dloc->getLongitude()) / 1000000.0;
-          if (la != 0.0 || lo != 0.0) { disp_lat = la; disp_lon = lo; }
+          // DL9SAU 2026-07-14: 999-Sentinel/Out-of-Range ablehnen (sonst zeigte
+          // sensor 999 im Sleep). Ungueltig -> node_lat (letzter gueltiger Fix).
+          if (isValidGpsCoord(la, lo)) { disp_lat = la; disp_lon = lo; }
         }
       }
 #endif
@@ -17037,7 +17051,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (_prefs.gps_enabled && loc && (loc->isValid() || _gps_had_fix_ever)) {
         double la = ((double)loc->getLatitude())  / 1000000.0;
         double lo = ((double)loc->getLongitude()) / 1000000.0;
-        if (la != 0.0 || lo != 0.0) {   // Sanity: Provider haelt echt eine Position
+        // DL9SAU 2026-07-14: NUR eine gueltige Position persistieren. Der alte
+        // "!= 0.0"-Check liess den 999-Sentinel durch -> setloc nagelte 999,999
+        // in node_lat fest und ueberschrieb den guten Fix (das Gegenteil des
+        // Ziels). isValidGpsCoord faengt 999/Out-of-Range/0,0.
+        if (isValidGpsCoord(la, lo)) {
           cur_lat = la; cur_lon = lo; usable = true;
           src = _gps_fix_seen_this_wake ? "LIVE" : "letzter GPS-Fix (Sleep)";
         }
@@ -17052,6 +17070,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           pushCompanionMessage("GPS ist aus. Mit 'gps on' aktivieren, Fix "
                                "abwarten (siehe 'gps'), 'gps setloc', danach "
                                "'gps off' wieder aus.");
+        } else if (_gps_had_fix_ever) {
+          // Es gab Fixes, aber der Provider haelt gerade keine gueltige Position
+          // (999-Sentinel nach Sleep) -> NICHT die gute fixe Position ueberschreiben.
+          pushCompanionMessage("Aktuelle GPS-Position ungueltig (kein frischer Fix). "
+                               "Fixe Position NICHT ueberschrieben. 'gps sync', Fix "
+                               "abwarten (siehe 'gps'), dann 'gps setloc'.");
         } else {
           pushCompanionMessage("Keine GPS-Position (noch nie ein Fix). Nach Befehl "
                                "'gps sync' Fix abwarten (siehe 'gps') und 'gps "

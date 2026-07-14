@@ -134,8 +134,14 @@ public :
     // hier true -- der NMEA-Loop unten skippt dann den setCurrentTime-Call.
     void setSkipTimeSync(bool s) override { _skip_time_sync = s; }
     bool getSkipTimeSync() const override { return _skip_time_sync; }
-    long getLatitude() override { return nmea.getLatitude(); }
-    long getLongitude() override { return nmea.getLongitude(); }
+    // DL9SAU 2026-07-14: bei !isValid() 0 statt MicroNMEAs Sentinel 999000000
+    // (=999.0 nach /1e6) zurueckgeben. 999 ist ein GEFAEHRLICHER Out-of-Range-
+    // Wert (bricht Distanz/Bbox/Advert-Rechnungen, wurde faelschlich via setloc
+    // persistiert). 0,0 ist eindeutig "keine Position" UND benign -- die
+    // bestehenden "!= 0.0"-Guards ueberall fangen es ab. Leakt trotzdem mal was,
+    // macht 0,0 keinen Schaden.
+    long getLatitude() override { return nmea.isValid() ? nmea.getLatitude() : 0; }
+    long getLongitude() override { return nmea.isValid() ? nmea.getLongitude() : 0; }
     long getAltitude() override { 
         long alt = 0;
         nmea.getAltitude(alt);
