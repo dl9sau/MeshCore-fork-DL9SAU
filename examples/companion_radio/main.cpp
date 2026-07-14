@@ -492,6 +492,11 @@ void setup() {
   #endif
   DIAG_MARK("M9 pre store.begin");
   store.begin();
+  // DL9SAU 2026-07-14 (Stufe 2): FRUEHER Shutdown-Check -- nach store.begin
+  // (Sentinel-Datei lesbar), VOR the_mesh.begin/BLE/Kontakten. Entscheidet aus
+  // dem Hint in /shutdown_pending (kein Prefs-Parse) ob wir aus bleiben (billiger
+  // Re-Sleep, kein BLE/Kontakte-Flackern) oder booten. Kehrt nur bei Boot zurueck.
+  the_mesh.earlyShutdownCheck();
   DIAG_MARK("M10 pre the_mesh.begin");
   the_mesh.begin(
     #ifdef DISPLAY_CLASS

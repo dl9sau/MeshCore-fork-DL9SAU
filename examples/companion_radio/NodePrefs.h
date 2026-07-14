@@ -765,6 +765,12 @@ struct NodePrefs {  // persisted to file
   // Cad ergaenzt int.thresh (RSSI-basiertes LBT) -- beide aktiv sinnvoll:
   // CAD faengt Meshcore-Preambles, int.thresh das allgemeine RF-Level.
   uint8_t        cad_enabled;
+  // DL9SAU 2026-07-14: nach Shutdown mit anliegendem/wiederkehrendem USB
+  // hochfahren (1, Default -- Auto-Tracker) oder aus bleiben (0 -- Solar/
+  // "aus lassen am Kabel"). Gilt NUR fuer usb_loss/batt_low-Shutdowns; ein
+  // EXPLIZITER shutdown (CLI/Button) bleibt IMMER aus (nur Button weckt).
+  // 0xFF (EOF) -> Default 1. APPEND ans Datei-Ende (nach trace_levels).
+  uint8_t        auto_on_when_charging;
 #ifdef ESP_PLATFORM
   // DL9SAU 2026-06-16: Reboot-into-OTA-Mode (Wunschliste-OTA).
   // 'start ota' setzt das Flag und triggert Reboot. setup() prueft beim

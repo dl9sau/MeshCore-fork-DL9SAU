@@ -6470,6 +6470,7 @@ void MyMesh::begin(bool has_display) {
   // int.thresh -- CAD faengt Meshcore-Preambles, int.thresh das
   // allgemeine RF-Level.
   _prefs.cad_enabled = 1;
+  _prefs.auto_on_when_charging = 1;   // DL9SAU 2026-07-14: Default Auto-On (Tracker)
 
   // Wunschliste 58 Phase B (2026-06-13): CPU-Clock Pref. 0 = "Default
   // benutzen" (Build-spezifisch, auf ESP32-S3 = 240 MHz). Wird in
@@ -8996,7 +8997,7 @@ void MyMesh::checkCLIRescueCmd() {
       else     board.reboot();  // doesn't return
     } else if (strcmp(cli_command, "shutdown") == 0) {
       // DL9SAU Wunschliste 94 (2026-06-19): Pseudo-Powerloss via Serial-CLI.
-      setShutdownSentinel();
+      setShutdownSentinel(SHUTDOWN_CAUSE_EXPLICIT);   // CLI 'shutdown' = expliziter User-Wille
       if (_ui) _ui->shutdown(false);
       else     board.powerOff();
     } else {
@@ -9430,7 +9431,7 @@ void MyMesh::loop() {
   // aber Endzustand ist powerOff(). _ui->shutdown(false) spielt erst
   // den Buzzer-Shutdown-Sound, dann _board->powerOff().
   if (_pending_shutdown_at != 0 && (long)(millis() - _pending_shutdown_at) >= 0) {
-    setShutdownSentinel();
+    setShutdownSentinel(SHUTDOWN_CAUSE_EXPLICIT);   // Button-Long-Press = expliziter User-Wille
     if (_ui) _ui->shutdown(false);
     else     board.powerOff();
     _pending_shutdown_at = 0;  // returns not normally; safety reset
@@ -10396,7 +10397,7 @@ void MyMesh::manageBatteryAndUsb() {
           // direkt vor SYSTEMOFF auf grenzwertigem FS. (Ursache des Boot-Hangs.)
           // Wunschliste 94: Shutdown-Piep via UITask. Fallback auf
           // stilles board.powerOff() wenn kein UI initialisiert.
-          setShutdownSentinel();
+          setShutdownSentinel(SHUTDOWN_CAUSE_USB_LOSS);   // Zuendung aus -> Auto-On bei USB-Rueckkehr
           if (_ui) _ui->shutdown(false);
           else     board.powerOff();
           return;
@@ -10456,7 +10457,7 @@ void MyMesh::manageBatteryAndUsb() {
         // usb_loss-Pfad (shutdown_pending ist jetzt eine Datei, gecleart via
         // rm; Prefs unveraendert). War redundant + Korruptions-Trigger.
         // Wunschliste 94: Shutdown-Piep via UITask.
-        setShutdownSentinel();
+        setShutdownSentinel(SHUTDOWN_CAUSE_BATT_LOW);   // Batterie-Schutz -> Voltage/USB-Recovery
         if (_ui) _ui->shutdown(false);
         else     board.powerOff();
         return;
@@ -10652,43 +10653,38 @@ void MyMesh::loadCronFromFile() {
   f.close();
 }
 
+void MyMesh::earlyShutdownCheck() {
+#if defined(NRF52_PLATFORM)
+  // Laeuft nach store.begin, VOR the_mesh.begin. _store valide, InternalFS
+  // gemountet, SoftDevice NOCH NICHT up.
+  //
+  // DL9SAU 2026-07-14: stay-off-Logik DEAKTIVIERT -> hier NUR Marker loeschen +
+  // weiterbooten. Die urspruengliche "auf-USB-aus-bleiben via busy-poll bzw.
+  // Batterie-SYSTEMOFF"-Logik hat auf dem T1000-E ausgesperrt:
+  //   - RESETREAS als Wake-Signal wertlos: RESETPIN feuert von selbst, wenn der
+  //     USB-Host das im SYSTEMOFF verschwundene Geraet re-enumeriert; OFF durch
+  //     den floating NOPULL-Button (siehe T1000eBoard::powerOff).
+  //   - isExternalPowered()/VBUSDETECT direkt nach DOG-Reboot aus emuliertem
+  //     SYSTEMOFF unzuverlaessig -> busy-poll nahm faelschlich den Batterie-Zweig
+  //     -> echtes SYSTEMOFF -> Button weckt HW-bedingt nicht -> Lockout.
+  // Redesign offen. Bis dahin: garantiert hochfahren, kein Aussperren moeglich.
+  _store->removeFile("/shutdown_pending");
+  _store->removeFile("/shutdown_stayoff");
+#endif
+}
+
 void MyMesh::applyShutdownPendingCheck() {
 #if defined(NRF52_PLATFORM)
-  // DL9SAU 2026-07-12: Sentinel = Existenz der Datei /shutdown_pending
-  // (nicht mehr _prefs.shutdown_pending). Frueh + billig pruefbar (kein
-  // Full-Prefs-Parse), und Clearen (rm) fasst die Settings nicht an.
+  // DL9SAU 2026-07-14: Sicherheitsnetz. earlyShutdownCheck (nach store.begin)
+  // hat die /shutdown-Marker normalerweise schon geloescht. Falls hier doch
+  // noch welche liegen: loeschen + weiterbooten. KEIN board.powerOff() (war der
+  // Lockout-Pfad), KEINE edbg-Diagnose mehr -- die stay-off-Logik wird neu
+  // designt (siehe Recovery-Historie 2026-07-14: RESETREAS wertlos auf T1000-E,
+  // isExternalPowered pre-SD unzuverlaessig -> Lockout).
   if (!_store->fileExists("/shutdown_pending")) return;
-  // Button-Press / Hardware-Reset = expliziter User-Wake -> immer
-  // booten, unabhaengig vom USB-State. RESETREAS_OFF wird gesetzt
-  // bei GPIO-Sense-Wake (BUTTON_PIN via nrf_gpio_cfg_sense_input
-  // in T1000eBoard::powerOff). RESETPIN ist Reset-Pin (falls am
-  // Hardware verkabelt).
-  extern uint32_t s_nrf52_resetreas_captured;
-  uint32_t r = s_nrf52_resetreas_captured;
-  bool user_button_wake = (r & (POWER_RESETREAS_OFF_Msk
-                              | POWER_RESETREAS_RESETPIN_Msk)) != 0;
-  if (user_button_wake) {
-    bootLogWritePreReboot("shutdown-pending(button-wake)");
-    _store->removeFile("/shutdown_pending");
-    return;  // boot weiter
-  }
-  // 50 USB-Samples ueber 500ms -- nur clearen wenn alle stable da.
-  int stable_usb = 0;
-  for (int k = 0; k < 50; k++) {
-    if (board.isExternalPowered()) stable_usb++;
-    delay(10);
-  }
-  if (stable_usb < 50) {
-    char buf[60];
-    snprintf(buf, sizeof(buf), "shutdown-pending(%d/50 usb)", stable_usb);
-    bootLogWritePreReboot(buf);
-    // Datei bleibt bestehen (bleibt aus) -> naechster Boot re-prueft.
-    board.powerOff();
-    // returns nicht (sd_power_system_off jetzt funktional nach
-    // SD-Init in serial_interface.begin)
-  }
-  // USB stabil da -> booten, Sentinel loeschen.
+  bootLogWritePreReboot("shutdown-pending(boot)");
   _store->removeFile("/shutdown_pending");
+  _store->removeFile("/shutdown_stayoff");
 #endif
 }
 
@@ -10705,7 +10701,7 @@ bool MyMesh::requestButtonShutdown() {
   return true;
 }
 
-void MyMesh::setShutdownSentinel() {
+void MyMesh::setShutdownSentinel(uint8_t cause) {
 #if defined(NRF52_PLATFORM)
   // Layered defense gegen Phantom-Wake nach shutdown + USB-Pull:
   // (1) GPREGRET: schnell, BOR-zerstoerbar
@@ -10719,8 +10715,21 @@ void MyMesh::setShutdownSentinel() {
   sd_softdevice_is_enabled(&sd_en);
   if (sd_en) sd_power_gpregret_set(0, 0xAB);
   else       NRF_POWER->GPREGRET = 0xAB;
+  // DL9SAU 2026-07-14: Sentinel = EXISTENZ von /shutdown_pending (littlefs-
+  // Metadaten committen synchron/atomar -> POR-robust). Datei-DATEN ueberleben
+  // SYSTEMOFF NICHT zuverlaessig (Write-Cache) -> NIE Config in die Daten legen!
+  // Die Boot-Entscheidung wird darum als EXISTENZ eines 2. Markers kodiert:
+  //   /shutdown_stayoff da = "nicht auto-booten" = expliziter Shutdown ODER
+  //   auto_on_when_charging==0. Fehlt er -> usb_loss/batt_low mit Auto-On.
   File f = _store->openWriteFile("/shutdown_pending");
-  if (f) f.close();
+  if (f) f.close();   // leer (touch) -- Existenz reicht
+  bool stayoff = (cause == SHUTDOWN_CAUSE_EXPLICIT) || (_prefs.auto_on_when_charging == 0);
+  if (stayoff) {
+    File s = _store->openWriteFile("/shutdown_stayoff");
+    if (s) s.close();
+  } else {
+    _store->removeFile("/shutdown_stayoff");   // evtl. stale Marker entfernen
+  }
 #endif
 }
 
@@ -11484,6 +11493,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("batt_min_mv_boot",      _prefs.batt_min_mv_boot);        // DL9SAU 2026-07-12
   kv_uint("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min);   // Wunschliste 90
   kv_uint("button_press_allow_shutdown", _prefs.button_press_allow_shutdown); // DL9SAU 2026-07-12
+  kv_uint("auto_on_when_charging", _prefs.auto_on_when_charging); // DL9SAU 2026-07-14
   // usb_wake_action entfernt 2026-06-20 -- kein backup-export.
   kv_uint("repeat_scope_mode",     _prefs.repeat_scope_mode);
   kv_uint("msg_store_flash",       _prefs.msg_store_flash);
@@ -12443,6 +12453,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "batt_min_mv_boot") == 0)      { _prefs.batt_min_mv_boot      = (uint16_t)as_uint(); _br_applied++; return; }                       // DL9SAU 2026-07-12
       if (strcmp(key, "usb_loss_shutdown_min") == 0) { uint32_t v=as_uint(); if (v>240) v=240; _prefs.usb_loss_shutdown_min=(uint8_t)v; _br_applied++; return; }  // Wunschliste 90
       if (strcmp(key, "button_press_allow_shutdown") == 0) { _prefs.button_press_allow_shutdown = (uint8_t)as_uint() ? 1 : 0; _br_applied++; return; }  // DL9SAU 2026-07-12
+      if (strcmp(key, "auto_on_when_charging") == 0) { _prefs.auto_on_when_charging = (uint8_t)(as_uint() ? 1 : 0); _br_applied++; return; }  // DL9SAU 2026-07-14
       // usb_wake_action entfernt 2026-06-20 -- restore-ignore.
       if (strcmp(key, "repeat_scope_mode") == 0)     { _prefs.repeat_scope_mode     = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "msg_store_flash") == 0)       { _prefs.msg_store_flash       = (uint8_t)as_uint(); _br_applied++; return; }
@@ -24432,6 +24443,20 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else        pushCompanionMessage("OK - button_press_allow_shutdown = 1 (Long-Press schaltet ab, Default).");
       return;
     }
+    // DL9SAU 2026-07-14: Auto-On beim Laden (gilt fuer usb_loss/batt_low-
+    // Shutdowns; expliziter 'shutdown' bleibt IMMER aus, nur Button weckt).
+    if (strcmp(key, "auto_on_when_charging") == 0) {
+      int v = atoi(value_lc);
+      if (v != 0 && v != 1) {
+        pushCompanionMessage("Wert 0 oder 1 (1 = bei USB-Rueckkehr/Laden hochfahren, Default).");
+        return;
+      }
+      _prefs.auto_on_when_charging = (uint8_t)v;
+      savePrefs();
+      if (v == 0) pushCompanionMessage("OK - auto_on_when_charging = 0 (bleibt nach usb_loss/batt_low aus; nur Button weckt).\n  Hinweis: expliziter 'shutdown' bleibt sowieso IMMER aus.");
+      else        pushCompanionMessage("OK - auto_on_when_charging = 1 (usb_loss/batt_low -> bei USB/Spannung hochfahren, Default).");
+      return;
+    }
     // Wunschliste 24: Hop-Cap fuer Nicht-Chat-Adverts (Repeater/Sensor/
     // Room). Range 0..flood_max. 0 = deaktiviert (es gilt flood_max).
     // Plus Sondersyntax: "follow" / "max" -> Sentinel 254 = persistent
@@ -25256,6 +25281,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       emit_uint  ("batt_min_mv_boot",    _prefs.batt_min_mv_boot,      0);  // DL9SAU 2026-07-12
       emit_uint  ("usb_loss_shutdown_min", _prefs.usb_loss_shutdown_min, 0);
       emit_uint  ("button_press_allow_shutdown", _prefs.button_press_allow_shutdown, 1);  // DL9SAU 2026-07-12 (Default 1)
+      emit_uint  ("auto_on_when_charging", _prefs.auto_on_when_charging, 1);  // DL9SAU 2026-07-14 (Default 1)
       // DL9SAU Wunschliste 81 Phase 1+3 / 83: GPS-Profile + Lead + RX.
       emit_uint  ("gps_profile",         _prefs.gps_profile,           0);
       emit_uint  ("gps_lead_secs",       _prefs.gps_lead_secs,         300);
@@ -25609,6 +25635,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                (unsigned)_prefs.button_press_allow_shutdown,
                _prefs.button_press_allow_shutdown ? "Button schaltet ab"
                                                    : "Button-Shutdown gesperrt");
+    }
+    else if (strcmp(key, "auto_on_when_charging") == 0) {
+      snprintf(r, sizeof(r), "auto_on_when_charging = %u (%s)",
+               (unsigned)_prefs.auto_on_when_charging,
+               _prefs.auto_on_when_charging ? "usb_loss/batt_low -> boot bei USB/Spannung"
+                                            : "bleibt aus (nur Button)");
     }
     else if (strcmp(key, "shutdown_pending") == 0) {
       // DL9SAU 2026-07-12: Sentinel ist jetzt die Datei /shutdown_pending

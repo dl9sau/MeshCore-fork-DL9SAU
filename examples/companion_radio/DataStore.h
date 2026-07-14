@@ -48,6 +48,9 @@ public:
   File openWriteFile(const char* filename);   // Wunschliste 19 Phase C: msg-bucket-persist
   bool removeFile(const char* filename);
   bool removeFile(FILESYSTEM* fs, const char* filename);
+  // DL9SAU 2026-07-14: Rename auf der Primary-FS (nur Directory-Eintrag, fasst
+  // Datei-Datenbloecke NICHT an) -- fuer Sideline-Recovery korrupter Dateien.
+  bool renameFile(const char* from, const char* to);
   // DL9SAU 2026-07-12: Existenz-Check auf der Primary-FS (InternalFS) --
   // fuer den /shutdown_pending-Datei-Sentinel (touch/rm statt Prefs-Byte).
   bool fileExists(const char* filename) const;

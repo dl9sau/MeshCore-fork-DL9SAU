@@ -188,6 +188,10 @@ bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
   return fs->remove(filename);
 }
 
+bool DataStore::renameFile(const char* from, const char* to) {
+  return _fs->rename(from, to);
+}
+
 // DL9SAU 2026-07-12: Existenz-Check ohne Oeffnen/Parsen -- fuer den
 // /shutdown_pending-Datei-Sentinel (touch=pending / rm=gecleart).
 bool DataStore::fileExists(const char* filename) const {
@@ -593,6 +597,12 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
       }
     }
 
+    // DL9SAU 2026-07-14: auto_on_when_charging (uint8, EOF 0xFF -> Default 1).
+    // APPEND ans Ende (nach trace_levels).
+    _prefs.auto_on_when_charging = 0xFF;
+    file.read((uint8_t *)&_prefs.auto_on_when_charging, sizeof(_prefs.auto_on_when_charging));
+    if (_prefs.auto_on_when_charging == 0xFF) _prefs.auto_on_when_charging = 1;
+
     file.close();
   }
 }
@@ -863,6 +873,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // -- letztes Feld auf beiden Plattformen (siehe loadPrefsInt).
     file.write((uint8_t *)&_prefs.trace_levels,
                sizeof(_prefs.trace_levels));
+    // DL9SAU 2026-07-14: auto_on_when_charging (uint8). APPEND ans Ende.
+    file.write((uint8_t *)&_prefs.auto_on_when_charging,
+               sizeof(_prefs.auto_on_when_charging));
   };  // Ende writeBody-Lambda
 
   const char* TMP  = "/new_prefs.tmp";

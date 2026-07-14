@@ -301,6 +301,13 @@ struct AdvertPath {
 #define TRACE_CAT_N     18       // Anzahl Kategorien (= hoechster Bit-Index + 1); passt in uint64 (max 32)
 #define TRACE_ALL_MASK  0x3FFFF
 
+// DL9SAU 2026-07-14: Shutdown-Ursache (Byte in /shutdown_pending). Steuert den
+// Boot-Check: explicit bleibt aus (nur Button), usb_loss/batt_low booten je nach
+// USB/Spannung + auto_on_when_charging.
+#define SHUTDOWN_CAUSE_EXPLICIT  1   // CLI 'shutdown' / Button-Long-Press
+#define SHUTDOWN_CAUSE_USB_LOSS  2   // usb_loss_shutdown_min (Zuendung aus)
+#define SHUTDOWN_CAUSE_BATT_LOW  3   // Batterie-Schutz / Solar-leer
+
 // Duty-Cycle-Schutz: regulatorische 10% TX-Airtime pro rollendem 1h-Fenster
 // (EU SRD 869 narrow). Sliding-Window mit 60 Slots à 1 Minute (millis-basiert,
 // GPS/RTC-unabhaengig). Threshold-Schwellen als %% von 360s in _prefs.
@@ -605,6 +612,11 @@ public:
   // Wenn Pref=1 UND USB nicht stable an -> board.powerOff (no return).
   // Public, weil aus main.cpp setup() aufgerufen (nach serial_interface.begin).
   void          applyShutdownPendingCheck();
+  // DL9SAU 2026-07-14 (Stufe 2): FRUEHER Check -- nach store.begin, VOR
+  // the_mesh.begin/BLE. Faengt den EXPLIZITEN Shutdown billig ab (Re-Sleep ohne
+  // BLE/Kontakte-Flackern). Braucht KEINE Prefs (die kommen erst in
+  // the_mesh.begin). usb_loss/batt_low laufen weiter zum spaeten Check.
+  void          earlyShutdownCheck();
   // DL9SAU 2026-07-12 (Power Weg A): HW-Comparator (LPCOMP+VBUS) mit der
   // effektiven Recovery-Schwelle armieren. Public -- aus main.cpp setup()
   // (nach the_mesh.begin) UND aus dem 'set batt_min_mv_boot'-Handler.
@@ -1566,7 +1578,10 @@ private:
   // Setzt 0xAB in GPREGRET vor powerOff -- Boot-Check in main.cpp
   // sieht das und blockt Phantom-Wakes (BOR durch USB-Pull-Glitch
   // hat keine RESETREAS-Bits).
-  void setShutdownSentinel();
+  // DL9SAU 2026-07-14: Shutdown-URSACHE als Byte in /shutdown_pending, damit
+  // der Boot-Check ursachen-bewusst entscheidet (explicit bleibt aus AUCH am
+  // Kabel; usb_loss/batt_low booten je nach USB/Spannung + auto_on_when_charging).
+  void setShutdownSentinel(uint8_t cause = SHUTDOWN_CAUSE_EXPLICIT);
   void manageCronAt();
   void executeScheduledCmd(const char* cmd, const char* origin_tag);
   bool parseRelativeMinutes(const char* s, uint32_t* out_minutes);
