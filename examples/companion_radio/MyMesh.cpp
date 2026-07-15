@@ -2455,16 +2455,40 @@ void MyMesh::markSelfRepeated(const mesh::Packet* packet) {
 void MyMesh::deliveryTraceEcho(mesh::Packet* packet) {
   uint8_t cnt = packet->getPathHashCount();
   uint8_t sz  = packet->getPathHashSize();
-  char rephex[16];
+  // DL9SAU 2026-07-15: trace-Level steuert die Verbositaet INNERHALB des Topics.
+  //   Level 1 -> nur der letzte (zuletzt hoerende) Repeater (wie bisher).
+  //   Level 2 -> KOMPLETTER Pfad: alle Prefixe kommasepariert, Header-Reihenfolge
+  //              (path[0..cnt-1]). Zeigt die ganze Reise (z.B. Loop hop1->..->hop4).
+  // hop=N bleibt in beiden Faellen dran (Schnellcheck).
+  bool full = (traceLevelOf(TRACE_DELIVERY) >= 2);
+  char rephex[110];
   if (cnt >= 1 && sz >= 1) {
-    const uint8_t* rep = &packet->path[(cnt - 1) * sz];
     int p = 0;
-    for (uint8_t b = 0; b < sz && b < 4 && p < (int)sizeof(rephex) - 2; b++)
-      p += snprintf(rephex + p, sizeof(rephex) - p, "%02x", rep[b]);
+    uint8_t first = full ? 0 : (uint8_t)(cnt - 1);
+    for (uint8_t h = first; h < cnt; h++) {
+      if (p > (int)sizeof(rephex) - 12) {   // Companion-145B-Limit: sauber truncaten
+        p += snprintf(rephex + p, sizeof(rephex) - p, ",..");
+        break;
+      }
+      if (p > 0) rephex[p++] = ',';
+      const uint8_t* rep = &packet->path[h * sz];
+      for (uint8_t b = 0; b < sz && b < 4; b++)
+        p += snprintf(rephex + p, sizeof(rephex) - p, "%02x", rep[b]);
+    }
+    rephex[p] = 0;
   } else {
     strncpy(rephex, "direct", sizeof(rephex));  // path_len==0: kein Repeater angehaengt
+    rephex[sizeof(rephex) - 1] = 0;
   }
   uint8_t ptype = packet->getPayloadType();
+  // DL9SAU 2026-07-15: Scope-Annotation in der Klammer (ersetzt den frueheren
+  // redundanten Channel-Hash). Zentraler Helfer computeScopeLabel -> IDENTISCH
+  // zur Channel-/DM-Message-Anzeige: "#<region>" bekannt / "#?" scoped-unbekannt
+  // / "#*" unscoped. Kein roher transport_code -- der ist HMAC(scope-key,
+  // type||payload), content-abhaengig, taugt NICHT als Scope-Kennung.
+  uint32_t scope_h;
+  char scopelabel[24];
+  computeScopeLabel(packet, scope_h, scopelabel, sizeof(scopelabel));  // enthaelt schon '#'
   if ((ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
       && packet->payload_len >= 1) {
     uint8_t ch_hash = packet->payload[0];
@@ -2480,14 +2504,15 @@ void MyMesh::deliveryTraceEcho(mesh::Packet* packet) {
       }
     }
     if (chname[0])
-      traceCompanion(TRACE_DELIVERY, "[deliv] ch %s (#%02x) repeat via %s hop=%u",
-                     chname, ch_hash, rephex, cnt);
+      traceCompanion(TRACE_DELIVERY, "[deliv] ch %s (%s) repeat via %s hop=%u",
+                     chname, scopelabel, rephex, cnt);
     else
-      traceCompanion(TRACE_DELIVERY, "[deliv] ch #%02x repeat via %s hop=%u",
-                     ch_hash, rephex, cnt);
+      // Channelname unbekannt -> Hash bleibt als Channel-ID, Scope dahinter.
+      traceCompanion(TRACE_DELIVERY, "[deliv] ch #%02x (%s) repeat via %s hop=%u",
+                     ch_hash, scopelabel, rephex, cnt);
   } else {
-    traceCompanion(TRACE_DELIVERY, "[deliv] %s repeat via %s hop=%u",
-                   ptypeName(ptype), rephex, cnt);
+    traceCompanion(TRACE_DELIVERY, "[deliv] %s (%s) repeat via %s hop=%u",
+                   ptypeName(ptype), scopelabel, rephex, cnt);
   }
 }
 
