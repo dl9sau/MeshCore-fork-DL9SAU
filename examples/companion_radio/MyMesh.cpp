@@ -2536,8 +2536,16 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     // einem Repeater weitergereicht (wir sind in Funkreichweite des
     // Originators). repeated = ueber mind. einen Repeater eingetroffen.
     int hop_idx = ((packet->path_len & 63) == 0) ? 0 : 1;
-    if (_rx_flood_by_ptype[ptype_raw][hop_idx] < 0xFFFF) {
-      _rx_flood_by_ptype[ptype_raw][hop_idx]++;
+    // DL9SAU 2026-07-16 (User): MULTIPART ist ein Wrapper (aktuell nur ACK-Inner,
+    // Mesh.cpp:308) UND direct-routed -> erreicht diesen Flood-Zaehler ohnehin
+    // nicht. Falls doch je ein Multipart geflutet wird: unter seinem INNEREN Typ
+    // zaehlen (Multipart-ACK -> ack-Topf), NICHT als eigener 'multi'-Topf.
+    uint8_t idx = ptype_raw;
+    if (ptype_raw == PAYLOAD_TYPE_MULTIPART && packet->payload_len > 0) {
+      idx = packet->payload[0] & 0x0F;
+    }
+    if (idx < 16 && _rx_flood_by_ptype[idx][hop_idx] < 0xFFFF) {
+      _rx_flood_by_ptype[idx][hop_idx]++;
     }
   }
 
@@ -26898,15 +26906,23 @@ cron_add_direct:
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][0],
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][0]);
     pushCompanionMessage(block);
-    // DL9SAU 2026-07-16: restliche flood-faehige Typen itemisieren, damit die
-    // Aufschluesselung aufs total reconciled (User-Befund: grp-data-Traffic in
-    // der Region, scoped/multi-hop -- wichtig zu verfolgen). Eigene Push-Zeile
-    // wegen Companion-Byte-Limit. multi/raw i.d.R. 0 (multipart=direct, nicht flood).
-    snprintf(block, sizeof(block), "  grpdata=%u multi=%u ctrl=%u raw=%u",
+    // DL9SAU 2026-07-16 (User-Granularitaets-Entscheid): grpdata (Regional-
+    // Traffic) + ctrl (Debug) explizit, Rest als 'other'-Sammeltopf -> reconciled
+    // aufs total OHNE jeden Typ einzeln zu itemisieren, und ZUKUNFTSSICHER: neue
+    // Upstream-Typen (evtl. TXT_SECURE, 0x0C-0x0E, raw) fallen automatisch in
+    // 'other', ohne Code-Aenderung. Zaehlen ist eh gratis (Array voll [16]-breit).
+    // Eigene Push-Zeile wegen Companion-Byte-Limit.
+    uint32_t hd_other = rxf_hd_total
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_REQ][0]     - _rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][0]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG][0] - _rx_flood_by_ptype[PAYLOAD_TYPE_ACK][0]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0]  - _rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT][0]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_GRP_DATA][0]- _rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][0]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_PATH][0]    - _rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][0]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_CONTROL][0];
+    snprintf(block, sizeof(block), "  grpdata=%u ctrl=%u other=%u",
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_DATA][0],
-             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_MULTIPART][0],
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_CONTROL][0],
-             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RAW_CUSTOM][0]);
+             (unsigned)hd_other);
     pushCompanionMessage(block);
     p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rxf_hd_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_hd_total, uptime_s);
@@ -26927,13 +26943,18 @@ cron_add_direct:
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][1],
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][1]);
     pushCompanionMessage(block);
-    // DL9SAU 2026-07-16: siehe heard-direct -- restliche flood-faehige Typen.
-    // grp-data ist hier der operativ relevante (Regional-Traffic, scoped/multi-hop).
-    snprintf(block, sizeof(block), "  grpdata=%u multi=%u ctrl=%u raw=%u",
+    // DL9SAU 2026-07-16: siehe heard-direct -- grpdata + ctrl explizit, Rest 'other'.
+    uint32_t rep_other = rxf_rep_total
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_REQ][1]     - _rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][1]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_TXT_MSG][1] - _rx_flood_by_ptype[PAYLOAD_TYPE_ACK][1]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][1]  - _rx_flood_by_ptype[PAYLOAD_TYPE_GRP_TXT][1]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_GRP_DATA][1]- _rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][1]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_PATH][1]    - _rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][1]
+        - _rx_flood_by_ptype[PAYLOAD_TYPE_CONTROL][1];
+    snprintf(block, sizeof(block), "  grpdata=%u ctrl=%u other=%u",
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_DATA][1],
-             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_MULTIPART][1],
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_CONTROL][1],
-             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RAW_CUSTOM][1]);
+             (unsigned)rep_other);
     pushCompanionMessage(block);
     p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rxf_rep_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_rep_total, uptime_s);
