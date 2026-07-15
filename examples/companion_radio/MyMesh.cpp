@@ -308,11 +308,15 @@ const char* MyMesh::bucketName(MsgBucket b) const {
 
 int MyMesh::bucketByName(const char* s) const {
   if (!s || !*s) return -1;
+  // DL9SAU 2026-07-15: fuehrendes '$' tolerieren (Anzeige zeigt "$companion") +
+  // case-insensitiv matchen (Anzeige zeigt "DM"/"Public", Nutzer tippt das ab).
+  if (*s == '$') s++;
+  if (!*s) return -1;
   size_t n = strlen(s);
   int hit = -1;
   int matches = 0;
   for (int i = 0; i < BUCKET_COUNT; i++) {
-    if (strncmp(s, k_bucket_names[i], n) == 0) {
+    if (strncasecmp(s, k_bucket_names[i], n) == 0) {
       if (strlen(k_bucket_names[i]) == n) return i;  // exakt
       hit = i;
       matches++;
@@ -15273,8 +15277,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  2/8 zeigt: 2 neue\n"
           "  Nachrichten von max 8.\n"
           "Typen:\n"
-          "  public, hashtag,\n"
-          "  private, dm, companion."
+          "  Public, hashtag,\n"
+          "  private, DM, $companion."
         );
         pushCompanionMessage(
           "messages flash <type> on|off\n"
@@ -15283,8 +15287,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "messages limit <type> <N>\n"
           "  Slot-Limit setzen. 0 = type-Default.\n"
-          "  Max: public 8, companion 16,\n"
-          "       hashtag/private/dm je 24."
+          "  Max: Public 8, $companion 16,\n"
+          "       hashtag/private/DM je 24."
         );
         pushCompanionMessage(
           "messages clear <type|all>\n"
@@ -18906,7 +18910,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         switch (b) {
           case BUCKET_DM:        return "DM";
           case BUCKET_COMPANION: return "$companion";
-          case BUCKET_PUBLIC:    return "public";
+          case BUCKET_PUBLIC:    return "Public";  // Default-Channel heisst "Public" (gross)
           case BUCKET_HASHTAG:   return "hashtag";
           case BUCKET_PRIVATE:   return "private";
           default: return "?";
