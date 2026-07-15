@@ -2492,14 +2492,17 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
   uint32_t h = calcShortHash(packet);
   uint8_t m = matchSelfHash(h);
   // DL9SAU 2026-07-15 DIAG (Advert-Echo-m-Klassifikations-Bug): fuer JEDEN
-  // empfangenen Flood-Advert Hash + m loggen (0=fremd, 1=self-initiated,
-  // 2=self-repeated). Vergleich mit dem tx-adv-rec-Hash unten zeigt, ob die
-  // Payload/der Hash zwischen unserem Send und dem Echo divergiert. Nur unter
-  // 'trace deliv >= 2' -> kein Normalbetrieb-Rauschen.
+  // empfangenen Flood-Advert loggen. "OWN!" via PUBKEY-Vergleich (Advert-Payload
+  // beginnt mit dem 32-Byte-Pubkey) -- eindeutig unser eigenes Advert-Echo, OHNE
+  // Hex vergleichen zu muessen. m: 0=fremd, 1=self-initiated, 2=self-repeated.
+  // Ein "OWN!" mit m!=1 = der Bug. Hash bleibt fuer den tx-rec-Vergleich dran.
+  // Nur unter 'trace deliv >= 2'.
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
       && traceLevelOf(TRACE_DELIVERY) >= 2) {
-    traceCompanion(TRACE_DELIVERY, "[deliv] rx-adv hash=%08lX m=%u",
-                   (unsigned long)h, (unsigned)m);
+    bool own = (packet->payload_len >= PUB_KEY_SIZE
+                && memcmp(packet->payload, self_id.pub_key, PUB_KEY_SIZE) == 0);
+    traceCompanion(TRACE_DELIVERY, "[deliv] rx-adv %s hash=%08lX m=%u",
+                   own ? "OWN!" : "other", (unsigned long)h, (unsigned)m);
   }
   if (m == 1 && _rx_us_self_initiated_count < 0xFFFF) {
     _rx_us_self_initiated_count++;
