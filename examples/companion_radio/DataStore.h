@@ -29,6 +29,13 @@ public:
   DataStore(FILESYSTEM& fs, FILESYSTEM& fsExtra, mesh::RTCClock& clock);
   void begin();
   bool formatFileSystem();
+  // DL9SAU 2026-07-15: getrenntes Formatieren, damit `reformat internal|extra`
+  // die KRANKE Partition heilt ohne die gesunde zu opfern. internal = _fs
+  // (Key/Prefs/Bonds), extra = _fsExtra (Channels/Contacts). extra gibt es nur
+  // auf NRF52/STM32; sonst false.
+  bool formatInternalFS();
+  bool formatExtraFS();
+  bool hasExtraFS() const { return _fsExtra != nullptr; }
   FILESYSTEM* getPrimaryFS() const { return _fs; }
   FILESYSTEM* getSecondaryFS() const { return _fsExtra; }
   bool loadMainIdentity(mesh::LocalIdentity &identity);

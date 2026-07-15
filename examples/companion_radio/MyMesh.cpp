@@ -23178,16 +23178,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     _store->getFsInfo(it, iu, et, eu);
     char r[200];
     snprintf(r, sizeof(r),
-      "fsinfo (Bytes):\n  InternalFS: %lu/%lu belegt, %lu frei",
+      "fsinfo (Bytes):\n  InternalFS: %lu/%lu belegt, %lu frei\n"
+      "    (Key, Prefs, BLE-Bonds, Msgs)",
       (unsigned long)iu, (unsigned long)it, (unsigned long)(it - iu));
     pushCompanionMessage(r);
     if (et > 0) {
       snprintf(r, sizeof(r),
-        "  ExtraFS: %lu/%lu belegt, %lu frei",
+        "  ExtraFS: %lu/%lu belegt, %lu frei\n    (Channels, Contacts)",
         (unsigned long)eu, (unsigned long)et, (unsigned long)(et - eu));
       pushCompanionMessage(r);
     } else {
-      pushCompanionMessage("  (kein ExtraFS)");
+      pushCompanionMessage("  (kein ExtraFS -> alles auf InternalFS)");
     }
     // Groesse der Prefs-Datei (fuer 2x-Abschaetzung bei temp+rename).
     File pf = _store->openRead("/new_prefs");
@@ -23215,28 +23216,80 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // erreichbar + mit Bestaetigung. NICHT wie 'erase', das alles inkl. Identity
   // wischt.)
   if (starts_with_word(cmd, "reformat")) {
-    const char* arg = strchr(cmd, ' ');
-    if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
-    if (!arg || strcmp(arg, "yes") != 0) {
+    // DL9SAU 2026-07-15: gezieltes Formatieren. `reformat <internal|extra|all>
+    // yes`. Heilt die KRANKE Partition ohne die gesunde zu opfern -- z.B.
+    // `reformat extra` fixt korrupte Channels/Contacts OHNE Key/Prefs/BLE-Bonds
+    // (InternalFS) anzufassen -> KEIN Re-Pair. Nach dem Format wird nur das neu
+    // geschrieben, was auf der jeweiligen Partition liegt (aus dem RAM).
+    // Tokens nach "reformat" holen: [target] [yes].
+    const char* p = cmd;
+    while (*p && *p != ' ' && *p != '\t') p++;      // "reformat" ueberspringen
+    while (*p == ' ' || *p == '\t') p++;
+    char t1[16] = {0};
+    { size_t i = 0; while (p[i] && p[i] != ' ' && p[i] != '\t' && i < sizeof(t1)-1) { t1[i] = p[i]; i++; } }
+    const char* p2 = p;
+    while (*p2 && *p2 != ' ' && *p2 != '\t') p2++;
+    while (*p2 == ' ' || *p2 == '\t') p2++;
+    char t2[16] = {0};
+    { size_t i = 0; while (p2[i] && p2[i] != ' ' && p2[i] != '\t' && i < sizeof(t2)-1) { t2[i] = p2[i]; i++; } }
+
+    auto isPrefixOf = [](const char* tok, const char* full) -> bool {
+      size_t n = strlen(tok);
+      return n > 0 && strncasecmp(tok, full, n) == 0;
+    };
+    // Ziel + Bestaetigung bestimmen (t1=="yes" allein = all, Back-Compat).
+    bool tgt_all = isPrefixOf(t1, "all") || (strcasecmp(t1, "yes") == 0);
+    bool tgt_int = isPrefixOf(t1, "internal");
+    bool tgt_ext = isPrefixOf(t1, "extra");
+    bool have_target = tgt_all || tgt_int || tgt_ext;
+    bool confirmed = (strcasecmp(t1, "yes") == 0) || (strcasecmp(t2, "yes") == 0);
+
+    if (!have_target || !confirmed) {
       pushCompanionMessage(
-        "reformat: FS formatieren + Daten sofort neu schreiben.\n"
-        "-> Identity, Contacts, Channels BLEIBEN. Prefs = aktueller Stand.\n"
-        "Behebt korrupte/volle FS (Settings speichern nicht mehr durch).");
-      pushCompanionMessage("Bestaetigen mit: 'reformat yes'");
+        "reformat <internal|extra|all> yes -- kranke Partition formatieren +\n"
+        "  Daten sofort aus dem RAM neu schreiben. Behebt korrupte/volle FS.");
+      pushCompanionMessage(
+        "  internal = Key + Prefs. Channels/Contacts BLEIBEN.\n"
+        "    ACHTUNG: BLE-Bonds weg -> Handy muss neu pairen.");
+      pushCompanionMessage(
+        "  extra    = Channels + Contacts. Key/Prefs/Bonds BLEIBEN,\n"
+        "    KEIN Re-Pair. all = beide.");
+      pushCompanionMessage("Bestaetigen, z.B.: reformat extra yes");
       return;
     }
-    pushCompanionMessage("reformat: formatiere FS + schreibe Daten neu ...");
-    bool ok = _store->formatFileSystem();
-    if (ok) {
-      _store->saveMainIdentity(self_id);
-      savePrefs();
-      saveContacts();
-      saveChannels();
-      pushCompanionMessage(
-        "OK - FS neu formatiert. Identity/Contacts/Channels behalten.\n"
-        "Jetzt Prefs-Backup einspielen + 'save'. Danach reboot-Test.");
-    } else {
+
+    bool do_int = tgt_all || tgt_int;
+    bool do_ext = tgt_all || tgt_ext;
+    if (do_ext && !_store->hasExtraFS()) {
+      pushCompanionMessage("reformat extra: kein ExtraFS auf dieser Plattform.");
+      return;
+    }
+
+    pushCompanionMessage("reformat: formatiere + schreibe Daten neu ...");
+    bool ok;
+    if (tgt_all)      ok = _store->formatFileSystem();
+    else if (do_int)  ok = _store->formatInternalFS();
+    else              ok = _store->formatExtraFS();
+
+    if (!ok) {
       pushCompanionMessage("FEHLER: Format fehlgeschlagen (Flash-Problem?).");
+      return;
+    }
+    if (do_int) { _store->saveMainIdentity(self_id); savePrefs(); }
+    if (do_ext) { saveContacts(); saveChannels(); }
+
+    if (tgt_ext) {
+      pushCompanionMessage(
+        "OK - ExtraFS neu formatiert. Channels/Contacts neu geschrieben.\n"
+        "Key/Prefs/Bonds unberuehrt (kein Re-Pair). Reboot-Test empfohlen.");
+    } else if (tgt_int) {
+      pushCompanionMessage(
+        "OK - InternalFS neu formatiert. Identity/Prefs neu geschrieben.\n"
+        "BLE-Bonds sind weg -> Handy neu pairen. Danach reboot-Test.");
+    } else {
+      pushCompanionMessage(
+        "OK - beide FS neu formatiert. Identity/Prefs/Channels/Contacts\n"
+        "neu geschrieben. BLE-Bonds weg -> neu pairen. Reboot-Test.");
     }
     return;
   }
@@ -25894,9 +25947,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       crash_catcher_selftest();   // kehrt nie zurueck (Reset)
     } else {
       pushCompanionMessage(
-        "crashtest: verifiziert den Crash-Faenger -- loest ABSICHTLICH einen "
-        "HardFault aus, Geraet resettet (Daten bleiben). Danach 'log read' -> "
-        "CRASH pc=.. -> addr2line. Aufruf: 'crashtest now'.");
+        "crashtest: der Crash-Faenger (HardFault-Log) ist AKTUELL DEAKTIVIERT "
+        "-- der naked-Override ist SoftDevice-inkompatibel (bricht den shutdown-"
+        "SYSTEMOFF-Pfad), Redesign offen. 'crashtest now' loest zwar einen "
+        "HardFault aus, schreibt aber KEIN 'CRASH pc=..'-Log -> nur ein Reset "
+        "(Daten bleiben). Bis zum SD-kompatiblen Redesign ohne Diagnose-Nutzen.");
     }
     return;
   }

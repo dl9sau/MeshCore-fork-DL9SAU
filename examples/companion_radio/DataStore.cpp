@@ -236,6 +236,32 @@ bool DataStore::formatFileSystem() {
 #endif
 }
 
+// DL9SAU 2026-07-15: nur die InternalFS (Key/Prefs/Bonds) formatieren.
+bool DataStore::formatInternalFS() {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  return _fs->format();
+#elif defined(RP2040_PLATFORM)
+  return LittleFS.format();
+#elif defined(ESP32)
+  bool fs_success = ((fs::SPIFFSFS *)_fs)->format();
+  esp_err_t nvs_err = nvs_flash_erase();
+  return fs_success && (nvs_err == ESP_OK);
+#else
+  return false;
+#endif
+}
+
+// DL9SAU 2026-07-15: nur die ExtraFS (Channels/Contacts) formatieren. Gibt es
+// nur auf NRF52/STM32 (zweite littlefs-Partition); sonst false.
+bool DataStore::formatExtraFS() {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  if (_fsExtra == nullptr) return false;
+  return _fsExtra->format();
+#else
+  return false;
+#endif
+}
+
 bool DataStore::loadMainIdentity(mesh::LocalIdentity &identity) {
   return identity_store.load("_main", identity);
 }
