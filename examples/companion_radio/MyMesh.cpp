@@ -10653,33 +10653,55 @@ void MyMesh::earlyShutdownCheck() {
   // Laeuft nach store.begin, VOR the_mesh.begin. _store valide, InternalFS
   // gemountet, SoftDevice NOCH NICHT up.
   //
-  // DL9SAU 2026-07-14: stay-off-Logik DEAKTIVIERT -> hier NUR Marker loeschen +
-  // weiterbooten. Die urspruengliche "auf-USB-aus-bleiben via busy-poll bzw.
-  // Batterie-SYSTEMOFF"-Logik hat auf dem T1000-E ausgesperrt:
-  //   - RESETREAS als Wake-Signal wertlos: RESETPIN feuert von selbst, wenn der
-  //     USB-Host das im SYSTEMOFF verschwundene Geraet re-enumeriert; OFF durch
-  //     den floating NOPULL-Button (siehe T1000eBoard::powerOff).
-  //   - isExternalPowered()/VBUSDETECT direkt nach DOG-Reboot aus emuliertem
-  //     SYSTEMOFF unzuverlaessig -> busy-poll nahm faelschlich den Batterie-Zweig
-  //     -> echtes SYSTEMOFF -> Button weckt HW-bedingt nicht -> Lockout.
-  // Redesign offen. Bis dahin: garantiert hochfahren, kein Aussperren moeglich.
-  _store->removeFile("/shutdown_pending");
-  _store->removeFile("/shutdown_stayoff");
+  // DL9SAU 2026-07-15: BEWUSST LEER. Die Stay-off-Entscheidung braucht ein
+  // VERLAESSLICHES VBUS-Read -- das gibt es HIER (pre-SoftDevice, direkt nach
+  // DOG-Reboot aus emuliertem SYSTEMOFF) NICHT (2026-07-14-Lockout: Fehllesung
+  // -> Batterie-Zweig -> SYSTEMOFF trotz USB -> Button-tot). Darum wandert die
+  // Entscheidung nach applyShutdownPendingCheck (nach the_mesh.begin +
+  // serial_interface.begin -> SoftDevice up -> isExternalPowered() nutzt
+  // sd_power_usbregstatus_get = verlaesslich). Marker hier NICHT anfassen,
+  // damit der spaete Check sie noch sieht.
 #endif
 }
 
 void MyMesh::applyShutdownPendingCheck() {
 #if defined(NRF52_PLATFORM)
-  // DL9SAU 2026-07-14: Sicherheitsnetz. earlyShutdownCheck (nach store.begin)
-  // hat die /shutdown-Marker normalerweise schon geloescht. Falls hier doch
-  // noch welche liegen: loeschen + weiterbooten. KEIN board.powerOff() (war der
-  // Lockout-Pfad), KEINE edbg-Diagnose mehr -- die stay-off-Logik wird neu
-  // designt (siehe Recovery-Historie 2026-07-14: RESETREAS wertlos auf T1000-E,
-  // isExternalPowered pre-SD unzuverlaessig -> Lockout).
+  // DL9SAU 2026-07-15: Stay-off-Entscheidung an der VERLAESSLICHEN Stelle. Laeuft
+  // nach the_mesh.begin + serial_interface.begin -> SoftDevice UP -> isExternal
+  // Powered() geht ueber sd_power_usbregstatus_get (kein Fehlgriff wie im
+  // Frueh-Pfad). board.powerOff() ist hier auch SICHER: radio/sensors/display
+  // sind initialisiert. Kern-Invariante gegen den 2026-07-14-Lockout: wir gehen
+  // NUR ins echte SYSTEMOFF, wenn USB VERLAESSLICH FEHLT -> "SYSTEMOFF trotz USB"
+  // (die Lockout-Ursache) ist ausgeschlossen. [[project_early_shutdown_check_design]]
   if (!_store->fileExists("/shutdown_pending")) return;
-  bootLogWritePreReboot("shutdown-pending(boot)");
-  _store->removeFile("/shutdown_pending");
-  _store->removeFile("/shutdown_stayoff");
+
+  bool usb = board.isExternalPowered();
+  if (!usb) {
+    // Bias in die SICHERE Richtung: SYSTEMOFF nur wenn ZWEI Reads einig sind,
+    // dass USB fehlt. Ein einzelnes "USB da" -> booten (kann nicht aussperren).
+    delay(20);
+    usb = board.isExternalPowered();
+  }
+
+  if (usb) {
+    // USB da: auf USB kann der nRF ohnehin nicht echt aus bleiben (VBUS haelt
+    // das Rail) -- UND das ist der Auto-On-beim-Laden-Fall. Marker weg, boot.
+    // GENAU DAS verhindert auch den Lockout (nie SYSTEMOFF solange USB da).
+    bootLogWritePreReboot("shutdown-pending: USB -> boot");
+    _store->removeFile("/shutdown_pending");
+    _store->removeFile("/shutdown_stayoff");
+    return;
+  }
+
+  // USB verlaesslich WEG = echte Batterie: zurueck in echtes SYSTEMOFF (bleibt
+  // aus). Weckt bei USB-Replug (echter VBUS-Anstieg von 0 -> zuverlaessiger Boot
+  // -> dann greift oben der USB-Zweig = Auto-On beim Laden). Auf echter Batterie
+  // stoppt SYSTEMOFF den WDT -> bleibt WIRKLICH aus, kein 90s-Loop.
+  // BEWUSST KEIN FS-Write kurz vor powerOff (Korruptions-Trigger, siehe
+  // [[project_reset_persistence_cache_gotcha]]); die Marker bleiben stehen, der
+  // Replug-Boot raeumt sie oben auf.
+  board.powerOff();   // = sd_power_system_off() auf Batterie, kehrt nicht zurueck
+  // Falls powerOff() wider Erwarten zurueckkehrt: einfach normal weiterbooten.
 #endif
 }
 
