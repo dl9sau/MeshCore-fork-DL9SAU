@@ -15279,6 +15279,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         );
         return;
       }
+      if (topic_prefix_match(topic, "reformat")) {
+        // DL9SAU 2026-07-15: keine Text-Duplikation -- bare `reformat` druckt
+        // schon die volle Hilfe (ohne 'yes' passiert nichts). Delegieren.
+        handleCompanionCommand("reformat");
+        return;
+      }
+      if (topic_prefix_match(topic, "fsinfo")) {
+        // fsinfo ist read-only + selbst-dokumentierend (annotiert Partitionen).
+        // Delegieren statt die Annotation zu duplizieren.
+        handleCompanionCommand("fsinfo");
+        return;
+      }
       if (topic_prefix_match(topic, "messages")) {
         pushCompanionMessage(
           "messages (no arg):\n"
