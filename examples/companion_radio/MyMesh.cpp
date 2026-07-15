@@ -26898,6 +26898,16 @@ cron_add_direct:
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][0],
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][0]);
     pushCompanionMessage(block);
+    // DL9SAU 2026-07-16: restliche flood-faehige Typen itemisieren, damit die
+    // Aufschluesselung aufs total reconciled (User-Befund: grp-data-Traffic in
+    // der Region, scoped/multi-hop -- wichtig zu verfolgen). Eigene Push-Zeile
+    // wegen Companion-Byte-Limit. multi/raw i.d.R. 0 (multipart=direct, nicht flood).
+    snprintf(block, sizeof(block), "  grpdata=%u multi=%u ctrl=%u raw=%u",
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_DATA][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_MULTIPART][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_CONTROL][0],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RAW_CUSTOM][0]);
+    pushCompanionMessage(block);
     p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rxf_hd_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_hd_total, uptime_s);
     pushCompanionMessage(block);
@@ -26916,6 +26926,14 @@ cron_add_direct:
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RESPONSE][1],
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ][1],
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_TRACE][1]);
+    pushCompanionMessage(block);
+    // DL9SAU 2026-07-16: siehe heard-direct -- restliche flood-faehige Typen.
+    // grp-data ist hier der operativ relevante (Regional-Traffic, scoped/multi-hop).
+    snprintf(block, sizeof(block), "  grpdata=%u multi=%u ctrl=%u raw=%u",
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_GRP_DATA][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_MULTIPART][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_CONTROL][1],
+             (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_RAW_CUSTOM][1]);
     pushCompanionMessage(block);
     p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rxf_rep_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_rep_total, uptime_s);
