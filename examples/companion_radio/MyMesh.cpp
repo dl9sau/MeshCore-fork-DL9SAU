@@ -417,15 +417,16 @@ void MyMesh::saveBucketToFlash(MsgBucket b) {
   int cap = 0;
   getBucket(b, arr, cap);
   if (!arr) return;
-  // DL9SAU 2026-07-15: /msgs BEWUSST auf InternalFS (getPrimaryFS), NICHT ExtraFS.
-  // ExtraFS traegt Channels + Contacts = die 30-40min-Neu-Klick-Kronjuwelen;
-  // wegwerfbaren Message-Churn dorthin zu legen wuerde AUSGERECHNET die teuer
-  // wiederherzustellende Config gefaehrden. Messages sind disposable (Offline-
-  // Queue), und die InternalFS-Nachbarn sind inzwischen alle wiederherstellbar:
-  // Key via `get prv.key`, Prefs via Backup, BLE-Bonds via schnelles Re-Pair.
+  // DL9SAU 2026-07-15: /msgs auf die GERAEUMIGE ExtraFS (roomyFS). Entscheidend
+  // ist, Korruption UNWAHRSCHEINLICH zu machen: die kleine 28KB-InternalFS
+  // (Key/Prefs/BLE-Bonds) soll nahezu STATISCH bleiben -- Message-Churn dort
+  // fuellt sie auf ~70% -> massiver GC-Druck -> genau die Fragilitaet die uns
+  // die Prefs/Key gekostet hat. ExtraFS hat ~60KB frei + churnt ohnehin schon
+  // (Contacts lazy 5s) -> vertraegt die paar Messages entspannt. Messages sind
+  // zudem disposable (App-offline-Queue, werden nach App-Connect geloescht).
   // mkdir jetzt UNCONDITIONAL (vorher auf NRF52 ausgespart -> /msgs-Write waere
-  // ohne existierendes Dir gescheitert; Adafruit_LittleFS kann mkdir).
-  FILESYSTEM* fs = _store->getPrimaryFS();
+  // ohne existierendes Dir gescheitert; CustomLFS/Adafruit_LittleFS koennen mkdir).
+  FILESYSTEM* fs = _store->roomyFS();
   if (fs) fs->mkdir("/msgs");
   File f = _store->openWriteFile(fs, path);
   if (!f) return;
@@ -451,8 +452,8 @@ void MyMesh::loadBucketsFromFlash() {
     if (!getBucketFlash((MsgBucket)b)) continue;
     const char* path = msgBucketPath((MsgBucket)b);
     if (!path) continue;
-    // DL9SAU 2026-07-15: /msgs liegt auf InternalFS (getPrimaryFS) -- von dort lesen.
-    File f = _store->openRead(path);
+    // DL9SAU 2026-07-15: /msgs liegt auf ExtraFS (roomyFS) -- von dort lesen.
+    File f = _store->openRead(_store->roomyFS(), path);
     if (!f) continue;
     Frame* arr = NULL;
     int cap = 0;
@@ -18991,9 +18992,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           _prefs.msg_store_flash &= ~(1 << b);
           savePrefs();
           // Bestehende Datei loeschen (RAM bleibt). DL9SAU 2026-07-15: /msgs
-          // liegt auf InternalFS (getPrimaryFS).
+          // liegt auf ExtraFS (roomyFS) -> von dort loeschen.
           const char* path = msgBucketPath((MsgBucket)b);
-          if (path) _store->removeFile(path);
+          if (path) _store->removeFile(_store->roomyFS(), path);
           char r[80];
           snprintf(r, sizeof(r), "OK - flash %s = off (file geloescht, RAM bleibt).",
                    bucketName((MsgBucket)b));
@@ -23179,12 +23180,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     char r[200];
     snprintf(r, sizeof(r),
       "fsinfo (Bytes):\n  InternalFS: %lu/%lu belegt, %lu frei\n"
-      "    (Key, Prefs, BLE-Bonds, Msgs)",
+      "    (Key, Prefs, BLE-Bonds)",
       (unsigned long)iu, (unsigned long)it, (unsigned long)(it - iu));
     pushCompanionMessage(r);
     if (et > 0) {
       snprintf(r, sizeof(r),
-        "  ExtraFS: %lu/%lu belegt, %lu frei\n    (Channels, Contacts)",
+        "  ExtraFS: %lu/%lu belegt, %lu frei\n    (Channels, Contacts, Msgs)",
         (unsigned long)eu, (unsigned long)et, (unsigned long)(et - eu));
       pushCompanionMessage(r);
     } else {
