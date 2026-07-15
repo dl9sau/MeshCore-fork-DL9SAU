@@ -2971,7 +2971,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   // 2026-07-09: bei Adverts den Sub-Typ mitloggen (CHAT/REPEATER/ROOM/SENSOR),
   // sonst suggeriert 'hops' die Ursache, wo oft der Typ entscheidet
   // (z.B. reject reason=unscoped haengt am Typ, nicht an den Hops).
-  char type_str[24];
+  char type_str[40];
   if (ptype == PAYLOAD_TYPE_ADVERT
       && packet->payload_len > (int)(PUB_KEY_SIZE + 4 + SIGNATURE_SIZE)) {
     uint8_t at = packet->payload[PUB_KEY_SIZE + 4 + SIGNATURE_SIZE] & 0x0F;
@@ -2979,7 +2979,13 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
                     : (at == ADV_TYPE_REPEATER) ? "REPEATER"
                     : (at == ADV_TYPE_ROOM) ? "ROOM"
                     : (at == ADV_TYPE_SENSOR) ? "SENSOR" : "?";
-    snprintf(type_str, sizeof(type_str), "ADV:%s", atn);
+    // DL9SAU 2026-07-15: 6-Byte-Pubkey-Prefix des WERBENDEN Nodes mitloggen
+    // (Advert-Payload beginnt mit dem 32-Byte-Pubkey). Zeigt WELCHER fremde
+    // Repeater advertet -- zusammen mit dem scope=yes/no unten sieht man auf
+    // einen Blick, welche Repeater ihre Adverts bereits scoped aussenden.
+    char idhex[13];
+    mesh::Utils::toHex(idhex, packet->payload, 6);
+    snprintf(type_str, sizeof(type_str), "ADV:%s %s", atn, idhex);
   } else {
     snprintf(type_str, sizeof(type_str), "%s", ptypeName(ptype));
   }
