@@ -192,6 +192,18 @@ bool DataStore::renameFile(const char* from, const char* to) {
   return _fs->rename(from, to);
 }
 
+// DL9SAU 2026-07-15: In-Place-Write ohne remove (siehe .h). Caller: seek(0) +
+// nach dem Schreiben truncate().
+File DataStore::openWriteFileInPlace(const char* filename) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  return _fs->open(filename, FILE_O_WRITE);   // KEIN remove -> Bloecke bleiben
+#elif defined(RP2040_PLATFORM)
+  return _fs->open(filename, "w");            // "w" truncatet bereits
+#else
+  return _fs->open(filename, "w", true);
+#endif
+}
+
 // DL9SAU 2026-07-12: Existenz-Check ohne Oeffnen/Parsen -- fuer den
 // /shutdown_pending-Datei-Sentinel (touch=pending / rm=gecleart).
 bool DataStore::fileExists(const char* filename) const {

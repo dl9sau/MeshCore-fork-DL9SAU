@@ -727,8 +727,12 @@ void MyMesh::bootLogAppend() {
   }
   // Schreiben: neuer Eintrag zuerst, dann max BOOT_LOG_MAX_ENTRIES-1
   // existing (aelteste fliegt raus).
-  File w = _store->openWriteFile("/boot_log.txt");
+  // DL9SAU 2026-07-15: In-Place-Write (kein remove) -> weniger Alloc/Free-Churn
+  // auf der kleinen InternalFS + crash-sicherer (COW: unterbrochener Write laesst
+  // das alte boot_log intakt). seek(0) + truncate() kappen den alten Tail.
+  File w = _store->openWriteFileInPlace("/boot_log.txt");
   if (!w) return;
+  w.seek(0);
   w.write((const uint8_t*)entry, strlen(entry));
   w.write((const uint8_t*)"\n", 1);
   int keep = (existing_n < BOOT_LOG_MAX_ENTRIES - 1)
@@ -737,6 +741,7 @@ void MyMesh::bootLogAppend() {
     w.write((const uint8_t*)existing[i], strlen(existing[i]));
     w.write((const uint8_t*)"\n", 1);
   }
+  w.truncate();
   w.close();
   // 2026-07-05: Companion-Push entfernt -- die Info ist redundant zu
   // 'log read' und blaehte den Chat beim Boot auf.
@@ -757,13 +762,15 @@ void MyMesh::bootLogWritePreReboot(const char* cause) {
   // -> direkter File-Write statt der saveRtcPersist-Routine.
   if (now_secs >= 1500000000UL
       && millis() >= RTC_PERSIST_BOOT_DELAY_MS) {
-    File f = _store->openWriteFile("/rtc_persist");
+    File f = _store->openWriteFileInPlace("/rtc_persist");   // In-Place (kein remove)
     if (f) {
       uint8_t magic = 0xAB;
+      f.seek(0);
       f.write(&magic, 1);
       f.write((const uint8_t*)&now_secs, 4);
       f.write((const uint8_t*)&now_secs, 4);
       f.write((const uint8_t*)&up_ms, 4);
+      f.truncate();
       f.close();
       _rtc_persist_last_saved = now_secs;
       _rtc_persist_last_write_ms = millis();
@@ -786,8 +793,12 @@ void MyMesh::bootLogWritePreReboot(const char* cause) {
   // Push (der Reboot kommt sowieso gleich).
   char existing[BOOT_LOG_MAX_ENTRIES][96];
   int existing_n = bootLogLoad(existing, BOOT_LOG_MAX_ENTRIES);
-  File w = _store->openWriteFile("/boot_log.txt");
+  // DL9SAU 2026-07-15: In-Place-Write (kein remove) -> weniger Alloc/Free-Churn
+  // auf der kleinen InternalFS + crash-sicherer (COW: unterbrochener Write laesst
+  // das alte boot_log intakt). seek(0) + truncate() kappen den alten Tail.
+  File w = _store->openWriteFileInPlace("/boot_log.txt");
   if (!w) return;
+  w.seek(0);
   w.write((const uint8_t*)entry, strlen(entry));
   w.write((const uint8_t*)"\n", 1);
   int keep = (existing_n < BOOT_LOG_MAX_ENTRIES - 1)
@@ -796,6 +807,7 @@ void MyMesh::bootLogWritePreReboot(const char* cause) {
     w.write((const uint8_t*)existing[i], strlen(existing[i]));
     w.write((const uint8_t*)"\n", 1);
   }
+  w.truncate();
   w.close();
 }
 
@@ -12479,7 +12491,11 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
         _prefs.trace_levels = mig;
         _br_applied++; return;
       }
-      if (strcmp(key, "trace_levels") == 0)          { char hexbuf[24]; brExtractString(val_start, val_len, hexbuf, sizeof(hexbuf)); _prefs.trace_levels = strtoull(hexbuf, NULL, 0); _br_applied++; return; }
+      // DL9SAU 2026-07-15 FIX: trace_levels ist als STRING ("0x..") im Backup ->
+      // val_type=='s'. Der Handler stand faelschlich HIER im val_type=='n'-Block
+      // und wurde daher NIE erreicht -> die trace_flags_persistent-Legacy-
+      // Migration (numerisch, laeuft) ueberlebte -> restauriertes trace_levels
+      // ging verloren. Handler jetzt im val_type=='s'-Block unten (nach owner_info).
       if (strcmp(key, "gps_power_mode") == 0)        { _prefs.gps_power_mode        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_lead_min") == 0)          { _prefs.gps_lead_min          = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "gps_lead_secs") == 0)         { _prefs.gps_lead_secs         = (uint32_t)as_uint(); _br_applied++; return; }  // Wunschliste 81 Phase 3
@@ -12503,6 +12519,11 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
       if (strcmp(key, "override_scope_name") == 0) { brExtractString(val_start, val_len, _prefs.override_scope_name, sizeof(_prefs.override_scope_name)); _br_applied++; return; }
       if (strcmp(key, "override_scope_key") == 0)  { brExtractHex(val_start, val_len, _prefs.override_scope_key, sizeof(_prefs.override_scope_key)); _br_applied++; return; }
       if (strcmp(key, "owner_info") == 0)          { brExtractString(val_start, val_len, _prefs.owner_info, sizeof(_prefs.owner_info)); _br_applied++; return; }
+      // DL9SAU 2026-07-15: trace_levels ("0x<hex>", uint64). Backup schreibt es
+      // NACH trace_flags_persistent -> ueberschreibt dessen Legacy-Migration
+      // (autoritativ). Vorher faelschlich im val_type=='n'-Block -> nie erreicht,
+      // Migration ueberlebte -> Tuning ging bei jedem restore verloren.
+      if (strcmp(key, "trace_levels") == 0)        { char hexbuf[24]; brExtractString(val_start, val_len, hexbuf, sizeof(hexbuf)); _prefs.trace_levels = strtoull(hexbuf, NULL, 0); _br_applied++; return; }
       if (strcmp(key, "passwd_admin") == 0)        { brExtractString(val_start, val_len, _prefs.passwd_admin, sizeof(_prefs.passwd_admin)); _br_applied++; return; }
       if (strcmp(key, "passwd_guest") == 0)        { brExtractString(val_start, val_len, _prefs.passwd_guest, sizeof(_prefs.passwd_guest)); _br_applied++; return; }
     }
