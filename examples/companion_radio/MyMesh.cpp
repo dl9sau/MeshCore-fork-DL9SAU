@@ -15780,8 +15780,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       "  advert, at, autoadv, backup, bluetooth, board,"
     );
     pushCompanionMessage(
+      // DL9SAU 2026-07-15: 'crashtest' an NRF52_CRASH_CATCHER gebunden (via
+      // #ifdef zwischen benachbarten String-Literalen -> C konkateniert). So
+      // erscheint es automatisch wieder in der Liste falls das Define zurueck-
+      // kommt (SD-kompatibles Redesign) -- kein manuelles Nachtragen, kein Drift.
       "  ch.hops, chatname, clear, clock, contact,\n"
-      "  crashtest, cron, dfu, discover, duty,"
+      "  "
+#ifdef NRF52_CRASH_CATCHER
+      "crashtest, "
+#endif
+      "cron, dfu, discover, duty,"
     );
     pushCompanionMessage(
       "  filter, fsinfo, get, gps, help, logging,\n"
