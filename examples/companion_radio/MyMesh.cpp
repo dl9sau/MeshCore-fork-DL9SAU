@@ -13768,6 +13768,17 @@ static bool starts_with_word(const char* text, const char* word) {
   return c == 0 || c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
+// DL9SAU 2026-07-15: wie starts_with_word, aber das erste Token darf eine
+// ABKUERZUNG (Prefix) von 'word' sein, ab minlen Zeichen. Fuer harmlose
+// Befehle (fsinfo -> 'fs'). BEWUSST NICHT fuer shutdown/reformat -- die
+// bleiben exakt (starts_with_word), damit ein Tippfehler nichts ausloest.
+static bool starts_with_word_abbrev(const char* text, const char* word, size_t minlen) {
+  size_t n = 0;
+  while (text[n] && text[n] != ' ' && text[n] != '\t'
+         && text[n] != '\r' && text[n] != '\n') n++;
+  return n >= minlen && n <= strlen(word) && strncmp(text, word, n) == 0;
+}
+
 // Argument-Prefix-Match gegen beliebige Auswahl-Liste (Wunschliste-4).
 // Exact-Match gewinnt; sonst eindeutiger Prefix; sonst ambiguous oder not-found.
 // Eintraege mit no_abbrev=true matchen NUR exakt (fuer reset/clear/remove
@@ -23194,7 +23205,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
   // DL9SAU 2026-07-12: 'fsinfo' -- FS-Belegung beider Partitionen + Groesse
   // von /new_prefs. Grundlage fuer die temp+rename-Platzentscheidung (temp
   // braucht temporaer 2x die Datei) und die Hilfe-in-Datei-Frage.
-  if (starts_with_word(cmd, "fsinfo")) {
+  if (starts_with_word_abbrev(cmd, "fsinfo", 2)) {   // 'fs'..'fsinfo'
     uint32_t it = 0, iu = 0, et = 0, eu = 0;
     _store->getFsInfo(it, iu, et, eu);
     char r[200];
