@@ -26954,10 +26954,10 @@ cron_add_direct:
       uint32_t rxu_rep  = _rx_us_repeated_count;
       uint32_t rxu_tot  = rxu_self + rxu_rep;
       p = snprintf(block, sizeof(block),
-                   "rx us (own echoes):\n"
-                   "  self-initiated = %lu\n"
-                   "  repeated       = %lu\n"
-                   "  total          = %lu",
+                   "rx echoes heard:\n"
+                   "  self-initiated  = %lu  (my own sends)\n"
+                   "  repeated-others = %lu  (relayed for others)\n"
+                   "  total           = %lu",
                    (unsigned long)rxu_self,
                    (unsigned long)rxu_rep,
                    (unsigned long)rxu_tot);
