@@ -2491,6 +2491,16 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
   // Match gegen unsere self-sent/repeated Hash-Ringe.
   uint32_t h = calcShortHash(packet);
   uint8_t m = matchSelfHash(h);
+  // DL9SAU 2026-07-15 DIAG (Advert-Echo-m-Klassifikations-Bug): fuer JEDEN
+  // empfangenen Flood-Advert Hash + m loggen (0=fremd, 1=self-initiated,
+  // 2=self-repeated). Vergleich mit dem tx-adv-rec-Hash unten zeigt, ob die
+  // Payload/der Hash zwischen unserem Send und dem Echo divergiert. Nur unter
+  // 'trace deliv >= 2' -> kein Normalbetrieb-Rauschen.
+  if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
+      && traceLevelOf(TRACE_DELIVERY) >= 2) {
+    traceCompanion(TRACE_DELIVERY, "[deliv] rx-adv hash=%08lX m=%u",
+                   (unsigned long)h, (unsigned)m);
+  }
   if (m == 1 && _rx_us_self_initiated_count < 0xFFFF) {
     _rx_us_self_initiated_count++;
   } else if (m == 2 && _rx_us_repeated_count < 0xFFFF) {
@@ -7191,6 +7201,16 @@ void MyMesh::applyPacketTxOverrides(const mesh::Packet* packet) {
   // self_repeated-Ring liegt, ist's ein Repeat (in allowPacketForward
   // bereits markiert) -- nicht erneut adden. Sonst self-initiated.
   uint32_t h = calcShortHash(packet);
+  // DL9SAU 2026-07-15 DIAG: beim Senden eines eigenen Flood-Adverts den
+  // aufgezeichneten Hash + pre-m loggen (pre-m==2 -> wird NICHT als self-init
+  // aufgezeichnet, weil schon im repeated-Ring). Gegenprobe zum rx-adv-Hash:
+  // gleiche Hashes + trotzdem m!=1 beim Echo -> Eviction; verschiedene Hashes
+  // -> Payload-Divergenz. Nur unter 'trace deliv >= 2'.
+  if (pt == PAYLOAD_TYPE_ADVERT && packet->isRouteFlood()
+      && traceLevelOf(TRACE_DELIVERY) >= 2) {
+    traceCompanion(TRACE_DELIVERY, "[deliv] tx-adv rec hash=%08lX pre-m=%u",
+                   (unsigned long)h, (unsigned)matchSelfHash(h));
+  }
   if (h != 0 && matchSelfHash(h) != 2) {
     _self_initiated_hashes[_self_initiated_head] = h;
     _self_initiated_head = (uint8_t)((_self_initiated_head + 1) % 32);
