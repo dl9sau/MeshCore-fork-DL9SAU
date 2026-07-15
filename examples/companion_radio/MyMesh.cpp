@@ -417,13 +417,15 @@ void MyMesh::saveBucketToFlash(MsgBucket b) {
   int cap = 0;
   getBucket(b, arr, cap);
   if (!arr) return;
-  // DL9SAU 2026-07-15: /msgs auf die GERAEUMIGE ExtraFS (roomyFS), NICHT auf die
-  // kleine fragile InternalFS -- die traegt Key /_main.id + Prefs + BLE-Bonds
-  // (/adafruit/bond_*), jeder Message-Write-Churn dort erhoeht deren Korruptions-
-  // risiko [[project_t1000e_fs_architecture]]. mkdir ist idempotent; CustomLFS
-  // (ExtraFS) UND Adafruit_LittleFS (Fallback) koennen es -- daher jetzt auch auf
-  // NRF52 (vorher ausgespart -> /msgs-Write waere ohne existierendes Dir gescheitert).
-  FILESYSTEM* fs = _store->roomyFS();
+  // DL9SAU 2026-07-15: /msgs BEWUSST auf InternalFS (getPrimaryFS), NICHT ExtraFS.
+  // ExtraFS traegt Channels + Contacts = die 30-40min-Neu-Klick-Kronjuwelen;
+  // wegwerfbaren Message-Churn dorthin zu legen wuerde AUSGERECHNET die teuer
+  // wiederherzustellende Config gefaehrden. Messages sind disposable (Offline-
+  // Queue), und die InternalFS-Nachbarn sind inzwischen alle wiederherstellbar:
+  // Key via `get prv.key`, Prefs via Backup, BLE-Bonds via schnelles Re-Pair.
+  // mkdir jetzt UNCONDITIONAL (vorher auf NRF52 ausgespart -> /msgs-Write waere
+  // ohne existierendes Dir gescheitert; Adafruit_LittleFS kann mkdir).
+  FILESYSTEM* fs = _store->getPrimaryFS();
   if (fs) fs->mkdir("/msgs");
   File f = _store->openWriteFile(fs, path);
   if (!f) return;
@@ -449,8 +451,8 @@ void MyMesh::loadBucketsFromFlash() {
     if (!getBucketFlash((MsgBucket)b)) continue;
     const char* path = msgBucketPath((MsgBucket)b);
     if (!path) continue;
-    // DL9SAU 2026-07-15: /msgs liegt jetzt auf ExtraFS (roomyFS) -- von dort lesen.
-    File f = _store->openRead(_store->roomyFS(), path);
+    // DL9SAU 2026-07-15: /msgs liegt auf InternalFS (getPrimaryFS) -- von dort lesen.
+    File f = _store->openRead(path);
     if (!f) continue;
     Frame* arr = NULL;
     int cap = 0;
@@ -18983,9 +18985,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           _prefs.msg_store_flash &= ~(1 << b);
           savePrefs();
           // Bestehende Datei loeschen (RAM bleibt). DL9SAU 2026-07-15: /msgs
-          // liegt auf ExtraFS (roomyFS) -> von dort loeschen, nicht von _fs.
+          // liegt auf InternalFS (getPrimaryFS).
           const char* path = msgBucketPath((MsgBucket)b);
-          if (path) _store->removeFile(_store->roomyFS(), path);
+          if (path) _store->removeFile(path);
           char r[80];
           snprintf(r, sizeof(r), "OK - flash %s = off (file geloescht, RAM bleibt).",
                    bucketName((MsgBucket)b));
