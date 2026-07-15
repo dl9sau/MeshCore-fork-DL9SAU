@@ -522,6 +522,9 @@ void MyMesh::loadBucketsFromFlash() {
   }
 }
 
+// [HISTORISCH -- /rtc_persist ist 2026-07-15 ENTFERNT: der RTC-Boot-Estimate
+//  kommt jetzt aus dem boot_log (siehe loadRtcPersist()), kein separater Writer
+//  mehr. Der folgende Text erklaert nur noch, WARUM es das Feature mal gab.]
 // User-Bug 2026-06-14: nach App-Sync sind die Start-Meldungen aus dem
 // $companion-Bucket popt -- bei naechstem Reboot fehlt die "frische"
 // Zeitquelle. RTC faellt auf max(contact.lastmod) zurueck, sprich auf
@@ -543,74 +546,31 @@ void MyMesh::loadBucketsFromFlash() {
 // maybeAdvertTimeSync, ...) saveRtcPersist direkt auf -- so geht eine
 // frische App-Sync nicht verloren wenn der User Sekunden spaeter
 // rebooted.
+// DL9SAU 2026-07-15: saveRtcPersist() + /rtc_persist ENTFERNT. Der RTC-Estimate
+// nach Boot kommt jetzt aus der neuesten boot_log-Zeile (loadRtcPersist), die die
+// RTC ohnehin traegt. Damit faellt der periodische Writer (alle 10min) + eine
+// Datei auf der fragilen InternalFS weg -- kritisch, weil dort Key/Prefs liegen.
+// saveRtcPersist ist damit ein No-Op-Stub (Signatur bleibt fuer die Aufrufer, die
+// jetzt aber entfernt sind -- Stub falls doch noch ein Aufruf uebrig ist).
 void MyMesh::saveRtcPersist(uint32_t rtc, bool force) {
-  if (rtc < 1500000000UL) return;   // < 2017-07: ungueltig
-  // Boot-Delay (User-Wunsch 2026-06-14): in den ersten 90s nach Boot
-  // keine Persist-Writes. Schuetzt vor: sofortiger Save mit
-  // moeglicherweise korruptem RTC nach Bug-Reboot / tiefentladenem Akku
-  // / Solar-Unterversorgung. Auch force=true (App-Sync) muss warten --
-  // die App-Zeit waere plausibel, aber 90s sind ein vernachlaessigbarer
-  // Lag und vereinheitlichen die Logik.
-  if (millis() < RTC_PERSIST_BOOT_DELAY_MS) return;
-  // force=true (z.B. von CMD_SET_DEVICE_TIME): App ist immer
-  // authoritativ, auch wenn ihr Wert KLEINER ist als unser letzter
-  // Save (Rueckwaerts-Korrektur). Sonst klassisch monoton: nur
-  // hoeher und um >= MIN_DELTA fortgeschritten.
-  if (!force) {
-    if (rtc <= _rtc_persist_last_saved) return;
-    if (rtc - _rtc_persist_last_saved < RTC_PERSIST_MIN_DELTA) return;
-  }
-  // Write-Interval-Guard (User-Sorge 2026-06-14: Flash-Wear bei
-  // pathologisch haeufigen Adverts). Min 10 min Pause zwischen
-  // Writes; das schluckt 'taube' Sync-Bursts (z.B. Adverter alle 3
-  // min). Beim allerersten Write (last_write_ms == 0) sofort
-  // erlauben damit App-First-Connect direkt persistiert wird.
-  uint32_t now_ms = millis();
-  if (_rtc_persist_last_write_ms != 0
-      && now_ms - _rtc_persist_last_write_ms < RTC_PERSIST_MIN_WRITE_INTERVAL_MS) {
-    return;
-  }
-  File f = _store->openWriteFile("/rtc_persist");
-  if (!f) return;
-  uint8_t magic = 0xAB;
-  f.write(&magic, 1);
-  f.write((const uint8_t*)&rtc, 4);
-  f.write((const uint8_t*)&rtc, 4);
-  // Wunschliste 53 Phase 2026-06-14: Piggyback aktuelle Uptime ms.
-  // Boot-Log benutzt dies fuer "letzte Session lief ~Xh" (+/- 10min
-  // Toleranz weil Write-Interval = MIN_WRITE_INTERVAL_MS = 10min).
-  uint32_t uptime_ms = now_ms;
-  f.write((const uint8_t*)&uptime_ms, 4);
-  f.close();
-  _rtc_persist_last_saved = rtc;
-  _rtc_persist_last_write_ms = (now_ms == 0 ? 1 : now_ms);  // 0 ist Sentinel
-  // Sichtbarkeit im 'trace on' / 'trace rtc on' (User-Wunsch 2026-06-14:
-  // im normalen RTC-Trace-Pfad statt nur in pushDebugLog).
-  traceCompanion(TRACE_RTC, "[rtc-persist] saved %lu", (unsigned long)rtc);
+  (void)rtc; (void)force;
 }
 
 uint32_t MyMesh::loadRtcPersist() {
-  File f = _store->openRead("/rtc_persist");
-  if (!f) return 0;
-  uint8_t magic;
-  uint32_t a = 0, b = 0;
-  bool ok = (f.read(&magic, 1) == 1)
-         && (f.read((uint8_t*)&a, 4) == 4)
-         && (f.read((uint8_t*)&b, 4) == 4);
-  // Wunschliste 53 Phase 2026-06-14: optional 4 Bytes uptime_ms (piggy-
-  // back, neues Format). Alte 9-Byte-Files liefern hier 0 Bytes -> bleibt
-  // bei _last_session_uptime_ms = 0 ("unbekannt").
-  uint32_t up = 0;
-  if (ok) {
-    f.read((uint8_t*)&up, 4);  // ignoriere short read (=alt-Format)
-  }
-  f.close();
-  if (!ok) return 0;
-  if (magic != 0xAB) return 0;
-  if (a != b) return 0;             // partial-write korruption
-  if (a < 1500000000UL) return 0;   // ungueltig
-  _last_session_uptime_ms = up;
-  return a;
+  // DL9SAU 2026-07-15: /rtc_persist ELIMINIERT -- der RTC-Estimate kommt jetzt aus
+  // der NEUESTEN boot_log-Zeile. Jeder Eintrag traegt die RTC (now_secs) als
+  // fuehrende Zahl; der Pre-Reboot-Marker schreibt sie im Reboot-Moment. Spart den
+  // periodischen rtc_persist-Writer + eine Datei auf der fragilen InternalFS. Bei
+  // sauberem Reboot/Shutdown exakt (Marker); bei Spontan-Reboot/WDT ohne Marker
+  // evtl. alt (letzter Boot) -- als GPS-Tracker unkritisch (GPS resynct).
+  // _last_session_uptime_ms bleibt 0 (die uptime steht sichtbar im Pre-Reboot-
+  // Marker via 'log read', wird nur nicht mehr in den Folge-Boot-Eintrag kopiert).
+  char entries[BOOT_LOG_MAX_ENTRIES][96];
+  int n = bootLogLoad(entries, BOOT_LOG_MAX_ENTRIES);
+  if (n <= 0) return 0;
+  uint32_t ts = (uint32_t)strtoul(entries[0], NULL, 10);   // fuehrende now_secs
+  if (ts < 1500000000UL) return 0;                          // ungueltig / pre-2017
+  return ts;
 }
 
 // Wunschliste 53 Phase 7 (2026-06-14): Boot-Log /boot_log.txt -- Ring
@@ -750,32 +710,13 @@ void MyMesh::bootLogAppend() {
 void MyMesh::bootLogWritePreReboot(const char* cause) {
   uint32_t now_secs = (uint32_t)getRTCClock()->getCurrentTime();
   uint32_t up_ms    = millis();
-  // User-Beobachtung 2026-06-14: rtc_persist wird in kurzen Sessions
-  // (<10min Min-Write-Interval) NIE geschrieben, daher rtc_clock beim
-  // naechsten Boot zeigt altes Timestamp + piggyback-uptime aus vor-
-  // vorletzter Session. Pre-Reboot ist explizite User-Aktion, da ist
-  // Force-Write gerechtfertigt -- jetzt-Timestamp + jetzt-Uptime
-  // landen im rtc_persist.txt, naechster Boot zeigt korrekte Werte.
-  // saveRtcPersist(force=true) bypasst Monotonic-Check + MIN_DELTA,
-  // aber NICHT MIN_WRITE_INTERVAL_MS. Hier sind wir ueber den Boot-
-  // Delay-Schutz hinaus (User-Befehl) und wollen den write garantieren
-  // -> direkter File-Write statt der saveRtcPersist-Routine.
-  if (now_secs >= 1500000000UL
-      && millis() >= RTC_PERSIST_BOOT_DELAY_MS) {
-    File f = _store->openWriteFileInPlace("/rtc_persist");   // In-Place (kein remove)
-    if (f) {
-      uint8_t magic = 0xAB;
-      f.seek(0);
-      f.write(&magic, 1);
-      f.write((const uint8_t*)&now_secs, 4);
-      f.write((const uint8_t*)&now_secs, 4);
-      f.write((const uint8_t*)&up_ms, 4);
-      f.truncate();
-      f.close();
-      _rtc_persist_last_saved = now_secs;
-      _rtc_persist_last_write_ms = millis();
-    }
-  }
+  // DL9SAU 2026-07-15: der frueher hier stehende rtc_persist-FORCE-WRITE ist
+  // ENTFERNT. Ein Flash-Write KURZ VOR poweroff/reset ist genau die Korruptions-
+  // Ursache (unterbrochener Write / GC mitten in der Relocation). Und er war
+  // redundant: (1) periodischer saveRtcPersist alle 10min, (2) als GPS-Tracker
+  // liefert das laufende GPS nach Reboot sofort wieder die Zeit. Zudem liegt
+  // rtc_persist jetzt auf ExtraFS -> ein Pre-Reboot-Write dort haette die
+  // Channels-Partition gefaehrdet. Also bewusst NICHT mehr schreiben.
   char dur[20];
   formatBootLogDuration(up_ms, dur, sizeof(dur));
   // 2026-07-08 DIAG: Channel-Zahl auch an den Pre-Reboot-Marker (via
@@ -1919,7 +1860,6 @@ void MyMesh::maybeAdvertTimeSync(const mesh::Identity& id, uint32_t adv_timestam
     }
     // Anwenden
     getRTCClock()->setCurrentTime(adv_timestamp);
-    saveRtcPersist(adv_timestamp);  // Bug-Fix 2026-06-14
     _time_sync_last_at_rtc = adv_timestamp;
     _time_sync_strict_last_ts[src_idx] = adv_timestamp;
     _time_sync_done_since_boot = true;
@@ -2028,7 +1968,6 @@ void MyMesh::timeSyncFinalizeLazyCollection() {
     return;
   }
   getRTCClock()->setCurrentTime(chosen.timestamp);
-  saveRtcPersist(chosen.timestamp);  // Bug-Fix 2026-06-14: lazy-sync persistieren
   _time_sync_last_at_rtc = chosen.timestamp;
   _time_sync_done_since_boot = true;
   memcpy(_time_sync_last_pubkey, chosen.pub_key3, 3);
@@ -7869,8 +7808,9 @@ void MyMesh::handleCmdFrame(size_t len) {
         // App-Sync persistieren mit force=true: erlaubt auch
         // Rueckwaerts-Korrektur (z.B. RTC war drift-bedingt 3 min vor
         // Echtzeit -- App korrigiert nach unten; ohne force wuerde
-        // _rtc_persist_last_saved den Save abwehren).
-        saveRtcPersist(secs, /*force=*/true);
+        // _rtc_persist_last_saved den Save abwehren). [DL9SAU 2026-07-15:
+        // rtc_persist entfernt -- die App-Zeit steht ohnehin im naechsten
+        // boot_log-Eintrag, aus dem der Boot-Estimate jetzt kommt.]
         // Reise-Fix 2026-06-08: App-Sync ueberschreibt auch unseren
         // advert-sync-State. pub_key={0,0,0} markiert App als Quelle.
         _time_sync_last_at_rtc = secs;
@@ -9248,17 +9188,10 @@ void MyMesh::loop() {
   // RTC-Persistierung Periodic-Check (Bug-Fix 2026-06-14): GPS-Sync
   // setzt RTC direkt ueber _clock->setCurrentTime (in MicroNMEALocation-
   // Provider), wir haben dort keinen direkten Hook. Periodisch
-  // (30 min) pruefen ob der aktuelle RTC um >= RTC_PERSIST_MIN_DELTA
-  // ueber dem zuletzt gespeicherten liegt -- saveRtcPersist guarded
-  // das intern, geschrieben wird also nur bei echtem Progress.
-  {
-    uint32_t now_ms = millis();
-    if (_rtc_persist_check_ms == 0
-        || now_ms - _rtc_persist_check_ms >= RTC_PERSIST_CHECK_INTERVAL_MS) {
-      _rtc_persist_check_ms = now_ms;
-      saveRtcPersist(getRTCClock()->getCurrentTime());
-    }
-  }
+  // DL9SAU 2026-07-15: periodischer rtc_persist-Check ENTFERNT -- /rtc_persist
+  // gibt es nicht mehr, der RTC-Boot-Estimate kommt jetzt aus dem boot_log
+  // (loadRtcPersist parst die neueste Zeile). Kein periodischer InternalFS-
+  // Writer mehr -> Key/Prefs auf der fragilen Partition weniger exponiert.
   if ((_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)
       && next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
     doPeriodicZeroHopAdvert();

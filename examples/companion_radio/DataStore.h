@@ -52,6 +52,12 @@ public:
   // die alte Datei intakt, kein remove-dann-weg-Fenster). Caller MUSS: seek(0)
   // vor dem Schreiben, truncate() nach dem Schreiben (alten Tail kappen).
   File openWriteFileInPlace(const char* filename);
+  File openWriteFileInPlace(FILESYSTEM* fs, const char* filename);
+  // DL9SAU 2026-07-15: die "geraeumige" FS (ExtraFS wo Channels/Contacts liegen,
+  // Fallback InternalFS). Fuer periodische DL9SAU-Writer (rtc_persist), die wir
+  // von der kleinen fragilen InternalFS wegnehmen, damit die dort verbleibenden
+  // KRITISCHEN Dateien (Key /_main.id, /new_prefs) fast statisch bleiben.
+  FILESYSTEM* roomyFS() const { return _getContactsChannelsFS(); }
   bool removeFile(const char* filename);
   bool removeFile(FILESYSTEM* fs, const char* filename);
   // DL9SAU 2026-07-14: Rename auf der Primary-FS (nur Directory-Eintrag, fasst
