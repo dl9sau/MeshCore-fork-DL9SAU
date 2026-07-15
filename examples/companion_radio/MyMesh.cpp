@@ -413,16 +413,15 @@ void MyMesh::saveBucketToFlash(MsgBucket b) {
   int cap = 0;
   getBucket(b, arr, cap);
   if (!arr) return;
-  // Verzeichnis muss existieren -- mkdir falls noetig (ist idempotent auf den
-  // unterstuetzten FS). Plattformen ohne mkdir-Support: das open(...,"w")
-  // greift trotzdem solange path keine Tiefen-Ebene anlegt.
-  FILESYSTEM* fs = _store->getPrimaryFS();
-#if !(defined(NRF52_PLATFORM) || defined(STM32_PLATFORM))
+  // DL9SAU 2026-07-15: /msgs auf die GERAEUMIGE ExtraFS (roomyFS), NICHT auf die
+  // kleine fragile InternalFS -- die traegt Key /_main.id + Prefs + BLE-Bonds
+  // (/adafruit/bond_*), jeder Message-Write-Churn dort erhoeht deren Korruptions-
+  // risiko [[project_t1000e_fs_architecture]]. mkdir ist idempotent; CustomLFS
+  // (ExtraFS) UND Adafruit_LittleFS (Fallback) koennen es -- daher jetzt auch auf
+  // NRF52 (vorher ausgespart -> /msgs-Write waere ohne existierendes Dir gescheitert).
+  FILESYSTEM* fs = _store->roomyFS();
   if (fs) fs->mkdir("/msgs");
-#else
-  (void)fs;
-#endif
-  File f = _store->openWriteFile(path);
+  File f = _store->openWriteFile(fs, path);
   if (!f) return;
   for (int i = 0; i < cap; i++) {
     if (arr[i].seq_no == 0) continue;
@@ -446,7 +445,8 @@ void MyMesh::loadBucketsFromFlash() {
     if (!getBucketFlash((MsgBucket)b)) continue;
     const char* path = msgBucketPath((MsgBucket)b);
     if (!path) continue;
-    File f = _store->openRead(path);
+    // DL9SAU 2026-07-15: /msgs liegt jetzt auf ExtraFS (roomyFS) -- von dort lesen.
+    File f = _store->openRead(_store->roomyFS(), path);
     if (!f) continue;
     Frame* arr = NULL;
     int cap = 0;
@@ -18978,9 +18978,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         } else if (strcmp(arg, "off") == 0) {
           _prefs.msg_store_flash &= ~(1 << b);
           savePrefs();
-          // Bestehende Datei loeschen (RAM bleibt)
+          // Bestehende Datei loeschen (RAM bleibt). DL9SAU 2026-07-15: /msgs
+          // liegt auf ExtraFS (roomyFS) -> von dort loeschen, nicht von _fs.
           const char* path = msgBucketPath((MsgBucket)b);
-          if (path) _store->removeFile(path);
+          if (path) _store->removeFile(_store->roomyFS(), path);
           char r[80];
           snprintf(r, sizeof(r), "OK - flash %s = off (file geloescht, RAM bleibt).",
                    bucketName((MsgBucket)b));
@@ -23511,6 +23512,34 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     memcpy(key, key_start, key_len);
     key[key_len] = 0;
     while (*p == ' ' || *p == '\t') p++;
+
+    // DL9SAU 2026-07-15: `set prv.key <128hex>` -- Private-Key-IMPORT (Gegen-
+    // stueck zu `get prv.key`), Identitaet nach FS-Korruption wiederherstellen.
+    // Spiegelt Repeater CommonCLI.cpp:549. SICHERHEIT wie beim Export: nur ueber
+    // die physische USB-Serial-Konsole (_serial_cli_active), nie BLE/RF, kein
+    // guest. Reboot noetig, damit die neue Identitaet ueberall greift.
+    if (strcmp(key, "prv.key") == 0) {
+      if (!_serial_cli_active) {
+        pushCompanionMessage("prv.key: nur ueber die USB-Serial-Konsole (nicht BLE/RF).");
+        return;
+      }
+      if (!*p) { pushCompanionMessage("Usage: set prv.key <128 hex chars>"); return; }
+      uint8_t prv_key[PRV_KEY_SIZE];
+      bool ok = mesh::Utils::fromHex(prv_key, PRV_KEY_SIZE, p);
+      if (ok && mesh::LocalIdentity::validatePrivateKey(prv_key)) {
+        self_id.readFrom(prv_key, PRV_KEY_SIZE);
+        _store->saveMainIdentity(self_id);
+        char r[80];
+        char pub[PUB_KEY_SIZE * 2 + 1];
+        mesh::Utils::toHex(pub, self_id.pub_key, 4);  // 8 hex = Pubkey-Prefix
+        snprintf(r, sizeof(r), "OK - neue Identitaet gesetzt (pub %s..). Reboot noetig!", pub);
+        pushCompanionMessage(r);
+      } else {
+        pushCompanionMessage("Error: ungueltiger Private-Key (128 hex, validatePrivateKey failed).");
+      }
+      return;
+    }
+
     if (!*p) {
       // Per-Key Discoverability: bei Keys mit nicht-offensichtlicher
       // 0-Semantik (Kaskade / transienter Fallback) explizite Erklaerung
@@ -25171,6 +25200,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         while (p[klen] && p[klen] != ' ' && p[klen] != '\t' && klen < (int)sizeof(key) - 1) klen++;
         memcpy(key, p, klen); key[klen] = 0;
       }
+    }
+
+    // DL9SAU 2026-07-15: `get prv.key` -- Private-Key-EXPORT (Hex), damit die
+    // Geraete-Identitaet eine FS-Korruption von /_main.id ueberlebt (Backup hat
+    // KEINEN prv_key -> sonst neuer Pubkey -> App vergisst alle Scopes, siehe
+    // [[project_key_export_import]]). SICHERHEIT: nur ueber die physische USB-
+    // Serial-Konsole (_serial_cli_active) -- NICHT ueber RF-Remote-Admin und
+    // NICHT ueber BLE-App (beide drahtlos + der Key ist die volle Identitaet).
+    // Das ist das Companion-Aequivalent zum Repeater `sender_timestamp == 0`
+    // (CommonCLI.cpp:827). 'guest' ist ein reines RF-Remote-Konzept -> hier
+    // implizit ausgeschlossen. Bewusst NICHT im normalen `backup save` (der wird
+    // in Chats gepastet -> Key-Leak).
+    if (strcmp(key, "prv.key") == 0) {
+      if (!_serial_cli_active) {
+        pushCompanionMessage("prv.key: nur ueber die USB-Serial-Konsole (nicht BLE/RF).");
+        return;
+      }
+      uint8_t prv_key[PRV_KEY_SIZE];
+      size_t len = self_id.writeTo(prv_key, PRV_KEY_SIZE);
+      char hex[PRV_KEY_SIZE * 2 + 1];
+      mesh::Utils::toHex(hex, prv_key, len);
+      pushCompanionMessage("=== PRIVATE KEY -- GEHEIM HALTEN! Das ist die volle Geraete-Identitaet. ===");
+      pushCompanionMessage(hex);
+      pushCompanionMessage("Sicher offline verwahren. Wiederherstellung: set prv.key <hex> (dann reboot).");
+      return;
     }
 
     // get          -> nur veraenderte Settings (analog 'prefs')

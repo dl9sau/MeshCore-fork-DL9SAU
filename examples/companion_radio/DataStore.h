@@ -46,6 +46,10 @@ public:
   File openRead(const char* filename);
   File openRead(FILESYSTEM* fs, const char* filename);
   File openWriteFile(const char* filename);   // Wunschliste 19 Phase C: msg-bucket-persist
+  // DL9SAU 2026-07-15: FS-Routing-Overload -- Message-Buckets (/msgs) auf die
+  // geraeumige ExtraFS (roomyFS) legen statt auf die kleine fragile InternalFS,
+  // die Key /_main.id + Prefs + BLE-Bonds (/adafruit/bond_*) traegt.
+  File openWriteFile(FILESYSTEM* fs, const char* filename);
   // DL9SAU 2026-07-15: In-Place-Write OHNE remove -> Bloecke wiederverwendet
   // (weniger Alloc/Free-Churn + weniger GC-Druck = weniger Korruptions-Risiko auf
   // der kleinen InternalFS) UND crash-sicherer (COW: unterbrochener Write laesst

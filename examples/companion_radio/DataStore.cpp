@@ -180,6 +180,10 @@ File DataStore::openWriteFile(const char* filename) {
   return openWrite(_fs, filename);
 }
 
+File DataStore::openWriteFile(FILESYSTEM* fs, const char* filename) {
+  return openWrite(fs, filename);
+}
+
 bool DataStore::removeFile(const char* filename) {
   return _fs->remove(filename);
 }
