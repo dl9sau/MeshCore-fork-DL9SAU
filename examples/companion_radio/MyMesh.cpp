@@ -3012,7 +3012,10 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     if (chname[0])
       snprintf(type_str, sizeof(type_str), "%s %s", ptypeName(ptype), chname);
     else
-      snprintf(type_str, sizeof(type_str), "%s #%02x", ptypeName(ptype), ch_hash);
+      // DL9SAU 2026-07-16: unbekannter Channel -> "ch?<hash>" statt "#<hash>",
+      // sonst liest sich z.B. "#23" wie ein Hashtag-Channel "#23", ist aber der
+      // 1-Byte-Channel-Hash 0x23 eines nicht konfigurierten Channels (User-Befund).
+      snprintf(type_str, sizeof(type_str), "%s ch?%02x", ptypeName(ptype), ch_hash);
   } else {
     snprintf(type_str, sizeof(type_str), "%s", ptypeName(ptype));
   }
