@@ -29103,6 +29103,17 @@ cron_add_direct:
         pushCompanionMessage("Name ungueltig.");
         return;
       }
+      // DL9SAU 2026-07-17 (#91): 'unscoped'/'#unscoped' ist KEIN keyed Scope,
+      // sondern das FEHLEN eines Scopes -- send-/filter-seitig bekannt, aber nie
+      // in der Region-Registry (kam spaeter dazu). Synthetische Info statt
+      // '#unscoped nicht bekannt', damit 'scope info unscoped' konsistent ist.
+      if (strcmp(name, "unscoped") == 0) {
+        pushCompanionMessage(
+          "#unscoped: Flood OHNE Region/Transport-Code\n"
+          "  (weiteste Reichweite, kein Scope-Key noetig).\n"
+          "  Nutzung send-seitig als Scope '#unscoped'.");
+        return;
+      }
       ScopeRef r = findScopeByName(name);
       if (r.storage == SCOPE_NONE) {
         char m[80]; snprintf(m, sizeof(m), "#%s nicht bekannt.", name);
