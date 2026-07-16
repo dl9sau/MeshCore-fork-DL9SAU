@@ -18309,17 +18309,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (!arg || *arg == 0 || strcmp(arg, "help") == 0 || arg[0] == '?') {
       pushCompanionMessage(
         "ch.hops: per-Channel Repeat-Cap.\n"
+        "  ch.hops <name> <follow|off|N>  -- Cap setzen\n"
         "  ch.hops status       -- aktive Caps zeigen\n"
         "  ch.hops clear        -- alle Caps loeschen");
       pushCompanionMessage(
-        "  set ch.hops <name> <follow|off|N>\n"
-        "    follow = kein Cap (flood_max)\n"
+        "  <name> = Channel-Name ODER 'unknown'\n"
+        "           (= Cap fuer NICHT konfigurierte Channels)\n"
+        "    follow = kein Cap (-> flood_max)\n"
         "    off    = nicht repeaten\n"
         "    1..63  = expliziter Cap");
       pushCompanionMessage(
-        "  get ch.hops <name>\n"
-        "$companion ist forced auf 0 (nicht repeaten,\n"
-        "Sicherheitsmassnahme, nicht aenderbar).");
+        "  Alternativ: set ch.hops <name> .. / get ch.hops <name>\n"
+        "  'unknown' auch als: set flood_max_unknown_chan ..\n"
+        "$companion ist forced auf 0 (nicht aenderbar).");
       return;
     }
 
@@ -18411,6 +18413,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         n_cleared);
       pushCompanionMessage(r);
       return;
+    }
+
+    // DL9SAU 2026-07-16: forgiving -- `ch.hops <name> <value>` (der intuitive
+    // erste Griff) direkt als Set behandeln statt 'Unbekannt'. Delegiert an die
+    // eigentliche Set-Stelle `set ch.hops <name> <value>`. Nur wenn arg ZWEI
+    // Tokens hat (name + wert); status/clear/help/single-token sind oben schon
+    // abgehandelt. Verhindert die "ch.hops unknown 3 geht nicht"-Falle.
+    {
+      const char* sp = strchr(arg, ' ');
+      while (sp && (*(sp+1) == ' ' || *(sp+1) == '\t')) sp++;
+      if (sp && *(sp + 1)) {
+        char delegated[128];
+        snprintf(delegated, sizeof(delegated), "set ch.hops %s", arg);
+        handleCompanionCommand(delegated);
+        return;
+      }
     }
 
     // Unbekanntes Subkommando
