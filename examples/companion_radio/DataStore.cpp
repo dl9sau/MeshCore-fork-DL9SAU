@@ -202,12 +202,16 @@ File DataStore::openWriteFileInPlace(const char* filename) {
   return openWriteFileInPlace(_fs, filename);
 }
 
-// DL9SAU 2026-07-17 (#86): Append-Open. Kein remove; Position ans Ende, so dass
-// ein f.write() den neuen Record anhaengt (Format wie saveBucketToFlash).
+// DL9SAU 2026-07-17 (#86): Append-Open. Es gibt in Adafruit_LittleFS KEIN
+// O_APPEND-Flag (nur FILE_O_READ/FILE_O_WRITE). FILE_O_WRITE = LFS_O_RDWR|
+// LFS_O_CREAT truncatet NICHT und die Library seekt beim Open bereits selbst
+// ans Datei-Ende (Adafruit_LittleFS_File.cpp: 'if FILE_O_WRITE lfs_file_seek
+// ..LFS_SEEK_END'). Das explizite seek(size()) ist daher redundant, bleibt aber
+// als selbstdokumentierende Absicht + Schutz gegen kuenftige Library-Aenderungen.
 File DataStore::openAppendFile(FILESYSTEM* fs, const char* filename) {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  File f = fs->open(filename, FILE_O_WRITE);  // kein remove, Position 0
-  if (f) f.seek(f.size());                    // -> ans Datei-Ende (append)
+  File f = fs->open(filename, FILE_O_WRITE);  // kein remove; Lib steht schon am Ende
+  if (f) f.seek(f.size());                    // -> explizit ans Datei-Ende (append)
   return f;
 #elif defined(RP2040_PLATFORM)
   return fs->open(filename, "a");

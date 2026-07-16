@@ -6731,6 +6731,14 @@ void MyMesh::begin(bool has_display) {
   _prefs.time_sync_mode = 1; // lazy default
   memset(_prefs.time_sync_sources, 0, sizeof(_prefs.time_sync_sources));
 
+  // DL9SAU 2026-07-17 (#86): DM + private per Default flash-on. Nutzer setzen
+  // sich nicht mit jedem Feature auseinander und sollen bei ihren persoenlichen
+  // (DM) und wertvollen (private Channels) Nachrichten unmittelbar von der
+  // Persistenz profitieren. Wie time_sync_mode: VOR loadPrefs setzen -> fresh-
+  // install kriegt den Default; ein persistierter Wert (auch bewusst 0/aus)
+  // ueberschreibt und bleibt erhalten. hashtag/public bleiben off (Geplauder).
+  _prefs.msg_store_flash = (1 << BUCKET_DM) | (1 << BUCKET_PRIVATE);
+
   // load persisted prefs
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10d pre loadPrefs"); Serial.flush();
