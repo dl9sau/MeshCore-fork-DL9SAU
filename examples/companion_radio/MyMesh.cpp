@@ -18528,6 +18528,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(
         "  Alternativ: set ch.hops <name> .. / get ch.hops <name>\n"
         "  'unknown' auch als: set flood_max_unknown_chan ..\n"
+        "  Channel heisst wie ein Subcmd (z.B. 'status')?\n"
+        "  -> mit Wert nutzen: ch.hops status <wert>.\n"
         "$companion ist forced auf 0 (nicht aenderbar).");
       return;
     }
@@ -18646,7 +18648,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     // Unbekanntes Subkommando
     char r[120];
-    snprintf(r, sizeof(r), "Unbekannt: ch.hops %s\n'ch.hops help' fuer Liste.", arg);
+    snprintf(r, sizeof(r), "Unbekannt: ch.hops %s\n'ch.hops help' fuer Syntax/Hilfe.", arg);
     pushCompanionMessage(r);
     return;
   }
