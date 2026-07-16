@@ -24248,12 +24248,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (strcmp(key, "ch.hops") == 0) {
         pushCompanionMessage(
-          "set ch.hops <name> <follow|off|N>:\n"
+          "set ch.hops <name> <clear|off|N>:\n"
           "  per-Channel Repeat-Cap (Group-Messages).");
         pushCompanionMessage(
-          "  follow = kein Cap (flood_max gilt)\n"
-          "  off    = nicht repeaten\n"
-          "  1..63  = Cap (Drop wenn path_hash > N)");
+          "  clear = Cap entfernen (-> Default/flood_max)\n"
+          "  off   = nicht repeaten\n"
+          "  1..63 = Cap (Drop wenn path_hash > N)");
         pushCompanionMessage(
           "Hashtag-Channels koennen auch OHNE Subscribe\n"
           "  geblockt werden (PSK aus Name ableitbar):\n"
