@@ -15333,10 +15333,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "ch.hops: per-Channel Repeat-Cap fuer\n"
           "  PAYLOAD_TYPE_GRP_TXT/GRP_DATA-Pakete.");
         pushCompanionMessage(
-          "  set ch.hops <name> <follow|off|N>\n"
-          "    follow = kein Cap (folgt flood_max)\n"
-          "    off    = nicht repeaten\n"
-          "    1..63  = expliziter Cap");
+          "  set ch.hops <name> <clear|off|N>\n"
+          "    clear = Cap entfernen (-> Default/flood_max)\n"
+          "    off   = nicht repeaten\n"
+          "    1..63 = expliziter Cap");
         pushCompanionMessage(
           "  get ch.hops <name>\n"
           "  ch.hops status -- aktive Caps\n"
@@ -18346,7 +18346,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
   // ---------- ch.hops --------------------------------------------------
   // Per-Channel Repeat-Cap (Wunschliste 32). dt267-inspirierte Syntax:
-  //   set ch.hops <name> <follow|off|N>  -- N=0 heisst 'nicht repeaten'
+  //   set ch.hops <name> <clear|off|N>  -- clear=Cap weg, off=nicht repeaten
   //   get ch.hops <name>
   //   ch.hops status              -- alle aktiven Caps
   //   ch.hops clear               -- alle Caps loeschen (ausser companion)
@@ -18515,15 +18515,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (!arg || *arg == 0 || strcmp(arg, "help") == 0 || arg[0] == '?') {
       pushCompanionMessage(
         "ch.hops: per-Channel Repeat-Cap.\n"
-        "  ch.hops <name> <follow|off|N>  -- Cap setzen\n"
+        "  ch.hops <name> <clear|off|N>  -- Cap setzen\n"
+        "  ch.hops <name> clear -- DIESEN Cap entfernen\n"
         "  ch.hops status       -- aktive Caps zeigen\n"
-        "  ch.hops clear        -- alle Caps loeschen");
+        "  ch.hops clear        -- ALLE Caps loeschen");
       pushCompanionMessage(
         "  <name> = Channel-Name ODER 'unknown'\n"
         "           (= Cap fuer NICHT konfigurierte Channels)\n"
-        "    follow = kein Cap (-> flood_max)\n"
-        "    off    = nicht repeaten\n"
-        "    1..63  = expliziter Cap");
+        "    clear = Cap entfernen (-> Default/flood_max)\n"
+        "    off   = nicht repeaten\n"
+        "    1..63 = expliziter Cap");
       pushCompanionMessage(
         "  Alternativ: set ch.hops <name> .. / get ch.hops <name>\n"
         "  'unknown' auch als: set flood_max_unknown_chan ..\n"
@@ -18556,8 +18557,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (ch.name[0] == 0) continue;
         uint8_t cap = _channel_hops_cap_cache[i];
         if (cap == CH_HOPS_OFF) continue;  // nicht zeigen
+        // DL9SAU 2026-07-17 (#93): '$' NUR fuer $companion -- vorher wurde jedem
+        // Channel-Namen '$' vorangestellt ($#test, $Public), was falsch/verwirrend
+        // war. Normale Channels nun ohne '$'.
         char display[24];
-        snprintf(display, sizeof(display), "$%s", ch.name);
+        if (isCompanionChannel(i))
+          snprintf(display, sizeof(display), "$%s", ch.name);
+        else
+          snprintf(display, sizeof(display), "%s", ch.name);
         char line[80];
         if (cap == 0) snprintf(line, sizeof(line), "  %-20.20s = 0 hops (off, nicht repeated)", display);
         else          snprintf(line, sizeof(line), "  %-20.20s = %u hops", display, (unsigned)cap);
@@ -25303,20 +25310,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       memcpy(vtok, value_lc + tok_start, vlen2);
       vtok[vlen2] = 0;
       uint8_t new_cap;
-      // Wunschliste 39 alignment (2026-06-04): einheitliche Konvention
-      //   follow = CH_HOPS_OFF (kein per-channel-Cap / follow parent)
-      //   off    = 0           (explizit nicht repeaten)
-      //   1..63  = expliziter Cap
-      // Bricht alte 'off' Semantik (war: kein Cap). Migration siehe
-      // Commit-Notes.
-      if (strcmp(vtok, "follow") == 0) {
+      // Wunschliste 39 alignment (2026-06-04); DL9SAU 2026-07-17: 'follow' ->
+      // 'clear' (per-channel). Konvention:
+      //   clear = CH_HOPS_OFF (Cap ENTFERNEN -> Default/flood_max; Eintrag weg)
+      //   off   = 0           (explizit nicht repeaten)
+      //   1..63 = expliziter Cap
+      // 'follow' bleibt NUR bei den Skalar-Caps (flood_max_infra/_req_resp/
+      // _unknown_chan via set), wo es ein echter Wert ist, keine Loeschung.
+      if (strcmp(vtok, "clear") == 0) {
         new_cap = CH_HOPS_OFF;
       } else if (strcmp(vtok, "off") == 0) {
         new_cap = 0;
       } else {
         int v = atoi(vtok);
         if (v < 0 || v > 63) {
-          pushCompanionMessage("Wert: 'follow' / 'off' / 0..63.");
+          pushCompanionMessage("Wert: 'clear' / 'off' / 0..63.");
           return;
         }
         new_cap = (uint8_t)v;
@@ -25339,7 +25347,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           char r[120];
           if (new_cap == CH_HOPS_OFF)
             snprintf(r, sizeof(r),
-              "OK - flood_max_unknown_chan = follow (-> %u)",
+              "OK - flood_max_unknown_chan = clear (folgt flood_max -> %u)",
               (unsigned)_prefs.flood_max);
           else if (new_cap == 0)
             snprintf(r, sizeof(r),
@@ -25361,7 +25369,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             rebuildChannelHopsCache();
             savePrefs();
             char r[100]; snprintf(r, sizeof(r),
-              "OK - ch.hops %s = off (external, removed)", chname);
+              "OK - ch.hops %s = clear (external, entfernt)", chname);
             pushCompanionMessage(r);
             return;
           }
@@ -25417,7 +25425,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       savePrefs();
       char r[120];
       if (new_cap == CH_HOPS_OFF)
-        snprintf(r, sizeof(r), "OK - ch.hops %s = follow (kein Cap)", ch.name);
+        snprintf(r, sizeof(r), "OK - ch.hops %s = clear (Cap entfernt -> Default)", ch.name);
       else if (new_cap == 0)
         snprintf(r, sizeof(r), "OK - ch.hops %s = off (nicht repeaten)", ch.name);
       else
