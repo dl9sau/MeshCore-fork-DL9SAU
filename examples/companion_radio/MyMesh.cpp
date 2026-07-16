@@ -19271,7 +19271,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Message 1: persoenliche Buckets
       char msg1[200];
       int n1 = snprintf(msg1, sizeof(msg1), "messages (offline-queue):");
-      MsgBucket personal[] = { BUCKET_DM, BUCKET_COMPANION };
+      // DL9SAU 2026-07-17 (#87): $companion NICHT mehr gelistet -- reine
+      // Infrastruktur (fluechtige CLI-Ausgabe, fix RAM-only), kein User-Bucket.
+      MsgBucket personal[] = { BUCKET_DM };
       for (size_t i = 0; i < sizeof(personal)/sizeof(personal[0]); i++) {
         MsgBucket b = personal[i];
         n1 += snprintf(msg1 + n1, sizeof(msg1) - n1,
@@ -19314,27 +19316,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       while (*arg == ' ' || *arg == '\t') arg++;
       int b = bucketByName(tname);
       if (b == -2) {
-        pushCompanionMessage("Mehrdeutig. public/hashtag/private/dm/companion.");
+        pushCompanionMessage("Mehrdeutig. public/hashtag/private/dm.");
         return;
       }
-      if (b < 0) {
-        pushCompanionMessage("Unbekannter Typ. public/hashtag/private/dm/companion.");
+      // DL9SAU 2026-07-17 (#87): $companion ist reine Infrastruktur (fluechtige
+      // CLI-Ausgabe, fix RAM-only, hart flash-exempt) -- kein konfigurierbarer
+      // Message-Bucket. Wird wie ein unbekannter Typ behandelt.
+      if (b < 0 || b == BUCKET_COMPANION) {
+        pushCompanionMessage("Unbekannter Typ. public/hashtag/private/dm.");
         return;
       }
       if (sub[0] == 'f') {  // flash
-        // DL9SAU 2026-07-17: $companion ist fluechtige CLI-Ausgabe -- Flash sinnlos
-        // + verursachte ~18s-Freeze (s. getBucketFlash). Ablehnen + Altzustand
-        // saeubern (Bit clear + evtl. bestehende Datei loeschen).
-        if (b == BUCKET_COMPANION) {
-          if (_prefs.msg_store_flash & (1 << b)) {
-            _prefs.msg_store_flash &= ~(1 << b);
-            savePrefs();
-          }
-          const char* cpath = msgBucketPath((MsgBucket)b);
-          if (cpath) _store->removeFile(_store->roomyFS(), cpath);
-          pushCompanionMessage("$companion ist fluechtig -- kein Flash noetig/moeglich.");
-          return;
-        }
         if (strcmp(arg, "on") == 0) {
           _prefs.msg_store_flash |= (1 << b);
           savePrefs();
@@ -19383,10 +19375,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         }
         _prefs.msg_store_limit[b] = (uint8_t)n;
         savePrefs();
-        char r[80];
-        snprintf(r, sizeof(r), "OK - limit %s = %d (effective %d).",
+        // DL9SAU 2026-07-17 (#88): Bucket wird bei Boot auf diese Groesse
+        // calloc'd -- Aenderung wirkt erst nach reboot. 'aktuell' = jetzige
+        // Allokation (0 = noch nicht alloziert).
+        char r[110];
+        snprintf(r, sizeof(r),
+                 "OK - limit %s = %d Slots (Ziel %d, aktiv nach reboot; aktuell %d).",
                  bucketName((MsgBucket)b), n,
-                 getBucketLimit((MsgBucket)b));
+                 getBucketLimit((MsgBucket)b), (int)_bucket_alloc[b]);
         pushCompanionMessage(r);
       }
       return;
@@ -19399,7 +19395,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       int b = bucketByName(arg);
       if (b == -2) { pushCompanionMessage("Mehrdeutig. Typ angeben oder 'all'."); return; }
-      if (b < 0)   { pushCompanionMessage("Unbekannter Typ. public/hashtag/private/dm/companion/all."); return; }
+      if (b < 0 || b == BUCKET_COMPANION) { pushCompanionMessage("Unbekannter Typ. public/hashtag/private/dm/all."); return; }
       clearBucket((MsgBucket)b);
       char r[80];
       snprintf(r, sizeof(r), "OK - bucket %s geleert (RAM + Flash).",
