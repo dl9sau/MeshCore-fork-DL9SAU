@@ -9960,6 +9960,16 @@ bool MyMesh::resolveDefaultOrGeo(TransportKey& out_key) const {
   // Default gewinnt wenn vorhanden.
   if (has_default) {
     out_key = configured;
+    // DL9SAU 2026-07-16: Ist der Default ein Magic-#geo, HIER schon zur Position
+    // aufloesen (wenn Fix vorhanden) -> Trace UND Send zeigen die echte Region
+    // statt rohem #geo (User-Befund: [adv] ... scope=#geo (default)). Ohne Fix:
+    // rohes #geo lassen -> die Send-Overloads machen ihren kontext-spezifischen
+    // no-fix-Fallback (#local/zero-hop; Advert via sendFloodScoped(TransportKey)).
+    // detectMagicScope ist non-const -> direkter Key-Vergleich (const-safe).
+    if (memcmp(out_key.key, _magic_geo_key.key, sizeof(out_key.key)) == 0) {
+      TransportKey geo_eff;
+      if (chooseGeoFallbackScope(geo_eff)) out_key = geo_eff;
+    }
     return true;
   }
   // on (2): Geo als Fallback wenn Default leer.
