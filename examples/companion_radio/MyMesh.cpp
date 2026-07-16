@@ -3870,6 +3870,10 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     MESH_DEBUG_PRINTLN("onChannelMessageRecv: dropping external $companion text");
     return;
   }
+  // DL9SAU 2026-07-17 (resolve-once): Scope EINMAL aufloesen (HMAC pro Region),
+  // dann in Filter + Augment + sender_scope_key wiederverwenden statt bis zu 3x.
+  const bool has_tc = pkt->hasTransportCodes();
+  const char* sc_name = has_tc ? lookupRegionByTransportCode(pkt) : NULL;
   // Wunschliste 46 Phase 1 (Reise 2026-06-09): Sender + Text Filter.
   // Channel-Wire: '<sender_name>: <text>'. Sender bis ': ' extrahieren
   // -- wenn Sender oder Text matched, komplett verwerfen.
@@ -3895,13 +3899,9 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
       traceCompanion(TRACE_FILTER, "[filter] GRP dropped: text-match");
       return;
     }
-    // Wunschliste 46 Phase 5: scope-Filter (Display-Pfad).
-    // scope_name = NULL bei unscoped (oder bei scoped mit unbekanntem
-    // Region-Code; in beiden Faellen matched 'unscoped' im Filter).
-    const char* sc_name = NULL;
-    if (pkt->hasTransportCodes()) {
-      sc_name = lookupRegionByTransportCode(pkt);
-    }
+    // Wunschliste 46 Phase 5: scope-Filter (Display-Pfad). sc_name oben schon
+    // aufgeloest (NULL = unscoped ODER scoped-aber-unbekannt; beide matchen
+    // 'unscoped' im Filter).
     if (filterScopeMatch(sc_name, ch_idx, /*for_repeat=*/false)) {
       traceCompanion(TRACE_FILTER, "[filter] GRP dropped: scope='%s'",
                      sc_name ? sc_name : "unscoped");
@@ -3955,7 +3955,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     //   0xFFFFFFFF = '#*' (unscoped)
     uint32_t scope_h;
     char scope_buf[36];
-    computeScopeLabel(pkt, scope_h, scope_buf, sizeof(scope_buf));
+    buildScopeLabel(sc_name, has_tc, scope_h, scope_buf, sizeof(scope_buf));  // sc_name oben aufgeloest
     const char* scope_label = scope_buf;
     uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
     // User-Wunsch 2026-06-08: per-Channel-Separation. 4 Bytes aus dem
@@ -3972,13 +3972,10 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     // (unbekannt) bleibt der Key null -> Reply faellt auf Hierarchie.
     uint8_t sender_scope_key[16];
     memset(sender_scope_key, 0, 16);
-    if (pkt->hasTransportCodes()) {
-      const char* rn = lookupRegionByTransportCode(pkt);
-      if (rn) {
-        int idx = dl9sau_find_region_index(rn);
-        if (idx >= 0 && idx < _buildin_keys_count) {
-          memcpy(sender_scope_key, _buildin_keys[idx].key, 16);
-        }
+    if (sc_name) {   // DL9SAU 2026-07-17: oben aufgeloesten Region-Namen wiederverwenden
+      int idx = dl9sau_find_region_index(sc_name);
+      if (idx >= 0 && idx < _buildin_keys_count) {
+        memcpy(sender_scope_key, _buildin_keys[idx].key, 16);
       }
     }
     // Channel: path_fnv1a=0 (Path wird bei Channel-Msg nicht getrackt).
@@ -4014,7 +4011,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV;
   }
 
-  uint8_t channel_idx = findChannelIdx(channel);
+  uint8_t channel_idx = ch_idx_check;   // DL9SAU 2026-07-17: oben schon aufgeloest (statt 2x findChannelIdx)
   out_frame[i++] = channel_idx;
   uint8_t path_len = out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
 
@@ -30087,16 +30084,17 @@ bool MyMesh::advert() {
 // DL9SAU 2026-06-16: Helper extrahiert aus dem 15-Zeiler der in
 // Z 2074-2089 + 3086-3101 doppelt war. Befuellt scope_h und scope_buf
 // (Letzteres direkt nutzbar als scope_label).
-void MyMesh::computeScopeLabel(const mesh::Packet* pkt,
-                               uint32_t& scope_h,
-                               char* scope_buf, size_t scope_buf_sz) const {
-  if (pkt->hasTransportCodes()) {
-    const char* scope_name = lookupRegionByTransportCode(pkt);
-    if (scope_name) {
-      scope_h = fnv1a32_cstr(scope_name);
+// DL9SAU 2026-07-17: Label + scope_h aus BEREITS aufgeloestem Region-Namen
+// (sc_name==NULL bei unscoped ODER scoped-aber-unbekannt; has_transport_codes
+// unterscheidet '#*' unscoped von '#?' unbekannt). Keine HMAC hier.
+void MyMesh::buildScopeLabel(const char* sc_name, bool has_transport_codes,
+                             uint32_t& scope_h, char* scope_buf, size_t scope_buf_sz) const {
+  if (has_transport_codes) {
+    if (sc_name) {
+      scope_h = fnv1a32_cstr(sc_name);
       // Kollision mit Sentinel-Werten extrem unwahrscheinlich aber sicher:
       if (scope_h == 0xFFFFFFFEUL || scope_h == 0xFFFFFFFFUL) scope_h ^= 0x12345678UL;
-      snprintf(scope_buf, scope_buf_sz, "#%s", scope_name);
+      snprintf(scope_buf, scope_buf_sz, "#%s", sc_name);
     } else {
       scope_h = 0xFFFFFFFEUL;
       snprintf(scope_buf, scope_buf_sz, "#?");
@@ -30105,6 +30103,13 @@ void MyMesh::computeScopeLabel(const mesh::Packet* pkt,
     scope_h = 0xFFFFFFFFUL;
     snprintf(scope_buf, scope_buf_sz, "#*");
   }
+}
+
+void MyMesh::computeScopeLabel(const mesh::Packet* pkt,
+                               uint32_t& scope_h,
+                               char* scope_buf, size_t scope_buf_sz) const {
+  const char* sc_name = pkt->hasTransportCodes() ? lookupRegionByTransportCode(pkt) : NULL;
+  buildScopeLabel(sc_name, pkt->hasTransportCodes(), scope_h, scope_buf, scope_buf_sz);
 }
 
 // To check if there is pending work

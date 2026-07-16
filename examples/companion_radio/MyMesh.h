@@ -683,6 +683,11 @@ private:
   void computeScopeLabel(const mesh::Packet* pkt,
                          uint32_t& scope_h,
                          char* scope_buf, size_t scope_buf_sz) const;
+  // DL9SAU 2026-07-17: Scope-Label aus BEREITS aufgeloestem Region-Namen bauen
+  // (kein erneutes lookupRegionByTransportCode -> HMAC gespart). computeScopeLabel
+  // loest auf + ruft das hier; Aufrufer die sc_name schon haben rufen direkt.
+  void buildScopeLabel(const char* sc_name, bool has_transport_codes,
+                       uint32_t& scope_h, char* scope_buf, size_t scope_buf_sz) const;
   // Format a debug line, write it to Serial AND push it to the app as a
   // PUSH_CODE_DEBUG_LOG frame (so the user can inspect logs in the app's
   // Debug-Protokolle view when no USB-Serial is attached, e.g. mobile).
