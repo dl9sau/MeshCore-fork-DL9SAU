@@ -15225,6 +15225,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Fuer klassischen Flood ohne Setting-Aenderung:\n"
           "Scope=#unscoped.");
+        pushCompanionMessage(
+          "Scope-Anzeige eingehender Channel-Msgs:\n"
+          "  set messages_append_scope_to_name on\n"
+          "haengt den Sender-Scope einmalig als 'Name (#scope)'\n"
+          "an -> du siehst, aus welchem Scope er sendet.\n"
+          "(Default off; kann App-Pfad-Anzeige stoeren.)");
         return;
       }
       if (topic_prefix_match(topic, "filter")) {
