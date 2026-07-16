@@ -294,6 +294,13 @@ int MyMesh::getBucketLimit(MsgBucket b) const {
 
 bool MyMesh::getBucketFlash(MsgBucket b) const {
   if (b < 0 || b >= BUCKET_COUNT) return false;
+  // DL9SAU 2026-07-17: $companion ist FLUECHTIGE CLI-/Hilfe-Ausgabe -- NIE flash-
+  // persistieren. Sonst schreibt addToOfflineQueue bei JEDEM der ~19 stats-Frames
+  // die ganze Bucket-Datei auf ExtraFS neu -> littlefs-GC -> ~18s Main-Thread-
+  // Freeze (kein Serial-Echo) waehrend der Companion-Ausgabe. Ueber Reboot hinweg
+  // Befehls-Output aufzuheben ist ohnehin sinnlos. Hard-Exempt schlaegt jedes
+  // versehentlich gesetzte Bit.
+  if (b == BUCKET_COMPANION) return false;
   return (_prefs.msg_store_flash & (1 << (int)b)) != 0;
 }
 
@@ -19200,6 +19207,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (sub[0] == 'f') {  // flash
+        // DL9SAU 2026-07-17: $companion ist fluechtige CLI-Ausgabe -- Flash sinnlos
+        // + verursachte ~18s-Freeze (s. getBucketFlash). Ablehnen + Altzustand
+        // saeubern (Bit clear + evtl. bestehende Datei loeschen).
+        if (b == BUCKET_COMPANION) {
+          if (_prefs.msg_store_flash & (1 << b)) {
+            _prefs.msg_store_flash &= ~(1 << b);
+            savePrefs();
+          }
+          const char* cpath = msgBucketPath((MsgBucket)b);
+          if (cpath) _store->removeFile(_store->roomyFS(), cpath);
+          pushCompanionMessage("$companion ist fluechtig -- kein Flash noetig/moeglich.");
+          return;
+        }
         if (strcmp(arg, "on") == 0) {
           _prefs.msg_store_flash |= (1 << b);
           savePrefs();
