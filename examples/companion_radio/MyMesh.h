@@ -1389,6 +1389,15 @@ private:
   bool     _bucket_alloc_failed[BUCKET_COUNT] = { false, false, false, false, false };
   // Bucket bei Bedarf allozieren (RAM = getBucketLimit(), also config-MAX-geklemmt).
   void     allocBucket(MsgBucket b);
+  // DL9SAU 2026-07-17 (#86): Debounced Flash-Persistenz. Statt bei jedem Add/Pop
+  // die ganze Bucket-Datei neu zu schreiben (Write-Amplification/Wear), wird der
+  // Bucket nur 'dirty' markiert und im loop()-Tick fruehestens 'interval' ms nach
+  // dem letzten Write persistiert. DM=0 (write-through, naechster Tick),
+  // private=60s, hashtag/public=300s. RAM-Queue/Tickle/App-Pull bleiben SOFORT.
+  bool     _bucket_dirty[BUCKET_COUNT]      = { false, false, false, false, false };
+  uint32_t _bucket_last_write[BUCKET_COUNT] = { 0, 0, 0, 0, 0 };
+  void     flushBucketIfDirty(MsgBucket b);   // jetzt persistieren (leer->Datei loeschen)
+  void     flushDirtyBucketsTick();           // loop()-Tick: faellige Buckets flushen
   // Runtime-Limit pro Bucket (resolved aus NodePrefs.msg_store_limit + Default).
   int      getBucketLimit(MsgBucket b) const;
   // Flash-Flag pro Bucket (lookup in NodePrefs.msg_store_flash bit-field).

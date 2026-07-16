@@ -466,6 +466,48 @@ void MyMesh::saveBucketToFlash(MsgBucket b) {
   f.close();
 }
 
+// DL9SAU 2026-07-17 (#86): einen dirty Bucket JETZT persistieren. Leer -> Datei
+// loeschen (verhindert Reboot-Duplikate, billig), sonst Full-Rewrite. Danach clean.
+void MyMesh::flushBucketIfDirty(MsgBucket b) {
+  if (b < 0 || b >= BUCKET_COUNT) return;
+  _bucket_dirty[b] = false;
+  _bucket_last_write[b] = millis();
+  if (!getBucketFlash(b)) return;
+  Frame* arr = NULL;
+  int cap = 0;
+  getBucket(b, arr, cap);
+  if (!arr) return;
+  bool empty = true;
+  for (int i = 0; i < cap; i++) if (arr[i].seq_no) { empty = false; break; }
+  if (empty) {
+    const char* p = msgBucketPath(b);
+    if (p) _store->removeFile(_store->roomyFS(), p);
+  } else {
+    saveBucketToFlash(b);
+  }
+}
+
+// loop()-Tick: faellige dirty-Buckets flushen (Debounce pro Bucket-Intervall).
+// Max EIN Flush pro Tick -> Datei-I/O ueber Ticks verteilt, kein Write-Storm.
+void MyMesh::flushDirtyBucketsTick() {
+  static const uint32_t interval_ms[BUCKET_COUNT] = {
+    300000UL,      // PUBLIC   5 min
+    300000UL,      // HASHTAG  5 min
+    60000UL,       // PRIVATE  1 min
+    0UL,           // DM       write-through (naechster Tick)
+    0xFFFFFFFFUL   // COMPANION nie (flash immer aus)
+  };
+  uint32_t now = millis();
+  for (int b = 0; b < BUCKET_COUNT; b++) {
+    if (!_bucket_dirty[b]) continue;
+    if (!getBucketFlash((MsgBucket)b)) { _bucket_dirty[b] = false; continue; }
+    if ((uint32_t)(now - _bucket_last_write[b]) >= interval_ms[b]) {
+      flushBucketIfDirty((MsgBucket)b);
+      break;   // nur ein Bucket pro Tick
+    }
+  }
+}
+
 void MyMesh::loadBucketsFromFlash() {
   uint32_t max_seq = 0;
   uint32_t max_ts  = 0;   // hoechster sender_timestamp ueber alle restaurierten
@@ -853,8 +895,12 @@ void MyMesh::clearBucket(MsgBucket b) {
   if (arr) {
     for (int i = 0; i < cap; i++) arr[i].seq_no = 0;
   }
+  if (b >= 0 && b < BUCKET_COUNT) _bucket_dirty[b] = false;   // DL9SAU #86
   const char* path = msgBucketPath(b);
-  if (path) _store->removeFile(path);
+  // DL9SAU 2026-07-17: msgs liegen auf roomyFS (ExtraFS) -- von DORT loeschen.
+  // Vorher 1-arg removeFile(path) (Default-FS) -> Datei blieb liegen -> nach
+  // Reboot wurden 'geloeschte' Messages restauriert (latenter Bug).
+  if (path) _store->removeFile(_store->roomyFS(), path);
 }
 
 int MyMesh::offlineQueueTotal() const {
@@ -957,10 +1003,14 @@ void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
   // aktiviert, neuen Bucket-State auf Flash schreiben. $companion-Bucket
   // ist von TRACE_MSGSTORE ausgenommen (sonst Rekursion: Trace pusht
   // $companion-Msg -> wird gespeichert -> Trace pusht "gespeichert" -> ...).
+  // DL9SAU 2026-07-17 (#86): nur dirty markieren -- der debounced loop()-Tick
+  // persistiert fruehestens 'interval' ms nach dem letzten Write (Wear-Schutz).
+  // Eviction hat den aeltesten Slot bereits ueberschrieben; der spaetere Flush
+  // schreibt ohnehin den vollen (dann konsistenten) Bucket.
   if (getBucketFlash(b)) {
-    saveBucketToFlash(b);
+    _bucket_dirty[b] = true;
     if (b != BUCKET_COMPANION) {
-      traceCompanion(TRACE_MSGSTORE, "[store] saved msg in bucket %d", (int)b);
+      traceCompanion(TRACE_MSGSTORE, "[store] msg queued bucket %d (dirty)", (int)b);
     }
   }
 }
@@ -994,8 +1044,25 @@ int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
   // Boot lud loadBucketsFromFlash sie zurueck in RAM, naechster Sync
   // duplizierte sie). Save-pro-Pop ist akzeptabel: Sync passiert nur
   // bei App-Connect, Volumen ist gering, Flash-Wear bleibt im Rahmen.
+  // DL9SAU 2026-07-17 (#86): Nach Zustellung NICHT sofort die ganze Datei neu
+  // schreiben (das war die Write-Amplification). Ist der Bucket jetzt leer ->
+  // Datei loeschen (verhindert das Reboot-Duplikat aus dem 2026-06-13-Bug,
+  // billig). Sonst dirty markieren + Flush verzoegern (last_write=now) -> ein
+  // App-Drain (viele Pops hintereinander) koalesziert zu EINEM spaeteren Rewrite.
   if (getBucketFlash(best_bucket)) {
-    saveBucketToFlash(best_bucket);
+    Frame* barr = NULL;
+    int bcap = 0;
+    getBucket(best_bucket, barr, bcap);
+    bool empty = true;
+    if (barr) for (int i = 0; i < bcap; i++) if (barr[i].seq_no) { empty = false; break; }
+    if (empty) {
+      const char* p = msgBucketPath(best_bucket);
+      if (p) _store->removeFile(_store->roomyFS(), p);
+      _bucket_dirty[best_bucket] = false;
+    } else {
+      _bucket_dirty[best_bucket] = true;
+      _bucket_last_write[best_bucket] = millis();
+    }
   }
   return len;
 }
@@ -9142,6 +9209,10 @@ void MyMesh::loop() {
 
   // Wunschliste 27: discover-Listen-Window check
   discoverLoop();
+
+  // DL9SAU 2026-07-17 (#86): debounced Flash-Persistenz der Message-Buckets.
+  // Schreibt hoechstens einen faelligen dirty-Bucket pro Tick (I/O verteilt).
+  flushDirtyBucketsTick();
 
   // Wunschliste 31: 3-min Timeout fuer Lazy-Collection. Wenn nach
   // 3 min noch nicht finalisiert (< 5 Kandidaten gesammelt),
@@ -19234,6 +19305,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           savePrefs();
           // Sofort persistieren falls Bucket gerade Eintraege hat
           saveBucketToFlash((MsgBucket)b);
+          _bucket_dirty[b] = false;              // DL9SAU #86: gerade sauber
+          _bucket_last_write[b] = millis();
           char r[80];
           snprintf(r, sizeof(r), "OK - flash %s = on (file persistiert).",
                    bucketName((MsgBucket)b));
