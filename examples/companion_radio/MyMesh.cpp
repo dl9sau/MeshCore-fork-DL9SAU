@@ -19743,41 +19743,54 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Sub-Tokens: 'sender' oder 'text', dann 'drop', dann action.
     const char* p = strchr(cmd, ' ');
     if (!p) {
-      pushCompanionMessage(
+      // DL9SAU 2026-07-17: Hilfe-Zeilen batchen (wie 'filter list' unten) statt
+      // 10 Einzel-Frames -- packt bis 130 Byte pro Push. Grosse Bloecke (>130)
+      // gehen als eigener Push raus, kleine werden zusammengefasst.
+      char hb[145]; size_t hp = 0; hb[0] = 0;
+      auto hflush = [&]() { if (hp > 0) { pushCompanionMessage(hb); hp = 0; hb[0] = 0; } };
+      auto hline = [&](const char* s) {
+        size_t sl = strlen(s);
+        if (hp > 0 && hp + 1 + sl > 130) hflush();
+        if (hp > 0) hb[hp++] = '\n';
+        for (size_t i = 0; i < sl && hp < sizeof(hb) - 1; i++) hb[hp++] = s[i];
+        hb[hp] = 0;
+      };
+      hline(
         "Usage filter sender:\n"
         "  filter sender drop|keep name <act>\n"
         "  <act> = add <pat> [chan-args]\n"
         "        | remove <pat|idx>\n"
         "        | list | clear");
-      pushCompanionMessage(
+      hline(
         "Usage filter text:\n"
         "  filter text drop|keep <act>\n"
         "  <act> wie bei sender");
-      pushCompanionMessage(
+      hline(
         "[chan-args] = on-channel <liste>\n"
         "            | exempt-channel <liste>");
-      pushCompanionMessage(
+      hline(
         "Shortcut Skopus alle Pattern je Typ:\n"
         "  filter <sender|text> on-channel <l>\n"
         "  filter <sender|text> exempt-channel <l>");
-      pushCompanionMessage(
+      hline(
         "  filter list  (Komplett-Uebersicht)");
-      pushCompanionMessage(
+      hline(
         "scope-Filter (drei Achsen pro Pattern):\n"
         "  filter scope drop|keep add <scope-list>");
-      pushCompanionMessage(
+      hline(
         "  -- wo: [on-channel|exempt-channel <chans>]\n"
         "  -- wirkung: [profile display|repeat|complete]\n"
         "  Default: alle Channels, complete (beide).");
-      pushCompanionMessage(
+      hline(
         "  filter scope drop|keep remove|list|clear\n"
         "  filter scope on-channel|exempt-channel\n"
         "    <chans|clear>  (Shortcut alle Patterns)");
-      pushCompanionMessage(
+      hline(
         "  filter unknown-channel\n"
         "    filter-none|filter-unscoped|\n"
         "    filter-scoped|filter-all\n"
         "  Default: filter-unscoped");
+      hflush();
       return;
     }
     while (*p == ' ' || *p == '\t') p++;
