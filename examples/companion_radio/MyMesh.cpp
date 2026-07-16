@@ -19750,7 +19750,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       auto hflush = [&]() { if (hp > 0) { pushCompanionMessage(hb); hp = 0; hb[0] = 0; } };
       auto hline = [&](const char* s) {
         size_t sl = strlen(s);
-        if (hp > 0 && hp + 1 + sl > 130) hflush();
+        // <=128 halten: pushCompanionMessage re-wrappt alles >128 zeilenweise
+        // (Z.13654) -> wuerde unsere Buendelung wieder zerreissen.
+        if (hp > 0 && hp + 1 + sl > 128) hflush();
         if (hp > 0) hb[hp++] = '\n';
         for (size_t i = 0; i < sl && hp < sizeof(hb) - 1; i++) hb[hp++] = s[i];
         hb[hp] = 0;
