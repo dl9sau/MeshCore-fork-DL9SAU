@@ -3667,6 +3667,50 @@ static bool extractReplyName(const char* text, char* out_name, size_t out_size,
   return true;
 }
 
+// DL9SAU 2026-07-17 (#95): Scope-Mention '@[Name (#scope)]' IRGENDWO im Text
+// finden (nicht nur am Anfang wie extractReplyName) + den Scope-Namen (ohne '#')
+// zurueckgeben. Fuer den Send-Scope bei z.B. 'text @[foo (#de-bebb)]'.
+// EINDEUTIGKEIT (User 2026-07-17): mehrere Mentions mit VERSCHIEDENEN Scopes
+// gehen nicht gleichzeitig -> dann false (Caller nimmt Channel-/Default-Scope).
+// Ein einziger Scope (oder mehrere identische) gewinnt. Das ' (#..)' selbst
+// raeumt stripReplyMentionDecoration ohnehin ueberall weg.
+static bool findMentionScopeUnambiguous(const char* text, char* out_scope, size_t out_size) {
+  if (!text || !out_scope || out_size == 0) return false;
+  out_scope[0] = 0;
+  bool have = false;
+  const char* p = text;
+  while ((p = strstr(p, "@[")) != NULL) {
+    const char* close = strchr(p + 2, ']');
+    if (!close) break;
+    const char* lim = p + 2;
+    if (close - lim >= 4 && close[-1] == ')') {
+      for (const char* q = close - 4; q >= lim; q--) {
+        if (q[0] == ' ' && q[1] == '(' && q[2] == '#') {
+          const char* s_start = q + 3;      // nach '#'
+          const char* s_end   = close - 1;  // vor ')'
+          if (s_end > s_start) {
+            char sc[36];
+            size_t slen = (size_t)(s_end - s_start);
+            if (slen >= sizeof(sc)) slen = sizeof(sc) - 1;
+            memcpy(sc, s_start, slen); sc[slen] = 0;
+            if (!have) {
+              size_t ol = slen < out_size - 1 ? slen : out_size - 1;
+              memcpy(out_scope, sc, ol); out_scope[ol] = 0;
+              have = true;
+            } else if (strcasecmp(out_scope, sc) != 0) {
+              out_scope[0] = 0;   // zweiter, ABWEICHENDER Scope -> mehrdeutig
+              return false;
+            }
+          }
+          break;  // pro Mention nur ein Scope (der letzte ' (#..)')
+        }
+      }
+    }
+    p = close + 1;
+  }
+  return have;
+}
+
 static void stripReplyMentionDecoration(char* buf) {
   if (buf == NULL) return;
   char* p = buf;
@@ -7748,10 +7792,17 @@ void MyMesh::handleCmdFrame(size_t len) {
       uint8_t reply_scope_key[16];
       bool have_reply_scope = false;
       {
-        char reply_name[32];
-        char reply_scope_name[36];
-        if (extractReplyName(mtext, reply_name, sizeof(reply_name),
-                             reply_scope_name, sizeof(reply_scope_name))) {
+        char reply_name[32]; reply_name[0] = 0;
+        char reply_scope_name[36]; reply_scope_name[0] = 0;
+        bool is_reply = extractReplyName(mtext, reply_name, sizeof(reply_name),
+                                         reply_scope_name, sizeof(reply_scope_name));
+        // DL9SAU 2026-07-17 (#95): Scope-Mention auch INNERHALB der Nachricht
+        // (nicht nur am Anfang) -- 'text @[foo (#de-bebb)]' soll mit #de-bebb raus.
+        // EINDEUTIG ueber ALLE Mentions: ueberschreibt die evtl. Start-Scope; eine
+        // Mention -> identisch; mehrere VERSCHIEDENE -> leer -> Channel-/Default-
+        // Scope (kein Raten). '#*' bleibt erhalten.
+        findMentionScopeUnambiguous(mtext, reply_scope_name, sizeof(reply_scope_name));
+        if (is_reply || reply_scope_name[0]) {
           // 2026-07-05: Bracket-Suffix '(#scope)' der App bevorzugt --
           // funktioniert auch wenn der Sender-Cache leer ist (Reboot etc).
           // Fallback auf Cache-Lookup wenn kein Suffix da war.
@@ -7786,7 +7837,7 @@ void MyMesh::handleCmdFrame(size_t len) {
               }
             }
           }
-          if (!have_reply_scope) {
+          if (!have_reply_scope && is_reply) {   // Cache-Lookup nur fuer echten Start-Reply
             uint32_t name_h = fnv1a32(reply_name, strlen(reply_name));
             uint32_t channel_h;
             memcpy(&channel_h, channel.channel.hash, sizeof(channel_h));
