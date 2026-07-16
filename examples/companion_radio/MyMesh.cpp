@@ -10342,6 +10342,19 @@ void MyMesh::doNightFloodAdvert() {
         src = "last-resort"; nm = "local";
       }
     }
+    // DL9SAU 2026-07-16: geo-fallback (oder sonst ein aufgeloester Region-Key)
+    // matcht keinen der Pref-Keys oben -> Region-Namen per Key aus der Build-in-
+    // Tabelle nachschlagen, sonst zeigt der Trace '#?' OBWOHL korrekt gescoped
+    // (User-Befund: scope=#? (geo-fallback) code=4EE2).
+    if (nm[0] == '?' && nm[1] == 0) {
+      for (int i = 0; i < _buildin_keys_count && i < SCOPE_BUILDIN_KEY_CACHE_MAX; i++) {
+        if (memcmp(scope.key, _buildin_keys[i].key, 16) == 0) {
+          const char* rn = NULL;
+          if (dl9sau_get_region((size_t)i, &rn, NULL, NULL, NULL, NULL) && rn && rn[0]) nm = rn;
+          break;
+        }
+      }
+    }
     traceCompanion(TRACE_ADVERTS, "[adv] nightly-flood scope=#%s (%s) code=%04X",
                    nm[0] ? nm : "?", src, (unsigned)codes[0]);
   }
