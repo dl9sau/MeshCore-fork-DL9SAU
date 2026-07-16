@@ -263,17 +263,32 @@ bool MyMesh::isCompanionChannel(uint8_t channel_idx) {
   return memcmp(ch.channel.secret, s_companion_psk_magic, 16) == 0;
 }
 
-// out_cap = Hardware-Kapazitaet (Array-Groesse). Runtime-Limit (slot count
-// das tatsaechlich benutzt wird) ist getBucketLimit() -- kann kleiner sein.
-void MyMesh::getBucket(MsgBucket b, Frame*& out_arr, int& out_cap) {
-  switch (b) {
-    case BUCKET_PUBLIC:    out_arr = bucket_public;    out_cap = BUCKET_CAP_PUBLIC;    break;
-    case BUCKET_HASHTAG:   out_arr = bucket_hashtag;   out_cap = BUCKET_CAP_HASHTAG;   break;
-    case BUCKET_PRIVATE:   out_arr = bucket_private;   out_cap = BUCKET_CAP_PRIVATE;   break;
-    case BUCKET_DM:        out_arr = bucket_dm;        out_cap = BUCKET_CAP_DM;        break;
-    case BUCKET_COMPANION: out_arr = bucket_companion; out_cap = BUCKET_CAP_COMPANION; break;
-    default:               out_arr = NULL;             out_cap = 0;                    break;
+// DL9SAU 2026-07-17: Bucket lazy per calloc allozieren (Groesse = getBucketLimit,
+// also config->default->MAX-geklemmt). Lazy loest die Boot-Ordering-Falle: beim
+// ersten Zugriff sind die Prefs geladen; $companion (fix, prefs-unabhaengig) ist
+// auch bei fruehen Traces sicher. calloc nullt -> seq_no=0 = leerer Slot.
+// calloc-Fehler -> Guard (deaktiviert, kein Retry-Spam pro getBucket).
+void MyMesh::allocBucket(MsgBucket b) {
+  if (b < 0 || b >= BUCKET_COUNT) return;
+  int want = getBucketLimit(b);          // config -> default -> MAX
+  if (want < 1) want = 1;
+  Frame* p = (Frame*)calloc((size_t)want, sizeof(Frame));
+  if (!p) {
+    _bucket_alloc_failed[b] = true;
+    MESH_DEBUG_PRINTLN("WARN: bucket %d calloc(%d) failed -> deaktiviert", (int)b, want);
+    return;
   }
+  _bucket_ptr[b]   = p;
+  _bucket_alloc[b] = (uint8_t)want;
+}
+
+// out_cap = tatsaechlich allozierte Slot-Zahl (= konfigurierte Groesse). Bei
+// erstem Zugriff wird alloziert. NULL/0 wenn calloc scheiterte (Bucket aus).
+void MyMesh::getBucket(MsgBucket b, Frame*& out_arr, int& out_cap) {
+  if (b < 0 || b >= BUCKET_COUNT) { out_arr = NULL; out_cap = 0; return; }
+  if (_bucket_ptr[b] == NULL && !_bucket_alloc_failed[b]) allocBucket(b);
+  out_arr = _bucket_ptr[b];
+  out_cap = (int)_bucket_alloc[b];
 }
 
 int MyMesh::getBucketLimit(MsgBucket b) const {
@@ -843,12 +858,13 @@ void MyMesh::clearBucket(MsgBucket b) {
 }
 
 int MyMesh::offlineQueueTotal() const {
+  // Member-direkt (const-safe, kein lazy-alloc) + nur ueber tatsaechlich
+  // allozierte Slots iterieren (OOB-sicher bei dynamischer Groesse).
   int n = 0;
-  for (int i = 0; i < BUCKET_CAP_PUBLIC;    i++) if (bucket_public   [i].seq_no) n++;
-  for (int i = 0; i < BUCKET_CAP_HASHTAG;   i++) if (bucket_hashtag  [i].seq_no) n++;
-  for (int i = 0; i < BUCKET_CAP_PRIVATE;   i++) if (bucket_private  [i].seq_no) n++;
-  for (int i = 0; i < BUCKET_CAP_DM;        i++) if (bucket_dm       [i].seq_no) n++;
-  for (int i = 0; i < BUCKET_CAP_COMPANION; i++) if (bucket_companion[i].seq_no) n++;
+  for (int b = 0; b < BUCKET_COUNT; b++) {
+    if (!_bucket_ptr[b]) continue;
+    for (int i = 0; i < _bucket_alloc[b]; i++) if (_bucket_ptr[b][i].seq_no) n++;
+  }
   return n;
 }
 
@@ -6189,15 +6205,11 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
       _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui), _iter(0) {
   _iter_started = false;
   _cli_rescue = false;
-  // 5 Offline-Buckets initialisieren (seq_no=0 als leerer-Slot Sentinel).
+  // 5 Offline-Buckets: DL9SAU 2026-07-17 jetzt lazy per calloc alloziert
+  // (Pointer NULL-init im Header, calloc nullt seq_no=0). Kein memset noetig.
   // Konstruktor laeuft vor dem ersten addToOfflineQueue, so dass spaeter
   // _msg_seq_next per ++ auf 1 inkrementiert wird.
   _msg_seq_next = 0;
-  memset(bucket_public,    0, sizeof(bucket_public));
-  memset(bucket_hashtag,   0, sizeof(bucket_hashtag));
-  memset(bucket_private,   0, sizeof(bucket_private));
-  memset(bucket_dm,        0, sizeof(bucket_dm));
-  memset(bucket_companion, 0, sizeof(bucket_companion));
   app_target_ver = 0;
   clearPendingReqs();
   next_ack_idx = 0;
@@ -19130,17 +19142,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // Message 2: Gruppen-Channels (public, hashtag, private)
       // Spalte 'cap' bewusst weggelassen (war verwirrend) -- in 'help
       // messages' steht der maximal moegliche Wert pro Typ.
-      static const int caps[BUCKET_COUNT] = {
-        BUCKET_CAP_PUBLIC, BUCKET_CAP_HASHTAG, BUCKET_CAP_PRIVATE,
-        BUCKET_CAP_DM,     BUCKET_CAP_COMPANION
-      };
+      // DL9SAU 2026-07-17: Member-direkt + nur ueber tatsaechlich allozierte
+      // Slots (OOB-sicher bei dynamischer Groesse; kein lazy-alloc-Nebeneffekt
+      // beim blossen Anzeigen von 'messages').
       auto bucketUsed = [&](MsgBucket b) -> int {
-        Frame* arr = NULL;
-        int c_unused = 0;
-        getBucket(b, arr, c_unused);
-        if (!arr) return 0;
+        if (!_bucket_ptr[(int)b]) return 0;
         int n = 0;
-        for (int i = 0; i < caps[(int)b]; i++) if (arr[i].seq_no) n++;
+        for (int i = 0; i < _bucket_alloc[(int)b]; i++)
+          if (_bucket_ptr[(int)b][i].seq_no) n++;
         return n;
       };
       auto displayName = [&](MsgBucket b) -> const char* {
@@ -26725,8 +26734,10 @@ cron_add_direct:
     unsigned long up_m = (unsigned long)((total_s % 3600ULL) / 60ULL);
     uint16_t batt_mv = (uint16_t)board.getBattMilliVolts();
     int q_used = offlineQueueTotal();
-    int q_cap  = BUCKET_CAP_PUBLIC + BUCKET_CAP_HASHTAG + BUCKET_CAP_PRIVATE
-               + BUCKET_CAP_DM + BUCKET_CAP_COMPANION;
+    // DL9SAU 2026-07-17: konfigurierte Bucket-Groessen summieren (dynamische
+    // Alloc), nicht die Compile-MAX.
+    int q_cap = 0;
+    for (int b = 0; b < BUCKET_COUNT; b++) q_cap += getBucketLimit((MsgBucket)b);
     // 145-Byte-Limit: stats-core in mehrere pushCompanionMessage splitten,
     // damit nichts abgeschnitten wird (v.a. bei USB-Marker und ESP32-CPU-Temp).
     char block[200];

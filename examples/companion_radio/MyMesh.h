@@ -1360,37 +1360,35 @@ private:
     BUCKET_COMPANION = 4,       // $companion-Channel (Trace, CLI-Output)
     BUCKET_COUNT     = 5
   };
-  // Bucket-Kapazitaeten (Array-Groessen). Phase C macht das Slot-Limit
-  // pro Bucket per NodePrefs+CLI konfigurierbar; die Arrays sind hier
-  // auf MAX vorallokiert. Slot mit Index >= runtime-limit bleibt
-  // ungenutzt. $companion eigener Bucket: Trace/CLI-Output wuerde sonst
-  // den privaten Bucket ueberfluten und User-Channel-Nachrichten
-  // verdraengen.
-  // Caps angepasst nach Test-Bericht 2026-05-30: User-Wunsch HASHTAG/
-  // PRIVATE auf 24 anheben (mehr Puffer fuer Gruppen-Chats), DM von
-  // 32 auf 24 reduziert (DMs sind seltener). PUBLIC bewusst klein (8)
-  // -- nur ein well-known PSK-Channel, geringer Traffic.
+  // DL9SAU 2026-07-17 (Msg-Store-Redesign): Buckets werden DYNAMISCH per calloc
+  // auf die KONFIGURIERTE Groesse alloziert (lazy in getBucket), nicht mehr fix
+  // auf MAX. So passt sich der RAM-Verbrauch an die User-Wuensche an -- nie
+  // groesser als MAX, oft deutlich kleiner. Config-Aenderung wirkt erst bei
+  // Reboot (dann re-calloc mit neuer Groesse). $companion eigener Bucket:
+  // Trace/CLI-Output wuerde sonst den privaten Bucket ueberfluten; fix,
+  // RAM-only, prefs-unabhaengig.
+  //
+  // BUCKET_CAP_* = MAX/Obergrenze fuer die Config-Klemmung (NICHT mehr die
+  // Array-Groesse). HASHTAG 24->16 (Geplauder), PRIVATE/DM 24, PUBLIC klein (8).
   static constexpr int BUCKET_CAP_PUBLIC    = 8;
-  static constexpr int BUCKET_CAP_HASHTAG   = 24;
+  static constexpr int BUCKET_CAP_HASHTAG   = 16;   // war 24 (MAX)
   static constexpr int BUCKET_CAP_PRIVATE   = 24;
   static constexpr int BUCKET_CAP_DM        = 24;
-  // DL9SAU 2026-07-17: 16 -> 24. Der $companion-Bucket puffert die (jetzt
-  // gepackte) Ausgabe EINES Befehls, bevor die App pullt -- 'stats' ist ~19
-  // gepackte Frames (mehr bei 3-4-stelligen Zaehlern) und lief bei 16 ueber
-  // (erste Bloecke evicted). +8 Slots x ~184B = ~1.5KB Heap. Fuer den absoluten
-  // Busy-Worst-Case bleiben die Sub-Befehle stats-core/stats-radio/stats-packets.
-  static constexpr int BUCKET_CAP_COMPANION = 24;
-  // Defaults wenn NodePrefs.msg_store_limit[b] == 0.
+  static constexpr int BUCKET_CAP_COMPANION = 24;   // fix, RAM-only ($companion)
+  // Default-Groesse wenn NodePrefs.msg_store_limit[b] == 0.
   static constexpr int BUCKET_DEFAULT_PUBLIC    = 8;
   static constexpr int BUCKET_DEFAULT_HASHTAG   = 16;
-  static constexpr int BUCKET_DEFAULT_PRIVATE   = 16;
-  static constexpr int BUCKET_DEFAULT_DM        = 16;
-  static constexpr int BUCKET_DEFAULT_COMPANION = 24;  // s. BUCKET_CAP_COMPANION
-  Frame    bucket_public   [BUCKET_CAP_PUBLIC];
-  Frame    bucket_hashtag  [BUCKET_CAP_HASHTAG];
-  Frame    bucket_private  [BUCKET_CAP_PRIVATE];
-  Frame    bucket_dm       [BUCKET_CAP_DM];
-  Frame    bucket_companion[BUCKET_CAP_COMPANION];
+  static constexpr int BUCKET_DEFAULT_PRIVATE   = 24;  // war 16
+  static constexpr int BUCKET_DEFAULT_DM        = 24;  // war 16
+  static constexpr int BUCKET_DEFAULT_COMPANION = 24;
+  // Dynamisch allozierte Buckets. _bucket_ptr[b]==NULL = noch nicht alloziert;
+  // _bucket_alloc[b] = tatsaechlich allozierte Slot-Zahl (0 wenn NULL/failed);
+  // _bucket_alloc_failed[b] = calloc scheiterte -> Bucket deaktiviert (Guard).
+  Frame*   _bucket_ptr[BUCKET_COUNT]          = { NULL, NULL, NULL, NULL, NULL };
+  uint8_t  _bucket_alloc[BUCKET_COUNT]        = { 0, 0, 0, 0, 0 };
+  bool     _bucket_alloc_failed[BUCKET_COUNT] = { false, false, false, false, false };
+  // Bucket bei Bedarf allozieren (RAM = getBucketLimit(), also config-MAX-geklemmt).
+  void     allocBucket(MsgBucket b);
   // Runtime-Limit pro Bucket (resolved aus NodePrefs.msg_store_limit + Default).
   int      getBucketLimit(MsgBucket b) const;
   // Flash-Flag pro Bucket (lookup in NodePrefs.msg_store_flash bit-field).
