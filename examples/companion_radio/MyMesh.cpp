@@ -14758,6 +14758,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "channels: Liste + Verwaltung.\n"
     "  channels                    -- Liste aller Channels\n"
     "  channels add <#name>        -- Hashtag anlegen (Key=sha256(Name))\n"
+    "    (#local/#lokal reserviert: forced-local, nicht anlegbar)\n"
     "  channels remove <slot|name> -- loeschen (companion geschuetzt)\n"
     "  channels delete <slot|name> -- Alias fuer remove";
   static const char PATH_USAGE[] =
@@ -18380,6 +18381,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           if (nm[0] != '#') {
             pushCompanionMessage("channels add: nur Hashtag (#name) -- Key wird aus dem Namen berechnet.");
             return;
+          }
+          // DL9SAU 2026-07-17 (#94): 'local'/'lokal' haben Sonderbedeutung
+          // (forced-local/no-repeat via detectForcedLocalChannel, das das '#'
+          // strippt). Ein Channel mit dem Namen wuerde die Send-Semantik
+          // verwirren -> ablehnen (analog $companion). Bare-Name (ohne '#').
+          {
+            const char* bare = (nm[0] == '#') ? nm + 1 : nm;
+            if (strcasecmp(bare, "local") == 0 || strcasecmp(bare, "lokal") == 0) {
+              pushCompanionMessage(
+                "channels add: '#local'/'#lokal' ist reserviert\n"
+                "(forced-local/no-repeat-Sonderbedeutung) -- nicht anlegbar.");
+              return;
+            }
           }
           for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
             ChannelDetails ex;
