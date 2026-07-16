@@ -18513,24 +18513,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg) { while (*arg == ' ' || *arg == '\t') arg++; }
 
     if (!arg || *arg == 0 || strcmp(arg, "help") == 0 || arg[0] == '?') {
-      pushCompanionMessage(
-        "ch.hops: per-Channel Repeat-Cap.\n"
-        "  ch.hops <name> <clear|off|N>  -- Cap setzen\n"
-        "  ch.hops <name> clear -- DIESEN Cap entfernen\n"
-        "  ch.hops status       -- aktive Caps zeigen\n"
-        "  ch.hops clear        -- ALLE Caps loeschen");
-      pushCompanionMessage(
-        "  <name> = Channel-Name ODER 'unknown'\n"
-        "           (= Cap fuer NICHT konfigurierte Channels)\n"
-        "    clear = Cap entfernen (-> Default/flood_max)\n"
-        "    off   = nicht repeaten\n"
-        "    1..63 = expliziter Cap");
-      pushCompanionMessage(
-        "  Alternativ: set ch.hops <name> .. / get ch.hops <name>\n"
-        "  'unknown' auch als: set flood_max_unknown_chan ..\n"
-        "  Channel heisst wie ein Subcmd (z.B. 'status')?\n"
-        "  -> mit Wert nutzen: ch.hops status <wert>.\n"
-        "$companion ist forced auf 0 (nicht aenderbar).");
+      // DL9SAU 2026-07-17: Hilfe konsolidiert in 'help ch.hops' (EINE Quelle,
+      // spart die Doppel-Strings). Hier nur dorthin delegieren. Ein Channel
+      // namens 'help' ist via 'ch.hops help <wert>' (2-Token -> set) erreichbar.
+      handleCompanionCommand("help ch.hops");
       return;
     }
 
@@ -18648,7 +18634,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     // Unbekanntes Subkommando
     char r[120];
-    snprintf(r, sizeof(r), "Unbekannt: ch.hops %s\n'ch.hops help' fuer Syntax/Hilfe.", arg);
+    snprintf(r, sizeof(r), "Unbekannt: ch.hops %s\n'help ch.hops' fuer Syntax/Hilfe.", arg);
     pushCompanionMessage(r);
     return;
   }
@@ -24249,23 +24235,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (strcmp(key, "ch.hops") == 0) {
+        // DL9SAU 2026-07-17: EINZIGE ch.hops-Hilfe-Quelle (das interne
+        // 'ch.hops help' delegiert hierher -> keine Doppel-Strings).
         pushCompanionMessage(
-          "set ch.hops <name> <clear|off|N>:\n"
-          "  per-Channel Repeat-Cap (Group-Messages).");
+          "ch.hops: per-Channel Repeat-Cap (Group-Msgs).\n"
+          "  ch.hops <name> <clear|off|N>\n"
+          "  ch.hops <name> clear -- DIESEN Cap entfernen\n"
+          "  ch.hops status  -- aktive Caps\n"
+          "  ch.hops clear   -- ALLE Caps loeschen");
         pushCompanionMessage(
           "  clear = Cap entfernen (-> Default/flood_max)\n"
           "  off   = nicht repeaten\n"
           "  1..63 = Cap (Drop wenn path_hash > N)");
         pushCompanionMessage(
-          "Hashtag-Channels koennen auch OHNE Subscribe\n"
-          "  geblockt werden (PSK aus Name ableitbar):\n"
-          "  set ch.hops #bots 0 -- Eintrag wird (ext).");
+          "  <name> = Channel-Name ODER 'unknown'\n"
+          "  'unknown' = Cap fuer nicht-konfigurierte Channels\n"
+          "  (auch: set flood_max_unknown_chan ..)");
         pushCompanionMessage(
-          "  Name 'unknown' -> flood_max_unknown_chan\n"
-          "  (Channel-Hash auf keinen Slot/External match)\n"
-          "  Default = follow flood_max.");
+          "Hashtag ohne Subscribe blockbar (PSK aus Name):\n"
+          "  ch.hops #bots off  -- Eintrag (ext); 'clear' entfernt.");
         pushCompanionMessage(
-          "  Siehe auch: 'ch.hops status' / 'ch.hops clear'");
+          "Channel heisst wie ein Subcmd (z.B. 'status')?\n"
+          "  -> mit Wert: ch.hops status <wert>.\n"
+          "Alternativ: set/get ch.hops <name>.\n"
+          "$companion ist forced auf 0 (nicht aenderbar).");
         return;
       }
       // DL9SAU 2026-06-16: 'set passwd_admin' / 'set passwd_guest' ohne
