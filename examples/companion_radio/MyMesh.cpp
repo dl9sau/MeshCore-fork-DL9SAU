@@ -466,6 +466,28 @@ void MyMesh::saveBucketToFlash(MsgBucket b) {
   f.close();
 }
 
+// DL9SAU 2026-07-17 (#86): einen einzelnen Frame-Record ans Bucket-File anhaengen
+// (seekEnd-Append via openAppendFile) -- billig statt Full-Rewrite. Format
+// identisch zu saveBucketToFlash: { seq:4 LE, len:1, frame:len }.
+void MyMesh::appendRecordToFlash(MsgBucket b, uint32_t seq, const uint8_t* frame, int len) {
+  if (len <= 0 || len > MAX_FRAME_SIZE) return;
+  const char* path = msgBucketPath(b);
+  if (!path) return;
+  FILESYSTEM* fs = _store->roomyFS();
+  if (fs) fs->mkdir("/msgs");
+  File f = _store->openAppendFile(fs, path);
+  if (!f) return;
+  uint8_t hdr[5];
+  hdr[0] = (uint8_t)( seq        & 0xFF);
+  hdr[1] = (uint8_t)((seq >>  8) & 0xFF);
+  hdr[2] = (uint8_t)((seq >> 16) & 0xFF);
+  hdr[3] = (uint8_t)((seq >> 24) & 0xFF);
+  hdr[4] = (uint8_t)len;
+  f.write(hdr, 5);
+  f.write(frame, len);
+  f.close();
+}
+
 // DL9SAU 2026-07-17 (#86): einen dirty Bucket JETZT persistieren. Leer -> Datei
 // loeschen (verhindert Reboot-Duplikate, billig), sonst Full-Rewrite. Danach clean.
 void MyMesh::flushBucketIfDirty(MsgBucket b) {
@@ -999,18 +1021,23 @@ void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
   arr[slot].len    = (uint8_t)len;
   memcpy(arr[slot].buf, frame, len);
 
-  // Flash-Persistenz (Wunschliste 19 Phase C): wenn fuer diesen Bucket
-  // aktiviert, neuen Bucket-State auf Flash schreiben. $companion-Bucket
-  // ist von TRACE_MSGSTORE ausgenommen (sonst Rekursion: Trace pusht
-  // $companion-Msg -> wird gespeichert -> Trace pusht "gespeichert" -> ...).
-  // DL9SAU 2026-07-17 (#86): nur dirty markieren -- der debounced loop()-Tick
-  // persistiert fruehestens 'interval' ms nach dem letzten Write (Wear-Schutz).
-  // Eviction hat den aeltesten Slot bereits ueberschrieben; der spaetere Flush
-  // schreibt ohnehin den vollen (dann konsistenten) Bucket.
+  // Flash-Persistenz. $companion ist hart flash-exempt (getBucketFlash=false).
+  // DL9SAU 2026-07-17 (#86): Write-Amplification-Fix.
+  //  - Normalfall (freier Slot, keine Compaction pending): den EINEN neuen Record
+  //    billig ans File anhaengen (seekEnd-Append). File bleibt == RAM, kein
+  //    Full-Rewrite. DM ist damit write-through; Channels haengen ebenso billig an.
+  //  - Eviction (Bucket voll) ODER schon dirty (Compaction pending): nur dirty
+  //    markieren -> der debounced loop()-Tick schreibt den vollen, dann wieder
+  //    konsistenten Bucket (droppt den evicted/zugestellten Alt-Record).
   if (getBucketFlash(b)) {
-    _bucket_dirty[b] = true;
+    if (free_slot < 0 || _bucket_dirty[b]) {
+      _bucket_dirty[b] = true;
+    } else {
+      appendRecordToFlash(b, _msg_seq_next, frame, len);
+    }
     if (b != BUCKET_COMPANION) {
-      traceCompanion(TRACE_MSGSTORE, "[store] msg queued bucket %d (dirty)", (int)b);
+      traceCompanion(TRACE_MSGSTORE, "[store] msg bucket %d (%s)", (int)b,
+                     (free_slot < 0 || _bucket_dirty[b]) ? "dirty" : "appended");
     }
   }
 }

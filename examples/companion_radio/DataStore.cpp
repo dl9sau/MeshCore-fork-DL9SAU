@@ -202,6 +202,20 @@ File DataStore::openWriteFileInPlace(const char* filename) {
   return openWriteFileInPlace(_fs, filename);
 }
 
+// DL9SAU 2026-07-17 (#86): Append-Open. Kein remove; Position ans Ende, so dass
+// ein f.write() den neuen Record anhaengt (Format wie saveBucketToFlash).
+File DataStore::openAppendFile(FILESYSTEM* fs, const char* filename) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  File f = fs->open(filename, FILE_O_WRITE);  // kein remove, Position 0
+  if (f) f.seek(f.size());                    // -> ans Datei-Ende (append)
+  return f;
+#elif defined(RP2040_PLATFORM)
+  return fs->open(filename, "a");
+#else
+  return fs->open(filename, "a", true);
+#endif
+}
+
 File DataStore::openWriteFileInPlace(FILESYSTEM* fs, const char* filename) {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   return fs->open(filename, FILE_O_WRITE);   // KEIN remove -> Bloecke bleiben

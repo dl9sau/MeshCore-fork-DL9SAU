@@ -64,6 +64,10 @@ public:
   // vor dem Schreiben, truncate() nach dem Schreiben (alten Tail kappen).
   File openWriteFileInPlace(const char* filename);
   File openWriteFileInPlace(FILESYSTEM* fs, const char* filename);
+  // DL9SAU 2026-07-17 (#86): Append-Open -- OHNE remove, Position ans Datei-Ende.
+  // Fuer die debounced Message-Bucket-Persistenz: einen neuen Frame-Record billig
+  // anhaengen statt die ganze Datei neu zu schreiben (Write-Amplification-Fix).
+  File openAppendFile(FILESYSTEM* fs, const char* filename);
   // DL9SAU 2026-07-15: die "geraeumige" FS (ExtraFS wo Channels/Contacts liegen,
   // Fallback InternalFS). Fuer periodische DL9SAU-Writer (rtc_persist), die wir
   // von der kleinen fragilen InternalFS wegnehmen, damit die dort verbleibenden

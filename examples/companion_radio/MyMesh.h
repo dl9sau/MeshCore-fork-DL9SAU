@@ -1398,6 +1398,9 @@ private:
   uint32_t _bucket_last_write[BUCKET_COUNT] = { 0, 0, 0, 0, 0 };
   void     flushBucketIfDirty(MsgBucket b);   // jetzt persistieren (leer->Datei loeschen)
   void     flushDirtyBucketsTick();           // loop()-Tick: faellige Buckets flushen
+  // Einen neuen Frame-Record ans Bucket-File anhaengen (seekEnd-Append, billig --
+  // kein Full-Rewrite). Format wie saveBucketToFlash: { seq:4 LE, len:1, frame:len }.
+  void     appendRecordToFlash(MsgBucket b, uint32_t seq, const uint8_t* frame, int len);
   // Runtime-Limit pro Bucket (resolved aus NodePrefs.msg_store_limit + Default).
   int      getBucketLimit(MsgBucket b) const;
   // Flash-Flag pro Bucket (lookup in NodePrefs.msg_store_flash bit-field).
