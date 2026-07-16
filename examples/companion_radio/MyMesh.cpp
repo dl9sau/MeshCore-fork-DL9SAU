@@ -9965,8 +9965,13 @@ bool MyMesh::resolveDefaultOrGeo(TransportKey& out_key) const {
     // statt rohem #geo (User-Befund: [adv] ... scope=#geo (default)). Ohne Fix:
     // rohes #geo lassen -> die Send-Overloads machen ihren kontext-spezifischen
     // no-fix-Fallback (#local/zero-hop; Advert via sendFloodScoped(TransportKey)).
-    // detectMagicScope ist non-const -> direkter Key-Vergleich (const-safe).
-    if (memcmp(out_key.key, _magic_geo_key.key, sizeof(out_key.key)) == 0) {
+    // detectMagicScope ist non-const -> direkter Key-Vergleich. sha256("#geo")
+    // LOKAL berechnen statt _magic_geo_key zu lesen: der ist lazy-init'd
+    // (ensureMagicScopeKeys) und koennte bei einem Advert frueh nach Boot noch
+    // 0 sein -> memcmp waere fehlgeschlagen (kein Sonderfall -> rohes #geo raus).
+    TransportKey geo_magic;
+    mesh::Utils::sha256(geo_magic.key, sizeof(geo_magic.key), (const uint8_t*)"#geo", 4);
+    if (memcmp(out_key.key, geo_magic.key, sizeof(out_key.key)) == 0) {
       TransportKey geo_eff;
       if (chooseGeoFallbackScope(geo_eff)) out_key = geo_eff;
     }
