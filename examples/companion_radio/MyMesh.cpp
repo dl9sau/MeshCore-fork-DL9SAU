@@ -3035,14 +3035,49 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis) {
-  if (scope.isNull()) {
-    sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
-  } else {
+  auto flood_scoped = [&](const TransportKey& k) {
+    if (k.isNull()) { sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1); return; }
     uint16_t codes[2];
-    codes[0] = scope.calcTransportCode(pkt);
+    codes[0] = k.calcTransportCode(pkt);
     codes[1] = 0;  // REVISIT: set to 'home' Region, for sender/return region?
     sendFlood(pkt, codes, delay_millis, _prefs.path_hash_mode + 1);
+  };
+  // DL9SAU 2026-07-16: Magic-Scope-Aufloesung. Der ADVERT-Pfad ruft DIESE Variante
+  // mit dem evtl. ROHEN default-Scope-Key auf (resolveDefaultOrGeo/chooseNight
+  // FloodScope geben ein per 'scope default #geo' gesetztes #geo UNAUFGELOEST
+  // zurueck). Ohne Aufloesung ginge das Advert mit einem bogus-'#geo'-Transport-
+  // code raus -> Repeater mit echten Regionen (#de-be) droppen es (mutmasslich
+  // auch Ursache fuer 'kein Advert-Echo'). DM/Channel loesen #geo schon in ihren
+  // eigenen Overloads auf -> hier dann non-magic -> idempotent.
+  MagicScope ms = detectMagicScope(scope);
+  if (ms == MS_DIRECT) {
+    traceCompanion(TRACE_SCOPE, "[send-adv] magic #direct -> zero-hop");
+    sendZeroHop(pkt, delay_millis);
+    return;
   }
+  if (ms == MS_UNSCOPED) {
+    traceCompanion(TRACE_SCOPE, "[send-adv] magic #unscoped -> flood ohne scope");
+    sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
+    return;
+  }
+  if (ms == MS_GEO) {
+    TransportKey geo_eff;
+    if (chooseGeoFallbackScope(geo_eff)) {
+      traceCompanion(TRACE_SCOPE, "[send-adv] magic #geo -> geo-fallback");
+      flood_scoped(geo_eff);
+      return;
+    }
+    int idx = dl9sau_find_region_index("local");
+    if (idx >= 0 && idx < _buildin_keys_count) {
+      traceCompanion(TRACE_SCOPE, "[send-adv] magic #geo -> #local (kein Fix)");
+      flood_scoped(_buildin_keys[idx]);
+      return;
+    }
+    traceCompanion(TRACE_SCOPE, "[send-adv] magic #geo -> unscoped (kein Fix, kein #local)");
+    sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
+    return;
+  }
+  flood_scoped(scope);
 }
 
 void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis) {
