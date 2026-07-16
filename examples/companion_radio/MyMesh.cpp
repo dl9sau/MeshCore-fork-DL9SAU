@@ -24754,6 +24754,36 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
+    // DL9SAU 2026-07-16: flood_max_unknown_chan ueber `set` erreichbar machen
+    // (war nur via `ch.hops unknown` -> User verlor es aus den Augen, fehlte in
+    // set/get/get all obwohl im backup sichtbar). Semantik wie ch.hops:
+    // follow=CH_HOPS_OFF (->flood_max), off=0 (nicht repeaten), 0..63 Cap.
+    if (strcmp(key, "flood_max_unknown_chan") == 0
+        || strcmp(key, "flood.max.unknown.chan") == 0) {
+      uint8_t newval;
+      if (strcmp(value_lc, "follow") == 0 || strcmp(value_lc, "max") == 0) {
+        newval = CH_HOPS_OFF;
+      } else if (strcmp(value_lc, "off") == 0) {
+        newval = 0;
+      } else {
+        int v = atoi(value_lc);
+        if (v < 0 || v > 63) { pushCompanionMessage("Wert: 'follow' / 'off' / 0..63."); return; }
+        newval = (uint8_t)v;
+      }
+      _prefs.flood_max_unknown_chan = newval;
+      savePrefs();
+      char r[130];
+      if (newval == CH_HOPS_OFF)
+        snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = follow (-> flood_max = %u)", (unsigned)_prefs.flood_max);
+      else if (newval == 0)
+        snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = off (nicht repeaten)");
+      else
+        snprintf(r, sizeof(r), "OK - flood_max_unknown_chan = %u", (unsigned)newval);
+      pushCompanionMessage(r);
+      pushCompanionMessage("(identisch zu 'ch.hops unknown <...>')");
+      return;
+    }
+
     // Wunschliste 29 (DL9SAU 2026-06-01): Hop-Cap fuer REQ/RESP/ANON_REQ.
     // Effektive Obergrenze ist min(flood_max_infra, flood_max). Wenn
     // flood_max_infra == 0, ist flood_max die einzige Obergrenze.
@@ -25683,6 +25713,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           gline(tmp);
         }
       }
+      // DL9SAU 2026-07-16: flood_max_unknown_chan -- Cap fuer GRP-Traffic auf
+      // Channels die wir NICHT kennen. Sentinel CH_HOPS_OFF = follow flood_max.
+      {
+        bool eq = (_prefs.flood_max_unknown_chan == CH_HOPS_OFF);
+        if (!list_changed || !eq) {
+          if (!eq) changed++;
+          if (_prefs.flood_max_unknown_chan == CH_HOPS_OFF)
+            snprintf(tmp, sizeof(tmp),
+              "  flood_max_unknown_chan = follow (-> flood_max = %u) [default]",
+              (unsigned)_prefs.flood_max);
+          else if (_prefs.flood_max_unknown_chan == 0)
+            snprintf(tmp, sizeof(tmp),
+              "  flood_max_unknown_chan = off (default: follow)");
+          else
+            snprintf(tmp, sizeof(tmp),
+              "  flood_max_unknown_chan = %u (default: follow -> flood_max = %u)",
+              (unsigned)_prefs.flood_max_unknown_chan, (unsigned)_prefs.flood_max);
+          gline(tmp);
+        }
+      }
       // flood_max_unscoped_companions (Wunschliste 39):
       // Sentinel CH_HOPS_OFF = follow flood_max_scope_region. Default.
       {
@@ -25933,6 +25983,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned)effectiveFloodMaxInfra());
       else
         snprintf(r, sizeof(r), "flood_max_req_resp = %u", (unsigned)_prefs.flood_max_req_resp);
+    }
+    else if (strcmp(key, "flood_max_unknown_chan") == 0
+             || strcmp(key, "flood.max.unknown.chan") == 0) {
+      if (_prefs.flood_max_unknown_chan == CH_HOPS_OFF)
+        snprintf(r, sizeof(r), "flood_max_unknown_chan = follow (-> flood_max = %u)", (unsigned)_prefs.flood_max);
+      else if (_prefs.flood_max_unknown_chan == 0)
+        snprintf(r, sizeof(r), "flood_max_unknown_chan = off (nicht repeaten)");
+      else
+        snprintf(r, sizeof(r), "flood_max_unknown_chan = %u", (unsigned)_prefs.flood_max_unknown_chan);
     }
     else if (strcmp(key, "flood_max_unscoped_companions") == 0
              || strcmp(key, "flood.max.unscoped.companions") == 0) {
