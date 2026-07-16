@@ -415,16 +415,19 @@ struct NodePrefs {  // persisted to file
   // Offline-Message-Queue Konfiguration (Wunschliste 19 Phase C).
   // ----------------------------------------------------------------
   // Bit-Field pro Bucket: 1 = Flash-Persistenz aktiv, 0 = RAM-only.
-  // Default 0 (alles RAM-only, privacy-konsistent).
+  // DL9SAU 2026-07-17: fresh-install Default = DM+private on (Nutzer profitieren
+  // ohne Fummelei von der Persistenz ihrer persoenlichen/wertvollen Nachrichten),
+  // hashtag/public/companion off (dort Geplauder). Vorbelegt VOR loadPrefs -> ein
+  // persistierter Wert ueberschreibt. $companion zusaetzlich hart flash-exempt.
   //   bit 0 = PUBLIC, bit 1 = HASHTAG, bit 2 = PRIVATE,
   //   bit 3 = DM,     bit 4 = COMPANION
   // CLI: messages flash <type> on|off
   uint8_t        msg_store_flash;
 
-  // Per-Bucket Slot-Limit. 0 = type-spezifischer Default
-  // (PUB=8, HT=8, PRIV=16, DM=16, COMP=16). Cap: 16 fuer alle ausser
-  // DM (32). Indizes [PUB,HT,PRIV,DM,COMP].
-  // CLI: messages limit <type> <N>
+  // Per-Bucket Slot-Limit = dynamische calloc-Groesse bei Boot (DL9SAU 2026-07-17).
+  // 0 = type-Default (PUB=8, HT=16, PRIV=24, DM=24, COMP=24). MAX/Klemmung:
+  // PUB=8, HT=16, PRIV=24, DM=24, COMP=24. Indizes [PUB,HT,PRIV,DM,COMP].
+  // Aenderung wirkt erst bei reboot. CLI: messages limit <type> <N>
   uint8_t        msg_store_limit[5];
 
   // Logging-Senken-Steuerung (Wunschliste 21, User-Wunsch 2026-05-30).

@@ -15603,21 +15603,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "messages (no arg):\n"
           "  Status pro bucket.\n"
-          "  2/8 zeigt: 2 neue\n"
-          "  Nachrichten von max 8.\n"
+          "  z.B. 2/24 = 2 neue\n"
+          "  Nachrichten von max 24.\n"
           "Typen:\n"
           "  Public, hashtag,\n"
-          "  private, DM, $companion."
+          "  private, DM."
         );
         pushCompanionMessage(
           "messages flash <type> on|off\n"
-          "  Flash-Persistenz toggle (default off)."
+          "  Flash-Persistenz toggle.\n"
+          "  Default: DM+private on,\n"
+          "  hashtag/public off."
         );
         pushCompanionMessage(
           "messages limit <type> <N>\n"
-          "  Slot-Limit setzen. 0 = type-Default.\n"
-          "  Max: Public 8, $companion 16,\n"
-          "       hashtag/private/DM je 24."
+          "  Slot-Limit (0 = Default).\n"
+          "  Aktiv nach reboot.\n"
+          "  Max: Public 8, hashtag 16,\n"
+          "       private/DM je 24."
         );
         pushCompanionMessage(
           "messages clear <type|all>\n"
