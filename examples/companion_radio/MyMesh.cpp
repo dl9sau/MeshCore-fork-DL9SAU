@@ -301,6 +301,11 @@ int MyMesh::getBucketLimit(MsgBucket b) const {
     BUCKET_CAP_DM,      BUCKET_CAP_COMPANION
   };
   if (b < 0 || b >= BUCKET_COUNT) return 0;
+  // DL9SAU 2026-07-17 (#87 Finalisierung): $companion ist fest verdrahtete
+  // Infrastruktur mit definierter Groesse -- NIE aus msg_store_limit. Sonst
+  // koennte ein alter Backup-/Restore-Wert (das Feld war frueher konfigurierbar)
+  // den $companion-Bucket schrumpfen und stats/Hilfe wieder abschneiden.
+  if (b == BUCKET_COMPANION) return BUCKET_CAP_COMPANION;
   uint8_t pref = _prefs.msg_store_limit[b];
   if (pref == 0) return cap_default[b];
   if (pref > cap_max[b]) return cap_max[b];
