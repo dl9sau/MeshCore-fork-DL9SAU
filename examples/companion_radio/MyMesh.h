@@ -937,6 +937,14 @@ private:
   // Connect via PUSH_CODE_MSG_WAITING ausgeliefert. No-op wenn der Companion-
   // Channel nicht angelegt werden konnte (_companion_channel_idx == 0xFF).
   void pushCompanionMessage(const char* text);
+  // DL9SAU 2026-07-17: Companion-Output-Batching (gegen Android-BLE-Flood +
+  // $companion-Bucket-Overflow). Waehrend Command-Dispatch werden die vielen
+  // kleinen pushCompanionMessage-Ausgaben in ~128B-Frames GEPACKT (statt 1
+  // Frame/Zeile) und am Befehlsende mit EINEM Tickle ausgeliefert.
+  void queueCompanionFrame(const char* text);   // baut "Sender: text"-Frame -> offline-queue (kein Tickle)
+  void beginCompanionBatch();
+  void endCompanionBatch();                      // flush + 1 Tickle
+  void flushCompanionBatch();                    // Rest-Frame raus (kein Tickle)
   // Parst und führt einen vom User über den Companion-Channel gesendeten
   // Befehl aus. Antwort wird via pushCompanionMessage() zurückgegeben.
   void handleCompanionCommand(const char* cmd);
@@ -1523,6 +1531,14 @@ private:
   // synthetic incoming-channel-message — App sieht es als normalen Chat.
   // 0xFF = nicht initialisiert / kein freier Slot.
   uint8_t       _companion_channel_idx;
+
+  // DL9SAU 2026-07-17: Command-Output-Batching-State (s. pushCompanionMessage).
+  // Packt die vielen kleinen Ausgabe-Zeilen EINES Befehls in ~128B-Frames.
+  bool          _companion_batch_active = false;
+  uint8_t       _companion_batch_depth = 0;      // Re-Entrancy (!! / help-/ch.hops-Delegation)
+  bool          _companion_batch_queued = false; // >=1 Frame gequeued -> Tickle noetig
+  int           _companion_batch_used = 0;
+  char          _companion_batch_buf[160];
 
   // DL9SAU Wunschliste 88 (2026-06-20) Phase 1: at / cron CLI-Skelett.
   // RAM-only. Persistenz (cron auf Flash) ist Phase 2 nach Reise.

@@ -13818,36 +13818,61 @@ void MyMesh::pushCompanionMessage(const char* text) {
     _admin_reply_buf[_admin_reply_used] = 0;
     return;
   }
-  if (_companion_channel_idx == 0xFF) return;
+  // DL9SAU 2026-07-17: waehrend Command-Dispatch die Ausgabe BATCHEN -- viele
+  // kurze Zeilen in EINEN ~128B-Frame packen (gegen Android-BLE-Flood +
+  // $companion-Bucket-Overflow), am Befehlsende EIN Tickle. Async-Pushes
+  // (Advert-Echo, eingehende Msgs -- ausserhalb Dispatch) gehen sofort raus.
+  if (_companion_batch_active) {
+    if (_companion_channel_idx == 0xFF) return;
+    size_t tl = strlen(text);
+    // Einzelzeile groesser als der Batch-Puffer -> nicht mergen, eigener Frame.
+    if (tl + 1 >= sizeof(_companion_batch_buf)) {
+      flushCompanionBatch();
+      queueCompanionFrame(text);
+      _companion_batch_queued = true;
+      return;
+    }
+    // Vor-Flush wenn die neue Zeile (+ \n) ueber 128 ginge (frame-cap-sicher).
+    if (_companion_batch_used > 0 && _companion_batch_used + 1 + (int)tl > 128)
+      flushCompanionBatch();
+    if (_companion_batch_used > 0) _companion_batch_buf[_companion_batch_used++] = '\n';
+    memcpy(_companion_batch_buf + _companion_batch_used, text, tl);
+    _companion_batch_used += (int)tl;
+    _companion_batch_buf[_companion_batch_used] = 0;
+    return;
+  }
+  queueCompanionFrame(text);
+  // NULL-Check: bei sehr fruehen Boot-Pushes ist _serial noch nicht via
+  // startInterface() gesetzt -- Msg liegt dann nur in der Offline-Queue, wird
+  // beim Connect abgeholt; der Tickle ist dafuer nicht erforderlich.
+  if (_serial != NULL && _serial->isConnected()) {
+    uint8_t frame[1] = { PUSH_CODE_MSG_WAITING };
+    _serial->writeFrame(frame, 1);
+  }
+}
 
-  // Frame analog zu onChannelMessageRecv() bauen, aber Sender = Plattform-
-  // Name (z.B. "Heltec V3") und path_len=0 (zero-hop / lokal).
-  // Konvention onChannelMessageRecv erkennt "Sender: msg" am ": " Separator,
-  // wir liefern das ebenso damit die App den Sender-Teil korrekt darstellt.
+// DL9SAU 2026-07-17: baut den "Sender: text"-Frame + queued ihn (KEIN Tickle --
+// den setzt der Sofort-Pfad bzw. endCompanionBatch). Ausgelagert aus pushCompanion
+// Message, damit Batch-Flush und Sofort-Pfad denselben Frame-Bau teilen.
+void MyMesh::queueCompanionFrame(const char* text) {
+  if (_companion_channel_idx == 0xFF) return;
+  // Sender = Plattform-Name; "Sender: msg" -- die App erkennt den ": "-Separator.
   const char* sender = board.getManufacturerName();
-  // DL9SAU 2026-06-20 (Stack-Fix): static statt Stack -- siehe oben
-  // bei char out[320]. MAX_TEXT_LEN = 160 -> 160B kumulativ pro
-  // pushCompanionMessage-Aufruf.
-  static char combined[MAX_TEXT_LEN];
-  // DL9SAU Wunschliste 88 (2026-06-20): bei scheduled-execute (cron/at)
-  // den Sender-String um Tag ergaenzen damit User in App sofort sieht
-  // woher der Output kommt. 'Seeed Tracker T1000-E' -> '... (cron)'.
   static char sender_with_tag[64];
   if (_scheduled_origin_tag) {
     snprintf(sender_with_tag, sizeof(sender_with_tag), "%s (%s)",
              sender ? sender : "fw", _scheduled_origin_tag);
     sender = sender_with_tag;
   }
+  // static statt Stack (BLE-Task-Stack klein, [[project_nrf52_cli_handler_stack_limit]]).
+  static char combined[MAX_TEXT_LEN];
   int n = snprintf(combined, sizeof(combined), "%s: %s", sender ? sender : "fw", text);
   if (n <= 0) return;
   int total_len = n < (int)sizeof(combined) ? n : (int)sizeof(combined) - 1;
-
   int i = 0;
   if (app_target_ver >= 3) {
     out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
-    out_frame[i++] = 0;  // SNR: lokal -> 0
-    out_frame[i++] = 0;  // reserved1
-    out_frame[i++] = 0;  // reserved2
+    out_frame[i++] = 0; out_frame[i++] = 0; out_frame[i++] = 0;
   } else {
     out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV;
   }
@@ -13861,16 +13886,39 @@ void MyMesh::pushCompanionMessage(const char* text) {
   if (total_len > max_text) total_len = max_text;
   memcpy(&out_frame[i], combined, total_len);
   i += total_len;
-
   addToOfflineQueue(out_frame, i);
-  // NULL-Check: bei sehr frühen Boot-Pushes (z.B. dem ersten GEO-SCOPE in
-  // begin()) ist _serial noch nicht via startInterface() gesetzt. Die
-  // Nachricht liegt dann nur in der Offline-Queue und wird abgeholt sobald
-  // die App connected — der Tickle ist dafür nicht erforderlich.
-  if (_serial != NULL && _serial->isConnected()) {
+}
+
+void MyMesh::beginCompanionBatch() {
+  if (_companion_batch_depth++ == 0) {
+    _companion_batch_active = true;
+    _companion_batch_used = 0;
+    _companion_batch_buf[0] = 0;
+    _companion_batch_queued = false;
+  }
+}
+
+void MyMesh::flushCompanionBatch() {
+  if (_companion_batch_used > 0) {
+    _companion_batch_buf[_companion_batch_used] = 0;
+    queueCompanionFrame(_companion_batch_buf);
+    _companion_batch_used = 0;
+    _companion_batch_buf[0] = 0;
+    _companion_batch_queued = true;
+  }
+}
+
+void MyMesh::endCompanionBatch() {
+  if (_companion_batch_depth == 0) return;    // safety
+  if (--_companion_batch_depth != 0) return;  // nur der aeusserste Dispatch flusht
+  flushCompanionBatch();
+  _companion_batch_active = false;
+  // EIN Tickle fuer den ganzen Befehl statt eines pro Zeile.
+  if (_companion_batch_queued && _serial != NULL && _serial->isConnected()) {
     uint8_t frame[1] = { PUSH_CODE_MSG_WAITING };
     _serial->writeFrame(frame, 1);
   }
+  _companion_batch_queued = false;
 }
 
 // Mini-Helper: prüft ob Text mit dem gegebenen Wort + Whitespace/EOL beginnt.
@@ -14550,6 +14598,16 @@ bool MyMesh::sendCliPingToStoredTarget() {
 
 void MyMesh::handleCompanionCommand(const char* cmd) {
   if (cmd == NULL) return;
+  // DL9SAU 2026-07-17: Output-Batch fuer die Dauer des Dispatch -- packt die
+  // vielen kleinen pushCompanionMessage-Ausgaben in wenige ~128B-Frames + EIN
+  // Tickle (gegen Android-BLE-Flood + $companion-Bucket-Overflow). RAII fangt
+  // ALLE early-returns; Depth-Count in begin/endCompanionBatch macht Rekursion
+  // (!! / help-/ch.hops-Delegation) sauber -- nur der aeusserste Dispatch flusht.
+  struct BatchScope {
+    MyMesh* m;
+    BatchScope(MyMesh* mm) : m(mm) { m->beginCompanionBatch(); }
+    ~BatchScope() { m->endCompanionBatch(); }
+  } _batch_scope(this);
   // 2026-07-09: Usage-Texte die an MEHREREN Stellen gezeigt werden EINMAL
   // definieren (help-Topic + catch-all/bare/'?'), nie duplizieren -- sonst
   // driften sie auseinander. Detail-Hilfen (help <topic>) duerfen darueber
