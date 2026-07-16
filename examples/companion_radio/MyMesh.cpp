@@ -2995,6 +2995,24 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     char idhex[13];
     mesh::Utils::toHex(idhex, packet->payload, 6);
     snprintf(type_str, sizeof(type_str), "ADV:%s %s", atn, idhex);
+  } else if ((ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
+             && packet->payload_len >= 1) {
+    // DL9SAU 2026-07-16: Channel-Zuordnung mitloggen -- zeigt WELCHER Channel den
+    // GRP-Flood traegt: Name falls wir ihn kennen, sonst der 1-Byte-Channel-Hash.
+    // Wichtig um Fremd-GRP_DATA-Traffic einzuordnen (data_type steckt verschluesselt
+    // im Payload -> im Forward nicht sichtbar; nur Channel/Hash + scope=yes/no).
+    uint8_t ch_hash = packet->payload[0];
+    char chname[24]; chname[0] = 0;
+    for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
+      ChannelDetails ch;
+      if (!getChannel(ci, ch)) continue;
+      if (ch.name[0] == 0) continue;
+      if (ch.channel.hash[0] == ch_hash) { StrHelper::strzcpy(chname, ch.name, sizeof(chname)); break; }
+    }
+    if (chname[0])
+      snprintf(type_str, sizeof(type_str), "%s %s", ptypeName(ptype), chname);
+    else
+      snprintf(type_str, sizeof(type_str), "%s #%02x", ptypeName(ptype), ch_hash);
   } else {
     snprintf(type_str, sizeof(type_str), "%s", ptypeName(ptype));
   }
