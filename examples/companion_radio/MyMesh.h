@@ -1374,13 +1374,18 @@ private:
   static constexpr int BUCKET_CAP_HASHTAG   = 24;
   static constexpr int BUCKET_CAP_PRIVATE   = 24;
   static constexpr int BUCKET_CAP_DM        = 24;
-  static constexpr int BUCKET_CAP_COMPANION = 16;
+  // DL9SAU 2026-07-17: 16 -> 24. Der $companion-Bucket puffert die (jetzt
+  // gepackte) Ausgabe EINES Befehls, bevor die App pullt -- 'stats' ist ~19
+  // gepackte Frames (mehr bei 3-4-stelligen Zaehlern) und lief bei 16 ueber
+  // (erste Bloecke evicted). +8 Slots x ~184B = ~1.5KB Heap. Fuer den absoluten
+  // Busy-Worst-Case bleiben die Sub-Befehle stats-core/stats-radio/stats-packets.
+  static constexpr int BUCKET_CAP_COMPANION = 24;
   // Defaults wenn NodePrefs.msg_store_limit[b] == 0.
   static constexpr int BUCKET_DEFAULT_PUBLIC    = 8;
   static constexpr int BUCKET_DEFAULT_HASHTAG   = 16;
   static constexpr int BUCKET_DEFAULT_PRIVATE   = 16;
   static constexpr int BUCKET_DEFAULT_DM        = 16;
-  static constexpr int BUCKET_DEFAULT_COMPANION = 16;
+  static constexpr int BUCKET_DEFAULT_COMPANION = 24;  // s. BUCKET_CAP_COMPANION
   Frame    bucket_public   [BUCKET_CAP_PUBLIC];
   Frame    bucket_hashtag  [BUCKET_CAP_HASHTAG];
   Frame    bucket_private  [BUCKET_CAP_PRIVATE];
