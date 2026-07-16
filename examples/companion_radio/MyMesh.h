@@ -688,6 +688,16 @@ private:
   // loest auf + ruft das hier; Aufrufer die sc_name schon haben rufen direkt.
   void buildScopeLabel(const char* sc_name, bool has_transport_codes,
                        uint32_t& scope_h, char* scope_buf, size_t scope_buf_sz) const;
+  // DL9SAU 2026-07-17 (resolve-once Phase 2): pro Paket vom Decode-Callback
+  // (onChannelMessageRecv/onChannelDataRecv -- laeuft VOR allowPacketForward)
+  // gesetzt, im Forward wiederverwendet. Reset pro Paket in filterRecvFloodPacket.
+  //  _rx_decoded_ci  = BESTAETIGTER lokaler Channel-Index (Key passte) oder -1.
+  //                    -1 => nicht dekodiert => KEINER unserer keyed Channels
+  //                    => Hop-Cap nur via externe Hash-Eintraege / unknown-cap.
+  //  _rx_scope_*     = aufgeloester Scope-Name (spart die HMAC-Aufloesung im Forward).
+  int         _rx_decoded_ci = -1;
+  bool        _rx_scope_valid = false;
+  const char* _rx_scope_name = NULL;
   // Format a debug line, write it to Serial AND push it to the app as a
   // PUSH_CODE_DEBUG_LOG frame (so the user can inspect logs in the app's
   // Debug-Protokolle view when no USB-Serial is attached, e.g. mobile).

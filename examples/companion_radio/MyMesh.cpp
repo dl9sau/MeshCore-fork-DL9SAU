@@ -2608,6 +2608,12 @@ uint8_t MyMesh::matchSelfHash(uint32_t h) const {
 }
 
 bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
+  // DL9SAU 2026-07-17 (resolve-once Phase 2): Per-Paket-Reset der Decode->Forward-
+  // Weitergabe. filterRecvFloodPacket laeuft fuer JEDES Flood-Paket VOR Decode
+  // (Mesh.cpp:252) und Forward (:256) -> sauberer Invalidierungspunkt.
+  _rx_decoded_ci = -1;
+  _rx_scope_valid = false;
+  _rx_scope_name = NULL;
   // Wunschliste 26 B: rx-us Echo-Tracking. filterRecvFloodPacket laeuft
   // VOR der hasSeen-Dedup, also sehen wir hier auch Echos eigener Sendungen.
   // Match gegen unsere self-sent/repeated Hash-Ringe.
@@ -2732,23 +2738,27 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     uint8_t ch_hash = packet->payload[0];
     uint8_t eff_cap = CH_HOPS_OFF;
     bool matched = false;
-    for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
-      ChannelDetails ch;
-      if (!getChannel(ci, ch)) continue;
-      if (ch.name[0] == 0) continue;
-      if (ch.channel.hash[0] != ch_hash) continue;
+    // DL9SAU 2026-07-17 (Phase 2): dekodiert = BESTAETIGTER lokaler Channel (Key
+    // passte in onChannelMessage/DataRecv) -> exakt DESSEN Cap. Kein Hash-Rate-
+    // Loop, kein '1-Byte-Kollision'-Fehlzuordnung mehr (fixt eigenen-Channel-
+    // Kollateral-Throttle UND Fremd-Paket-erbt-laxen-lokalen-Cap).
+    if (_rx_decoded_ci >= 0 && _rx_decoded_ci < MAX_GROUP_CHANNELS) {
       matched = true;
-      uint8_t cap = _channel_hops_cap_cache[ci];
-      if (cap == CH_HOPS_OFF) continue;
-      if (eff_cap == CH_HOPS_OFF || cap < eff_cap) eff_cap = cap;
-    }
-    for (uint8_t e = 0; e < _prefs.channel_hops_count; e++) {
-      const auto& en = _prefs.channel_hops_list[e];
-      if (!(en.flags & CH_HOPS_FLAG_EXTERNAL)) continue;
-      if (en.channel_hash != ch_hash) continue;
-      matched = true;
-      if (en.cap == CH_HOPS_OFF) continue;
-      if (eff_cap == CH_HOPS_OFF || en.cap < eff_cap) eff_cap = en.cap;
+      uint8_t cap = _channel_hops_cap_cache[_rx_decoded_ci];
+      if (cap != CH_HOPS_OFF) eff_cap = cap;
+    } else {
+      // NICHT dekodiert -> KEINER unserer keyed Channels (sonst haetten wir's
+      // dekodiert). Lokale Channels daher NICHT per Hash matchen. Nur explizite
+      // externe Hash-only-Cap-Eintraege greifen (dort cappt der Operator bewusst
+      // hash-basiert ohne Key -- 1-Byte-Kollision dort inhaerent/gewollt).
+      for (uint8_t e = 0; e < _prefs.channel_hops_count; e++) {
+        const auto& en = _prefs.channel_hops_list[e];
+        if (!(en.flags & CH_HOPS_FLAG_EXTERNAL)) continue;
+        if (en.channel_hash != ch_hash) continue;
+        matched = true;
+        if (en.cap == CH_HOPS_OFF) continue;
+        if (eff_cap == CH_HOPS_OFF || en.cap < eff_cap) eff_cap = en.cap;
+      }
     }
     if (!matched) eff_cap = _prefs.flood_max_unknown_chan;
     if (eff_cap != CH_HOPS_OFF
@@ -3054,17 +3064,12 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   // wenn schon ein anderer Grund das Paket droppt.
   if (decision && (ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
       && packet->payload_len >= 1) {
-    // Channel-Index aus ch_hash ermitteln. -2 = unknown channel.
-    int ch_idx = -2;
-    uint8_t ch_hash = packet->payload[0];
-    for (int ci = 0; ci < MAX_GROUP_CHANNELS && ci < 64; ci++) {
-      ChannelDetails cd;
-      if (!getChannel(ci, cd)) continue;
-      if (cd.name[0] == 0) continue;
-      if (cd.channel.hash[0] != ch_hash) continue;
-      ch_idx = ci;
-      break;
-    }
+    // DL9SAU 2026-07-17 (Phase 2): Channel-Index aus dem BESTAETIGTEN Decode
+    // (_rx_decoded_ci) statt per 1-Byte-Hash raten. -2 = unknown = nicht dekodiert
+    // = keiner unserer keyed Channels -> korrekt fuer filter_unknown_channel_repeat
+    // (b) UND den scope-Filter (a, wirkt nur auf konfigurierte Channels). Behebt
+    // zugleich die lokal-vs-lokal-Hash-Kollision (Loop nahm den ERSTEN Treffer).
+    int ch_idx = (_rx_decoded_ci >= 0) ? _rx_decoded_ci : -2;
     // (b) Repeat-Achse fuer unbekannte Channels
     if (ch_idx == -2) {
       uint8_t mode = _prefs.filter_unknown_channel_repeat;
@@ -3082,10 +3087,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     }
     // (a) scope-Filter mit profile=repeat
     if (decision) {
-      const char* sc_name = NULL;
-      if (packet->hasTransportCodes()) {
-        sc_name = lookupRegionByTransportCode(packet);
-      }
+      // DL9SAU 2026-07-17 (Phase 2): Scope aus dem Decode wiederverwenden wenn
+      // vorhanden (dekodiertes GRP_TXT hat ihn schon aufgeloest), sonst einmal
+      // aufloesen (fremdes / GRP_DATA-Paket).
+      const char* sc_name = _rx_scope_valid ? _rx_scope_name
+                          : (packet->hasTransportCodes() ? lookupRegionByTransportCode(packet) : NULL);
       if (filterScopeMatch(sc_name, ch_idx, /*for_repeat=*/true)) {
         decision = false;
         reject_reason = "scope-filter";
@@ -3125,11 +3131,12 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     // im Payload -> im Forward nicht sichtbar; nur Channel/Hash + scope=yes/no).
     uint8_t ch_hash = packet->payload[0];
     char chname[24]; chname[0] = 0;
-    for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
+    // DL9SAU 2026-07-17 (Phase 2): Namen NUR bei bestaetigtem Decode zeigen
+    // (_rx_decoded_ci), sonst ch?<hash>. Verhindert die 1:256-Falschbenennung --
+    // ein fremder Kollisions-Channel wurde vorher als lokaler '#name' angezeigt.
+    if (_rx_decoded_ci >= 0) {
       ChannelDetails ch;
-      if (!getChannel(ci, ch)) continue;
-      if (ch.name[0] == 0) continue;
-      if (ch.channel.hash[0] == ch_hash) { StrHelper::strzcpy(chname, ch.name, sizeof(chname)); break; }
+      if (getChannel(_rx_decoded_ci, ch)) StrHelper::strzcpy(chname, ch.name, sizeof(chname));
     }
     if (chname[0])
       snprintf(type_str, sizeof(type_str), "%s %s", ptypeName(ptype), chname);
@@ -3874,6 +3881,11 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   // dann in Filter + Augment + sender_scope_key wiederverwenden statt bis zu 3x.
   const bool has_tc = pkt->hasTransportCodes();
   const char* sc_name = has_tc ? lookupRegionByTransportCode(pkt) : NULL;
+  // Phase 2: bestaetigten Channel + Scope fuer allowPacketForward mitfuehren
+  // (laeuft gleich danach fuers selbe Paket) -> exakter Hop-Cap + keine erneute HMAC.
+  _rx_decoded_ci = ch_idx_check;
+  _rx_scope_name = sc_name;
+  _rx_scope_valid = true;
   // Wunschliste 46 Phase 1 (Reise 2026-06-09): Sender + Text Filter.
   // Channel-Wire: '<sender_name>: <text>'. Sender bis ': ' extrahieren
   // -- wenn Sender oder Text matched, komplett verwerfen.
@@ -4069,6 +4081,9 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
     MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping external $companion data");
     return;
   }
+  // Phase 2: bestaetigten Channel fuer allowPacketForward mitfuehren (dekodiert
+  // = unser keyed Channel). Scope loest hier keiner auf -> Forward macht's einmal.
+  _rx_decoded_ci = ch_idx_check;
   if (data_len > MAX_CHANNEL_DATA_LENGTH) {
     MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping payload_len=%d exceeds frame limit=%d",
                        (uint32_t)data_len, (uint32_t)MAX_CHANNEL_DATA_LENGTH);
@@ -4081,7 +4096,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   out_frame[i++] = 0; // reserved1
   out_frame[i++] = 0; // reserved2
 
-  uint8_t channel_idx = findChannelIdx(channel);
+  uint8_t channel_idx = ch_idx_check;   // DL9SAU 2026-07-17: oben schon aufgeloest
   out_frame[i++] = channel_idx;
   out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
   out_frame[i++] = (uint8_t)(data_type & 0xFF);
