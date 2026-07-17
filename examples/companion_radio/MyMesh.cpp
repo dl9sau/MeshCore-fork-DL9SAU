@@ -2111,11 +2111,58 @@ void MyMesh::timeSyncFinalizeLazyCollection() {
 // Identity::copyHashTo) auf einen Repeater-Neighbour matchen. NUR ADV_TYPE_REPEATER
 // (Typ-Filter reduziert die 1-Byte-Kollision). sz-aware -> 2-Byte-Pfade matchen
 // schaerfer. -1 wenn keiner.
-int MyMesh::matchRepeaterNeighbour(const uint8_t* hop, uint8_t sz) const {
+int MyMesh::matchRepeaterNeighbour(const uint8_t* hop, uint8_t sz) {
   if (!hop || sz == 0) return -1;
+  // 1) RAM-Neighbours (aus Advert/Discover diese Session).
   for (int i = 0; i < _neighbours_count; i++) {
     if (_neighbours[i].adv_type != ADV_TYPE_REPEATER) continue;
     if (memcmp(_neighbours[i].pub_key, hop, sz) == 0) return i;
+  }
+  // 2) Kein Advert gehoert -> in der Contacts-DB nach einer bekannten
+  // Direktverbindung suchen und promoten (sonst 0 Zahlen trotz Traffic).
+  return promoteDirectContactByHash(hop, sz);
+}
+
+// DL9SAU 2026-07-17 (Neighbor-Signal): passt kein RAM-Neighbour, aber wir kennen
+// den Repeater als DIREKTEN Contact (out_path_len==0) mit Advert <48h -> in den
+// RAM-Cache promoten. Loest "74 Pakete empfangen, aber kein Advert diese Session
+// -> neighbors stats leer". Hash-Match gegen den ECHTEN Pubkey (sz Byte Prefix),
+// also nur so kollisionsarm wie die Pfad-Hash-Groesse.
+int MyMesh::promoteDirectContactByHash(const uint8_t* hop, uint8_t sz) {
+  uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  bool rtc_ok = (now_rtc > 1500000000UL);
+  uint32_t cutoff = (rtc_ok && now_rtc > 48UL * 3600UL) ? (now_rtc - 48UL * 3600UL) : 0;
+  int n_contacts = getNumContacts();
+  for (int ci = 0; ci < n_contacts; ci++) {
+    ContactInfo c;
+    if (!getContactByIdx(ci, c)) continue;
+    if (c.type != ADV_TYPE_REPEATER) continue;      // nur Repeater
+    if (c.out_path_len != 0) continue;              // nur Direktverbindungen
+    if (rtc_ok && c.lastmod < cutoff) continue;     // nur <48h gehoert
+    if (memcmp(c.id.pub_key, hop, sz) != 0) continue;
+    // Treffer -> in Neighbour-Tabelle einreihen (analog putRuntimeNeighbour).
+    int target_idx;
+    if (_neighbours_count < MAX_RUNTIME_NEIGHBOURS) {
+      target_idx = _neighbours_count++;
+    } else {
+      uint32_t oldest = 0xFFFFFFFFu; target_idx = 0;
+      for (int i = 0; i < _neighbours_count; i++) {
+        if (_neighbours[i].heard_millis < oldest) {
+          oldest = _neighbours[i].heard_millis; target_idx = i;
+        }
+      }
+    }
+    RuntimeNeighbour& nb = _neighbours[target_idx];
+    memcpy(nb.pub_key, c.id.pub_key, 32);
+    nb.advert_timestamp = c.last_advert_timestamp;
+    nb.heard_timestamp  = c.lastmod;
+    nb.heard_millis     = millis();
+    nb.snr              = 0;
+    nb.rssi_dbm         = INT8_MIN;     // = ungesetzt bis erstes Direkt-Paket
+    nb.adv_type         = ADV_TYPE_REPEATER;
+    nb.scope_name[0]    = 0;
+    nb.rx_him = 0; nb.rx_us = 0;
+    return target_idx;
   }
   return -1;
 }
@@ -2129,18 +2176,18 @@ void MyMesh::updateNeighbourSignals(mesh::Packet* packet, uint8_t m) {
   const uint8_t* path = packet->path;
   const uint8_t* last_hop = path + (size_t)(n - 1) * sz;
 
-  // rx_he_total + RSSI/SNR-Refresh: letzter Hop = direkt gehoerter Repeater.
+  // rx_him + RSSI/SNR-Refresh: letzter Hop = direkt gehoerter Repeater.
   int last_idx = matchRepeaterNeighbour(last_hop, sz);
   if (last_idx >= 0) {
     RuntimeNeighbour& nb = _neighbours[last_idx];
-    if (nb.rx_he_total < 0xFFFF) nb.rx_he_total++;
+    if (nb.rx_him < 0xFFFF) nb.rx_him++;
     nb.snr = (int8_t)(packet->getSNR() * 4);
     nb.rssi_dbm = (int8_t)radio_driver.getLastRSSI();
     nb.heard_millis = millis();
     nb.heard_timestamp = getRTCClock()->getCurrentTime();
   }
 
-  if (m != 1 && m != 2) return;   // rx_us/tx_he_us nur fuer EIGENE Pakete
+  if (m != 1 && m != 2) return;   // rx_us nur fuer EIGENE Pakete
 
   // Meine Hash-Position im Pfad (m==2 = ich habe repeated, Hash im Pfad; m==1 =
   // ich bin Origin, konzeptionell VOR path[0]).
@@ -2153,20 +2200,14 @@ void MyMesh::updateNeighbourSignals(mesh::Packet* packet, uint8_t m) {
     }
   }
 
-  // rx_us (er hat mich gehoert): der Hop direkt NACH meiner Position.
+  // rx_us (er hat mich gehoert): der Hop direkt NACH meiner Position hat meine
+  // Aussendung direkt empfangen.
   const uint8_t* heard_me = NULL;
   if (m == 1) heard_me = path;                                        // path[0]
   else if (my_k >= 0 && my_k + 1 < n) heard_me = path + (size_t)(my_k + 1) * sz;
   if (heard_me) {
     int hi = matchRepeaterNeighbour(heard_me, sz);
     if (hi >= 0 && _neighbours[hi].rx_us < 0xFFFF) _neighbours[hi].rx_us++;
-  }
-
-  // tx_he_us (ich hoere ihn, mein Verkehr, sauberer Direkt-Round-Trip):
-  // er == letzter Hop UND ich direkt davor.
-  bool me_before_last = (m == 1 && n == 1) || (m == 2 && my_k >= 0 && my_k == n - 2);
-  if (me_before_last && last_idx >= 0 && _neighbours[last_idx].tx_he_us < 0xFFFF) {
-    _neighbours[last_idx].tx_he_us++;
   }
 }
 
@@ -2188,6 +2229,10 @@ void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_times
                            sizeof(_neighbours[i].scope_name));
       } else {
         _neighbours[i].scope_name[0] = 0;
+      }
+      // Neighbor-Signal: dieses zero-hop-Advert = direkt von ihm gehoert.
+      if (adv_type == ADV_TYPE_REPEATER && _neighbours[i].rx_him < 0xFFFF) {
+        _neighbours[i].rx_him++;
       }
       return;
     }
@@ -2217,9 +2262,9 @@ void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_times
   _neighbours[target_idx].rssi_dbm         = rssi_dbm;
   _neighbours[target_idx].adv_type         = adv_type;
   // DL9SAU 2026-07-17 (Neighbor-Signal): neuer/evicteter Slot -> Zaehler frisch.
-  _neighbours[target_idx].rx_us       = 0;
-  _neighbours[target_idx].tx_he_us    = 0;
-  _neighbours[target_idx].rx_he_total = 0;
+  // Dieses zero-hop-Advert zaehlt als erstes Direkt-Hoeren (nur Repeater).
+  _neighbours[target_idx].rx_us  = 0;
+  _neighbours[target_idx].rx_him = (adv_type == ADV_TYPE_REPEATER) ? 1 : 0;
   if (scope_name) {
     StrHelper::strzcpy(_neighbours[target_idx].scope_name, scope_name,
                        sizeof(_neighbours[target_idx].scope_name));
@@ -15315,9 +15360,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Scope #local / #lokal:\n"
           "  -> single-hop lokal: direkte Nachbarn repeaten EINMAL,\n"
-          "     (Begrezung durch Umschreiben auf scope #local-discard"
-          "     auf das niemad hoert -> geht daduruch nicht weiter)."
-          "     Die Reichweite ist damit groesser Scope #direct und"
+          "     (Begrezung durch Umschreiben auf scope #local-discard\n"
+          "     auf das niemad hoert -> geht daduruch nicht weiter).\n"
+          "     Die Reichweite ist damit groesser Scope #direct und\n"
           "     geriger als bei Scope #region");
         pushCompanionMessage(
           "Scope #region / #regional:\n"
@@ -15523,6 +15568,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Zeigt Typ (rep/cmp/room/sns), Name, Alter,\n"
           "Distanz/Bearing wenn Positionen bekannt.\n"
           "Cutoff 48h fuer stale-Eintraege.");
+        pushCompanionMessage(
+          "neighbors stats (ohne weitere Args):\n"
+          "  Signal-Zaehler pro Repeater (RAM, seit Boot).\n"
+          "  rx_him=wie oft ich ihn DIREKT hoerte\n"
+          "  rx_us =wie oft ER mich hoerte\n"
+          "  -> Link-Asymmetrie sichtbar. Speist sich aus\n"
+          "  Adverts, Direkt-Contacts (<48h) + Repeat-Pfaden.");
         return;
       }
       if (topic_prefix_match(topic, "set")) {
@@ -17875,7 +17927,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     {
       const char* narg = strchr(cmd, ' ');
       if (narg) { while (*narg == ' ' || *narg == '\t') narg++; }
-      if (narg && starts_with_word(narg, "stats")) {
+      if (narg && starts_with_word_abbrev(narg, "stats", 2)) {
         char sb[200]; size_t sused = 0;
         auto sflush = [&](bool force) {
           if (sused == 0) return;
@@ -17889,22 +17941,27 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           for (size_t k = 0; k < ln && sused < sizeof(sb) - 1; k++) sb[sused++] = l[k];
         };
         saddl("neighbor stats (RAM, seit Boot; nur Repeater):");
-        saddl("rxUs=er hoert mich  txHe=ich hoere ihn (direkt)");
-        saddl("rxTot=direkt gehoerte Pakete von ihm");
+        saddl("rx_him=ich hoere ihn direkt  rx_us=er hoert mich");
         int shown = 0;
         for (int i = 0; i < _neighbours_count; i++) {
           RuntimeNeighbour& nb = _neighbours[i];
           if (nb.adv_type != ADV_TYPE_REPEATER) continue;
-          if (nb.rx_us == 0 && nb.tx_he_us == 0 && nb.rx_he_total == 0) continue;
+          if (nb.rx_him == 0 && nb.rx_us == 0) continue;
           char nm[18];
           ContactInfo* c = lookupContactByPubKey(nb.pub_key, PUB_KEY_SIZE);
           if (c && c->name[0]) StrHelper::strzcpy(nm, c->name, sizeof(nm));
           else snprintf(nm, sizeof(nm), "%02x%02x%02x", nb.pub_key[0], nb.pub_key[1], nb.pub_key[2]);
           char line[112];
-          snprintf(line, sizeof(line),
-                   "  %-12.12s rxUs=%u txHe=%u rxTot=%u (%ddBm %.1fdB)",
-                   nm, (unsigned)nb.rx_us, (unsigned)nb.tx_he_us, (unsigned)nb.rx_he_total,
-                   (int)nb.rssi_dbm, nb.snr / 4.0);
+          if (nb.rssi_dbm == INT8_MIN) {
+            snprintf(line, sizeof(line),
+                     "  %-12.12s rx_him=%u rx_us=%u",
+                     nm, (unsigned)nb.rx_him, (unsigned)nb.rx_us);
+          } else {
+            snprintf(line, sizeof(line),
+                     "  %-12.12s rx_him=%u rx_us=%u (%ddBm %.1fdB)",
+                     nm, (unsigned)nb.rx_him, (unsigned)nb.rx_us,
+                     (int)nb.rssi_dbm, nb.snr / 4.0);
+          }
           saddl(line);
           shown++;
         }
@@ -18201,7 +18258,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Usage: neighbors [rep|cmp|sns|room]\n"
           "  [hops <N>] [km <D>] [deg <X|FROM-TO>]\n"
-          "  [help]");
+          "  [help]\n"
+          "  neighbors stats  -> Signal-Zaehler (RAM, ohne\n"
+          "    weitere Argumente): rx_him=ich hoere ihn direkt,\n"
+          "    rx_us=er hoert mich");
         return;
       }
     }

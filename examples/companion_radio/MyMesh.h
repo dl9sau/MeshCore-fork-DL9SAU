@@ -164,13 +164,15 @@ struct RuntimeNeighbour {
   //                   unserer region-Tabelle)
   //   "de-be" usw.: scope-Name (aufgeloest via lookupRegionByTransportCode)
   char     scope_name[16];
-  // DL9SAU 2026-07-17 (Neighbor-Signal, session-scoped RAM-Zaehler, kein Flash):
-  //   rx_us       = er hat MICH gehoert (mein Paket, sein Hash direkt nach mir)
-  //   tx_he_us    = ich hoere IHN fuer meinen Verkehr (er=last-hop + ich direkt davor)
-  //   rx_he_total = ich hoere ihn DIREKT (er=last-hop, egal welches Paket) = busy/Direkt-Vol
+  // DL9SAU 2026-07-17 (Neighbor-Signal, session-scoped RAM-Zaehler, kein Flash).
+  // Zwei Zaehler, zwei Richtungen (Notation wie bei ping/discover: _him=von ihm,
+  // _us=er-hoerte-uns):
+  //   rx_him = ich hoere IHN DIREKT (er=letzter Pfad-Hop ODER sein zero-hop-Advert;
+  //            NICHT wenn er nur mittendrin im Pfad steht) = Direkt-Empfangs-Volumen
+  //   rx_us  = ER hat MICH gehoert (mein Paket, sein Hash direkt nach mir; plus
+  //            discover/ping/trace-Antworten an mich)
+  uint16_t rx_him;
   uint16_t rx_us;
-  uint16_t tx_he_us;
-  uint16_t rx_he_total;
 };
 
 // Wire-Layout fuer REQ_TYPE_GET_STATUS Antwort (Wunschliste 7 Phase 4).
@@ -542,10 +544,15 @@ protected:
                            uint8_t adv_type,
                            const char* scope_name);
   // DL9SAU 2026-07-17 (Neighbor-Signal): Pfad-Hop (sz Bytes = Pubkey-Prefix) auf
-  // einen Repeater-Neighbour matchen (Typ-Filter REPEATER). -1 wenn keiner.
-  int  matchRepeaterNeighbour(const uint8_t* hop, uint8_t sz) const;
-  // Zaehler rx_us/tx_he_us/rx_he_total + RSSI/SNR-Refresh aus einem empfangenen
-  // Flood-Paket aktualisieren. m = matchSelfHash (1=self-init, 2=self-repeated).
+  // einen Repeater-Neighbour matchen (Typ-Filter REPEATER). Findet nichts im RAM
+  // (kein Advert diese Session) -> promoteDirectContactByHash. -1 wenn keiner.
+  int  matchRepeaterNeighbour(const uint8_t* hop, uint8_t sz);
+  // Direkt-Contact (out_path_len==0, Repeater, lastmod <48h) per Hash-Prefix in den
+  // RAM-Neighbour-Cache promoten, damit Attribution auch ohne frisch gehoertes
+  // Advert greift. -1 wenn keiner passt.
+  int  promoteDirectContactByHash(const uint8_t* hop, uint8_t sz);
+  // Zaehler rx_him/rx_us + RSSI/SNR-Refresh aus einem empfangenen Flood-Paket
+  // aktualisieren. m = matchSelfHash (1=self-init, 2=self-repeated).
   void updateNeighbourSignals(mesh::Packet* packet, uint8_t m);
   void onControlDataRecv(mesh::Packet *packet) override;
   void onRawDataRecv(mesh::Packet *packet) override;
