@@ -17963,18 +17963,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           RuntimeNeighbour& nb = _neighbours[i];
           if (nb.adv_type != ADV_TYPE_REPEATER) continue;
           if (nb.rx_him == 0 && nb.rx_us == 0) continue;
-          char nm[18];
+          // Name UTF-8-aware auf 12 visuelle Spalten kuerzen (nicht %-.12s ->
+          // das schnitte bei 12 BYTES mitten durch ein Multibyte-Emoji, Bug
+          // 2026-07-17: "DL7ASM @Leo<zerhacktes Emoji>"). nm gross genug fuer
+          // 12 visuelle Zeichen inkl. Multibyte.
+          char nm[40];
           ContactInfo* c = lookupContactByPubKey(nb.pub_key, PUB_KEY_SIZE);
-          if (c && c->name[0]) StrHelper::strzcpy(nm, c->name, sizeof(nm));
-          else snprintf(nm, sizeof(nm), "%02x%02x%02x", nb.pub_key[0], nb.pub_key[1], nb.pub_key[2]);
-          char line[112];
+          if (c && c->name[0]) {
+            StrHelper::strzcpy(nm, c->name, sizeof(nm));
+            neighbors_utf8_truncate_to_visual(nm, 12);
+          } else {
+            snprintf(nm, sizeof(nm), "%02x%02x%02x", nb.pub_key[0], nb.pub_key[1], nb.pub_key[2]);
+          }
+          char line[128];
           if (nb.rssi_dbm == INT8_MIN) {
             snprintf(line, sizeof(line),
-                     "  %-12.12s rx_him=%u rx_us=%u",
+                     "  %-12s rx_him=%u rx_us=%u",
                      nm, (unsigned)nb.rx_him, (unsigned)nb.rx_us);
           } else {
             snprintf(line, sizeof(line),
-                     "  %-12.12s rx_him=%u rx_us=%u (%ddBm %.1fdB)",
+                     "  %-12s rx_him=%u rx_us=%u (%ddBm %.1fdB)",
                      nm, (unsigned)nb.rx_him, (unsigned)nb.rx_us,
                      (int)nb.rssi_dbm, nb.snr / 4.0);
           }
