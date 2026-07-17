@@ -27463,7 +27463,7 @@ cron_add_direct:
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TRACE]);
     pushCompanionMessage(block);
-    snprintf(block, sizeof(block), "  flood total=%lu", (unsigned long)own_flood_total);
+    snprintf(block, sizeof(block), "  total=%lu", (unsigned long)own_flood_total);
     pushCompanionMessage(block);
     return;
   }
@@ -27746,7 +27746,7 @@ cron_add_direct:
                    (unsigned long)rxu_self,
                    (unsigned long)rxu_rep);
       pushCompanionMessage(block);
-      p = snprintf(block, sizeof(block), "  total           = %lu", (unsigned long)rxu_tot);
+      p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rxu_tot);
       append_rate_hint(block + p, sizeof(block) - p, rxu_tot, uptime_s);
       pushCompanionMessage(block);
     }
@@ -27796,7 +27796,7 @@ cron_add_direct:
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_ANON_REQ],
              (unsigned)_tx_self_flood_by_ptype[PAYLOAD_TYPE_TRACE]);
     pushCompanionMessage(block);
-    snprintf(block, sizeof(block), "  flood total=%lu", (unsigned long)own_flood_total);
+    snprintf(block, sizeof(block), "  total=%lu", (unsigned long)own_flood_total);
     pushCompanionMessage(block);
 
     // ---- Msg 6+7: tx repeated + tx total — nur wenn Repeater aktiv ----
