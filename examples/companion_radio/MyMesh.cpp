@@ -27567,9 +27567,12 @@ cron_add_direct:
              (unsigned)_heard_quality[ADV_TYPE_SENSOR][2]);
     pushCompanionMessage(block);
 
-    // ---- 3) rx adv total -- by scope+type (alle Hops) ----
+    // ---- 3) rx adv: scoped/unscoped + total-Zeile (Grand-Total via '-> N').
+    // 'by role' ist exakt scoped+unscoped pro Rolle (=_rx_advert_total) -> als
+    // total-Zeile in denselben Block gezogen (User-Konsolidierung 2026-07-17).
+    // total-Zeile eigener Push (Companion-Cap), Batching fuegt nahtlos an.
     snprintf(block, sizeof(block),
-             "rx adv total -- by scope+type:\n"
+             "rx adv:\n"
              "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
              "  unscoped: rep=%u cmp=%u room=%u sns=%u",
              (unsigned)_rx_advert_by_scope[ADV_TYPE_REPEATER][1],
@@ -27581,12 +27584,8 @@ cron_add_direct:
              (unsigned)_rx_advert_by_scope[ADV_TYPE_ROOM][0],
              (unsigned)_rx_advert_by_scope[ADV_TYPE_SENSOR][0]);
     pushCompanionMessage(block);
-
-    // ---- 3b) rx adv total -- by role + grand total ----
     p = snprintf(block, sizeof(block),
-                 "rx adv total -- by role:\n"
-                 "  rep=%u cmp=%u room=%u sns=%u\n"
-                 "  total = %lu",
+                 "  total:    rep=%u cmp=%u room=%u sns=%u -> %lu",
                  (unsigned)_rx_advert_total[ADV_TYPE_REPEATER],
                  (unsigned)_rx_advert_total[ADV_TYPE_CHAT],
                  (unsigned)_rx_advert_total[ADV_TYPE_ROOM],
@@ -27595,9 +27594,9 @@ cron_add_direct:
     append_rate_hint(block + p, sizeof(block) - p, ad_total, uptime_s);
     pushCompanionMessage(block);
 
-    // ---- 4) rx direct nodes -- by scope+type (zero-hop Subset von #3) ----
+    // ---- 4) rx direct nodes (zero-hop Subset von #3), gleiche Konsolidierung ----
     snprintf(block, sizeof(block),
-             "rx direct nodes -- by scope+type:\n"
+             "rx direct nodes:\n"
              "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
              "  unscoped: rep=%u cmp=%u room=%u sns=%u",
              (unsigned)_heard_direct_by_scope[ADV_TYPE_REPEATER][1],
@@ -27609,12 +27608,8 @@ cron_add_direct:
              (unsigned)_heard_direct_by_scope[ADV_TYPE_ROOM][0],
              (unsigned)_heard_direct_by_scope[ADV_TYPE_SENSOR][0]);
     pushCompanionMessage(block);
-
-    // ---- 4b) rx direct nodes -- by role + total ----
     p = snprintf(block, sizeof(block),
-                 "rx direct nodes -- by role:\n"
-                 "  rep=%u cmp=%u room=%u sns=%u\n"
-                 "  total = %lu",
+                 "  total:    rep=%u cmp=%u room=%u sns=%u -> %lu",
                  (unsigned)_heard_direct[ADV_TYPE_REPEATER],
                  (unsigned)_heard_direct[ADV_TYPE_CHAT],
                  (unsigned)_heard_direct[ADV_TYPE_ROOM],
@@ -27629,20 +27624,16 @@ cron_add_direct:
     {
       uint32_t rxd_total = 0;
       for (int t = 0; t < 5; t++) rxd_total += _rx_direct_advert_by_role[t];
+      // Konsolidiert (User 2026-07-17): by-role + total in eine '-> N'-Zeile.
       p = snprintf(block, sizeof(block),
                    "rx zero-hop (DIRECT-typed adv):\n"
-                   "  total = %lu",
+                   "  rep=%u cmp=%u room=%u sns=%u -> %lu",
+                   (unsigned)_rx_direct_advert_by_role[ADV_TYPE_REPEATER],
+                   (unsigned)_rx_direct_advert_by_role[ADV_TYPE_CHAT],
+                   (unsigned)_rx_direct_advert_by_role[ADV_TYPE_ROOM],
+                   (unsigned)_rx_direct_advert_by_role[ADV_TYPE_SENSOR],
                    (unsigned long)rxd_total);
       append_rate_hint(block + p, sizeof(block) - p, rxd_total, uptime_s);
-      pushCompanionMessage(block);
-
-      snprintf(block, sizeof(block),
-               "rx zero-hop -- adv by role:\n"
-               "  rep=%u cmp=%u room=%u sns=%u",
-               (unsigned)_rx_direct_advert_by_role[ADV_TYPE_REPEATER],
-               (unsigned)_rx_direct_advert_by_role[ADV_TYPE_CHAT],
-               (unsigned)_rx_direct_advert_by_role[ADV_TYPE_ROOM],
-               (unsigned)_rx_direct_advert_by_role[ADV_TYPE_SENSOR]);
       pushCompanionMessage(block);
     }
 
