@@ -14809,7 +14809,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     "channels: Liste + Verwaltung.\n"
     "  channels                    -- Liste aller Channels\n"
     "  channels add <#name>        -- Hashtag anlegen (Key=sha256(Name))\n"
-    "    (#local/#lokal reserviert: forced-local, nicht anlegbar)\n"
     "  channels remove <slot|name> -- loeschen (companion geschuetzt)\n"
     "  channels delete <slot|name> -- Alias fuer remove";
   static const char PATH_USAGE[] =
@@ -18438,19 +18437,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           if (nm[0] != '#') {
             pushCompanionMessage("channels add: nur Hashtag (#name) -- Key wird aus dem Namen berechnet.");
             return;
-          }
-          // DL9SAU 2026-07-17 (#94): 'local'/'lokal' haben Sonderbedeutung
-          // (forced-local/no-repeat via detectForcedLocalChannel, das das '#'
-          // strippt). Ein Channel mit dem Namen wuerde die Send-Semantik
-          // verwirren -> ablehnen (analog $companion). Bare-Name (ohne '#').
-          {
-            const char* bare = (nm[0] == '#') ? nm + 1 : nm;
-            if (strcasecmp(bare, "local") == 0 || strcasecmp(bare, "lokal") == 0) {
-              pushCompanionMessage(
-                "channels add: '#local'/'#lokal' ist reserviert\n"
-                "(forced-local/no-repeat-Sonderbedeutung) -- nicht anlegbar.");
-              return;
-            }
           }
           for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
             ChannelDetails ex;
@@ -24329,7 +24315,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Channel heisst wie ein Subcmd (z.B. 'status')?\n"
           "  -> mit Wert: ch.hops status <wert>.\n"
           "Alternativ: set/get ch.hops <name>.\n"
-          "$companion ist forced auf 0 (nicht aenderbar).");
+          "$companion forced 0; #local/#lokal forced-local\n"
+          "(single-hop via Scope) -> beide kein Cap setzbar.");
         return;
       }
       // DL9SAU 2026-06-16: 'set passwd_admin' / 'set passwd_guest' ohne
@@ -25370,6 +25357,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       size_t nlen = name_end < sizeof(chname) - 1 ? name_end : sizeof(chname) - 1;
       memcpy(chname, value_lc, nlen);
       chname[nlen] = 0;
+      // DL9SAU 2026-07-17 (#94): #local/#lokal sind forced-local -- der Scope
+      // erzwingt single-hop, also ist ein per-Channel-Hop-Cap gegenstandslos ->
+      // ablehnen (analog $companion). Bare-Name (ohne '#'), case-insensitiv.
+      {
+        const char* lbare = (chname[0] == '#') ? chname + 1 : chname;
+        if (strcasecmp(lbare, "local") == 0 || strcasecmp(lbare, "lokal") == 0) {
+          pushCompanionMessage(
+            "ch.hops: #local/#lokal sind forced-local (single-hop via Scope)\n"
+            "-- ein Hop-Cap ist gegenstandslos, nicht setzbar.");
+          return;
+        }
+      }
       // Value-Token interpretieren
       char vtok[12];
       size_t vlen2 = tok_end - tok_start < sizeof(vtok) - 1 ? tok_end - tok_start : sizeof(vtok) - 1;
