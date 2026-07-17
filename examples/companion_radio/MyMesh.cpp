@@ -27653,8 +27653,8 @@ cron_add_direct:
       uint32_t direct_typed_advs = (hd_total > rxf_hd_adv) ? (hd_total - rxf_hd_adv) : 0;
       uint32_t rx_heard_total = rxf_hd_total + direct_typed_advs;
       p = snprintf(block, sizeof(block),
-                   "rx heard total (kein Repeater dazwischen):\n"
-                   "  = heard-direct + zero-hop adv = %lu",
+                   "rx heard-direct total (zero-hop und flood path_len=0):\n"
+                   "  total=%lu",
                    (unsigned long)rx_heard_total);
       append_rate_hint(block + p, sizeof(block) - p, rx_heard_total, uptime_s);
       pushCompanionMessage(block);
