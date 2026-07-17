@@ -5782,6 +5782,43 @@ static void utf8ByteTruncate(char* dst, const char* src, size_t dst_size) {
   dst[bytes] = 0;
 }
 
+// DL9SAU 2026-07-17: UTF-8-aware Feld-Formatter -- der eine Wrapper, der das
+// byte-basierte '%.Ns' / '%-N.Ns' ersetzt (das Multibyte-Zeichen zerhackt).
+// Kopiert 'src' nach 'out' und macht dreierlei:
+//   1. SANITIZE: bricht bei einer unvollstaendigen/ungueltigen UTF-8-Sequenz ab
+//      -> kappt kaputte Trailing-Bytes. Heilt damit auch schon KORRUPT
+//         gespeicherte Namen (z.B. via Upstream StrHelper::strncpy byte-truncatet)
+//         fuer die Anzeige, ohne die Storage-/Upstream-Schicht anzufassen.
+//   2. TRUNCATE: kuerzt auf max 'width' visuelle Spalten OHNE ein Multibyte-
+//      Zeichen zu zerteilen (width==0 -> nicht kuerzen, nur sanitisieren).
+//   3. PAD: fuellt mit Spaces auf 'width' Spalten, wenn pad=true (Alignment).
+// Rueckgabe: out (direkt als %s einsetzbar). out sollte fuer 'width' visuelle
+// Zeichen gross genug sein (Multibyte kann mehr Bytes brauchen; Emoji ~2 Bytes
+// je Spalte). Nutzt dieselben utf8Decode/utf8_cp_display_width wie oben.
+static const char* utf8Field(char* out, size_t outsz, const char* src,
+                             size_t width, bool pad) {
+  if (!out || outsz == 0) return "";
+  size_t oi = 0, visual = 0, si = 0;
+  if (src) {
+    size_t slen = strlen(src);
+    while (src[si]) {
+      size_t consumed = 0;
+      int cp = utf8Decode(src + si, slen - si, &consumed);
+      if (consumed == 0) break;                              // sanitize: stop
+      int w = (cp >= 0) ? utf8_cp_display_width((uint32_t)cp) : 1;
+      if (width != 0 && visual + (size_t)w > width) break;   // Breite erreicht
+      if (oi + consumed + 1 > outsz) break;                  // Puffer voll
+      memcpy(out + oi, src + si, consumed);
+      oi += consumed; si += consumed; visual += (size_t)w;
+    }
+  }
+  if (pad && width != 0) {
+    while (visual < width && oi + 1 < outsz) { out[oi++] = ' '; visual++; }
+  }
+  out[oi] = 0;
+  return out;
+}
+
 // 2026-07-06 REFACTOR: printRepeaterLegendEntry entfernt -- durch
 // printDiscoveryLegendEntry ersetzt (siehe unten).
 
@@ -5830,8 +5867,8 @@ void MyMesh::printDiscoveryLegendEntry(const DiscoveryEntry& e, bool verbose,
   }
   const char* name = (known && known->name[0]) ? known->name
                      : (e.name[0] ? e.name : "(unknown)");
-  char name_buf[31];
-  utf8ByteTruncate(name_buf, name, sizeof(name_buf));
+  char name_buf[64];
+  utf8Field(name_buf, sizeof(name_buf), name, 30, false);  // visual-aware + sanitize
   char line[160];
   bool ctl_fresh = (e.ctl_answered_at_rtc >= _discover_round_started_rtc
                    && e.ctl_answered_at_rtc != 0);
@@ -7429,7 +7466,9 @@ void MyMesh::begin(bool has_display) {
   //   v3 "@[<name>] booted.."       -> Test
   {
     char greet[80];
-    snprintf(greet, sizeof(greet), "@[%.40s] booted..", _prefs.node_name);
+    char gnmf[48];
+    snprintf(greet, sizeof(greet), "@[%s] booted..",
+             utf8Field(gnmf, sizeof(gnmf), _prefs.node_name, 0, false));
     pushCompanionMessage(greet);
   }
 
@@ -18457,7 +18496,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char prefix6[7];
       mesh::Utils::toHex(prefix6, c.id.pub_key, 3);
       char idstr[64];
-      snprintf(idstr, sizeof(idstr), "%s %s", prefix6, c.name);
+      char lnmf[40];
+      snprintf(idstr, sizeof(idstr), "%s %s", prefix6,
+               utf8Field(lnmf, sizeof(lnmf), c.name, 0, false));
       // UTF-8 visuell trunkieren auf 25 Codepoints (User-Bug 2026-06-14
       // v2: byte-basiert trunkieren + %-25s padden = 1-Char-Drift pro
       // Multi-Byte-Codepoint im Namen, sichtbar bei 'LOS_Schoeneiche3').
@@ -18765,7 +18806,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (memcmp(ch.channel.secret, expected, 16) == 0) psk_class = "hashtag";
         else                                              psk_class = "custom";
       }
-      snprintf(buf, sizeof(buf), "%2d: %-30.30s (%s)", i, ch.name, psk_class);
+      char cnmf[64];
+      snprintf(buf, sizeof(buf), "%2d: %-30s (%s)", i,
+               utf8Field(cnmf, sizeof(cnmf), ch.name, 30, true), psk_class);
       pushCompanionMessage(buf);
     }
     if (n == 0) pushCompanionMessage("channels: (leer)");
@@ -22124,6 +22167,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             if (ci.type == ADV_TYPE_NONE) continue;  // skip anon-leftover
             char pkx[7];
             mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
+            char nmf[40];
             char line[100];
             const char* type_str = (ci.type == ADV_TYPE_CHAT) ? "CHAT"
                                  : (ci.type == ADV_TYPE_REPEATER) ? "REP"
@@ -22131,7 +22175,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                  : (ci.type == ADV_TYPE_SENSOR) ? "SENSOR"
                                  : "NONE";
             snprintf(line, sizeof(line), "  %s %s (%s)",
-                     pkx, ci.name, type_str);
+                     pkx, utf8Field(nmf, sizeof(nmf), ci.name, 0, false), type_str);
             if (found_n == 0) {
               snprintf(hdr, sizeof(hdr), "path show direct:");
               pushCompanionMessage(hdr);
@@ -22236,8 +22280,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             if (!out_ok && !in_ok) continue;
             char pkx[7];
             mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
+            char nmf[40];
             char line[220];
-            int lp = snprintf(line, sizeof(line), "  %s %s:", pkx, ci.name);
+            int lp = snprintf(line, sizeof(line), "  %s %s:", pkx,
+                              utf8Field(nmf, sizeof(nmf), ci.name, 0, false));
             if (out_ok) {
               lp += snprintf(line + lp, sizeof(line) - lp, " out=");
               for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++)
@@ -22379,9 +22425,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             if (!ok) continue;
             char pkx[7];
             mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
+            char nmf[40];
             char line[220];
             int lp = snprintf(line, sizeof(line), "  %s %s: ",
-                              pkx, ci.name);
+                              pkx, utf8Field(nmf, sizeof(nmf), ci.name, 0, false));
             if (ci.out_path_len == OUT_PATH_UNKNOWN) {
               snprintf(line + lp, sizeof(line) - lp, "UNKNOWN");
             } else if (ci.out_path_len == 0) {
@@ -23607,8 +23654,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                 has_exact = true;
               }
               if (ambig_used + 35 < sizeof(ambig)) {
+                char anmf[48];
                 ambig_used += snprintf(ambig + ambig_used, sizeof(ambig) - ambig_used,
-                                       "\n  %.30s", ci.name);
+                                       "\n  %s", utf8Field(anmf, sizeof(anmf), ci.name, 30, false));
               }
             } else if (!has_off_role) {
               cand_off_role = ci;
@@ -23651,10 +23699,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                  : (ci.type == ADV_TYPE_SENSOR) ? "SENSOR"
                                  : (ci.type == ADV_TYPE_ROOM)   ? "ROOM"
                                  : "?";
-                  char r[160];
+                  char r[160]; char enmf[48];
                   snprintf(r, sizeof(r),
-                           "'%.30s' (hex-match) ist kein %s (%s).",
-                           ci.name, role_label, tn);
+                           "'%s' (hex-match) ist kein %s (%s).",
+                           utf8Field(enmf, sizeof(enmf), ci.name, 30, false), role_label, tn);
                   pushCompanionMessage(r);
                   return;
                 }
@@ -23694,11 +23742,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                            : (cand_off_role.type == ADV_TYPE_SENSOR) ? "SENSOR"
                            : (cand_off_role.type == ADV_TYPE_ROOM)   ? "ROOM"
                            : "?";
-            char r[160];
+            char r[160]; char enmf[48];
             snprintf(r, sizeof(r),
-                     "'%.30s' ist kein %s (%s).\n"
+                     "'%s' ist kein %s (%s).\n"
                      "discover %s geht nur fuer %s.",
-                     cand_off_role.name, role_label, tn,
+                     utf8Field(enmf, sizeof(enmf), cand_off_role.name, 30, false), role_label, tn,
                      sub_label, role_label);
             pushCompanionMessage(r);
             return;
@@ -24021,9 +24069,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
         if (ci.type == ADV_TYPE_NONE) continue;
         if (!name_has(ci.name)) continue;
-        char r[140];
+        char r[140]; char nmf[40];
         snprintf(r, sizeof(r), "  %s: type = %s (%u)",
-                 ci.name, type_name_of(ci.type), (unsigned)ci.type);
+                 utf8Field(nmf, sizeof(nmf), ci.name, 0, false),
+                 type_name_of(ci.type), (unsigned)ci.type);
         pushCompanionMessage(r);
         shown++;
       }
