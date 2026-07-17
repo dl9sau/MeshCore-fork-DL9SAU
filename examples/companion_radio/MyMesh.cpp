@@ -17869,6 +17869,50 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     return;
   }
   if (starts_with_word(cmd, "neighbors")) {
+    // DL9SAU 2026-07-17 (Neighbor-Signal): 'neighbors stats' -> kompakte Zaehler-
+    // Ansicht NUR der RAM-Repeater mit Signalzahlen. Die normale 'neighbors'-Liste
+    // (inkl. Contacts ohne Zahlen) bleibt bewusst ohne diese Spalten.
+    {
+      const char* narg = strchr(cmd, ' ');
+      if (narg) { while (*narg == ' ' || *narg == '\t') narg++; }
+      if (narg && starts_with_word(narg, "stats")) {
+        char sb[200]; size_t sused = 0;
+        auto sflush = [&](bool force) {
+          if (sused == 0) return;
+          if (!force && sused < 130) return;
+          sb[sused] = 0; pushCompanionMessage(sb); sused = 0;
+        };
+        auto saddl = [&](const char* l) {
+          size_t ln = strlen(l);
+          if (sused + ln + 2 >= sizeof(sb)) sflush(true);
+          if (sused > 0) sb[sused++] = '\n';
+          for (size_t k = 0; k < ln && sused < sizeof(sb) - 1; k++) sb[sused++] = l[k];
+        };
+        saddl("neighbor stats (RAM, seit Boot; nur Repeater):");
+        saddl("rxUs=er hoert mich  txHe=ich hoere ihn (direkt)");
+        saddl("rxTot=direkt gehoerte Pakete von ihm");
+        int shown = 0;
+        for (int i = 0; i < _neighbours_count; i++) {
+          RuntimeNeighbour& nb = _neighbours[i];
+          if (nb.adv_type != ADV_TYPE_REPEATER) continue;
+          if (nb.rx_us == 0 && nb.tx_he_us == 0 && nb.rx_he_total == 0) continue;
+          char nm[18];
+          ContactInfo* c = lookupContactByPubKey(nb.pub_key, PUB_KEY_SIZE);
+          if (c && c->name[0]) StrHelper::strzcpy(nm, c->name, sizeof(nm));
+          else snprintf(nm, sizeof(nm), "%02x%02x%02x", nb.pub_key[0], nb.pub_key[1], nb.pub_key[2]);
+          char line[112];
+          snprintf(line, sizeof(line),
+                   "  %-12.12s rxUs=%u txHe=%u rxTot=%u (%ddBm %.1fdB)",
+                   nm, (unsigned)nb.rx_us, (unsigned)nb.tx_he_us, (unsigned)nb.rx_he_total,
+                   (int)nb.rssi_dbm, nb.snr / 4.0);
+          saddl(line);
+          shown++;
+        }
+        if (shown == 0) saddl("  (noch keine Zahlen -- Traffic abwarten)");
+        sflush(true);
+        return;
+      }
+    }
     // Erweiterter Parser (User-Wunsch 2026-06-12, erweitert 2026-06-13):
     // mehrere Modifier kombinierbar. Rolle (rep|cmp|sns|room) +
     // km + hops + deg gleichzeitig. Semantik 2026-06-13: AND zwischen
