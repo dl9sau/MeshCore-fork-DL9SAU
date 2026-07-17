@@ -18024,8 +18024,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           char nm[40];
           ContactInfo* c = lookupContactByPubKey(nb.pub_key, PUB_KEY_SIZE);
           if (c && c->name[0]) {
-            StrHelper::strzcpy(nm, c->name, sizeof(nm));
-            neighbors_utf8_truncate_to_visual(nm, 12);
+            utf8Field(nm, sizeof(nm), c->name, 12, false);  // sanitize + visual-truncate
           } else {
             snprintf(nm, sizeof(nm), "%02x%02x%02x", nb.pub_key[0], nb.pub_key[1], nb.pub_key[2]);
           }
@@ -18874,14 +18873,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         // DL9SAU 2026-07-17 (#93): '$' NUR fuer $companion -- vorher wurde jedem
         // Channel-Namen '$' vorangestellt ($#test, $Public), was falsch/verwirrend
         // war. Normale Channels nun ohne '$'.
-        char display[24];
+        char display[40];
         if (isCompanionChannel(i))
           snprintf(display, sizeof(display), "$%s", ch.name);
         else
           snprintf(display, sizeof(display), "%s", ch.name);
+        char dfld[64]; utf8Field(dfld, sizeof(dfld), display, 20, true);
         char line[80];
-        if (cap == 0) snprintf(line, sizeof(line), "  %-20.20s = 0 hops (off, nicht repeated)", display);
-        else          snprintf(line, sizeof(line), "  %-20.20s = %u hops", display, (unsigned)cap);
+        if (cap == 0) snprintf(line, sizeof(line), "  %s = 0 hops (off, nicht repeated)", dfld);
+        else          snprintf(line, sizeof(line), "  %s = %u hops", dfld, (unsigned)cap);
         add_b(line);
         n_shown++;
       }
@@ -18890,13 +18890,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       for (uint8_t e = 0; e < _prefs.channel_hops_count; e++) {
         const auto& en = _prefs.channel_hops_list[e];
         if (!(en.flags & CH_HOPS_FLAG_EXTERNAL)) continue;
-        char display[24];
+        char display[40];
         snprintf(display, sizeof(display), "#%s (ext)", en.name);
+        char dfld[64]; utf8Field(dfld, sizeof(dfld), display, 20, true);
         char line[80];
         if (en.cap == 0)
-          snprintf(line, sizeof(line), "  %-20.20s = 0 hops (off, nicht repeated)", display);
+          snprintf(line, sizeof(line), "  %s = 0 hops (off, nicht repeated)", dfld);
         else
-          snprintf(line, sizeof(line), "  %-20.20s = %u hops", display, (unsigned)en.cap);
+          snprintf(line, sizeof(line), "  %s = %u hops", dfld, (unsigned)en.cap);
         add_b(line);
         n_shown++;
       }
