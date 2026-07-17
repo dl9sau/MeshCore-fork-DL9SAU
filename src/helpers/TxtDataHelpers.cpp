@@ -1,11 +1,27 @@
 #include "TxtDataHelpers.h"
 
-void StrHelper::strncpy(char* dest, const char* src, size_t buf_sz) {
-  while (buf_sz > 1 && *src) {
-    *dest++ = *src++;
-    buf_sz--;
+// DL9SAU 2026-07-17: UTF-8-safe. Namen (Contact/Node/Region) enthalten oft
+// Emojis/Umlaute; ein Byte-Cut bei buf_sz-1 zerhackte die letzte Multibyte-
+// Sequenz -> halbes Zeichen dauerhaft im Flash gespeichert (in App UND Firmware
+// sichtbar). Nach dem Kopieren eine unvollstaendige Trailing-Sequenz verwerfen.
+// (Upstream-Datei -- bei Merge beachten.)
+static size_t utf8_backoff_incomplete(const char* buf, size_t n, const char* src) {
+  // src[n] = erstes NICHT kopiertes Byte. Ist es eine Continuation (10xxxxxx),
+  // stehen wir mitten in einer Sequenz -> deren Lead+bisherige Continuations
+  // aus dem Ziel entfernen.
+  if (src[n] && ((unsigned char)src[n] & 0xC0) == 0x80) {
+    while (n > 0 && ((unsigned char)buf[n - 1] & 0xC0) == 0x80) n--;  // Continuations zurueck
+    if (n > 0) n--;                                                    // den Lead-Byte auch weg
   }
-  *dest = 0;  // truncates if needed
+  return n;
+}
+
+void StrHelper::strncpy(char* dest, const char* src, size_t buf_sz) {
+  if (buf_sz == 0) return;
+  size_t n = 0;
+  while (n < buf_sz - 1 && src[n]) { dest[n] = src[n]; n++; }
+  n = utf8_backoff_incomplete(dest, n, src);
+  dest[n] = 0;  // truncates if needed (UTF-8-safe)
 }
 
 void StrHelper::strzcpy(char* dest, const char* src, size_t buf_sz) {

@@ -5802,14 +5802,29 @@ static const char* utf8Field(char* out, size_t outsz, const char* src,
   if (src) {
     size_t slen = strlen(src);
     while (src[si]) {
-      size_t consumed = 0;
+      // ACHTUNG: utf8Decode gibt bei defekten/abgeschnittenen Sequenzen
+      // consumed=1 + rohes Byte zurueck (Absicht, damit Match-Loops nicht
+      // haengen) -- taugt daher NICHT zum Sanitisieren. Wir validieren die
+      // Sequenz hier selbst: Lead-Byte -> erwartete Laenge, dann pruefen ob alle
+      // Folge-Bytes echte Continuations (10xxxxxx) und vollstaendig da sind.
+      unsigned char c = (unsigned char)src[si];
+      size_t need;
+      if (c < 0x80)              need = 1;
+      else if ((c & 0xE0) == 0xC0) need = 2;
+      else if ((c & 0xF0) == 0xE0) need = 3;
+      else if ((c & 0xF8) == 0xF0) need = 4;
+      else break;                                  // Continuation/ungueltig als Lead -> stop
+      bool complete = (si + need <= slen);
+      for (size_t k = 1; complete && k < need; k++)
+        if (((unsigned char)src[si + k] & 0xC0) != 0x80) complete = false;
+      if (!complete) break;                        // abgeschnittene Sequenz -> stop (sanitize)
+      size_t consumed = need;
       int cp = utf8Decode(src + si, slen - si, &consumed);
-      if (consumed == 0) break;                              // sanitize: stop
       int w = (cp >= 0) ? utf8_cp_display_width((uint32_t)cp) : 1;
       if (width != 0 && visual + (size_t)w > width) break;   // Breite erreicht
-      if (oi + consumed + 1 > outsz) break;                  // Puffer voll
-      memcpy(out + oi, src + si, consumed);
-      oi += consumed; si += consumed; visual += (size_t)w;
+      if (oi + need + 1 > outsz) break;                      // Puffer voll
+      memcpy(out + oi, src + si, need);
+      oi += need; si += need; visual += (size_t)w;
     }
   }
   if (pad && width != 0) {
