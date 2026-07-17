@@ -27820,14 +27820,10 @@ cron_add_direct:
       p = snprintf(block, sizeof(block), "  total=%lu", (unsigned long)rep_total);
       append_rate_hint(block + p, sizeof(block) - p, rep_total, uptime_s);
       pushCompanionMessage(block);
-
-      uint32_t tx_grand_total = own_total + rep_total;
-      p = snprintf(block, sizeof(block),
-                   "tx total:\n"
-                   "  total=%lu",
-                   (unsigned long)tx_grand_total);
-      append_rate_hint(block + p, sizeof(block) - p, tx_grand_total, uptime_s);
-      pushCompanionMessage(block);
+      // 'tx total'-Footer entfernt (User 2026-07-17): war identisch zu
+      // 'gesendet (tx): total' ganz oben (own_total+rep_total == n_sent_total).
+      // Die RX-Sektion hat auch keinen Grand-Total-Footer -> Symmetrie + weniger
+      // Redundanz; die Summe steht oben.
     }
 
     // ---- Msg 8: airtime (kompakt, Sekunden statt ms) ----
