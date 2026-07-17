@@ -27494,22 +27494,25 @@ cron_add_direct:
              (unsigned long)n_sent_flood, (unsigned long)n_sent_direct);
     pushCompanionMessage(block);
     p = snprintf(block, sizeof(block),
-                 "empfangen (rx):\n  total=%lu",
+                 "empfangen (rx - jedes, nicht deduped):\n  total=%lu",
                  (unsigned long)n_recv_total);
     p += append_rate_hint(block + p, sizeof(block) - p, n_recv_total, uptime_s);
-    p += snprintf(block + p, sizeof(block) - p,
+    snprintf(block + p, sizeof(block) - p,
              "\n  flood=%lu  direct=%lu",
              (unsigned long)n_recv_flood, (unsigned long)n_recv_direct);
+    pushCompanionMessage(block);
     // DL9SAU 2026-07-17 unique-Zaehler: der Core (SimpleMeshTables::wasSeen) zaehlt
     // Duplikate ohnehin schon -> unique = total - dups, ueber ALLE Empfangstypen
     // (flood+direct), am Dedup-Punkt. amp = total/unique = wie oft dasselbe Paket
     // im Aether bei mir ankam (Redundanz/Netzlast). TRACE self-mutiert -> nie Dup
     // -> zaehlt als unique, verduennt amp Richtung 1.0 (harmlose Richtung).
+    // Eigene Push-Zeile: der laengere '(... nicht deduped)'-Header + unique zusammen
+    // wuerden den Companion-Cap (~136) reissen.
     uint32_t rx_dups = ((SimpleMeshTables*)getTables())->getNumFloodDups()
                      + ((SimpleMeshTables*)getTables())->getNumDirectDups();
     uint32_t rx_unique = (n_recv_total > rx_dups) ? (n_recv_total - rx_dups) : n_recv_total;
-    snprintf(block + p, sizeof(block) - p,
-             "\n  unique=%lu (dups %lu, amp %.1fx)",
+    snprintf(block, sizeof(block),
+             "  unique=%lu (dups %lu, amp %.1fx)",
              (unsigned long)rx_unique, (unsigned long)rx_dups,
              (rx_unique > 0) ? (double)n_recv_total / (double)rx_unique : 1.0);
     pushCompanionMessage(block);
@@ -27743,14 +27746,16 @@ cron_add_direct:
       uint32_t rxu_self = _rx_us_self_initiated_count;
       uint32_t rxu_rep  = _rx_us_repeated_count;
       uint32_t rxu_tot  = rxu_self + rxu_rep;
-      p = snprintf(block, sizeof(block),
-                   "rx echoes heard:\n"
+      // Header + Marker + total wuerden zusammen den Companion-Cap (~136) reissen
+      // -> total als eigene Push-Zeile.
+      snprintf(block, sizeof(block),
+                   "rx echoes heard (jedes, nicht deduped):\n"
                    "  self-initiated  = %lu  (my own sends)\n"
-                   "  repeated-others = %lu  (relayed for others)\n"
-                   "  total           = %lu",
+                   "  repeated-others = %lu  (relayed for others)",
                    (unsigned long)rxu_self,
-                   (unsigned long)rxu_rep,
-                   (unsigned long)rxu_tot);
+                   (unsigned long)rxu_rep);
+      pushCompanionMessage(block);
+      p = snprintf(block, sizeof(block), "  total           = %lu", (unsigned long)rxu_tot);
       append_rate_hint(block + p, sizeof(block) - p, rxu_tot, uptime_s);
       pushCompanionMessage(block);
     }
