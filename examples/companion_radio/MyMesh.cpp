@@ -5084,6 +5084,14 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
                           csv_len > 0 ? &data[8] : NULL, csv_len);
         upsertCompletedRegion(d.pubkey, csv_len > 0 ? &data[8] : NULL, csv_len);
         // OWNER/BASIC-Zweige nicht durch diese Site -- App-Piggyback handled.
+        // Neighbor-Signal Step 2: REGIONS-RESP auf UNSERE (zero-hop) Anfrage ->
+        // beide Richtungen direkt bewiesen: ich hoerte ihn (rx_him) UND er hoerte
+        // mich (rx_us). pubkey-exakt (d.pubkey).
+        int ni = matchRepeaterNeighbour(d.pubkey, PUB_KEY_SIZE);
+        if (ni >= 0) {
+          if (_neighbours[ni].rx_him < 0xFFFF) _neighbours[ni].rx_him++;
+          if (_neighbours[ni].rx_us  < 0xFFFF) _neighbours[ni].rx_us++;
+        }
       }
       // tag clearen; region_answered_at_rtc setzt upsertCompletedRegion.
       d.region_query_tag = 0;
@@ -5447,6 +5455,14 @@ void MyMesh::discoverHandleResp(mesh::Packet *packet) {
     mesh::Identity nb_id(e.pub_key);
     putRuntimeNeighbour(nb_id, now_rtc, e.our_snr_q4, e.our_rssi_dbm,
                         e.adv_type, "");
+    // Neighbor-Signal Step 2: eine AKTIVE Antwort auf UNSERE Discovery beweist
+    // (CTL-DISCOVER-RESP ist zero-hop, s.o.) dass er meinen REQ direkt gehoert
+    // hat -> rx_us++. Passiv (Fremd-Discovery mitgehoert) beweist das NICHT.
+    // matchRepeaterNeighbour filtert auf Repeater -> nur die zaehlen.
+    if (active) {
+      int ni = matchRepeaterNeighbour(e.pub_key, PUB_KEY_SIZE);
+      if (ni >= 0 && _neighbours[ni].rx_us < 0xFFFF) _neighbours[ni].rx_us++;
+    }
     ContactInfo* cp = lookupContactByPubKey(e.pub_key, PUB_KEY_SIZE);
     if (cp != NULL) {
       cp->lastmod = now_rtc;
