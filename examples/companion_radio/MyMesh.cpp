@@ -15242,6 +15242,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "  (#norepeat/#no-repeat sind Aliase, gleiche Wirkung.)");
         pushCompanionMessage(
+          "Scope #local / #lokal:\n"
+          "  -> single-hop lokal: direkte Nachbarn repeaten EINMAL,\n"
+          "     dann local-discard (geht nicht weiter). Mehr als\n"
+          "     #direct, weniger als eine Region.");
+        pushCompanionMessage(
+          "Scope #region / #regional:\n"
+          "  -> regionaler Flood mit HOP-LIMIT. Repeater begrenzen\n"
+          "     die Hopzahl -- unsere Firmware via\n"
+          "     flood_max_scope_region.");
+        pushCompanionMessage(
           "Scope #unscoped:\n"
           "  -> klassischer Flood ohne Scope-Code (path>0 moeglich).");
         pushCompanionMessage(
