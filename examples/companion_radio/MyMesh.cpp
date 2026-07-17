@@ -27497,9 +27497,21 @@ cron_add_direct:
                  "empfangen (rx):\n  total=%lu",
                  (unsigned long)n_recv_total);
     p += append_rate_hint(block + p, sizeof(block) - p, n_recv_total, uptime_s);
-    snprintf(block + p, sizeof(block) - p,
+    p += snprintf(block + p, sizeof(block) - p,
              "\n  flood=%lu  direct=%lu",
              (unsigned long)n_recv_flood, (unsigned long)n_recv_direct);
+    // DL9SAU 2026-07-17 unique-Zaehler: der Core (SimpleMeshTables::wasSeen) zaehlt
+    // Duplikate ohnehin schon -> unique = total - dups, ueber ALLE Empfangstypen
+    // (flood+direct), am Dedup-Punkt. amp = total/unique = wie oft dasselbe Paket
+    // im Aether bei mir ankam (Redundanz/Netzlast). TRACE self-mutiert -> nie Dup
+    // -> zaehlt als unique, verduennt amp Richtung 1.0 (harmlose Richtung).
+    uint32_t rx_dups = ((SimpleMeshTables*)getTables())->getNumFloodDups()
+                     + ((SimpleMeshTables*)getTables())->getNumDirectDups();
+    uint32_t rx_unique = (n_recv_total > rx_dups) ? (n_recv_total - rx_dups) : n_recv_total;
+    snprintf(block + p, sizeof(block) - p,
+             "\n  unique=%lu (dups %lu, amp %.1fx)",
+             (unsigned long)rx_unique, (unsigned long)rx_dups,
+             (rx_unique > 0) ? (double)n_recv_total / (double)rx_unique : 1.0);
     pushCompanionMessage(block);
 
     // RX-Block (Wunschliste 26 D, 2026-05-31): vom User reorganisierte
