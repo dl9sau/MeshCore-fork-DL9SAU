@@ -164,6 +164,13 @@ struct RuntimeNeighbour {
   //                   unserer region-Tabelle)
   //   "de-be" usw.: scope-Name (aufgeloest via lookupRegionByTransportCode)
   char     scope_name[16];
+  // DL9SAU 2026-07-17 (Neighbor-Signal, session-scoped RAM-Zaehler, kein Flash):
+  //   rx_us       = er hat MICH gehoert (mein Paket, sein Hash direkt nach mir)
+  //   tx_he_us    = ich hoere IHN fuer meinen Verkehr (er=last-hop + ich direkt davor)
+  //   rx_he_total = ich hoere ihn DIREKT (er=last-hop, egal welches Paket) = busy/Direkt-Vol
+  uint16_t rx_us;
+  uint16_t tx_he_us;
+  uint16_t rx_he_total;
 };
 
 // Wire-Layout fuer REQ_TYPE_GET_STATUS Antwort (Wunschliste 7 Phase 4).
@@ -534,6 +541,12 @@ protected:
                            int8_t snr_q4, int8_t rssi_dbm,
                            uint8_t adv_type,
                            const char* scope_name);
+  // DL9SAU 2026-07-17 (Neighbor-Signal): Pfad-Hop (sz Bytes = Pubkey-Prefix) auf
+  // einen Repeater-Neighbour matchen (Typ-Filter REPEATER). -1 wenn keiner.
+  int  matchRepeaterNeighbour(const uint8_t* hop, uint8_t sz) const;
+  // Zaehler rx_us/tx_he_us/rx_he_total + RSSI/SNR-Refresh aus einem empfangenen
+  // Flood-Paket aktualisieren. m = matchSelfHash (1=self-init, 2=self-repeated).
+  void updateNeighbourSignals(mesh::Packet* packet, uint8_t m);
   void onControlDataRecv(mesh::Packet *packet) override;
   void onRawDataRecv(mesh::Packet *packet) override;
   void onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,

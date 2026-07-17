@@ -2107,6 +2107,69 @@ void MyMesh::timeSyncFinalizeLazyCollection() {
                (int)chosen.adv_type, (long)delta);
 }
 
+// DL9SAU 2026-07-17 (Neighbor-Signal): Pfad-Hop-Bytes (sz = Pubkey-Prefix, s.
+// Identity::copyHashTo) auf einen Repeater-Neighbour matchen. NUR ADV_TYPE_REPEATER
+// (Typ-Filter reduziert die 1-Byte-Kollision). sz-aware -> 2-Byte-Pfade matchen
+// schaerfer. -1 wenn keiner.
+int MyMesh::matchRepeaterNeighbour(const uint8_t* hop, uint8_t sz) const {
+  if (!hop || sz == 0) return -1;
+  for (int i = 0; i < _neighbours_count; i++) {
+    if (_neighbours[i].adv_type != ADV_TYPE_REPEATER) continue;
+    if (memcmp(_neighbours[i].pub_key, hop, sz) == 0) return i;
+  }
+  return -1;
+}
+
+// Neighbor-Signal-Zaehler + RSSI/SNR-Refresh aus einem empfangenen Flood-Paket.
+// Anker: letzter Pfad-Hop = der Repeater, den ich DIREKT gehoert habe.
+void MyMesh::updateNeighbourSignals(mesh::Packet* packet, uint8_t m) {
+  uint8_t n  = packet->getPathHashCount();
+  uint8_t sz = packet->getPathHashSize();
+  if (n < 1 || sz < 1) return;   // kein Repeater im Pfad (direkt-vom-Origin = Advert-Pfad)
+  const uint8_t* path = packet->path;
+  const uint8_t* last_hop = path + (size_t)(n - 1) * sz;
+
+  // rx_he_total + RSSI/SNR-Refresh: letzter Hop = direkt gehoerter Repeater.
+  int last_idx = matchRepeaterNeighbour(last_hop, sz);
+  if (last_idx >= 0) {
+    RuntimeNeighbour& nb = _neighbours[last_idx];
+    if (nb.rx_he_total < 0xFFFF) nb.rx_he_total++;
+    nb.snr = (int8_t)(packet->getSNR() * 4);
+    nb.rssi_dbm = (int8_t)radio_driver.getLastRSSI();
+    nb.heard_millis = millis();
+    nb.heard_timestamp = getRTCClock()->getCurrentTime();
+  }
+
+  if (m != 1 && m != 2) return;   // rx_us/tx_he_us nur fuer EIGENE Pakete
+
+  // Meine Hash-Position im Pfad (m==2 = ich habe repeated, Hash im Pfad; m==1 =
+  // ich bin Origin, konzeptionell VOR path[0]).
+  int my_k = -1;
+  if (m == 2) {
+    uint8_t self_prefix[4];
+    self_id.copyHashTo(self_prefix, sz);
+    for (int i = 0; i < n; i++) {
+      if (memcmp(path + (size_t)i * sz, self_prefix, sz) == 0) { my_k = i; break; }
+    }
+  }
+
+  // rx_us (er hat mich gehoert): der Hop direkt NACH meiner Position.
+  const uint8_t* heard_me = NULL;
+  if (m == 1) heard_me = path;                                        // path[0]
+  else if (my_k >= 0 && my_k + 1 < n) heard_me = path + (size_t)(my_k + 1) * sz;
+  if (heard_me) {
+    int hi = matchRepeaterNeighbour(heard_me, sz);
+    if (hi >= 0 && _neighbours[hi].rx_us < 0xFFFF) _neighbours[hi].rx_us++;
+  }
+
+  // tx_he_us (ich hoere ihn, mein Verkehr, sauberer Direkt-Round-Trip):
+  // er == letzter Hop UND ich direkt davor.
+  bool me_before_last = (m == 1 && n == 1) || (m == 2 && my_k >= 0 && my_k == n - 2);
+  if (me_before_last && last_idx >= 0 && _neighbours[last_idx].tx_he_us < 0xFFFF) {
+    _neighbours[last_idx].tx_he_us++;
+  }
+}
+
 void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_timestamp,
                                  int8_t snr_q4, int8_t rssi_dbm,
                                  uint8_t adv_type,
@@ -2153,6 +2216,10 @@ void MyMesh::putRuntimeNeighbour(const mesh::Identity& id, uint32_t advert_times
   _neighbours[target_idx].snr              = snr_q4;
   _neighbours[target_idx].rssi_dbm         = rssi_dbm;
   _neighbours[target_idx].adv_type         = adv_type;
+  // DL9SAU 2026-07-17 (Neighbor-Signal): neuer/evicteter Slot -> Zaehler frisch.
+  _neighbours[target_idx].rx_us       = 0;
+  _neighbours[target_idx].tx_he_us    = 0;
+  _neighbours[target_idx].rx_he_total = 0;
   if (scope_name) {
     StrHelper::strzcpy(_neighbours[target_idx].scope_name, scope_name,
                        sizeof(_neighbours[target_idx].scope_name));
@@ -2624,6 +2691,10 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
   } else if (m == 2 && _rx_us_repeated_count < 0xFFFF) {
     _rx_us_repeated_count++;
   }
+  // DL9SAU 2026-07-17 (Neighbor-Signal): per-Repeater rx_us/tx_he_us/rx_he_total
+  // + RSSI/SNR-Refresh aus dem Pfad dieses Pakets. Laeuft hier (vor hasSeen-Dedup),
+  // damit auch Echos eigener Sends gezaehlt werden (m==1/2).
+  updateNeighbourSignals(packet, m);
   // DL9SAU 2026-07-13 (TRACE_DELIVERY): Echo eines EIGENEN Sends gehoert (ein
   // Repeater hat mein Paket weitergesendet). Laeuft VOR der hasSeen-Dedup, also
   // sehen wir JEDEN Repeater (mehrere Zeilen bei mehreren Repeatern). Direkt
