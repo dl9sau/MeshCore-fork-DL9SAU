@@ -27645,6 +27645,21 @@ cron_add_direct:
     append_rate_hint(block + p, sizeof(block) - p, rxf_hd_total, uptime_s);
     pushCompanionMessage(block);
 
+    // ---- 6a') rx heard total: Roll-up des heard-direct-Blocks (steht bewusst
+    // HIER direkt dahinter, damit klar ist worauf sich die Summe bezieht) =
+    // FLOOD-typed path0 (rxf_hd_total) + DIRECT-typed zero-hop Adverts.
+    {
+      uint32_t rxf_hd_adv = _rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0];
+      uint32_t direct_typed_advs = (hd_total > rxf_hd_adv) ? (hd_total - rxf_hd_adv) : 0;
+      uint32_t rx_heard_total = rxf_hd_total + direct_typed_advs;
+      p = snprintf(block, sizeof(block),
+                   "rx heard total (kein Repeater dazwischen):\n"
+                   "  = heard-direct + zero-hop adv = %lu",
+                   (unsigned long)rx_heard_total);
+      append_rate_hint(block + p, sizeof(block) - p, rx_heard_total, uptime_s);
+      pushCompanionMessage(block);
+    }
+
     // ---- 6b) rx flood -- repeated (FLOOD-typed, path_len>0) ----
     snprintf(block, sizeof(block),
              "rx flood -- repeated (path_len>0):\n"
@@ -27683,22 +27698,6 @@ cron_add_direct:
                  (unsigned long)rxf_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
     pushCompanionMessage(block);
-
-    // ---- 7) rx heard total (Pakete die wir DIREKT empfangen haben) ----
-    // = alle zero-hop FLOOD-typed Pakete (rxf_hd_total) plus DIRECT-typed
-    //   zero-hop Adverts (= hd_total minus jene Adverts die FLOOD-typed
-    //   zero-hop ankamen und damit schon in rxf_hd_total stecken).
-    {
-      uint32_t rxf_hd_adv = _rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0];
-      uint32_t direct_typed_advs = (hd_total > rxf_hd_adv) ? (hd_total - rxf_hd_adv) : 0;
-      uint32_t rx_heard_total = rxf_hd_total + direct_typed_advs;
-      p = snprintf(block, sizeof(block),
-                   "rx heard total:\n"
-                   "  total=%lu",
-                   (unsigned long)rx_heard_total);
-      append_rate_hint(block + p, sizeof(block) - p, rx_heard_total, uptime_s);
-      pushCompanionMessage(block);
-    }
 
     // ---- 8) rx us (Echo eigener Pakete im Mesh) -- Wunschliste 26 B ----
     // Match-Hash-Ringe: 32 self-initiated + 128 repeated Slots (4-Byte
