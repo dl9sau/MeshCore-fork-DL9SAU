@@ -15244,8 +15244,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(
           "Scope #local / #lokal:\n"
           "  -> single-hop lokal: direkte Nachbarn repeaten EINMAL,\n"
-          "     dann local-discard (geht nicht weiter). Mehr als\n"
-          "     #direct, weniger als eine Region.");
+          "     (Begrezung durch Umschreiben auf scope #local-discard"
+          "     auf das niemad hoert -> geht daduruch nicht weiter)."
+          "     Die Reichweite ist damit groesser Scope #direct und"
+          "     geriger als bei Scope #region");
         pushCompanionMessage(
           "Scope #region / #regional:\n"
           "  -> regionaler Flood mit HOP-LIMIT. Repeater begrenzen\n"
@@ -25374,8 +25376,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         const char* lbare = (chname[0] == '#') ? chname + 1 : chname;
         if (strcasecmp(lbare, "local") == 0 || strcasecmp(lbare, "lokal") == 0) {
           pushCompanionMessage(
-            "ch.hops: #local/#lokal sind forced-local (single-hop via Scope)\n"
-            "-- ein Hop-Cap ist gegenstandslos, nicht setzbar.");
+            "#local/#lokal haben per Design besondere Bedeutung:\n"
+            "max. EIN Repeat. Technisch wird beim Repeat der Scope\n"
+            "auf 'local-discard' umgeschrieben, fuer das sich niemand\n"
+            "zustaendig fuehlt. Ein Hop-Cap ist daher gegenstandslos.");
           return;
         }
       }
