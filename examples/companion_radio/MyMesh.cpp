@@ -5149,6 +5149,18 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
         // NOTE: telemetry data in 'extra' is discarded at present
 
         _serial->writeFrame(out_frame, i);
+
+        // DL9SAU 2026-07-17 (Neighbor-Signal Nachschlag): path-discovery-Antwort,
+        // pubkey-exakt. out_path_len==0 = mein REQ erreichte ihn DIREKT (er hoerte
+        // mich) -> rx_us. in_path_len==0 = seine Antwort kam DIREKT (ich hoerte ihn)
+        // -> rx_him. Routed (path_len>0) beweist keine Direkt-Strecke -> nicht zaehlen.
+        if (out_path_len == 0 || in_path_len == 0) {
+          int ni = matchRepeaterNeighbour(contact.id.pub_key, PUB_KEY_SIZE);
+          if (ni >= 0) {
+            if (out_path_len == 0 && _neighbours[ni].rx_us  < 0xFFFF) _neighbours[ni].rx_us++;
+            if (in_path_len  == 0 && _neighbours[ni].rx_him < 0xFFFF) _neighbours[ni].rx_him++;
+          }
+        }
       }
       return false;  // DON'T send reciprocal path!
     }
@@ -6383,6 +6395,17 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     unsigned long rtt = millis() - _cli_ping_started_ms;
     _cli_ping_tag = 0;
     _cli_ping_expiry_ms = 0;
+    // DL9SAU 2026-07-17 (Neighbor-Signal Nachschlag): NUR zero-hop-ping (path_len
+    // ==0) beweist die Direkt-Strecke in BEIDE Richtungen -> rx_us + rx_him.
+    // Routed tracepath (path_len>0) zaehlt NICHT. Ziel-Pubkey ggf. nur Prefix ->
+    // erst ab 4 Byte matchen (Kollisionsschutz).
+    if (path_len == 0 && _cli_ping_target_hex_len >= 4) {
+      int ni = matchRepeaterNeighbour(_cli_ping_target_pubkey, _cli_ping_target_hex_len);
+      if (ni >= 0) {
+        if (_neighbours[ni].rx_us  < 0xFFFF) _neighbours[ni].rx_us++;
+        if (_neighbours[ni].rx_him < 0xFFFF) _neighbours[ni].rx_him++;
+      }
+    }
     char pkx[7];
     mesh::Utils::toHex(pkx, _cli_ping_target_pubkey,
                        (_cli_ping_target_hex_len > 3) ? 3 : _cli_ping_target_hex_len);
