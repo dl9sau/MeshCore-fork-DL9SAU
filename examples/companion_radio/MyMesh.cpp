@@ -19,6 +19,10 @@
 #include <SHA256.h>
 #include "dl9sau_geo_recommendations.h"
 
+// DL9SAU: Forward-Decl (utf8Field wird schon frueh genutzt, definiert weiter unten).
+static const char* utf8Field(char* out, size_t outsz, const char* src,
+                             size_t width, bool pad);
+
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
 #define CMD_SEND_CHANNEL_TXT_MSG      3
@@ -2384,16 +2388,20 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
   // Return-Frame kam gerade rein), ist das ein Path-Discovery-Event.
   // Fuer Diagnose sichtbar machen wieviel Pfad-Neu-Findung im Netz
   // stattfindet.
-  if (contact.out_path_len == 0) {
-    traceCompanion(TRACE_SCOPE,
-                   "[path] '%s' -> zero-hop (direct heard)",
-                   contact.name);
-  } else {
-    char hebuf[40];
-    formatPathBytes(hebuf, sizeof(hebuf), contact.out_path, contact.out_path_len);
-    traceCompanion(TRACE_SCOPE,
-                   "[path] '%s' -> %u hops (%s)",
-                   contact.name, (unsigned)contact.out_path_len, hebuf);
+  // DL9SAU 2026-07-18: Name UTF-8-sanitisieren, aber NUR wenn der Trace an ist
+  // (sonst liefe utf8Field bei JEDEM Path-Event umsonst). Guard = traceLevelOf.
+  if (traceLevelOf(TRACE_SCOPE) > 0) {
+    char pnm[40]; utf8Field(pnm, sizeof(pnm), contact.name, 0, false);
+    if (contact.out_path_len == 0) {
+      traceCompanion(TRACE_SCOPE,
+                     "[path] '%s' -> zero-hop (direct heard)", pnm);
+    } else {
+      char hebuf[40];
+      formatPathBytes(hebuf, sizeof(hebuf), contact.out_path, contact.out_path_len);
+      traceCompanion(TRACE_SCOPE,
+                     "[path] '%s' -> %u hops (%s)",
+                     pnm, (unsigned)contact.out_path_len, hebuf);
+    }
   }
 }
 
@@ -4931,8 +4939,6 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 
 // Forward-Decls fuer utf8-Helper (Definition weiter unten in dieser Datei).
 static void neighbors_utf8_truncate_to_visual(char* s, size_t max_visual);
-static const char* utf8Field(char* out, size_t outsz, const char* src,
-                             size_t width, bool pad);
 static size_t neighbors_utf8_visual_count(const char* s);
 
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
