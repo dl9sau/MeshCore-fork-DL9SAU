@@ -18088,9 +18088,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                      nm, (unsigned)nb.rx_him, (unsigned)nb.rx_us);
           } else {
             snprintf(line, sizeof(line),
-                     "  %-12s rx_him=%u rx_us=%u (%ddBm %.1fdB)",
+                     "  %-12s rx_him=%u rx_us=%u (%+.1fdB/%ddBm)",
                      nm, (unsigned)nb.rx_him, (unsigned)nb.rx_us,
-                     (int)nb.rssi_dbm, nb.snr / 4.0);
+                     nb.snr / 4.0, (int)nb.rssi_dbm);
           }
           saddl(line);
           shown++;
