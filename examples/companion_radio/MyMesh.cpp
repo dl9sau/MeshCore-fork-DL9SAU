@@ -27509,6 +27509,10 @@ cron_add_direct:
     uint32_t n_recv_direct = getNumRecvDirect();
     uint32_t n_sent_total  = n_sent_flood + n_sent_direct;
     uint32_t n_recv_total  = n_recv_flood + n_recv_direct;
+    // DL9SAU 2026-07-18: Dedup-Legende. '(d)' markiert Bloecke ohne Wiederholung;
+    // alles ohne '(d)' zaehlt jedes Paket (RX: jede gehoerte Kopie; TX: jeden Send
+    // inkl. resend + DM-Auto-Retry).
+    pushCompanionMessage("(d): deduplicated, ohne Wiederholung (statt jedes Paket)");
     p = snprintf(block, sizeof(block),
                  "gesendet (tx):\n  total=%lu",
                  (unsigned long)n_sent_total);
@@ -27518,7 +27522,7 @@ cron_add_direct:
              (unsigned long)n_sent_flood, (unsigned long)n_sent_direct);
     pushCompanionMessage(block);
     p = snprintf(block, sizeof(block),
-                 "empfangen (rx - jedes, nicht deduped):\n  total=%lu",
+                 "empfangen (rx):\n  total=%lu",
                  (unsigned long)n_recv_total);
     p += append_rate_hint(block + p, sizeof(block) - p, n_recv_total, uptime_s);
     snprintf(block + p, sizeof(block) - p,
@@ -27536,7 +27540,7 @@ cron_add_direct:
                      + ((SimpleMeshTables*)getTables())->getNumDirectDups();
     uint32_t rx_unique = (n_recv_total > rx_dups) ? (n_recv_total - rx_dups) : n_recv_total;
     snprintf(block, sizeof(block),
-             "  unique=%lu (dups %lu, amp %.1fx)",
+             "  unique=%lu (d) (dups %lu, amp %.1fx)",
              (unsigned long)rx_unique, (unsigned long)rx_dups,
              (rx_unique > 0) ? (double)n_recv_total / (double)rx_unique : 1.0);
     pushCompanionMessage(block);
@@ -27572,7 +27576,7 @@ cron_add_direct:
     // Alle 4 Typen werden immer angezeigt (auch mit 0/0/0). Schwellen Q4:
     // gut >= 0 dB, mittel >= -8 dB, schlecht < -8 dB.
     snprintf(block, sizeof(block),
-             "rx direct qual good/med/bad:\n"
+             "rx direct qual good/med/bad (d):\n"
              "  rep  %u / %u / %u\n"
              "  cmp  %u / %u / %u\n"
              "  room %u / %u / %u\n"
@@ -27596,7 +27600,7 @@ cron_add_direct:
     // total-Zeile in denselben Block gezogen (User-Konsolidierung 2026-07-17).
     // total-Zeile eigener Push (Companion-Cap), Batching fuegt nahtlos an.
     snprintf(block, sizeof(block),
-             "rx adv:\n"
+             "rx adv (d):\n"
              "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
              "  unscoped: rep=%u cmp=%u room=%u sns=%u",
              (unsigned)_rx_advert_by_scope[ADV_TYPE_REPEATER][1],
@@ -27620,7 +27624,7 @@ cron_add_direct:
 
     // ---- 4) rx direct nodes (zero-hop Subset von #3), gleiche Konsolidierung ----
     snprintf(block, sizeof(block),
-             "rx direct nodes:\n"
+             "rx direct nodes (d):\n"
              "  scoped:   rep=%u cmp=%u room=%u sns=%u\n"
              "  unscoped: rep=%u cmp=%u room=%u sns=%u",
              (unsigned)_heard_direct_by_scope[ADV_TYPE_REPEATER][1],
@@ -27650,7 +27654,7 @@ cron_add_direct:
       for (int t = 0; t < 5; t++) rxd_total += _rx_direct_advert_by_role[t];
       // Konsolidiert (User 2026-07-17): by-role + total in eine '-> N'-Zeile.
       p = snprintf(block, sizeof(block),
-                   "rx zero-hop (DIRECT-typed adv):\n"
+                   "rx zero-hop (DIRECT-typed adv) (d):\n"
                    "  rep=%u cmp=%u room=%u sns=%u -> %lu",
                    (unsigned)_rx_direct_advert_by_role[ADV_TYPE_REPEATER],
                    (unsigned)_rx_direct_advert_by_role[ADV_TYPE_CHAT],
@@ -27663,7 +27667,7 @@ cron_add_direct:
 
     // ---- 6a) rx flood -- heard-direct (FLOOD-typed, path_len=0) ----
     snprintf(block, sizeof(block),
-             "rx flood -- heard-direct (path_len=0):\n"
+             "rx flood -- heard-direct (path_len=0) (d):\n"
              "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
              "  req=%u rsp=%u anon=%u trc=%u",
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][0],
@@ -27706,7 +27710,7 @@ cron_add_direct:
       uint32_t direct_typed_advs = (hd_total > rxf_hd_adv) ? (hd_total - rxf_hd_adv) : 0;
       uint32_t rx_heard_total = rxf_hd_total + direct_typed_advs;
       p = snprintf(block, sizeof(block),
-                   "rx heard-direct total (zero-hop und flood path_len=0):\n"
+                   "rx heard-direct total (zero-hop und flood path_len=0) (d):\n"
                    "  total=%lu",
                    (unsigned long)rx_heard_total);
       append_rate_hint(block + p, sizeof(block) - p, rx_heard_total, uptime_s);
@@ -27715,7 +27719,7 @@ cron_add_direct:
 
     // ---- 6b) rx flood -- repeated (FLOOD-typed, path_len>0) ----
     snprintf(block, sizeof(block),
-             "rx flood -- repeated (path_len>0):\n"
+             "rx flood -- repeated (path_len>0) (d):\n"
              "  adv=%u path=%u txt=%u grp=%u ack=%u\n"
              "  req=%u rsp=%u anon=%u trc=%u",
              (unsigned)_rx_flood_by_ptype[PAYLOAD_TYPE_ADVERT][1],
@@ -27747,7 +27751,7 @@ cron_add_direct:
 
     // ---- 6c) rx flood -- grand total ----
     p = snprintf(block, sizeof(block),
-                 "rx flood -- grand total = %lu",
+                 "rx flood -- grand total (d) = %lu",
                  (unsigned long)rxf_total);
     append_rate_hint(block + p, sizeof(block) - p, rxf_total, uptime_s);
     pushCompanionMessage(block);
@@ -27764,7 +27768,7 @@ cron_add_direct:
       // Header + Marker + total wuerden zusammen den Companion-Cap (~136) reissen
       // -> total als eigene Push-Zeile.
       snprintf(block, sizeof(block),
-                   "rx echoes heard (jedes, nicht deduped):\n"
+                   "rx echoes heard:\n"
                    "  self-initiated  = %lu  (my own sends)\n"
                    "  repeated-others = %lu  (relayed for others)",
                    (unsigned long)rxu_self,
