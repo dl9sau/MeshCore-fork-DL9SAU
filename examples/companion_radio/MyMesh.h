@@ -1339,6 +1339,10 @@ private:
     // Pakets (Echo-Match in filterRecvFloodPacket); DM = expected_ack-Code
     // (Match in processAck). 0 = noch keiner gesetzt.
     uint32_t      confirm_key;
+    // DL9SAU 2026-07-18: Channel-Index beim Send (Channel-Eintraege), damit der
+    // [deliv]-Echo-Trace den Namen OHNE 1-Byte-Hash-Kollision + ohne Channel-Suche
+    // aufloest. -1 = unbelegt/DM.
+    int8_t        ch_idx;
   };
   static const int RESEND_COALESCE_N = 16;
   ResendCoalesce _resend_coalesce[RESEND_COALESCE_N] = {};
@@ -1348,7 +1352,7 @@ private:
                           uint32_t app_timestamp, uint8_t* attempt);
   // Phase 2: Confirm-Handle nachtragen (nach dem Send, wenn pkt-hash/ack da).
   void noteCoalesceConfirm(bool is_dm, uint32_t key_hash, uint32_t text_hash,
-                           uint32_t confirm_key);
+                           uint32_t confirm_key, int ch_idx = -1);
   // Phase 2: Eintrag loeschen wenn Echo (Channel) bzw. ACK (DM) bestaetigt --
   // damit ein spaeterer identischer Send NICHT faelschlich rueckdatiert wird.
   bool dropCoalesceByConfirm(bool is_dm, uint32_t confirm_key);

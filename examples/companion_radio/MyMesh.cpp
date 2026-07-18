@@ -2684,15 +2684,36 @@ void MyMesh::deliveryTraceEcho(mesh::Packet* packet) {
   if ((ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA)
       && packet->payload_len >= 1) {
     uint8_t ch_hash = packet->payload[0];
+    // DL9SAU 2026-07-18: NICHT per kollidierendem hash[0] matchen (1-Byte -> Public
+    // vs #local verwechselt). Der fruehere _rx_decoded_ci-Fix greift hier nicht:
+    // dieses Echo ist unser EIGENER Send (m==1) und damit ein Duplikat -> hasSeen-
+    // Dedup verwirft es VOR onChannelMessageRecv -> nie dekodiert. Loesung: den beim
+    // Send gemerkten Channel-Index aus dem Coalesce-Eintrag holen (confirm_key ==
+    // calcShortHash bindet ihn an genau dieses Echo; Trace laeuft VOR
+    // dropCoalesceByConfirm). Ein Lookup, keine Channel-Suche. Fallback (kein
+    // Eintrag, z.B. evicted/coalesce-off): alter hash[0]-Match.
+    uint32_t echo_h = calcShortHash(packet);
+    int coalesce_ci = -1;
+    for (int i = 0; i < RESEND_COALESCE_N; i++) {
+      const ResendCoalesce& ce = _resend_coalesce[i];
+      if (ce.used && !ce.is_dm && ce.confirm_key != 0 && ce.confirm_key == echo_h) {
+        coalesce_ci = ce.ch_idx; break;
+      }
+    }
     char chname[34]; chname[0] = 0;
-    for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
-      ChannelDetails ch;
-      if (!getChannel(ci, ch)) continue;
-      if (ch.name[0] == 0) continue;
-      if (ch.channel.hash[0] == ch_hash) {
-        strncpy(chname, ch.name, sizeof(chname) - 1);
-        chname[sizeof(chname) - 1] = 0;
-        break;
+    ChannelDetails ch;
+    if (coalesce_ci >= 0 && getChannel(coalesce_ci, ch) && ch.name[0]) {
+      strncpy(chname, ch.name, sizeof(chname) - 1);
+      chname[sizeof(chname) - 1] = 0;
+    } else {
+      for (int ci = 0; ci < MAX_GROUP_CHANNELS; ci++) {
+        if (!getChannel(ci, ch)) continue;
+        if (ch.name[0] == 0) continue;
+        if (ch.channel.hash[0] == ch_hash) {
+          strncpy(chname, ch.name, sizeof(chname) - 1);
+          chname[sizeof(chname) - 1] = 0;
+          break;
+        }
       }
     }
     if (chname[0])
@@ -8128,7 +8149,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       // 2026-07-10 Phase 2: Confirm-Handle (pkt-hash des Sends) in den Coalesce-
       // Eintrag -> beim Echo (filterRecvFloodPacket) wird der Eintrag geloescht.
       if (send_ok && sent_pkt_hash) {
-        noteCoalesceConfirm(/*is_dm=*/false, ch_key, txt_key, sent_pkt_hash);
+        noteCoalesceConfirm(/*is_dm=*/false, ch_key, txt_key, sent_pkt_hash, channel_idx);
         // DL9SAU 2026-07-13 (TRACE_DELIVERY): KEIN eigener Ring-Add noetig --
         // applyPacketTxOverrides (zentraler TX-Hook) fuellt _self_initiated_hashes
         // schon fuer jedes ausgehende Paket. Beim Echo feuert m==1 in
@@ -14840,6 +14861,7 @@ uint32_t MyMesh::resendCoalesce(bool is_dm, uint32_t key_hash, uint32_t text_has
   e.anchor_millis = now;
   e.max_attempt = (is_dm && attempt) ? *attempt : 0;
   e.confirm_key = 0;  // Phase 2: erst nach dem Send gesetzt (noteCoalesceConfirm)
+  e.ch_idx = -1;      // wird bei noteCoalesceConfirm gesetzt (Channel), -1 = DM/unbelegt
   return app_timestamp;  // erster Send -> App-Timestamp unveraendert
 }
 
@@ -14848,12 +14870,14 @@ uint32_t MyMesh::resendCoalesce(bool is_dm, uint32_t key_hash, uint32_t text_has
 // gerade angelegt/aktualisiert hat. confirm_key = calcShortHash (Channel) bzw.
 // expected_ack (DM).
 void MyMesh::noteCoalesceConfirm(bool is_dm, uint32_t key_hash,
-                                 uint32_t text_hash, uint32_t confirm_key) {
+                                 uint32_t text_hash, uint32_t confirm_key,
+                                 int ch_idx) {
   for (int i = 0; i < RESEND_COALESCE_N; i++) {
     ResendCoalesce& e = _resend_coalesce[i];
     if (!e.used) continue;
     if (e.is_dm == is_dm && e.key_hash == key_hash && e.text_hash == text_hash) {
       e.confirm_key = confirm_key;
+      e.ch_idx = (int8_t)ch_idx;   // Channel-Index fuer [deliv]-Namen (Channel), -1 = DM
       return;
     }
   }
