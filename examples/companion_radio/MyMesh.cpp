@@ -4931,6 +4931,8 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 
 // Forward-Decls fuer utf8-Helper (Definition weiter unten in dieser Datei).
 static void neighbors_utf8_truncate_to_visual(char* s, size_t max_visual);
+static const char* utf8Field(char* out, size_t outsz, const char* src,
+                             size_t width, bool pad);
 static size_t neighbors_utf8_visual_count(const char* s);
 
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
@@ -4965,6 +4967,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
        || pending_admin_pubkey[2] || pending_admin_pubkey[3])
       && memcmp(pending_admin_pubkey, contact.id.pub_key, 4) == 0) {
     memset(pending_admin_pubkey, 0, sizeof(pending_admin_pubkey));
+    char cname[40]; utf8Field(cname, sizeof(cname), contact.name, 0, false);  // sanitize fuer [remote]-Echos
     if (pending_admin_login) {
       pending_admin_login = false;
       // Login-Antwort: [4]ts [4]now [1]RESP [1]perm
@@ -4973,11 +4976,11 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
                             : (data[9] == 2) ? "guest" : "unknown";
         char r[120];
         snprintf(r, sizeof(r), "[remote] Login OK bei %s (perm=%s)",
-                 contact.name, perm_s);
+                 cname, perm_s);
         pushCompanionMessage(r);
       } else {
         char r[100];
-        snprintf(r, sizeof(r), "[remote] Login failed bei %s", contact.name);
+        snprintf(r, sizeof(r), "[remote] Login failed bei %s", cname);
         pushCompanionMessage(r);
       }
       return;
@@ -4985,7 +4988,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     // CMD-Antwort: [4]ts_echo [N]response_text
     if (len > 4) {
       char r[200];
-      size_t pre_len = snprintf(r, sizeof(r), "[remote %s]\n", contact.name);
+      size_t pre_len = snprintf(r, sizeof(r), "[remote %s]\n", cname);
       size_t avail = (sizeof(r) > pre_len + 1) ? (sizeof(r) - pre_len - 1) : 0;
       size_t txt_len = (size_t)(len - 4);
       if (txt_len > avail) txt_len = avail;
@@ -4994,7 +4997,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       pushCompanionMessage(r);
     } else {
       char r[100];
-      snprintf(r, sizeof(r), "[remote %s] (leere Antwort)", contact.name);
+      snprintf(r, sizeof(r), "[remote %s] (leere Antwort)", cname);
       pushCompanionMessage(r);
     }
     return;
@@ -5042,8 +5045,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     char pkx[7];
     mesh::Utils::toHex(pkx, contact.id.pub_key, 3);
     char name_buf[80];
-    StrHelper::strzcpy(name_buf, contact.name, sizeof(name_buf));
-    neighbors_utf8_truncate_to_visual(name_buf, 25);
+    utf8Field(name_buf, sizeof(name_buf), contact.name, 25, false);  // sanitize + truncate
     char r[140];
     snprintf(r, sizeof(r),
              "ping %s %s:\n  rtt=%.1fs rx_him=%+.1fdB/%ddBm",
@@ -6431,8 +6433,7 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     mesh::Utils::toHex(pkx, _cli_ping_target_pubkey,
                        (_cli_ping_target_hex_len > 3) ? 3 : _cli_ping_target_hex_len);
     char name_buf[32];
-    StrHelper::strzcpy(name_buf, _cli_ping_target_name, sizeof(name_buf));
-    neighbors_utf8_truncate_to_visual(name_buf, 25);
+    utf8Field(name_buf, sizeof(name_buf), _cli_ping_target_name, 25, false);  // sanitize + truncate
     // hin = wie stark WIR bei ihm ankamen (Ziel's SNR-Messung, in path_snrs).
     // rueck = wie stark ER bei UNS ankam (unser aktueller RX-SNR/RSSI).
     double snr_hin   = (path_len >= 1) ? (double)((int8_t)path_snrs[0]) / 4.0 : 0.0;
@@ -6492,8 +6493,7 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     mesh::Utils::toHex(pkx, _cli_trace_target_pubkey,
                        (_cli_trace_target_hex_len > 3) ? 3 : _cli_trace_target_hex_len);
     char name_buf[32];
-    StrHelper::strzcpy(name_buf, _cli_trace_target_name, sizeof(name_buf));
-    neighbors_utf8_truncate_to_visual(name_buf, 25);
+    utf8Field(name_buf, sizeof(name_buf), _cli_trace_target_name, 25, false);  // sanitize + truncate
     // 2026-07-07: Format analog ping. Bei zero-hop (path_len == 1)
     // reines ping-Format. Bei multi-hop: hop-Liste angehaengt.
     double snr_hin   = (path_len >= 1) ? (double)((int8_t)path_snrs[0]) / 4.0 : 0.0;
@@ -24198,10 +24198,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("Unbekannter type. Erwartet: chat|repeater|sensor|room");
       return;
     }
+    char cnm[40]; utf8Field(cnm, sizeof(cnm), c->name, 0, false);  // sanitize fuer Echo
     if (c->type == new_type) {
       char r[120];
       snprintf(r, sizeof(r), "%s war bereits type=%s. Nichts zu tun.",
-               c->name, arg);
+               cnm, arg);
       pushCompanionMessage(r);
       return;
     }
@@ -24217,7 +24218,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     snprintf(r, sizeof(r),
              "OK - %s: type %u -> %u (%s).\n"
              "App ggf. trennen+neu verbinden falls UI nicht aktualisiert.",
-             c->name, old, new_type, arg);
+             cnm, old, new_type, arg);
     pushCompanionMessage(r);
     return;
   }
