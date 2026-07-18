@@ -551,6 +551,9 @@ protected:
   // RAM-Neighbour-Cache promoten, damit Attribution auch ohne frisch gehoertes
   // Advert greift. -1 wenn keiner passt.
   int  promoteDirectContactByHash(const uint8_t* hop, uint8_t sz);
+  // DL9SAU 2026-07-18: EIN kanonischer neighbors-Hilfetext (help-Dispatcher +
+  // 'neighbors help/?' + Usage-bei-Fehler rufen alle hier rein -> kein Drift).
+  void printNeighborsHelp();
   // Zaehler rx_him/rx_us + RSSI/SNR-Refresh aus einem empfangenen Flood-Paket
   // aktualisieren. m = matchSelfHash (1=self-init, 2=self-repeated).
   void updateNeighbourSignals(mesh::Packet* packet, uint8_t m);

@@ -2737,6 +2737,44 @@ void MyMesh::deliveryTraceEcho(mesh::Packet* packet) {
   }
 }
 
+// DL9SAU 2026-07-18: EIN kanonischer neighbors-Hilfetext. Frueher 3 driftende
+// Kopien (help-Dispatcher, 'neighbors help/?', Usage-bei-Fehler) -> stats/name
+// mal da, mal nicht. Jetzt rufen alle hier rein.
+void MyMesh::printNeighborsHelp() {
+  pushCompanionMessage(
+    "neighbors [<role>...] [hops <N>] [km <D>]\n"
+    "          [deg <X> | <FROM>-<TO>]\n"
+    "          [last <N>d|h] [name <muster>]:");
+  pushCompanionMessage(
+    "  <role>: repeater|companion|sensor|room\n"
+    "    (abkuerzbar+kombinierbar, z.B. 'rep')");
+  pushCompanionMessage(
+    "  hops <N>: <=N Hops (0=direkt).\n"
+    "  km <D>:   <=D km Distanz (braucht GPS).");
+  pushCompanionMessage(
+    "  deg <X>:  Peilung X +/- 1.5 Grad.\n"
+    "  deg <FROM>-<TO>: Peil-Sektor,\n"
+    "    darf 0 wrappen (z.B. 340-005).");
+  pushCompanionMessage(
+    "  last <N>d|h: Zeit-Fenster (Default 48h).\n"
+    "    z.B. 'last 7d' (1..30 Tage),\n"
+    "         'last 24h' (1..720 Stunden).");
+  pushCompanionMessage(
+    "  name <muster>: Name (Substring) ODER pubkey-Hex-\n"
+    "    Prefix. ^: Anfang, $: Ende, ^x$: exakt, *: Wildcard.");
+  pushCompanionMessage(
+    "  Mehrere Filter = UND-Verknuepfung.\n"
+    "  ohne Filter -> nur direct-gehoerte.\n"
+    "  Bsp: neighbors km 50 deg 340-005 last 7d");
+  pushCompanionMessage(
+    "neighbors stats (ohne weitere Args):\n"
+    "  Signal-Zaehler pro Repeater (RAM, seit Boot).\n"
+    "  rx_him=wie oft ich ihn DIREKT hoerte\n"
+    "  rx_us =wie oft ER mich hoerte\n"
+    "  -> Link-Asymmetrie. Speist aus Adverts,\n"
+    "  Direkt-Contacts (<48h) + Repeat-Pfaden.");
+}
+
 uint8_t MyMesh::matchSelfHash(uint32_t h) const {
   if (h == 0) return 0;
   for (int i = 0; i < 32; i++) {
@@ -15666,38 +15704,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (topic_prefix_match(topic, "neighbors")) {
-        pushCompanionMessage(
-          "neighbors [<role>...] [hops <N>] [km <D>]\n"
-          "          [deg <X>|<FROM>-<TO>] [last <N>d|h]\n"
-          "          [name <muster>]:\n"
-          "  ohne Arg: nur direkt-gehoerte.");
-        pushCompanionMessage(
-          "  <role>: repeater|companion|sensor|room\n"
-          "    (abkuerzbar+kombinierbar, z.B. 'rep')");
-        pushCompanionMessage(
-          "  hops <N>: <=N Hops (0=direkt).\n"
-          "  km <D>:   <=D km Distanz.\n"
-          "  deg <X>:  Peilung X +/- 1.5 Grad.");
-        pushCompanionMessage(
-          "  deg <FROM>-<TO>: Sektor,\n"
-          "    darf 0 wrappen (z.B. 340-005).\n"
-          "  last <N>d|h: Zeit-Fenster\n"
-          "    (Default 48h; '7d' 1-30 Tage, '24h' 1-720h)");
-        pushCompanionMessage(
-          "Mehrere Filter werden UND-verknuepft.\n"
-          "Bsp: neighbors km 50 deg 340-005\n"
-          "     neighbors rep km 15 hops 2");
-        pushCompanionMessage(
-          "Zeigt Typ (rep/cmp/room/sns), Name, Alter,\n"
-          "Distanz/Bearing wenn Positionen bekannt.\n"
-          "Cutoff 48h fuer stale-Eintraege.");
-        pushCompanionMessage(
-          "neighbors stats (ohne weitere Args):\n"
-          "  Signal-Zaehler pro Repeater (RAM, seit Boot).\n"
-          "  rx_him=wie oft ich ihn DIREKT hoerte\n"
-          "  rx_us =wie oft ER mich hoerte\n"
-          "  -> Link-Asymmetrie sichtbar. Speist sich aus\n"
-          "  Adverts, Direkt-Contacts (<48h) + Repeat-Pfaden.");
+        printNeighborsHelp();
         return;
       }
       if (topic_prefix_match(topic, "set")) {
@@ -18155,31 +18162,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       while (*arg == ' ' || *arg == '\t') arg++;
       while (*arg) {
         if (arg[0] == '?' || consume_word(arg, "help")) {
-          pushCompanionMessage(
-            "neighbors [<role>...] [hops <N>] [km <D>]\n"
-            "          [deg <X> | <FROM>-<TO>]\n"
-            "          [last <N>d|h] [name <muster>]:");
-          pushCompanionMessage(
-            "  <role>: repeater|companion|sensor|room\n"
-            "    (abkuerzbar+kombinierbar, z.B. 'rep')");
-          pushCompanionMessage(
-            "  hops <N>: <=N Hops (0=direkt).\n"
-            "  km <D>:   <=D km Distanz (braucht GPS).");
-          pushCompanionMessage(
-            "  deg <X>:  Peilung X +/- 1.5 Grad.\n"
-            "  deg <FROM>-<TO>: Peil-Sektor,\n"
-            "    darf 0 wrappen (z.B. 340-005).");
-          pushCompanionMessage(
-            "  last <N>d|h: Zeit-Fenster (Default 48h).\n"
-            "    z.B. 'last 7d' (1..30 Tage),\n"
-            "         'last 24h' (1..720 Stunden).");
-          pushCompanionMessage(
-            "  name <muster>: Namens-Suche. Substring;\n"
-            "    ^: Anfang, $: Ende, ^x$: exakt, *: Wildcard.");
-          pushCompanionMessage(
-            "  Mehrere Filter = UND-Verknuepfung.\n"
-            "  ohne Filter -> nur direct-gehoerte.\n"
-            "  Bsp: neighbors km 50 deg 340-005 last 7d");
+          printNeighborsHelp();
           return;
         }
         // Rollen-Token: exakt ODER unambig-Prefix. So tippt der User
@@ -18385,13 +18368,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                    "%d%c", n, unit);
           continue;
         }
-        pushCompanionMessage(
-          "Usage: neighbors [rep|cmp|sns|room]\n"
-          "  [hops <N>] [km <D>] [deg <X|FROM-TO>]\n"
-          "  [help]\n"
-          "  neighbors stats  -> Signal-Zaehler (RAM, ohne\n"
-          "    weitere Argumente): rx_him=ich hoere ihn direkt,\n"
-          "    rx_us=er hoert mich");
+        pushCompanionMessage("neighbors: unbekanntes Argument.");
+        printNeighborsHelp();
         return;
       }
     }
@@ -18498,7 +18476,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if ((role_mask & (1 << c.type)) == 0) continue;
       // 2026-07-11: Namens-Muster-Filter (AND). Greift unabhaengig von der
       // km/hops/deg-direct-Semantik.
-      if (has_name && !textMatchesPattern(name_pat, c.name)) continue;
+      // DL9SAU 2026-07-18: Name-Substring ODER pubkey-Hex-Prefix (User: '3-Byte-
+      // Prefix genuegt nicht'). So findet 'neighbors name EB2E31' den Knoten auch
+      // ohne den vollen Namen zu tippen.
+      if (has_name) {
+        bool nmatch = textMatchesPattern(name_pat, c.name);
+        if (!nmatch) {
+          char pkhex[13];
+          mesh::Utils::toHex(pkhex, c.id.pub_key, 6);  // 12 Hex-Zeichen (UPPERCASE)
+          size_t pl = strlen(name_pat);
+          if (pl > 0 && pl <= 12) {
+            nmatch = true;
+            for (size_t k = 0; k < pl; k++) {
+              char ch = name_pat[k];
+              if (ch >= 'a' && ch <= 'f') ch = (char)(ch - 32);  // case-insensitive
+              if (ch != pkhex[k]) { nmatch = false; break; }
+            }
+          }
+        }
+        if (!nmatch) continue;
+      }
       // Filter-Semantik (User-Spec 2026-06-13): ohne Filter -> nur direct;
       // mit Filter -> AND-Verknuepfung aller angegebenen Filter (km,
       // hops, deg). Direkte Knoten ohne GPS fallen damit unter km/deg
