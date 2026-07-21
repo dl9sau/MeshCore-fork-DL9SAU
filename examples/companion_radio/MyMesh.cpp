@@ -15560,12 +15560,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "scope use default <name>|clear\n"
           "  Default-Scope fuer eigene Flood-Pakete.");
         pushCompanionMessage(
-          "scope use advert <name>|clear\n"
-          "  Nightly-Flood-Advert nutzt diesen Scope (kann weiter sein\n"
-          "  als default, z.B. de-be -> de-bebb).");
-        pushCompanionMessage(
           "scope use override <name> [<n>h|<n>d]|clear\n"
           "  Hoechste Send-Prioritaet, persistent ueber Reboots, max 30d TTL.");
+        pushCompanionMessage(
+          "Der Nightly-Advert-Scope ist hierher verschoben:\n"
+          "  'advert nightly scope <follow|local|region|<scope>>'.");
         pushCompanionMessage(
           "scope use auto off|on|prefer\n"
           "  Regelt wie Default und Geo interagieren:");
@@ -15579,7 +15578,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "      andere ist als das Default. ('User ist nicht zu Hause')");
         pushCompanionMessage(
           "    off:\n"
-          "      Geo wird nie verwendet, nur Default/Advert-Scope/Override.");
+          "      Geo wird nie verwendet, nur Default/Override.");
         pushCompanionMessage(
           "Siehe auch 'help magic-scopes' fuer Scope-Namen mit\n"
           "Firmware-Sonderbehandlung (#direct/#unscoped/#geo).");
@@ -15595,7 +15594,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "4) Per-Eintrag ('scope <name> ...')");
         pushCompanionMessage(
           "Sende-Hierarchie fuer eigene Flood-Pakete:\n"
-          "  override > advert-Scope > default-oder-geo (gemaess scope use auto)");
+          "  override > default-oder-geo (gemaess scope use auto)");
         pushCompanionMessage(
           "scope\n"
           "  ohne Argument: Status der drei Send-Quellen + Registry-Count");
@@ -15606,12 +15605,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "scope default clear\n"
           "  loescht den default");
         pushCompanionMessage(
-          "scope advert <name>\n"
-          "  persistent, NUR fuer nightly Flood-Advert. Darf weiter sein als default\n"
-          "  (z.B. default=#de-be, advert=#de-bebb).");
-        pushCompanionMessage(
-          "scope advert clear\n"
-          "  loescht den Advert-Scope");
+          "Nightly-Flood-Advert-Scope: -> 'advert nightly scope <name>'\n"
+          "  Die Nacht-Bake laesst sich auf einen festen Scope legen, z.B.\n"
+          "  'advert nightly scope #de-be' (darf weiter sein als default).");
         pushCompanionMessage(
           "scope override <name> [12h|3d]\n"
           "  persistent ueber Reboots, hoechste Prio.\n"
@@ -19547,16 +19543,31 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.duty_hard_pct != 100) non_default_count++;
     }
-    // bake scope
-    bool bake_set = false;
-    for (size_t k = 0; k < sizeof(_prefs.bake_scope_key); k++)
-      if (_prefs.bake_scope_key[k] != 0) { bake_set = true; break; }
-    if (show_all || bake_set) {
-      snprintf(tmp, sizeof(tmp), "  bake_scope = %s%s",
-               bake_set ? _prefs.bake_scope_name : "(none)",
-               bake_set ? " (default: (none))" : " [default]");
+    // DL9SAU 2026-07-21: advert nightly scope (0=follow/1=local/2=region/
+    // 3=named). Loest die alte 'bake_scope'-Zeile ab; Name steckt bei Modus 3
+    // in bake_scope_name (Storage-Wiederverwendung).
+    if (show_all || _prefs.advert_nightly_scope != 0) {
+      char nsc[48];
+      if (_prefs.advert_nightly_scope == 3)
+        snprintf(nsc, sizeof(nsc), "#%s",
+                 _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
+      else
+        StrHelper::strncpy(nsc, _prefs.advert_nightly_scope == 2 ? "region"
+                              : _prefs.advert_nightly_scope == 1 ? "local" : "follow",
+                           sizeof(nsc));
+      snprintf(tmp, sizeof(tmp), "  advert_nightly_scope = %s%s", nsc,
+               _prefs.advert_nightly_scope == 0 ? " [default]" : " (default: follow)");
       add_line(tmp);
-      if (bake_set) non_default_count++;
+      if (_prefs.advert_nightly_scope != 0) non_default_count++;
+    }
+    // advert periodic scope (0=zero-hop/1=local/2=region)
+    if (show_all || _prefs.advert_periodic_scope != 0) {
+      const char* psc = _prefs.advert_periodic_scope == 2 ? "region"
+                      : _prefs.advert_periodic_scope == 1 ? "local" : "zero-hop";
+      snprintf(tmp, sizeof(tmp), "  advert_periodic_scope = %s%s", psc,
+               _prefs.advert_periodic_scope == 0 ? " [default]" : " (default: zero-hop)");
+      add_line(tmp);
+      if (_prefs.advert_periodic_scope != 0) non_default_count++;
     }
     // override scope
     bool ovr_set = (_prefs.override_expiry != 0);
@@ -28647,17 +28658,15 @@ cron_add_direct:
       };
       uint32_t now = getRTCClock()->getCurrentTime();
       bool override_active = (_prefs.override_expiry != 0 && now < _prefs.override_expiry);
-      bool bake_set    = is_set(_prefs.bake_scope_key,    sizeof(_prefs.bake_scope_key));
       bool default_set = is_set(_prefs.default_scope_key, sizeof(_prefs.default_scope_key));
 
-      char def_line[80], bake_line[80], ovr_line[120];
+      // DL9SAU 2026-07-21: die 'advert ='-Zeile (bake) ist hier raus -- der
+      // Nightly-Advert-Scope wohnt jetzt in 'advert nightly scope <name>' und
+      // hat mit der allgemeinen Own-Packet-Hierarchie nichts zu tun.
+      char def_line[80], ovr_line[120];
       if (default_set) snprintf(def_line, sizeof(def_line), "default = #%s",
                _prefs.default_scope_name[0] ? _prefs.default_scope_name : "?");
       else snprintf(def_line, sizeof(def_line), "default = (none)");
-
-      if (bake_set) snprintf(bake_line, sizeof(bake_line), "advert = #%s",
-               _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
-      else snprintf(bake_line, sizeof(bake_line), "advert = (none)");
 
       if (override_active) {
         uint32_t remaining = _prefs.override_expiry - now;
@@ -28720,7 +28729,6 @@ cron_add_direct:
       const char* active_val;
       const char* active_legend;   // NULL = kein Legende-Zeile noetig
       if (override_active)         { active_val = "override";     active_legend = NULL; }
-      else if (bake_set)           { active_val = "advert";       active_legend = "nightly Flood-Advert-Scope"; }
       else if (geo_wins_default)   {
         if (geo_name_buf[0]) {
           snprintf(active_val_buf, sizeof(active_val_buf),
@@ -28773,7 +28781,17 @@ cron_add_direct:
           break;
         default: // on
           auto_val = "on";
-          if (default_set)           auto_legend = "Default aktiv -- 'auto prefer' wuerde Geo den Vorrang geben";
+          if (default_set) {
+            // Wenn der Default selbst #geo ist, greift Geo bereits ueber den
+            // Default -- die Aussage 'auto prefer wuerde Geo Vorrang geben'
+            // waere widerspruechlich (User-Befund 2026-07-21).
+            bool default_is_geo =
+                _prefs.default_scope_name[0] != 0
+                && strcasecmp(_prefs.default_scope_name, "geo") == 0;
+            auto_legend = default_is_geo
+                ? "Default ist #geo -> ortsaufgeloest aktiv (prefer aendert nichts)"
+                : "Default aktiv -- 'auto prefer' wuerde Geo den Vorrang geben";
+          }
           else if (has_geo)          auto_legend = "Geo aktiv als Fallback";
           else                       auto_legend = "kein Geo-Match verfuegbar";
           break;
@@ -28787,15 +28805,14 @@ cron_add_direct:
       // werden. Explizit: 'own initiated packets'.
       char head[200];
       int hlen = snprintf(head, sizeof(head),
-                          "scope (own initiated packets):\n  %s\n  %s\n  %s",
-                          def_line, bake_line, ovr_line);
+                          "scope (own initiated packets):\n  %s\n  %s",
+                          def_line, ovr_line);
       if (hlen < 145) {
         pushCompanionMessage(head);
       } else {
         pushCompanionMessage("scope (own initiated packets):");
         char line[160];
         snprintf(line, sizeof(line), "  %s", def_line);  pushCompanionMessage(line);
-        snprintf(line, sizeof(line), "  %s", bake_line); pushCompanionMessage(line);
         snprintf(line, sizeof(line), "  %s", ovr_line);  pushCompanionMessage(line);
       }
 
@@ -28809,11 +28826,15 @@ cron_add_direct:
         snprintf(line2, sizeof(line2), "  auto = %s", auto_val);
       pushCompanionMessage(line2);
 
+      // DL9SAU 2026-07-21: 'active' ist NICHT einstellbar (im Gegensatz zu
+      // default/override/auto) -- es ist das berechnete Ergebnis. Mit '=>' +
+      // Doppelpunkt statt '=' formatiert, damit es nicht wie ein Setz-Feld
+      // gelesen wird (User-Befund).
       if (active_legend)
-        snprintf(line2, sizeof(line2), "  active = %s\n    %s",
+        snprintf(line2, sizeof(line2), "  => aktiv jetzt: %s\n    %s",
                  active_val, active_legend);
       else
-        snprintf(line2, sizeof(line2), "  active = %s", active_val);
+        snprintf(line2, sizeof(line2), "  => aktiv jetzt: %s", active_val);
       pushCompanionMessage(line2);
       // User-Feedback 2026-06-02: das war NUR die Send-Sicht. User
       // hat 45 min nach der allowlist-Einstellung gesucht weil das
@@ -28832,18 +28853,20 @@ cron_add_direct:
 
     // -- Sub-Befehl-Dispatch via match_choice (Prefix-Matching erlaubt).
     // 'remove' und 'clear' sind no_abbrev (zerstoerend).
+    // DL9SAU 2026-07-21: 'advert' (bake) hier ENTFERNT -- der Nightly-Advert-
+    // Scope wird jetzt via 'advert nightly scope <name>' gesetzt. Indizes
+    // entsprechend neu durchnummeriert.
     static const CompanionChoice scope_subs[] = {
       { "default",  false },  // 0  - eigene Send-Default (auch unter 'use')
-      { "advert",   false },  // 1  - nightly Flood-Advert-Scope (auch unter 'use')
-      { "override", false },  // 2  - persistent override (auch unter 'use')
-      { "list",     false },  // 3  - Registry (Liste A) anzeigen
-      { "add",      false },  // 4  - Registry-Eintrag hinzufuegen
-      { "remove",   true  },  // 5  - Registry-Eintrag loeschen (no_abbrev!)
-      { "info",     false },  // 6  - Detail-Anzeige fuer einen Eintrag
-      { "repeater", false },  // 7  - Sub-Namespace: Repeat-Policy
-      { "regions",  false },  // 8  - Built-in Region-Tabelle (read-only)
-      { "use",      false },  // 9  - Sub-Namespace: Sende-Hierarchie fuer eigene Flood-Pakete
-      { "channel",  false },  // 10 - Sub-Namespace: Channel-Msg-Behavior (z.B. no-scope)
+      { "override", false },  // 1  - persistent override (auch unter 'use')
+      { "list",     false },  // 2  - Registry (Liste A) anzeigen
+      { "add",      false },  // 3  - Registry-Eintrag hinzufuegen
+      { "remove",   true  },  // 4  - Registry-Eintrag loeschen (no_abbrev!)
+      { "info",     false },  // 5  - Detail-Anzeige fuer einen Eintrag
+      { "repeater", false },  // 6  - Sub-Namespace: Repeat-Policy
+      { "regions",  false },  // 7  - Built-in Region-Tabelle (read-only)
+      { "use",      false },  // 8  - Sub-Namespace: Sende-Hierarchie fuer eigene Flood-Pakete
+      { "channel",  false },  // 9  - Sub-Namespace: Channel-Msg-Behavior (z.B. no-scope)
     };
     // Punkt 16 Reise-Fix 2026-06-08: Pre-Flight Region-Lookup.
     // Wenn das erste Wort ein bekannter Region-Name ist (z.B. 'de',
@@ -28899,7 +28922,7 @@ cron_add_direct:
       // ? — Top-Level-Hilfe
       if (first_word[0] == '?' && first_word[1] == 0) {
         pushCompanionMessage("scope — Sub-Befehle:");
-        pushCompanionMessage("  scope use [...]   ('scope use ?')\n    Sende-Hierarchie eigener Flood-Pakete:\n    default/advert/override/auto");
+        pushCompanionMessage("  scope use [...]   ('scope use ?')\n    Sende-Hierarchie eigener Flood-Pakete:\n    default/override/auto");
         pushCompanionMessage("  scope repeater [...]   ('scope rep ?')\n    Repeat-Policy + globaler Auto-Schalter");
         pushCompanionMessage("  scope channel no-scope <direct|flood>\n    Channel-Msg-Verhalten ohne Scope");
         pushCompanionMessage("  scope list | add | remove | info | regions\n    Registry");
@@ -29133,7 +29156,7 @@ cron_add_direct:
     // -- scope channel <sub> ... (2026-07-02) --
     // Sub-Namespace fuer Channel-Msg-Behavior:
     //   scope channel no-scope <flood|direct>  (persistent)
-    if (sub_idx == 10) {
+    if (sub_idx == 9) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ' || *p == '\t') p++; }
       if (!p || *p == 0 || (p[0] == '?' && (p[1] == 0 || p[1] == ' '))) {
@@ -29182,12 +29205,12 @@ cron_add_direct:
     // Sub-Namespace fuer die Sende-Hierarchie eigener Flood-Pakete
     // (DM-Discovery, ACK, REQ/RESP, ANON-REQ, Channel-Msg, nightly Advert):
     //   scope use default <n>|clear     -> sub_idx 0
-    //   scope use advert <n>|clear      -> sub_idx 1 (nightly Flood-Advert-Scope)
-    //   scope use override <n> [TTL]    -> sub_idx 2
+    //   (scope use advert entfernt -> 'advert nightly scope <name>')
+    //   scope use override <n> [TTL]    -> sub_idx 1
     //   scope use auto off|on|prefer    -> hier behandelt
-    // Re-Dispatch fuer default/advert/override: arg + sub_idx werden auf
+    // Re-Dispatch fuer default/override: arg + sub_idx werden auf
     // die existierenden Handler umgebogen und das if-chain faellt durch.
-    if (sub_idx == 9) {
+    if (sub_idx == 8) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ') p++; }
 
@@ -29205,18 +29228,14 @@ cron_add_direct:
         // Hinweis: Wenn der scope-no-arg-Block weiterentwickelt wird,
         // muss hier mit-gepflegt werden.
         bool default_set = (_prefs.default_scope_key[0] != 0);
-        bool bake_set    = false;
-        for (size_t k = 0; k < sizeof(_prefs.bake_scope_key); k++) {
-          if (_prefs.bake_scope_key[k] != 0) { bake_set = true; break; }
-        }
         uint32_t now = getRTCClock()->getCurrentTime();
         bool override_active = (_prefs.override_expiry != 0
                                 && now < _prefs.override_expiry);
-        char def_line[80], bake_line[80], ovr_line[120];
+        // DL9SAU 2026-07-21: 'advert ='-Zeile (bake) raus -- Nightly-Scope
+        // wohnt jetzt in 'advert nightly scope <name>'.
+        char def_line[80], ovr_line[120];
         snprintf(def_line, sizeof(def_line), "default = %s",
                  default_set ? _prefs.default_scope_name : "(none)");
-        snprintf(bake_line, sizeof(bake_line), "advert = %s",
-                 bake_set ? _prefs.bake_scope_name : "(none)");
         if (override_active) {
           uint32_t rem = _prefs.override_expiry - now;
           uint32_t rd = rem / 86400UL, rh = (rem % 86400UL) / 3600UL, rm = (rem % 3600UL) / 60UL;
@@ -29246,7 +29265,6 @@ cron_add_direct:
 
         const char* active;
         if (override_active)            active = "override";
-        else if (bake_set)              active = "advert (nightly Flood-Advert-Scope)";
         else if (geo_wins_default)      active = "geo-fallback (gewinnt vor Default)";
         else if (default_set)           active = "default (in der App konfigurierter Default-Scope)";
         else if (geo_is_fallback)       active = "geo-fallback";
@@ -29274,7 +29292,12 @@ cron_add_direct:
                        "prefer (weder Geo noch Default verfuegbar)");
             break;
           default:
-            if (default_set)
+            if (default_set && _prefs.default_scope_name[0]
+                && strcasecmp(_prefs.default_scope_name, "geo") == 0)
+              snprintf(auto_str, sizeof(auto_str),
+                       "on (Default ist #geo -> ortsaufgeloest aktiv;\n"
+                       "       'auto prefer' aendert nichts)");
+            else if (default_set)
               snprintf(auto_str, sizeof(auto_str),
                        "on (Default aktiv; Geo waere verfuegbar aber greift nicht\n"
                        "       -- 'auto prefer' wuerde Geo den Vorrang geben)");
@@ -29291,13 +29314,13 @@ cron_add_direct:
         char head[200];
         snprintf(head, sizeof(head),
                  "scope use (Sende-Hierarchie eigener Flood-Pakete):\n"
-                 "  %s\n  %s\n  %s",
-                 def_line, bake_line, ovr_line);
+                 "  %s\n  %s",
+                 def_line, ovr_line);
         pushCompanionMessage(head);
         char tail[200];
         snprintf(tail, sizeof(tail),
                  "  auto = %s\n"
-                 "  active = %s",
+                 "  => aktiv jetzt: %s",
                  auto_str, active);
         pushCompanionMessage(tail);
 
@@ -29368,11 +29391,10 @@ cron_add_direct:
           "    Default-Scope fuer alle eigenen Flood-Pakete\n"
           "    (DM-Discovery, ACK, REQ/RESP, ANON-REQ, Channel-Msg, Advert)");
         pushCompanionMessage(
-          "  scope use advert <name> | clear\n"
-          "    Scope fuer den nightly Flood-Advert (Bake)");
-        pushCompanionMessage(
           "  scope use override <name> [<n>h|<n>d] | clear\n"
           "    Temp Override (max 30d, persistent ueber Reboot)");
+        pushCompanionMessage(
+          "  (Nightly-Advert-Scope: 'advert nightly scope <name>')");
         pushCompanionMessage(
           "  scope use auto off | on | prefer");
         pushCompanionMessage(
@@ -29385,18 +29407,20 @@ cron_add_direct:
           "      andere ist als das Default. ('User ist nicht zu Hause')");
         pushCompanionMessage(
           "    off:\n"
-          "      Geo wird nie verwendet, nur Default/Advert-Scope/Override.");
+          "      Geo wird nie verwendet, nur Default/Override.");
         return;
       }
 
+      // DL9SAU 2026-07-21: 'advert' (bake) hier ENTFERNT -> 'advert nightly
+      // scope <name>'. default/override mappen 1:1 auf die neuen main sub_idx
+      // 0/1; auto wird inline behandelt.
       static const CompanionChoice use_subs[] = {
-        { "default",  false },  // 0 -> dispatch to existing sub_idx==0
-        { "advert",   false },  // 1 -> sub_idx==1 (nightly Flood-Advert-Scope)
-        { "override", false },  // 2 -> sub_idx==2
-        { "auto",     false },  // 3 -> handled here
+        { "default",  false },  // 0 -> dispatch to main sub_idx==0
+        { "override", false },  // 1 -> dispatch to main sub_idx==1
+        { "auto",     false },  // 2 -> handled here
       };
       char use_ambig[40];
-      int av = match_choice(p, use_subs, 4, use_ambig, sizeof(use_ambig));
+      int av = match_choice(p, use_subs, 3, use_ambig, sizeof(use_ambig));
       if (av == -1) {
         char r[80]; snprintf(r, sizeof(r), "Mehrdeutig: %s", use_ambig);
         pushCompanionMessage(r); return;
@@ -29407,7 +29431,7 @@ cron_add_direct:
         return;
       }
 
-      if (av == 3) {
+      if (av == 2) {
         // scope use auto off|on|prefer
         const char* val = strchr(p, ' ');
         if (val) { while (*val == ' ') val++; }
@@ -29442,7 +29466,7 @@ cron_add_direct:
         return;
       }
 
-      // av == 0/1/2: re-dispatch zu existing default/advert/override.
+      // av == 0/1: re-dispatch zu existing default/override (main sub_idx 0/1).
       // Wir biegen arg + sub_idx um und lassen die if-chain weiterlaufen.
       arg = p;
       sub_idx = av;
@@ -29478,34 +29502,12 @@ cron_add_direct:
       return;
     }
 
-    // -- advert <name>|clear --  (nightly Flood-Advert-Scope, war frueher 'bake')
-    if (sub_idx == 1) {
-      const char* sub = strchr(arg, ' ');
-      if (sub) { while (*sub == ' ') sub++; }
-      if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope advert <name>|clear"); return; }
-      // Punkt 17 Fix: clear/none/off als Synonyme.
-      if (strcmp(sub, "clear") == 0 || strcmp(sub, "none") == 0 || strcmp(sub, "off") == 0) {
-        memset(_prefs.bake_scope_name, 0, sizeof(_prefs.bake_scope_name));
-        memset(_prefs.bake_scope_key,  0, sizeof(_prefs.bake_scope_key));
-        savePrefs();
-        pushCompanionMessage("OK - scope advert cleared.");
-        return;
-      }
-      char name[32];
-      extract_name(arg, name, sizeof(name));
-      if (name[0] == 0) { pushCompanionMessage("Usage: scope advert <name>|clear"); return; }
-      char tag[40]; snprintf(tag, sizeof(tag), "#%s", name);
-      TransportKey key; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, key);
-      StrHelper::strncpy(_prefs.bake_scope_name, name, sizeof(_prefs.bake_scope_name));
-      memcpy(_prefs.bake_scope_key, key.key, sizeof(_prefs.bake_scope_key));
-      savePrefs();
-      char line[100]; snprintf(line, sizeof(line), "OK - scope advert = #%s", name);
-      pushCompanionMessage(line);
-      return;
-    }
+    // DL9SAU 2026-07-21: 'scope advert' (bake) ENTFERNT -> 'advert nightly
+    // scope <name>'. Der Handler-Block ist raus, die folgenden sub_idx sind
+    // um 1 heruntergezaehlt.
 
     // -- override <name> [<ttl>] | clear --
-    if (sub_idx == 2) {
+    if (sub_idx == 1) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       if (!sub || *sub == 0) { pushCompanionMessage("Usage: scope override <name> [<n>h|<n>d] | clear"); return; }
@@ -29550,7 +29552,7 @@ cron_add_direct:
     // 'scope list'      -> nur non-default Eintraege (kompakt)
     // 'scope list all'  -> auch Default-Eintraege (komplettes Bild)
     // Deleted (USER_DELETED) wird nur in 'list all' angezeigt.
-    if (sub_idx == 3) {
+    if (sub_idx == 2) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       bool show_all = (sub && strncmp(sub, "all", 3) == 0
@@ -29671,8 +29673,8 @@ cron_add_direct:
         "  ! = Eigenes geo auto-Advert nimmt diesen Scope nie.\n"
         "      Keine Auswirkung auf Repeater-Verhalten.");
       pushCompanionMessage(
-        "      'scope use default/advert/override <name>' kann diesen\n"
-        "      Scope trotzdem explizit waehlen.");
+        "      'scope use default/override <name>' oder 'advert nightly\n"
+        "      scope <name>' kann diesen Scope trotzdem explizit waehlen.");
       return;
     }
 
@@ -29681,7 +29683,7 @@ cron_add_direct:
     // mehr ueber Legacy-scope_registry-Buffer + Migration). Build-in-
     // Namen werden abgewiesen — die haben ihren Slot in der Build-in-
     // Tabelle und werden via 'scope <name> pin/geo/off' gesteuert.
-    if (sub_idx == 4) {
+    if (sub_idx == 3) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ') p++; }
       if (!p || *p == 0) {
@@ -29777,7 +29779,7 @@ cron_add_direct:
     // -- remove <name> (User-Extras) --
     // Wunschliste 11 Schritt 8: entfernt aus scope_extras, kompaktiert.
     // Build-in-Namen: USER_DELETED-Bit setzen statt entfernen.
-    if (sub_idx == 5) {
+    if (sub_idx == 4) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ') p++; }
       if (!p || *p == 0) { pushCompanionMessage("Usage: scope remove <name>"); return; }
@@ -29836,7 +29838,7 @@ cron_add_direct:
     }
 
     // -- info <name> --
-    if (sub_idx == 6) {
+    if (sub_idx == 5) {
       const char* p = strchr(arg, ' ');
       if (p) { while (*p == ' ') p++; }
       if (!p || *p == 0) { pushCompanionMessage("Usage: scope info <name>"); return; }
@@ -29920,7 +29922,7 @@ cron_add_direct:
     }
 
     // -- repeater <...> (Sub-Namespace: Repeat-Policy / Liste B) --
-    if (sub_idx == 7) {
+    if (sub_idx == 6) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       // ? -> Kurzhilfe (vor dem Status-Check, sonst greift no-arg=status).
@@ -30111,7 +30113,7 @@ cron_add_direct:
     }
 
     // -- regions (read-only built-in geo-table) --
-    if (sub_idx == 8) {
+    if (sub_idx == 7) {
       char gb[200]; size_t gu = 0;
       auto gflush = [&]() {
         if (gu == 0) return;
