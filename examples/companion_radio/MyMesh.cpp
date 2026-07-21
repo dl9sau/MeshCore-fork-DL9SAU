@@ -17139,6 +17139,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg && arg[0] == '?' && (arg[1] == 0 || arg[1] == ' ')) {
       pushCompanionMessage("advert -- Sub-Befehle:");
       pushCompanionMessage(
+        "  advert status\n"
+        "    Uebersicht: Position/Intervall/next/Scope/nightly.");
+      pushCompanionMessage(
         "  advert [flood | zero-hop]\n"
         "    Default ohne Arg = flood (wie Upstream-Repeater).\n"
         "    zero-hop = nur single-hop neighbours.\n"
@@ -17154,6 +17157,66 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "  advert role fixed <chat|repeater|sensor|room>\n"
         "    Type fest pinnen -- beeinflusst createSelfAdvert\n"
         "    + Discovery-Query.");
+      return;
+    }
+
+    // DL9SAU 2026-07-21 (#0): konsolidierte Beacon-Uebersicht. Das Advert-
+    // Verhalten (Intervall/Grund/Scope/Positions-Policy/next-ETA) war bisher
+    // nirgends auf einen Blick sichtbar -- nur verstreut in status/get + opt-in
+    // [adv]-Traces. 'advert status' fasst es zusammen.
+    if (arg && starts_with_word(arg, "status")) {
+      char line[200];
+      const char* pol =
+          (_prefs.advert_loc_policy == ADVERT_LOC_NONE)  ? "none (keine Position)"
+        : (_prefs.advert_loc_policy == ADVERT_LOC_SHARE) ? "gps-live (geteilt)"
+        : (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) ? "fixed (konfiguriert)"
+        : "?";
+      unsigned long iv_ms = computeNextAdvertIntervalMs();
+      const char* reason = "statisch";
+      if (_prefs.advert_loc_policy == ADVERT_LOC_NONE)        reason = "keine Position";
+      else if (_prefs.gps_enabled && !_gps_had_fix_ever)      reason = "noch kein GPS-Fix";
+      else if (_prefs.gps_enabled && _is_moving)              reason = "bewegt";
+      bool periodic_on = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP);
+      uint32_t now_rtc = getRTCClock()->getCurrentTime();
+      bool rtc_ok = (now_rtc > 1500000000UL);
+      int32_t tz = rtc_ok ? localTzOffsetSecs(now_rtc) : 0;
+      char next_s[28];
+      if (!periodic_on)  strcpy(next_s, "off");
+      else if (!rtc_ok)  strcpy(next_s, "on (RTC?)");
+      else {
+        long d_ms = (long)(next_periodic_advert_at - millis());
+        long d_s  = (d_ms < 0) ? 0 : d_ms / 1000;
+        uint32_t loc = now_rtc + (uint32_t)d_s + (uint32_t)tz;
+        snprintf(next_s, sizeof(next_s), "%02u:%02u (in %lds)",
+                 (unsigned)((loc % 86400UL) / 3600UL),
+                 (unsigned)((loc % 3600UL) / 60UL), d_s);
+      }
+      char nl_s[16];
+      if (!(_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY)) strcpy(nl_s, "off");
+      else if (!rtc_ok || next_night_flood_unix == 0)       strcpy(nl_s, "on (?)");
+      else {
+        uint32_t loc = next_night_flood_unix + (uint32_t)tz;
+        snprintf(nl_s, sizeof(nl_s), "%02u:%02u",
+                 (unsigned)((loc % 86400UL) / 3600UL),
+                 (unsigned)((loc % 3600UL) / 60UL));
+      }
+      snprintf(line, sizeof(line),
+               "advert status:\n"
+               "  Position: %s\n"
+               "  Intervall: %lu min (%s)",
+               pol, iv_ms / 60000UL, reason);
+      pushCompanionMessage(line);
+      snprintf(line, sizeof(line),
+               "  periodisch: %s -> %s\n"
+               "  Scope: zero-hop unscoped\n"
+               "  nightly: %s",
+               periodic_on ? "on" : "off", next_s, nl_s);
+      pushCompanionMessage(line);
+      snprintf(line, sizeof(line),
+               "  gps=%s fix_ever=%d moving=%d",
+               _prefs.gps_enabled ? "on" : "off",
+               (int)_gps_had_fix_ever, (int)_is_moving);
+      pushCompanionMessage(line);
       return;
     }
 
