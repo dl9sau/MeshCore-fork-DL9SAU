@@ -10837,7 +10837,7 @@ void MyMesh::updateMotionTracking() {
 #endif
 }
 
-void MyMesh::doPeriodicZeroHopAdvert() {
+void MyMesh::doPeriodicZeroHopAdvert(bool force_unscoped) {
   if (dutyHardReached()) {
     _duty_blocked_count++;
     traceCompanion(TRACE_DUTY, "[duty] periodic blocked (last_h=%lus hard=%lus)",
@@ -10848,8 +10848,10 @@ void MyMesh::doPeriodicZeroHopAdvert() {
   // DL9SAU 2026-07-21 (#3): periodic scope. 0=zero-hop (unscoped, nur direkte
   // Nachbarn -- wie bisher); 1=local / 2=region -> scoped flood (hop-limitiert via
   // 3-Byte-Pfad wie nightly). Scope VOR createSelfAdvert aufloesen -> bei
-  // Fehlschlag kein Paket-Leak.
-  bool scoped = (_prefs.advert_periodic_scope != 0);
+  // Fehlschlag kein Paket-Leak. force_unscoped=true beim manuellen 'advert
+  // zero-hop': ein DIRECT-Paket wird nie repeated -> ein Scope waere dort
+  // bedeutungslos, also senden wir es garantiert unscoped (User-Frage 2026-07-21).
+  bool scoped = (!force_unscoped && _prefs.advert_periodic_scope != 0);
   TransportKey scope;
   if (scoped && !resolveConfiguredAdvertScope(_prefs.advert_periodic_scope, scope)) return;
   mesh::Packet* pkt;
@@ -17567,8 +17569,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     if (!want_flood) {
-      doPeriodicZeroHopAdvert();   // hat eigenen duty-hard-Check + counter
-      pushCompanionMessage("OK - zero-hop advert.");
+      // Explizites 'advert zero-hop' -> immer unscoped (DIRECT-Paket, kein
+      // Repeater handelt auf einem Scope). Der periodic-scope-Config gilt nur
+      // fuer die automatischen Adverts, nicht fuer diesen manuellen Befehl.
+      doPeriodicZeroHopAdvert(/*force_unscoped=*/true);   // eigener duty-hard-Check + counter
+      pushCompanionMessage("OK - zero-hop advert (unscoped).");
       return;
     }
 
@@ -17587,7 +17592,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
     doNightFloodAdvert(&mscope);   // hat eigenen duty-hard-Check + counter
     const char* src = use_nightly
-                        ? (night ? "Nacht-Scope" : "Nacht-Scope (Tag=zero-hop)")
+                        ? (night ? "Nacht-Scope" : "Nacht-Scope, da Tag=zero-hop")
                         : "Tag-Scope";
     char line[160];
     snprintf(line, sizeof(line), "OK - flood advert (%s). Scope siehe [adv]-Trace.", src);

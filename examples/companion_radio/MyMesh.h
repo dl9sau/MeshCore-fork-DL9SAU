@@ -1264,7 +1264,7 @@ private:
                     double* lat_min, double* lat_max,
                     double* lon_min, double* lon_max) const;
   void scheduleNextNightFlood();
-  void doPeriodicZeroHopAdvert();
+  void doPeriodicZeroHopAdvert(bool force_unscoped = false);
   void doNightFloodAdvert(const TransportKey* scope_override = nullptr);
   void updateMotionTracking();
   unsigned long computeNextAdvertIntervalMs() const;

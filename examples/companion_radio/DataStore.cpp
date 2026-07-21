@@ -667,6 +667,17 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.auto_on_when_charging, sizeof(_prefs.auto_on_when_charging));
     if (_prefs.auto_on_when_charging == 0xFF) _prefs.auto_on_when_charging = 1;
 
+    // DL9SAU 2026-07-21 (#3/#4): Advert-Scope (periodic/nightly) + Mindest-
+    // Intervall. APPEND ans Ende (nach auto_on_when_charging). Default 0
+    // (zero-hop/follow/kein Floor) via Pre-Init in begin() -- kurze Alt-Datei
+    // laesst die Felder auf 0. Clamp faengt Altdaten-Muell ab.
+    file.read((uint8_t *)&_prefs.advert_periodic_scope, sizeof(_prefs.advert_periodic_scope));
+    if (_prefs.advert_periodic_scope > 2) _prefs.advert_periodic_scope = 0;
+    file.read((uint8_t *)&_prefs.advert_nightly_scope, sizeof(_prefs.advert_nightly_scope));
+    if (_prefs.advert_nightly_scope > 2) _prefs.advert_nightly_scope = 0;
+    file.read((uint8_t *)&_prefs.advert_periodic_min_min, sizeof(_prefs.advert_periodic_min_min));
+    if (_prefs.advert_periodic_min_min > 1440) _prefs.advert_periodic_min_min = 0;
+
     file.close();
   }
 }
@@ -940,6 +951,14 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     // DL9SAU 2026-07-14: auto_on_when_charging (uint8). APPEND ans Ende.
     file.write((uint8_t *)&_prefs.auto_on_when_charging,
                sizeof(_prefs.auto_on_when_charging));
+    // DL9SAU 2026-07-21 (#3/#4): Advert-Scope + Mindest-Intervall. APPEND ans
+    // Ende, gleiche Reihenfolge wie in loadPrefsInt.
+    file.write((uint8_t *)&_prefs.advert_periodic_scope,
+               sizeof(_prefs.advert_periodic_scope));
+    file.write((uint8_t *)&_prefs.advert_nightly_scope,
+               sizeof(_prefs.advert_nightly_scope));
+    file.write((uint8_t *)&_prefs.advert_periodic_min_min,
+               sizeof(_prefs.advert_periodic_min_min));
   };  // Ende writeBody-Lambda
 
   const char* TMP  = "/new_prefs.tmp";
