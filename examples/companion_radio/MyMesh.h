@@ -328,6 +328,10 @@ struct AdvertPath {
 #define AUTO_ADV_ZEROHOP        0x01
 #define AUTO_ADV_NIGHTLY        0x02
 #define AUTO_ADV_ALL            (AUTO_ADV_ZEROHOP | AUTO_ADV_NIGHTLY)
+// DL9SAU 2026-07-21 (#3 Stufe 2): 'advert periodic moving-only' -> periodischer
+// Advert nur wenn _is_moving (statisch=still). Bit ZUSAETZLICH zu ZEROHOP.
+//   off = ZEROHOP aus; on = ZEROHOP; moving-only = ZEROHOP | MOVING_ONLY.
+#define AUTO_ADV_MOVING_ONLY    0x04
 // 5 min after boot when GPS is off or has already obtained a fix; if GPS is
 // enabled but still searching, wait up to 10 min so that the first advert can
 // already carry a position. When the first fix arrives during the wait, the

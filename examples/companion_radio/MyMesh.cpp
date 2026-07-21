@@ -9744,7 +9744,14 @@ void MyMesh::loop() {
   // Writer mehr -> Key/Prefs auf der fragilen Partition weniger exponiert.
   if ((_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)
       && next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
-    doPeriodicZeroHopAdvert();
+    // DL9SAU 2026-07-21 (#3 Stufe 2): moving-only -> im Stand NICHT senden, nur neu
+    // planen. Bei Bewegungsbeginn zieht updateMotionTracking next_periodic_advert_at
+    // ohnehin auf jetzt vor -> der Advert feuert dann sofort.
+    if (!((_prefs.auto_advert_enabled & AUTO_ADV_MOVING_ONLY) && !_is_moving)) {
+      doPeriodicZeroHopAdvert();
+    } else {
+      traceCompanion(TRACE_ADVERTS, "[adv] periodic skip (moving-only, statisch)");
+    }
     // Jitter 0..120s addieren (User-Wunsch 2026-05-30): bei mehreren
     // Fix-Position-Clients die gleichzeitig booten oder die selbe
     // Cadence-Klasse haben (3h/1h/15min) wuerden ihre Adverts sonst
@@ -17163,8 +17170,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         "    zero-hop = nur single-hop neighbours.\n"
         "    flood = scoped flood-advert wie nightly.");
       pushCompanionMessage(
-        "  advert periodic on|off   (war 'autoadv zerohop')\n"
-        "  advert nightly  on|off   (war 'autoadv nightly')");
+        "  advert periodic on|moving-only|off\n"
+        "    moving-only: nur senden wenn bewegt (still im Stand).\n"
+        "  advert nightly  on|off");
       pushCompanionMessage(
         "  advert role\n"
         "    Status (configured + effective Role)");
@@ -17203,6 +17211,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         reason = (_prefs.advert_loc_policy == ADVERT_LOC_NONE) ? "keine Position" : "statisch";
       }
       bool periodic_on = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP);
+      const char* periodic_mode = !periodic_on ? "off"
+        : (_prefs.auto_advert_enabled & AUTO_ADV_MOVING_ONLY) ? "moving-only" : "on";
       uint32_t now_rtc = getRTCClock()->getCurrentTime();
       bool rtc_ok = (now_rtc > 1500000000UL);
       int32_t tz = rtc_ok ? localTzOffsetSecs(now_rtc) : 0;
@@ -17236,7 +17246,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                "  periodisch: %s -> %s\n"
                "  Scope: zero-hop unscoped\n"
                "  nightly: %s",
-               periodic_on ? "on" : "off", next_s, nl_s);
+               periodic_mode, next_s, nl_s);
       pushCompanionMessage(line);
       snprintf(line, sizeof(line),
                "  gps=%s fix_ever=%d moving=%d",
@@ -17252,17 +17262,34 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg && starts_with_word(arg, "periodic")) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
+      auto pstate = [&]() -> const char* {
+        if (!(_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)) return "off";
+        return (_prefs.auto_advert_enabled & AUTO_ADV_MOVING_ONLY) ? "moving-only" : "on";
+      };
       if (!sub || *sub == 0) {
-        pushCompanionMessage((_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)
-          ? "advert periodic: on  ('advert periodic on|off')"
-          : "advert periodic: off  ('advert periodic on|off')");
+        char l[80];
+        snprintf(l, sizeof(l), "advert periodic: %s  (on|moving-only|off)", pstate());
+        pushCompanionMessage(l);
+        return;
+      }
+      // 3-State. moving-only = alles mit 'm' vorn (on/off starten nicht mit m).
+      if (sub[0] == 'm' || sub[0] == 'M') {
+        _prefs.auto_advert_enabled |= (uint8_t)(AUTO_ADV_ZEROHOP | AUTO_ADV_MOVING_ONLY);
+        next_periodic_advert_at = millis();
+        savePrefs();
+        pushCompanionMessage("OK - advert periodic moving-only (nur wenn bewegt).");
         return;
       }
       int sm = match_on_off(sub);
       if (sm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
-      if (sm < 0)   { pushCompanionMessage("Usage: advert periodic on|off"); return; }
-      if (sm == 1) { _prefs.auto_advert_enabled |= AUTO_ADV_ZEROHOP; next_periodic_advert_at = millis(); }
-      else         { _prefs.auto_advert_enabled &= (uint8_t)~AUTO_ADV_ZEROHOP; }
+      if (sm < 0)   { pushCompanionMessage("Usage: advert periodic on|moving-only|off"); return; }
+      if (sm == 1) {
+        _prefs.auto_advert_enabled |= AUTO_ADV_ZEROHOP;
+        _prefs.auto_advert_enabled &= (uint8_t)~AUTO_ADV_MOVING_ONLY;
+        next_periodic_advert_at = millis();
+      } else {
+        _prefs.auto_advert_enabled &= (uint8_t)~(AUTO_ADV_ZEROHOP | AUTO_ADV_MOVING_ONLY);
+      }
       savePrefs();
       pushCompanionMessage(sm == 1 ? "OK - advert periodic on (sofort)."
                                    : "OK - advert periodic off.");
