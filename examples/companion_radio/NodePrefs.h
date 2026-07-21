@@ -789,8 +789,13 @@ struct NodePrefs {  // persisted to file
   //   advert_nightly_scope:  0=follow    (Default), 1=local, 2=region
   uint8_t        advert_periodic_scope;
   uint8_t        advert_nightly_scope;
-  // DL9SAU 2026-07-21 (#4): Mindest-Intervall (Floor) fuer den periodischen Advert
-  // in MINUTEN. 0 = aus (Matrix-Default 15/60/180 min gilt). Sonst: das effektive
-  // Intervall ist max(Matrix, min_min). APPEND, Default 0 vor loadPrefs.
-  uint16_t       advert_periodic_min_min;
+  // DL9SAU 2026-07-21 (#4, Redesign): periodisches Advert-Intervall der
+  // STATIONAEREN Bake in GANZEN STUNDEN. 0 = Default (1h wenn Position in der
+  // Bake, 3h ohne). N (1..24) = N h fuer den Positions-Fall; der "ohne
+  // Position"-Fall (NONE / noch kein Fix) nimmt max(3h, N). Bewegung ist FIX
+  // 15min (nicht konfigurierbar). APPEND, Default 0 vor loadPrefs.
+  uint16_t       advert_periodic_interval_h;
+  // DL9SAU 2026-07-21: Nightly-Flood alle N NAECHTE. 0/1 = jede Nacht (Default),
+  // N = alle N Naechte. APPEND ans Ende, Default 0 vor loadPrefs.
+  uint8_t        advert_nightly_interval_d;
 };

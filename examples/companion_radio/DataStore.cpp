@@ -675,8 +675,11 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     if (_prefs.advert_periodic_scope > 2) _prefs.advert_periodic_scope = 0;
     file.read((uint8_t *)&_prefs.advert_nightly_scope, sizeof(_prefs.advert_nightly_scope));
     if (_prefs.advert_nightly_scope > 3) _prefs.advert_nightly_scope = 0;  // 3=named
-    file.read((uint8_t *)&_prefs.advert_periodic_min_min, sizeof(_prefs.advert_periodic_min_min));
-    if (_prefs.advert_periodic_min_min > 1440) _prefs.advert_periodic_min_min = 0;
+    file.read((uint8_t *)&_prefs.advert_periodic_interval_h, sizeof(_prefs.advert_periodic_interval_h));
+    if (_prefs.advert_periodic_interval_h > 24) _prefs.advert_periodic_interval_h = 0;  // Stunden 1..24
+    // DL9SAU 2026-07-21: nightly-Intervall (Naechte). APPEND ans Ende.
+    file.read((uint8_t *)&_prefs.advert_nightly_interval_d, sizeof(_prefs.advert_nightly_interval_d));
+    if (_prefs.advert_nightly_interval_d > 30) _prefs.advert_nightly_interval_d = 0;
 
     file.close();
   }
@@ -957,8 +960,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
                sizeof(_prefs.advert_periodic_scope));
     file.write((uint8_t *)&_prefs.advert_nightly_scope,
                sizeof(_prefs.advert_nightly_scope));
-    file.write((uint8_t *)&_prefs.advert_periodic_min_min,
-               sizeof(_prefs.advert_periodic_min_min));
+    file.write((uint8_t *)&_prefs.advert_periodic_interval_h,
+               sizeof(_prefs.advert_periodic_interval_h));
+    file.write((uint8_t *)&_prefs.advert_nightly_interval_d,
+               sizeof(_prefs.advert_nightly_interval_d));
   };  // Ende writeBody-Lambda
 
   const char* TMP  = "/new_prefs.tmp";

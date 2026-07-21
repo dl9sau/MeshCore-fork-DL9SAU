@@ -2755,12 +2755,14 @@ void MyMesh::printAdvertHelp() {
     "advert periodic <on|moving-only|off>\n"
     "  moving-only: nur wenn bewegt (still im Stand).\n"
     "advert periodic scope <zero-hop|local|region>\n"
-    "advert periodic interval <N[h] | off>  (Mindest-Abstand)");
+    "advert periodic interval <1..24 | off>  (Stunden, stationaer;\n"
+    "  ohne Position max(3h,N); Bewegung bleibt fix 15min)");
   pushCompanionMessage(
     "advert nightly <on|off>\n"
     "advert nightly scope <follow|local|region|<scope>>\n"
     "  follow = Scope-Kaskade wie oben. <scope> = fester\n"
-    "  Scope-Name (# optional), z.B. de-bebb (loest 'scope advert' ab).");
+    "  Scope-Name (# optional), z.B. de-bebb (loest 'scope advert' ab).\n"
+    "advert nightly interval <1..30>  (alle N Naechte, Default 1)");
   pushCompanionMessage(
     "advert role [auto | fixed <chat|repeater|sensor|room>]\n"
     "  auto folgt client_repeat + repeater_profile.");
@@ -7118,7 +7120,8 @@ void MyMesh::begin(bool has_display) {
   // Default==0 -> kurze Alt-Datei laesst sie auf 0). 0=zero-hop/follow.
   _prefs.advert_periodic_scope = 0;   // zero-hop
   _prefs.advert_nightly_scope  = 0;   // follow
-  _prefs.advert_periodic_min_min = 0; // 0 = Matrix-Default (kein Floor)
+  _prefs.advert_periodic_interval_h = 0; // 0 = Default (1h mit Pos / 3h ohne)
+  _prefs.advert_nightly_interval_d  = 0; // 0/1 = jede Nacht
 
   // load persisted prefs
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
@@ -10636,6 +10639,18 @@ void MyMesh::scheduleNextNightFlood() {
     window_end   += 86400UL;
   }
 
+  // DL9SAU 2026-07-21: Nightly nur alle N Naechte. Nach der obigen "naechste
+  // Nacht"-Basis um (N-1) Tage weiterschieben. 0/1 = jede Nacht (Default).
+  // Da nach JEDEM Flood neu terminiert wird, liegt der naechste Flood dann
+  // N Naechte spaeter; Boot terminiert entsprechend N Naechte ab jetzt.
+  {
+    uint8_t nd = _prefs.advert_nightly_interval_d;
+    if (nd > 1) {
+      window_start += (uint32_t)(nd - 1) * 86400UL;
+      window_end   += (uint32_t)(nd - 1) * 86400UL;
+    }
+  }
+
   uint32_t span = window_end - window_start;
   uint32_t pick_local = window_start + getRNG()->nextInt(0, span);
   // Rueckkonvertierung lokal->UTC mit gleichem Offset wie oben. Edge-Case
@@ -10673,27 +10688,28 @@ void MyMesh::scheduleNextNightFlood() {
 // Voraussetzung fuer moving: GPS an + hatte Fix (Bewegungserkennung braucht GPS);
 // die Position bleibt bei NONE trotzdem ungeteilt.
 unsigned long MyMesh::computeNextAdvertIntervalMs() const {
-  unsigned long base;
-  // PREFS: feste konfigurierte Position -> immer 1h, Motion/GPS irrelevant.
-  if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
-    base = CR_ADVERT_INT_STATIC_MS;
+  // DL9SAU 2026-07-21 (#4-Redesign): das STATIONAERE Intervall ist in ganzen
+  // Stunden konfigurierbar (advert_periodic_interval_h, Default 1h). Zwei
+  // Faelle:
+  //   - MIT Position in der Bake (SHARE mit Fix, oder PREFS feste Position)
+  //     -> n_h Stunden.
+  //   - OHNE Position (NONE, oder noch kein Fix) -> max(3h, n_h) -- die
+  //     info-aermere Bake soll nie DICHTER beaken als die Positions-Bake.
+  // Bewegung ist FIX 15min (nicht konfigurierbar); wer das nicht will, stellt
+  // die Bewegungserkennung ab ('advert periodic moving-only'/GPS).
+  unsigned int n_h = (_prefs.advert_periodic_interval_h > 0)
+                       ? _prefs.advert_periodic_interval_h : 1;
+  unsigned long with_ms    = (unsigned long)n_h * 3600000UL;                 // mit Position
+  unsigned long without_ms = (unsigned long)(n_h > 3 ? n_h : 3) * 3600000UL; // ohne Position
+
+  // PREFS: feste konfigurierte Position IST in der Bake -> with, Motion egal.
+  if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) return with_ms;
 #if ENV_INCLUDE_GPS == 1
-  } else if (_prefs.gps_enabled && !_gps_had_fix_ever) {
-    base = CR_ADVERT_INT_NO_LOC_MS;                 // noch kein Fix -> langsam
-  } else if (_prefs.gps_enabled && _is_moving) {
-    base = CR_ADVERT_INT_MOVING_MS;                 // SHARE=Frische, NONE=Praesenz
+  if (_prefs.gps_enabled && !_gps_had_fix_ever) return without_ms;  // kein Fix -> ohne Pos
+  if (_prefs.gps_enabled && _is_moving)         return CR_ADVERT_INT_MOVING_MS;  // fix 15min
 #endif
-  } else {
-    // static bzw. GPS aus: SHARE -> 1h, NONE -> 3h.
-    base = (_prefs.advert_loc_policy == ADVERT_LOC_NONE) ? CR_ADVERT_INT_NO_LOC_MS
-                                                          : CR_ADVERT_INT_STATIC_MS;
-  }
-  // DL9SAU 2026-07-21 (#4): Mindest-Intervall (Floor). Effektiv max(Matrix, min).
-  if (_prefs.advert_periodic_min_min > 0) {
-    unsigned long floor_ms = (unsigned long)_prefs.advert_periodic_min_min * 60000UL;
-    if (floor_ms > base) base = floor_ms;
-  }
-  return base;
+  // stationaer bzw. GPS aus: SHARE -> mit Position; NONE -> ohne.
+  return (_prefs.advert_loc_policy == ADVERT_LOC_NONE) ? without_ms : with_ms;
 }
 
 void MyMesh::updateMotionTracking() {
@@ -10739,9 +10755,13 @@ void MyMesh::updateMotionTracking() {
   // -> node_lat (und damit Advert-Scope, first-fix-Trace, sensor-Anzeige,
   // naechster savePrefs) behaelt die alte PREFS-Position. Wir spiegeln hier
   // direkt aus dem gueltigen loc-Fix -- diese Funktion laeuft jeden Loop
-  // solange GPS wach + isValid. Nur in Nicht-'normal'-Profil: im normal-
-  // Profil ist die fixe Position autoritativ (GPS dient nur Time-Sync).
-  if (_prefs.repeater_profile != 1 && isValidGpsCoord(cur_lat, cur_lon)) {
+  // solange GPS wach + isValid.
+  // Guard = ADVERT_LOC_SHARE (User-Entscheid 2026-07-21): Position wird NUR
+  // erfasst/persistiert, wenn sie auch in die Bake soll. Bei NONE bleibt eine
+  // 0,0-Position unangetastet (Repeater der keine Position teilt -> keine
+  // ungewollte Standort-Erfassung); bei PREFS ist die fixe Position autoritativ
+  // (der Advert nutzt _adv_prefs_*), also NICHT mit Live-GPS ueberschreiben.
+  if (_prefs.advert_loc_policy == ADVERT_LOC_SHARE && isValidGpsCoord(cur_lat, cur_lon)) {
     sensors.node_lat = cur_lat;
     sensors.node_lon = cur_lon;
     sensors.node_altitude = ((double)loc->getAltitude()) / 1000.0;
@@ -12269,7 +12289,8 @@ void MyMesh::backupSaveToSerial() {
   kv_uint ("advert_loc_policy",    _prefs.advert_loc_policy);
   kv_uint ("advert_periodic_scope",_prefs.advert_periodic_scope);
   kv_uint ("advert_nightly_scope", _prefs.advert_nightly_scope);
-  kv_uint ("advert_periodic_min_min", _prefs.advert_periodic_min_min);
+  kv_uint ("advert_periodic_interval_h", _prefs.advert_periodic_interval_h);
+  kv_uint ("advert_nightly_interval_d", _prefs.advert_nightly_interval_d);
   kv_float("airtime_factor",       _prefs.airtime_factor, 3);
   kv_uint ("rx_boosted_gain",      _prefs.rx_boosted_gain);
   kv_uint ("manual_add_contacts",  _prefs.manual_add_contacts);
@@ -13430,7 +13451,8 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
         _prefs.advert_loc_policy     = v; _br_applied++; return; }
       if (strcmp(key, "advert_periodic_scope") == 0) { uint8_t v=(uint8_t)as_uint(); if(v>2)v=0; _prefs.advert_periodic_scope=v; _br_applied++; return; }
       if (strcmp(key, "advert_nightly_scope") == 0)  { uint8_t v=(uint8_t)as_uint(); if(v>3)v=0; _prefs.advert_nightly_scope=v;  _br_applied++; return; }  // 3=named (bake)
-      if (strcmp(key, "advert_periodic_min_min") == 0){ uint32_t v=as_uint(); if(v>1440)v=1440; _prefs.advert_periodic_min_min=(uint16_t)v; _br_applied++; return; }
+      if (strcmp(key, "advert_periodic_interval_h") == 0){ uint32_t v=as_uint(); if(v>24)v=0; _prefs.advert_periodic_interval_h=(uint16_t)v; _br_applied++; return; }
+      if (strcmp(key, "advert_nightly_interval_d") == 0){ uint32_t v=as_uint(); if(v>30)v=0; _prefs.advert_nightly_interval_d=(uint8_t)v; _br_applied++; return; }
       if (strcmp(key, "airtime_factor") == 0)        { _prefs.airtime_factor        = as_float();        _br_applied++; return; }
       if (strcmp(key, "rx_boosted_gain") == 0)       { _prefs.rx_boosted_gain       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "manual_add_contacts") == 0)   { _prefs.manual_add_contacts   = (uint8_t)as_uint(); _br_applied++; return; }
@@ -17346,19 +17368,22 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                  (unsigned)((loc % 86400UL) / 3600UL),
                  (unsigned)((loc % 3600UL) / 60UL));
       }
-      char floorbuf[24]; floorbuf[0] = 0;
-      if (_prefs.advert_periodic_min_min > 0)
-        snprintf(floorbuf, sizeof(floorbuf), " [Floor %umin]", (unsigned)_prefs.advert_periodic_min_min);
+      char cfgbuf[32]; cfgbuf[0] = 0;
+      if (_prefs.advert_periodic_interval_h > 0)
+        snprintf(cfgbuf, sizeof(cfgbuf), " [cfg %uh]", (unsigned)_prefs.advert_periodic_interval_h);
       snprintf(line, sizeof(line),
                "advert status:\n"
                "  Position: %s\n"
                "  Intervall: %lu min (%s)%s",
-               pol, iv_ms / 60000UL, reason, floorbuf);
+               pol, iv_ms / 60000UL, reason, cfgbuf);
       pushCompanionMessage(line);
+      char ndbuf[20]; ndbuf[0] = 0;
+      if (_prefs.advert_nightly_interval_d > 1)
+        snprintf(ndbuf, sizeof(ndbuf), " alle %uN", (unsigned)_prefs.advert_nightly_interval_d);
       snprintf(line, sizeof(line),
                "  periodisch: %s (scope %s) -> %s\n"
-               "  nightly: %s (scope %s)",
-               periodic_mode, pscope, next_s, nl_s, nscope);
+               "  nightly: %s (scope %s)%s",
+               periodic_mode, pscope, next_s, nl_s, nscope, ndbuf);
       pushCompanionMessage(line);
       snprintf(line, sizeof(line),
                "  gps=%s fix_ever=%d moving=%d",
@@ -17394,29 +17419,41 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(l, sizeof(l), "OK - advert periodic scope %s.", scn());
         pushCompanionMessage(l); return;
       }
-      // advert periodic interval <N[m|h] | off>  -- Mindest-Intervall (Floor)
+      // advert periodic interval <N | off>  -- STATIONAERES Intervall in STUNDEN.
+      // Bewegung bleibt fix 15min. Ohne Position (NONE/kein Fix) = max(3h, N).
       if (sub && starts_with_word_abbrev(sub, "interval", 2)) {
         const char* iv = strchr(sub, ' ');
         if (iv) { while (*iv == ' ') iv++; }
-        char l[110];
+        char l[128];
         if (!iv || *iv == 0) {
-          if (_prefs.advert_periodic_min_min == 0)
-            snprintf(l, sizeof(l), "advert periodic interval: aus (Matrix 15/60/180min)");
+          unsigned n = (_prefs.advert_periodic_interval_h > 0)
+                         ? _prefs.advert_periodic_interval_h : 1;
+          unsigned without = n > 3 ? n : 3;
+          if (_prefs.advert_periodic_interval_h == 0)
+            snprintf(l, sizeof(l),
+                     "advert periodic interval: %uh (Default; ohne Position %uh). "
+                     "Bewegung fix 15min.", n, without);
           else
-            snprintf(l, sizeof(l), "advert periodic interval: min %umin", (unsigned)_prefs.advert_periodic_min_min);
+            snprintf(l, sizeof(l),
+                     "advert periodic interval: %uh (ohne Position %uh). "
+                     "Bewegung fix 15min.", n, without);
           pushCompanionMessage(l); return;
         }
-        long v = atol(iv);
-        if (iv[0]=='o' || iv[0]=='O') v = 0;            // 'off'
-        else if (strchr(iv,'h') || strchr(iv,'H')) v *= 60;  // Stunden-Suffix
-        if (v <= 0) {
-          _prefs.advert_periodic_min_min = 0; savePrefs();
-          pushCompanionMessage("OK - advert periodic interval aus (Matrix-Default).");
+        if (iv[0]=='o' || iv[0]=='O') {                 // 'off' -> Default
+          _prefs.advert_periodic_interval_h = 0; savePrefs();
+          pushCompanionMessage("OK - advert periodic interval: Default (1h mit Pos / 3h ohne).");
           return;
         }
-        if (v > 1440) v = 1440;
-        _prefs.advert_periodic_min_min = (uint16_t)v; savePrefs();
-        snprintf(l, sizeof(l), "OK - advert periodic interval: mind. %ldmin.", v);
+        long v = atol(iv);
+        if (v < 1 || v > 24) {
+          pushCompanionMessage("Usage: advert periodic interval <1..24 (Stunden) | off>");
+          return;
+        }
+        _prefs.advert_periodic_interval_h = (uint16_t)v; savePrefs();
+        unsigned without = (v > 3) ? (unsigned)v : 3;
+        snprintf(l, sizeof(l),
+                 "OK - advert periodic interval: %ldh (ohne Position %uh). "
+                 "Bewegung fix 15min.", v, without);
         pushCompanionMessage(l); return;
       }
       auto pstate = [&]() -> const char* {
@@ -17514,6 +17551,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         _prefs.advert_nightly_scope = ns; savePrefs();
         snprintf(l, sizeof(l), "OK - advert nightly scope %s.", scn());
         pushCompanionMessage(l); return;
+      }
+      // advert nightly interval <N>  -- Flood alle N NAECHTE (Default 1 = jede).
+      if (sub && starts_with_word_abbrev(sub, "interval", 2)) {
+        const char* iv = strchr(sub, ' ');
+        if (iv) { while (*iv == ' ') iv++; }
+        char l[100];
+        if (!iv || *iv == 0) {
+          uint8_t nd = _prefs.advert_nightly_interval_d > 0 ? _prefs.advert_nightly_interval_d : 1;
+          if (nd == 1) snprintf(l, sizeof(l), "advert nightly interval: jede Nacht  (<N Naechte>)");
+          else         snprintf(l, sizeof(l), "advert nightly interval: alle %u Naechte", (unsigned)nd);
+          pushCompanionMessage(l); return;
+        }
+        long v = atol(iv);
+        if (v < 1 || v > 30) {
+          pushCompanionMessage("Usage: advert nightly interval <1..30 (Naechte)>");
+          return;
+        }
+        _prefs.advert_nightly_interval_d = (uint8_t)v;
+        next_night_flood_unix = 0;   // reschedule mit neuem Intervall
+        savePrefs();
+        if (v == 1) pushCompanionMessage("OK - advert nightly interval: jede Nacht.");
+        else { snprintf(l, sizeof(l), "OK - advert nightly interval: alle %ld Naechte.", v);
+               pushCompanionMessage(l); }
+        return;
       }
       if (!sub || *sub == 0) {
         pushCompanionMessage((_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY)
@@ -19589,6 +19650,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                _prefs.advert_periodic_scope == 0 ? " [default]" : " (default: zero-hop)");
       add_line(tmp);
       if (_prefs.advert_periodic_scope != 0) non_default_count++;
+    }
+    // advert periodic interval (Stunden, stationaer; 0=Default 1h/3h)
+    if (show_all || _prefs.advert_periodic_interval_h != 0) {
+      if (_prefs.advert_periodic_interval_h == 0)
+        snprintf(tmp, sizeof(tmp), "  advert_periodic_interval_h = default (1h/3h) [default]");
+      else
+        snprintf(tmp, sizeof(tmp), "  advert_periodic_interval_h = %uh (default: 1h/3h)",
+                 (unsigned)_prefs.advert_periodic_interval_h);
+      add_line(tmp);
+      if (_prefs.advert_periodic_interval_h != 0) non_default_count++;
+    }
+    // advert nightly interval (Naechte; 0/1=jede Nacht)
+    if (show_all || _prefs.advert_nightly_interval_d > 1) {
+      uint8_t nd = _prefs.advert_nightly_interval_d > 0 ? _prefs.advert_nightly_interval_d : 1;
+      snprintf(tmp, sizeof(tmp), "  advert_nightly_interval_d = %uN%s", (unsigned)nd,
+               nd == 1 ? " (jede Nacht) [default]" : " (default: 1)");
+      add_line(tmp);
+      if (_prefs.advert_nightly_interval_d > 1) non_default_count++;
     }
     // override scope
     bool ovr_set = (_prefs.override_expiry != 0);
