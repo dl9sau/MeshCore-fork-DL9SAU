@@ -17455,10 +17455,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             snprintf(l, sizeof(l), "advert nightly scope: %s  (follow|local|region|<scope>)", scn());
           pushCompanionMessage(l); return;
         }
+        // '#' VOR dem Keyword-Match strippen -- '#local'==='local'===Modus 1,
+        // '#region'==='region'===Modus 2 (gleicher Key, keine Modus-3-Dublette).
+        // Nur echte andere Namen (#de-be, stadtteil) fallen in den named-Pfad.
+        const char* kw = sv;
+        if (*kw == '#') kw++;
         uint8_t ns;
-        if      (starts_with_word_abbrev(sv, "follow", 1)) ns = 0;
-        else if (starts_with_word_abbrev(sv, "local",  1)) ns = 1;
-        else if (starts_with_word_abbrev(sv, "region", 1)) ns = 2;
+        if      (starts_with_word_abbrev(kw, "follow", 1)) ns = 0;
+        else if (starts_with_word_abbrev(kw, "local",  1)) ns = 1;
+        else if (starts_with_word_abbrev(kw, "region", 1)) ns = 2;
         else {
           // Beliebiger Scope-Name (Nightly-Bake). '#' ist optional -- OHNE
           // fuehrendes '#' extrahieren, damit beim Hashen (das '#' addiert)
