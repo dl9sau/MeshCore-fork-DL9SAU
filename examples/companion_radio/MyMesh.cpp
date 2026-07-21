@@ -2745,8 +2745,9 @@ void MyMesh::printAdvertHelp() {
     "advert [zero-hop | flood]: einmaligen Advert JETZT senden.\n"
     "  ohne Arg = zero-hop. Aliase: z=zero-hop, f=flood.");
   pushCompanionMessage(
-    "  'flood' nutzt die Scope-Kaskade wie 'nightly follow'\n"
-    "  (override > default > geo). Quelle steht in der Antwort.");
+    "  'flood' floodet immer (nie zero-hop). Scope: nachts (23-5)\n"
+    "  die nightly-Config, tags die periodic-Config -- ausser diese\n"
+    "  ist zero-hop, dann ebenfalls nightly. Scope in [adv]-Trace.");
   pushCompanionMessage(
     "advert status: Uebersicht -- Position, Intervall + Grund,\n"
     "  next-ETA, Scopes, nightly.");
@@ -10558,6 +10559,33 @@ bool MyMesh::resolveConfiguredAdvertScope(uint8_t mode, TransportKey& out_key) c
   return false;
 }
 
+// DL9SAU 2026-07-21: liegt die aktuelle lokale Zeit im Nightly-Flood-Fenster
+// [23:00, 05:00)? (RTC unbekannt -> als Tag behandeln.) Gleiche Grenzen wie
+// scheduleNextNightFlood, nur als Membership-Test statt Slot-Wuerfeln.
+bool MyMesh::isNowInNightWindow() const {
+  uint32_t now = getRTCClock()->getCurrentTime();
+  if (now < 1500000000UL) return false;   // RTC unset -> Tag
+  uint32_t local_now = now + (uint32_t)localTzOffsetSecs(now);
+  uint32_t hour = (local_now % 86400UL) / 3600UL;
+  return (hour >= (uint32_t)CR_NIGHT_FLOOD_START_HOUR_LOCAL)
+      || (hour <  (uint32_t)CR_NIGHT_FLOOD_END_HOUR_LOCAL);
+}
+
+// DL9SAU 2026-07-21: Scope-Wahl fuer manuelles 'advert flood'. Floodet IMMER
+// (nie zero-hop -- sonst haette der Nutzer 'advert zero-hop' gesagt):
+//   Nacht (23-5)                 -> nightly-Config.
+//   Tag + periodic=local/region  -> periodic-Config (Tag-Scope).
+//   Tag + periodic=zero-hop      -> nightly-Config (Flood erzwingt Scope).
+bool MyMesh::resolveManualFloodScope(TransportKey& out_key) const {
+  bool use_nightly = isNowInNightWindow() || (_prefs.advert_periodic_scope == 0);
+  if (use_nightly) {
+    return (_prefs.advert_nightly_scope == 0)
+             ? chooseNightFloodScope(out_key)
+             : resolveConfiguredAdvertScope(_prefs.advert_nightly_scope, out_key);
+  }
+  return resolveConfiguredAdvertScope(_prefs.advert_periodic_scope, out_key);
+}
+
 void MyMesh::scheduleNextNightFlood() {
   uint32_t now = getRTCClock()->getCurrentTime();
   if (now < 1500000000UL) {   // RTC clearly unset (pre-2017): skip
@@ -10854,7 +10882,7 @@ void MyMesh::doPeriodicZeroHopAdvert() {
   }
 }
 
-void MyMesh::doNightFloodAdvert() {
+void MyMesh::doNightFloodAdvert(const TransportKey* scope_override) {
   if (dutyHardReached()) {
     _duty_blocked_count++;
     traceCompanion(TRACE_DUTY, "[duty] nightly blocked (last_h=%lus hard=%lus)",
@@ -10863,14 +10891,19 @@ void MyMesh::doNightFloodAdvert() {
   }
   if (_tx_blocked) return;  // Wunschliste 82: stille Skip im Cron-Pfad
   // DL9SAU 2026-07-21 (#3): nightly scope. follow(0)=Kaskade wie bisher;
-  // local(1)/region(2)=fest konfiguriert.
+  // local(1)/region(2)=fest konfiguriert. scope_override (manuelles
+  // 'advert flood', tag/nacht-aufgeloest) hat Vorrang vor der nightly-Config.
   TransportKey scope;
-  bool got = (_prefs.advert_nightly_scope == 0)
-               ? chooseNightFloodScope(scope)
-               : resolveConfiguredAdvertScope(_prefs.advert_nightly_scope, scope);
-  if (!got) {
-    MESH_DEBUG_PRINTLN("night-flood: no scope available, skipping");
-    return;
+  if (scope_override) {
+    scope = *scope_override;
+  } else {
+    bool got = (_prefs.advert_nightly_scope == 0)
+                 ? chooseNightFloodScope(scope)
+                 : resolveConfiguredAdvertScope(_prefs.advert_nightly_scope, scope);
+    if (!got) {
+      MESH_DEBUG_PRINTLN("night-flood: no scope available, skipping");
+      return;
+    }
   }
   mesh::Packet* pkt;
   if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
@@ -17527,54 +17560,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       return;
     }
 
-    // Flood: Scope-Quelle vorab bestimmen fuer die Antwort, dann senden.
-    // Reihenfolge muss zu chooseNightFloodScope passen:
-    //   override (persistent) > bake > default > geo
-    char src_label[64] = "(none - Keine Scopes verfuegbar)";
-    bool have_scope = false;
-    uint32_t now = getRTCClock()->getCurrentTime();
-    // 1) override
-    if (_prefs.override_expiry != 0 && now < _prefs.override_expiry) {
-      snprintf(src_label, sizeof(src_label), "override = #%s",
-               _prefs.override_scope_name[0] ? _prefs.override_scope_name : "?");
-      have_scope = true;
+    // Flood: 'advert flood' floodet IMMER -- nie zero-hop (sonst haette der
+    // Nutzer 'advert zero-hop' gesagt). Scope tag/nacht-abhaengig aufloesen
+    // (siehe resolveManualFloodScope):
+    //   Nacht (23-5)                -> nightly-Config.
+    //   Tag + periodic=local/region -> periodic-Config (Tag-Scope).
+    //   Tag + periodic=zero-hop     -> nightly-Config (Flood erzwingt Scope).
+    bool night = isNowInNightWindow();
+    bool use_nightly = night || (_prefs.advert_periodic_scope == 0);
+    TransportKey mscope;
+    if (!resolveManualFloodScope(mscope)) {
+      pushCompanionMessage("advert flood: kein Scope verfuegbar.");
+      return;
     }
-    // 2) bake
-    if (!have_scope) {
-      bool bake_set = false;
-      for (size_t k = 0; k < sizeof(_prefs.bake_scope_key); k++) {
-        if (_prefs.bake_scope_key[k] != 0) { bake_set = true; break; }
-      }
-      if (bake_set) {
-        snprintf(src_label, sizeof(src_label), "advert-scope = #%s",
-                 _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
-        have_scope = true;
-      }
-    }
-    // 3) configured default
-    if (!have_scope) {
-      bool default_set = false;
-      for (size_t k = 0; k < sizeof(_prefs.default_scope_key); k++) {
-        if (_prefs.default_scope_key[k] != 0) { default_set = true; break; }
-      }
-      if (default_set) {
-        snprintf(src_label, sizeof(src_label), "default = #%s",
-                 _prefs.default_scope_name[0] ? _prefs.default_scope_name : "?");
-        have_scope = true;
-      }
-    }
-    // 4) geo fallback
-    if (!have_scope) {
-      TransportKey k;
-      if (chooseGeoFallbackScope(k)) {
-        snprintf(src_label, sizeof(src_label), "geo-fallback");
-        have_scope = true;
-      }
-    }
-
-    doNightFloodAdvert();   // hat eigenen duty-hard-Check + counter
+    doNightFloodAdvert(&mscope);   // hat eigenen duty-hard-Check + counter
+    const char* src = use_nightly
+                        ? (night ? "Nacht-Scope" : "Nacht-Scope (Tag=zero-hop)")
+                        : "Tag-Scope";
     char line[160];
-    snprintf(line, sizeof(line), "OK - flood advert.  scope: %s", src_label);
+    snprintf(line, sizeof(line), "OK - flood advert (%s). Scope siehe [adv]-Trace.", src);
     pushCompanionMessage(line);
     return;
   }

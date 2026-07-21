@@ -1194,6 +1194,13 @@ private:
   // (#local Build-in-Key), 2=region (geo-aufgeloest, Fallback #local). mode 0
   // (zero-hop/follow) behandelt der Aufrufer.
   bool resolveConfiguredAdvertScope(uint8_t mode, TransportKey& out_key) const;
+  // DL9SAU 2026-07-21: liegt die aktuelle lokale Zeit im Nightly-Flood-Fenster
+  // [23:00, 05:00)? Grundlage der Tag/Nacht-Scope-Wahl fuer 'advert flood'.
+  bool isNowInNightWindow() const;
+  // Scope-Wahl fuer manuelles 'advert flood' (floodet immer, nie zero-hop):
+  // Nacht -> nightly-Config; Tag+periodic-scoped -> periodic-Config;
+  // Tag+periodic-zero-hop -> nightly-Config.
+  bool resolveManualFloodScope(TransportKey& out_key) const;
   // "Default-oder-Geo" Helper fuer Sende-Pfade. Wenn
   // _prefs.scope_advert_auto=prefer UND die ortliche Geo-Region eine andere
   // ist als das Default-Scope, gewinnt Geo. Sonst Default. Returns
@@ -1257,7 +1264,7 @@ private:
                     double* lon_min, double* lon_max) const;
   void scheduleNextNightFlood();
   void doPeriodicZeroHopAdvert();
-  void doNightFloodAdvert();
+  void doNightFloodAdvert(const TransportKey* scope_override = nullptr);
   void updateMotionTracking();
   unsigned long computeNextAdvertIntervalMs() const;
   void manageGpsPower();
