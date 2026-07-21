@@ -10729,6 +10729,24 @@ void MyMesh::updateMotionTracking() {
     _gps_last_fix_at_millis = (now == 0) ? 1 : now;
   }
 
+  double cur_lat = ((double)loc->getLatitude()) / 1000000.0;
+  double cur_lon = ((double)loc->getLongitude()) / 1000000.0;
+
+  // DL9SAU 2026-07-21: Live-Fix SOFORT nach sensors.node_lat/lon/alt spiegeln.
+  // EnvironmentSensorManager::loop() aktualisiert node_lat nur GEDROSSELT
+  // (next_gps_update-Intervall, fuer Always-On-GPS gedacht). Im aggressiven
+  // Companion-Power-Cycle endet der GPS-Wach-Slot oft BEVOR dieser Tick greift
+  // -> node_lat (und damit Advert-Scope, first-fix-Trace, sensor-Anzeige,
+  // naechster savePrefs) behaelt die alte PREFS-Position. Wir spiegeln hier
+  // direkt aus dem gueltigen loc-Fix -- diese Funktion laeuft jeden Loop
+  // solange GPS wach + isValid. Nur in Nicht-'normal'-Profil: im normal-
+  // Profil ist die fixe Position autoritativ (GPS dient nur Time-Sync).
+  if (_prefs.repeater_profile != 1 && isValidGpsCoord(cur_lat, cur_lon)) {
+    sensors.node_lat = cur_lat;
+    sensors.node_lon = cur_lon;
+    sensors.node_altitude = ((double)loc->getAltitude()) / 1000.0;
+  }
+
   if (!_gps_had_fix_ever) {
     _gps_had_fix_ever = true;
     // Reise-Fix 2026-06-08: GPS-Marker setzen damit clock-Display auch
@@ -10765,8 +10783,6 @@ void MyMesh::updateMotionTracking() {
     }
   }
 
-  double cur_lat = ((double)loc->getLatitude()) / 1000000.0;
-  double cur_lon = ((double)loc->getLongitude()) / 1000000.0;
   unsigned long now = millis();
 
   // First fix this session OR a fresh motion-window tick (every 10 min) —
