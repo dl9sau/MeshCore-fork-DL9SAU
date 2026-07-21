@@ -10964,7 +10964,11 @@ void MyMesh::doNightFloodAdvert(const TransportKey* scope_override) {
         }
       }
     }
-    traceCompanion(TRACE_ADVERTS, "[adv] nightly-flood scope=#%s (%s) code=%04X",
+    // scope_override gesetzt = manuelles 'advert flood' (tag/nacht-aufgeloest),
+    // sonst der geplante Nightly-Slot. Label entsprechend, damit ein Tag-Flood
+    // nicht faelschlich 'nightly-flood' heisst.
+    traceCompanion(TRACE_ADVERTS, "[adv] %s scope=#%s (%s) code=%04X",
+                   scope_override ? "flood" : "nightly-flood",
                    nm[0] ? nm : "?", src, (unsigned)codes[0]);
   }
 }
