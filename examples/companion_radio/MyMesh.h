@@ -1190,8 +1190,9 @@ private:
   void reevaluateRepeaterBbox();
   bool chooseGeoFallbackScope(TransportKey& out_key) const;
   bool chooseNightFloodScope(TransportKey& out_key) const;
-  // DL9SAU 2026-07-21 (#3): konfigurierten Advert-Scope aufloesen. mode 1=local
-  // (#local Build-in-Key), 2=region (geo-aufgeloest, Fallback #local). mode 0
+  // DL9SAU 2026-07-21 (#3): konfigurierten Advert-Scope aufloesen. mode 1=#local
+  // (single-hop), 2=#region (Hop-Cap flood_max_scope_region). Beides LITERALE
+  // Build-in-Scopes -- NICHT die per-GPS aufgeloeste Geo-Region (#geo). mode 0
   // (zero-hop/follow) behandelt der Aufrufer.
   bool resolveConfiguredAdvertScope(uint8_t mode, TransportKey& out_key) const;
   // DL9SAU 2026-07-21: liegt die aktuelle lokale Zeit im Nightly-Flood-Fenster

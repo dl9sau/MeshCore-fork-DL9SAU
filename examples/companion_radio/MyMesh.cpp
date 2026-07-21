@@ -10547,11 +10547,13 @@ bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
 }
 
 bool MyMesh::resolveConfiguredAdvertScope(uint8_t mode, TransportKey& out_key) const {
-  if (mode == 2) {                          // region: geo-aufgeloest
-    if (chooseGeoFallbackScope(out_key)) return true;
-    // keine Geo-Region gematcht -> Fallback #local (unten).
-  }
-  int idx = dl9sau_find_region_index("local");   // mode 1 ODER region-Fallback
+  // mode 1 = literaler #local-Scope (single-hop), 2 = literaler #region-Scope
+  // (Hop-Cap flood_max_scope_region, default ~3 bei Repeatern dieses Typs).
+  // WICHTIG (User-Klarstellung 2026-07-21): 'region' meint den echten
+  // #region-Scope, NICHT die per-GPS aufgeloeste Geo-Region -- das waere #geo
+  // via chooseGeoFallbackScope. Beide sind fixe Build-in-Keys.
+  const char* name = (mode == 2) ? "region" : "local";
+  int idx = dl9sau_find_region_index(name);
   if (idx >= 0 && idx < _buildin_keys_count) {
     out_key = _buildin_keys[idx];
     return true;
@@ -10944,11 +10946,17 @@ void MyMesh::doNightFloodAdvert(const TransportKey* scope_override) {
         && memcmp(scope.key, _prefs.default_scope_key, 16) == 0) {
       src = "default"; nm = _prefs.default_scope_name;
     } else {
-      // Wenn key == #local Build-in-Key -> Last-Resort gegriffen.
+      // Aufgeloester literaler Build-in-Scope: entweder explizit local/region
+      // konfiguriert (advert nightly/periodic scope) ODER Follow-Kaskaden-
+      // Last-Resort #local. Per Key benennen -- NICHT als geo-fallback labeln.
+      int ri = dl9sau_find_region_index("region");
       int li = dl9sau_find_region_index("local");
-      if (li >= 0 && li < _buildin_keys_count
+      if (ri >= 0 && ri < _buildin_keys_count
+          && memcmp(scope.key, _buildin_keys[ri].key, 16) == 0) {
+        src = "region"; nm = "region";
+      } else if (li >= 0 && li < _buildin_keys_count
           && memcmp(scope.key, _buildin_keys[li].key, 16) == 0) {
-        src = "last-resort"; nm = "local";
+        src = "local"; nm = "local";
       }
     }
     // DL9SAU 2026-07-16: geo-fallback (oder sonst ein aufgeloester Region-Key)
