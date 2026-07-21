@@ -10558,24 +10558,29 @@ void MyMesh::scheduleNextNightFlood() {
 //     keep publishing the last-known location at the static rate).
 //   * 15 minutes, when the GPS-derived position has moved beyond that radius
 //     in the last window — i.e. the node is being carried around.
+// DL9SAU 2026-07-21 (#2-Redesign): Kadenz-Matrix (Policy x moving). Zwei GRUENDE
+// fuer schnellere Adverts beim Bewegen: SHARE=Positions-Frische, NONE=Praesenz-
+// Sichtbarkeit (auch OHNE Koordinaten). PREFS=fixe Position -> nie beschleunigen.
+//   Policy \ Zustand |  moving             | static
+//   SHARE (Live-GPS) |  15min (Frische)    | 1h
+//   NONE  (keine Pos)|  15min (Praesenz)   | 3h
+//   PREFS (fix)      |  1h  (immer fest)   | 1h
+// Voraussetzung fuer moving: GPS an + hatte Fix (Bewegungserkennung braucht GPS);
+// die Position bleibt bei NONE trotzdem ungeteilt.
 unsigned long MyMesh::computeNextAdvertIntervalMs() const {
-  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) return CR_ADVERT_INT_NO_LOC_MS;
-
+  // PREFS: feste konfigurierte Position -> immer 1h, Motion/GPS irrelevant.
+  if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) return CR_ADVERT_INT_STATIC_MS;
 #if ENV_INCLUDE_GPS == 1
   if (_prefs.gps_enabled) {
-    if (!_gps_had_fix_ever) {
-      // Never saw a fix this session — no point publishing a 0,0 position
-      // frequently. Long interval until something useful happens.
-      return CR_ADVERT_INT_NO_LOC_MS;
-    }
-    // Use the LAST KNOWN motion state, not the live fix status. The GPS may
-    // be sleeping by design — that's expected — and the last value of
-    // _is_moving still reflects what we knew at the previous wake cycle.
-    return _is_moving ? CR_ADVERT_INT_MOVING_MS : CR_ADVERT_INT_STATIC_MS;
+    // Never saw a fix -> keine Position/Bewegung bekannt -> langsam.
+    if (!_gps_had_fix_ever) return CR_ADVERT_INT_NO_LOC_MS;
+    // moving: SHARE=frische Koordinaten, NONE=Praesenz -> beide 15min.
+    if (_is_moving) return CR_ADVERT_INT_MOVING_MS;
   }
 #endif
-  // GPS disabled → published location is the configured one, treated as static.
-  return CR_ADVERT_INT_STATIC_MS;
+  // static bzw. GPS aus: SHARE -> 1h, NONE -> 3h.
+  return (_prefs.advert_loc_policy == ADVERT_LOC_NONE) ? CR_ADVERT_INT_NO_LOC_MS
+                                                        : CR_ADVERT_INT_STATIC_MS;
 }
 
 void MyMesh::updateMotionTracking() {
@@ -15373,6 +15378,21 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  'auto' folgt der\n"
           "  Matrix aus client_repeat + repeater_profile."
         );
+        pushCompanionMessage(
+          "advert status: Uebersicht -- Position, effektives Intervall\n"
+          "+ Grund, next-ETA, Scope, nightly."
+        );
+        pushCompanionMessage(
+          "Periodische Kadenz = Positions-Policy (gps advert) x Bewegung:\n"
+          "  SHARE bewegt 15min, statisch 1h\n"
+          "  NONE  bewegt 15min (Praesenz), statisch 3h\n"
+          "  PREFS immer 1h (fixe Position)"
+        );
+        pushCompanionMessage(
+          "Bewegung braucht GPS an; bei NONE bleibt die Position\n"
+          "trotzdem ungeteilt (nur 'ich bin aktiv'). Grund live in\n"
+          "'advert status'."
+        );
         return;
       }
       if (topic_prefix_match(topic, "autoadv")) {
@@ -17172,10 +17192,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         : (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) ? "fixed (konfiguriert)"
         : "?";
       unsigned long iv_ms = computeNextAdvertIntervalMs();
-      const char* reason = "statisch";
-      if (_prefs.advert_loc_policy == ADVERT_LOC_NONE)        reason = "keine Position";
-      else if (_prefs.gps_enabled && !_gps_had_fix_ever)      reason = "noch kein GPS-Fix";
-      else if (_prefs.gps_enabled && _is_moving)              reason = "bewegt";
+      const char* reason;
+      if (_prefs.advert_loc_policy == ADVERT_LOC_PREFS) {
+        reason = "fixe Position";
+      } else if (_prefs.gps_enabled && !_gps_had_fix_ever) {
+        reason = "noch kein GPS-Fix";
+      } else if (_prefs.gps_enabled && _is_moving) {
+        reason = (_prefs.advert_loc_policy == ADVERT_LOC_SHARE) ? "bewegt (Live-Position)"
+                                                                : "bewegt (Praesenz)";
+      } else {
+        reason = (_prefs.advert_loc_policy == ADVERT_LOC_NONE) ? "keine Position" : "statisch";
+      }
       bool periodic_on = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP);
       uint32_t now_rtc = getRTCClock()->getCurrentTime();
       bool rtc_ok = (now_rtc > 1500000000UL);
