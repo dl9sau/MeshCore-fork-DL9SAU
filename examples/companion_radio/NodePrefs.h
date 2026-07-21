@@ -783,4 +783,10 @@ struct NodePrefs {  // persisted to file
   // adafruit-nrf-util), nicht WiFi-basiert -- daher hier ifdef-fenced.
   uint8_t        ota_pending;
 #endif
+  // DL9SAU 2026-07-21 (#3): Advert-Scope pro Kind. APPEND ans Datei-Ende.
+  // Default==0 + Vorbelegung VOR loadPrefs -> kurze Alt-Datei laesst sie auf 0.
+  //   advert_periodic_scope: 0=zero-hop (Default), 1=local, 2=region
+  //   advert_nightly_scope:  0=follow    (Default), 1=local, 2=region
+  uint8_t        advert_periodic_scope;
+  uint8_t        advert_nightly_scope;
 };

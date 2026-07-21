@@ -1187,6 +1187,10 @@ private:
   void reevaluateRepeaterBbox();
   bool chooseGeoFallbackScope(TransportKey& out_key) const;
   bool chooseNightFloodScope(TransportKey& out_key) const;
+  // DL9SAU 2026-07-21 (#3): konfigurierten Advert-Scope aufloesen. mode 1=local
+  // (#local Build-in-Key), 2=region (geo-aufgeloest, Fallback #local). mode 0
+  // (zero-hop/follow) behandelt der Aufrufer.
+  bool resolveConfiguredAdvertScope(uint8_t mode, TransportKey& out_key) const;
   // "Default-oder-Geo" Helper fuer Sende-Pfade. Wenn
   // _prefs.scope_advert_auto=prefer UND die ortliche Geo-Region eine andere
   // ist als das Default-Scope, gewinnt Geo. Sonst Default. Returns

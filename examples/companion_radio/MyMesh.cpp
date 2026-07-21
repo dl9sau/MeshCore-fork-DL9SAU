@@ -7078,6 +7078,11 @@ void MyMesh::begin(bool has_display) {
   // persistierter Wert (auch bewusst off) ueberschreibt + bleibt.
   _prefs.messages_append_scope_to_name = 1;
 
+  // DL9SAU 2026-07-21 (#3): Advert-Scope-Defaults VOR loadPrefs (append-only-sicher,
+  // Default==0 -> kurze Alt-Datei laesst sie auf 0). 0=zero-hop/follow.
+  _prefs.advert_periodic_scope = 0;   // zero-hop
+  _prefs.advert_nightly_scope  = 0;   // follow
+
   // load persisted prefs
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10d pre loadPrefs"); Serial.flush();
@@ -10505,6 +10510,19 @@ bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
   return false;
 }
 
+bool MyMesh::resolveConfiguredAdvertScope(uint8_t mode, TransportKey& out_key) const {
+  if (mode == 2) {                          // region: geo-aufgeloest
+    if (chooseGeoFallbackScope(out_key)) return true;
+    // keine Geo-Region gematcht -> Fallback #local (unten).
+  }
+  int idx = dl9sau_find_region_index("local");   // mode 1 ODER region-Fallback
+  if (idx >= 0 && idx < _buildin_keys_count) {
+    out_key = _buildin_keys[idx];
+    return true;
+  }
+  return false;
+}
+
 void MyMesh::scheduleNextNightFlood() {
   uint32_t now = getRTCClock()->getCurrentTime();
   if (now < 1500000000UL) {   // RTC clearly unset (pre-2017): skip
@@ -10754,6 +10772,13 @@ void MyMesh::doPeriodicZeroHopAdvert() {
     return;
   }
   if (_tx_blocked) return;  // Wunschliste 82: stille Skip im Cron-Pfad
+  // DL9SAU 2026-07-21 (#3): periodic scope. 0=zero-hop (unscoped, nur direkte
+  // Nachbarn -- wie bisher); 1=local / 2=region -> scoped flood (hop-limitiert via
+  // 3-Byte-Pfad wie nightly). Scope VOR createSelfAdvert aufloesen -> bei
+  // Fehlschlag kein Paket-Leak.
+  bool scoped = (_prefs.advert_periodic_scope != 0);
+  TransportKey scope;
+  if (scoped && !resolveConfiguredAdvertScope(_prefs.advert_periodic_scope, scope)) return;
   mesh::Packet* pkt;
   if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
     pkt = createSelfAdvert(_prefs.node_name);
@@ -10764,20 +10789,25 @@ void MyMesh::doPeriodicZeroHopAdvert() {
   }
   if (pkt) {
     // CR5 always (short airtime). Power reduction only when we are stationary;
-    // while moving (15-min interval, e.g. driving) we want maximum reach so
-    // distant neighbours can still pick up our position. Zero-hop adverts are
-    // never repeated, so this stays a local-only burst.
+    // while moving we want maximum reach so distant neighbours pick us up.
     uint8_t flags = PKT_TX_FORCE_CR5;
     if (!_is_moving) flags |= PKT_TX_REDUCE_POWER;
     pkt->tx_flags |= flags;
-    sendZeroHop(pkt);
+    if (!scoped) {
+      sendZeroHop(pkt);
+    } else {
+      uint16_t codes[2];
+      codes[0] = scope.calcTransportCode(pkt);
+      codes[1] = 0;
+      sendFlood(pkt, codes, 0, /*path_hash_size=*/3);
+    }
     _tx_advert_count++;
     _gps_user_override_until_advert = false;   // user-on override expires with this advert
-    pushDebugLog("[ADV-DBG] periodic, millis=%lu moving=%d\n", millis(), (int)_is_moving);
-    // D4: scope-Info mit ausgeben. Zero-hop ist normalerweise unscoped
-    // (sendZeroHop) -- machen wir explizit klar.
-    traceCompanion(TRACE_ADVERTS, "[adv] periodic zero-hop moving=%d scope=unscoped",
-                   (int)_is_moving);
+    pushDebugLog("[ADV-DBG] periodic, millis=%lu moving=%d scoped=%d\n",
+                 millis(), (int)_is_moving, (int)scoped);
+    traceCompanion(TRACE_ADVERTS, "[adv] periodic moving=%d scope=%s",
+                   (int)_is_moving,
+                   !scoped ? "unscoped" : (_prefs.advert_periodic_scope == 2 ? "region" : "local"));
   }
 }
 
@@ -10789,8 +10819,13 @@ void MyMesh::doNightFloodAdvert() {
     return;
   }
   if (_tx_blocked) return;  // Wunschliste 82: stille Skip im Cron-Pfad
+  // DL9SAU 2026-07-21 (#3): nightly scope. follow(0)=Kaskade wie bisher;
+  // local(1)/region(2)=fest konfiguriert.
   TransportKey scope;
-  if (!chooseNightFloodScope(scope)) {
+  bool got = (_prefs.advert_nightly_scope == 0)
+               ? chooseNightFloodScope(scope)
+               : resolveConfiguredAdvertScope(_prefs.advert_nightly_scope, scope);
+  if (!got) {
     MESH_DEBUG_PRINTLN("night-flood: no scope available, skipping");
     return;
   }
@@ -12114,6 +12149,8 @@ void MyMesh::backupSaveToSerial() {
   kv_uint ("gps",                  _prefs.gps_enabled);
   kv_uint ("gps_interval",         _prefs.gps_interval);
   kv_uint ("advert_loc_policy",    _prefs.advert_loc_policy);
+  kv_uint ("advert_periodic_scope",_prefs.advert_periodic_scope);
+  kv_uint ("advert_nightly_scope", _prefs.advert_nightly_scope);
   kv_float("airtime_factor",       _prefs.airtime_factor, 3);
   kv_uint ("rx_boosted_gain",      _prefs.rx_boosted_gain);
   kv_uint ("manual_add_contacts",  _prefs.manual_add_contacts);
@@ -13272,6 +13309,8 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
         uint8_t v = (uint8_t)as_uint();
         if (v > ADVERT_LOC_PREFS) v = ADVERT_LOC_SHARE;
         _prefs.advert_loc_policy     = v; _br_applied++; return; }
+      if (strcmp(key, "advert_periodic_scope") == 0) { uint8_t v=(uint8_t)as_uint(); if(v>2)v=0; _prefs.advert_periodic_scope=v; _br_applied++; return; }
+      if (strcmp(key, "advert_nightly_scope") == 0)  { uint8_t v=(uint8_t)as_uint(); if(v>2)v=0; _prefs.advert_nightly_scope=v;  _br_applied++; return; }
       if (strcmp(key, "airtime_factor") == 0)        { _prefs.airtime_factor        = as_float();        _br_applied++; return; }
       if (strcmp(key, "rx_boosted_gain") == 0)       { _prefs.rx_boosted_gain       = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "manual_add_contacts") == 0)   { _prefs.manual_add_contacts   = (uint8_t)as_uint(); _br_applied++; return; }
@@ -17172,7 +17211,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage(
         "  advert periodic on|moving-only|off\n"
         "    moving-only: nur senden wenn bewegt (still im Stand).\n"
-        "  advert nightly  on|off");
+        "  advert periodic scope zero-hop|local|region\n"
+        "  advert nightly  on|off\n"
+        "  advert nightly  scope follow|local|region");
       pushCompanionMessage(
         "  advert role\n"
         "    Status (configured + effective Role)");
@@ -17213,6 +17254,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool periodic_on = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP);
       const char* periodic_mode = !periodic_on ? "off"
         : (_prefs.auto_advert_enabled & AUTO_ADV_MOVING_ONLY) ? "moving-only" : "on";
+      const char* pscope = _prefs.advert_periodic_scope == 2 ? "region"
+                         : _prefs.advert_periodic_scope == 1 ? "local" : "zero-hop";
+      const char* nscope = _prefs.advert_nightly_scope == 2 ? "region"
+                         : _prefs.advert_nightly_scope == 1 ? "local" : "follow";
       uint32_t now_rtc = getRTCClock()->getCurrentTime();
       bool rtc_ok = (now_rtc > 1500000000UL);
       int32_t tz = rtc_ok ? localTzOffsetSecs(now_rtc) : 0;
@@ -17243,10 +17288,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                pol, iv_ms / 60000UL, reason);
       pushCompanionMessage(line);
       snprintf(line, sizeof(line),
-               "  periodisch: %s -> %s\n"
-               "  Scope: zero-hop unscoped\n"
-               "  nightly: %s",
-               periodic_mode, next_s, nl_s);
+               "  periodisch: %s (scope %s) -> %s\n"
+               "  nightly: %s (scope %s)",
+               periodic_mode, pscope, next_s, nl_s, nscope);
       pushCompanionMessage(line);
       snprintf(line, sizeof(line),
                "  gps=%s fix_ever=%d moving=%d",
@@ -17262,6 +17306,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg && starts_with_word(arg, "periodic")) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
+      // advert periodic scope <zero-hop|local|region>
+      if (sub && starts_with_word(sub, "scope")) {
+        const char* sv = strchr(sub, ' ');
+        if (sv) { while (*sv == ' ') sv++; }
+        auto scn = [&]() { return _prefs.advert_periodic_scope == 2 ? "region"
+                                : _prefs.advert_periodic_scope == 1 ? "local" : "zero-hop"; };
+        char l[96];
+        if (!sv || *sv == 0) {
+          snprintf(l, sizeof(l), "advert periodic scope: %s  (zero-hop|local|region)", scn());
+          pushCompanionMessage(l); return;
+        }
+        uint8_t ns;
+        if      (sv[0]=='z'||sv[0]=='Z') ns = 0;
+        else if (sv[0]=='l'||sv[0]=='L') ns = 1;
+        else if (sv[0]=='r'||sv[0]=='R') ns = 2;
+        else { pushCompanionMessage("Usage: advert periodic scope zero-hop|local|region"); return; }
+        _prefs.advert_periodic_scope = ns; savePrefs();
+        snprintf(l, sizeof(l), "OK - advert periodic scope %s.", scn());
+        pushCompanionMessage(l); return;
+      }
       auto pstate = [&]() -> const char* {
         if (!(_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)) return "off";
         return (_prefs.auto_advert_enabled & AUTO_ADV_MOVING_ONLY) ? "moving-only" : "on";
@@ -17298,6 +17362,26 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg && starts_with_word(arg, "nightly")) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
+      // advert nightly scope <follow|local|region>
+      if (sub && starts_with_word(sub, "scope")) {
+        const char* sv = strchr(sub, ' ');
+        if (sv) { while (*sv == ' ') sv++; }
+        auto scn = [&]() { return _prefs.advert_nightly_scope == 2 ? "region"
+                                : _prefs.advert_nightly_scope == 1 ? "local" : "follow"; };
+        char l[96];
+        if (!sv || *sv == 0) {
+          snprintf(l, sizeof(l), "advert nightly scope: %s  (follow|local|region)", scn());
+          pushCompanionMessage(l); return;
+        }
+        uint8_t ns;
+        if      (sv[0]=='f'||sv[0]=='F') ns = 0;
+        else if (sv[0]=='l'||sv[0]=='L') ns = 1;
+        else if (sv[0]=='r'||sv[0]=='R') ns = 2;
+        else { pushCompanionMessage("Usage: advert nightly scope follow|local|region"); return; }
+        _prefs.advert_nightly_scope = ns; savePrefs();
+        snprintf(l, sizeof(l), "OK - advert nightly scope %s.", scn());
+        pushCompanionMessage(l); return;
+      }
       if (!sub || *sub == 0) {
         pushCompanionMessage((_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY)
           ? "advert nightly: on  ('advert nightly on|off')"
