@@ -558,6 +558,9 @@ protected:
   // DL9SAU 2026-07-18: EIN kanonischer neighbors-Hilfetext (help-Dispatcher +
   // 'neighbors help/?' + Usage-bei-Fehler rufen alle hier rein -> kein Drift).
   void printNeighborsHelp();
+  // DL9SAU 2026-07-21: EIN kanonischer advert-Hilfetext (advert ? + help advert +
+  // Usage-bei-Fehler rufen alle hier rein -> kein Drift).
+  void printAdvertHelp();
   // Zaehler rx_him/rx_us + RSSI/SNR-Refresh aus einem empfangenen Flood-Paket
   // aktualisieren. m = matchSelfHash (1=self-init, 2=self-repeated).
   void updateNeighbourSignals(mesh::Packet* packet, uint8_t m);

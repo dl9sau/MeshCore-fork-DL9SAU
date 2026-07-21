@@ -2740,6 +2740,39 @@ void MyMesh::deliveryTraceEcho(mesh::Packet* packet) {
 // DL9SAU 2026-07-18: EIN kanonischer neighbors-Hilfetext. Frueher 3 driftende
 // Kopien (help-Dispatcher, 'neighbors help/?', Usage-bei-Fehler) -> stats/name
 // mal da, mal nicht. Jetzt rufen alle hier rein.
+void MyMesh::printAdvertHelp() {
+  pushCompanionMessage(
+    "advert [zero-hop | flood]: einmaligen Advert JETZT senden.\n"
+    "  ohne Arg = zero-hop. Aliase: z=zero-hop, f=flood.");
+  pushCompanionMessage(
+    "  'flood' nutzt die Scope-Kaskade wie 'nightly follow'\n"
+    "  (override > default > geo). Quelle steht in der Antwort.");
+  pushCompanionMessage(
+    "advert status: Uebersicht -- Position, Intervall + Grund,\n"
+    "  next-ETA, Scopes, nightly.");
+  pushCompanionMessage(
+    "advert periodic <on|moving-only|off>\n"
+    "  moving-only: nur wenn bewegt (still im Stand).\n"
+    "advert periodic scope <zero-hop|local|region>");
+  pushCompanionMessage(
+    "advert nightly <on|off>\n"
+    "advert nightly scope <follow|local|region>\n"
+    "  follow = Scope-Kaskade wie oben.");
+  pushCompanionMessage(
+    "advert role [auto | fixed <chat|repeater|sensor|room>]\n"
+    "  auto folgt client_repeat + repeater_profile.");
+  pushCompanionMessage(
+    "Kadenz (Positions-Policy 'gps advert' x Bewegung):\n"
+    "  SHARE: bewegt 15min, statisch 1h\n"
+    "  NONE:  bewegt 15min (Praesenz), statisch 3h");
+  pushCompanionMessage(
+    "  PREFS: immer 1h (fixe Position).\n"
+    "Bewegungserkennung bei GPS an. Bei NONE enthaelt der advert\n"
+    "keine Position, signalisiert aber 'ich bin da'.");
+  pushCompanionMessage(
+    "Subbefehle + Werte sind abkuerzbar, z.B. 'advert per sc region'.");
+}
+
 void MyMesh::printNeighborsHelp() {
   pushCompanionMessage(
     "neighbors [<role>...] [hops <N>] [km <D>]\n"
@@ -15406,39 +15439,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (topic_prefix_match(topic, "advert")) {
-        pushCompanionMessage(
-          "advert [zero-hop | flood]: sendet sofort einen einmaligen Advert. "
-          "Ohne Arg = zero-hop. Aliase: z, f."
-        );
-        pushCompanionMessage(
-          "'flood' verwendet die gleiche Scope-Auswahl wie nightly: "
-          "override > default > geo-fallback. Scope-Quelle wird in der "
-          "Antwort gemeldet."
-        );
-        pushCompanionMessage(
-          "advert role [auto | fixed chat|repeater|sensor|room]:\n"
-          "  Welcher ADV_TYPE in createSelfAdvert + welche Discovery-\n"
-          "  Queries beantwortet werden."
-        );
-        pushCompanionMessage(
-          "  'auto' folgt der\n"
-          "  Matrix aus client_repeat + repeater_profile."
-        );
-        pushCompanionMessage(
-          "advert status: Uebersicht -- Position, effektives Intervall\n"
-          "+ Grund, next-ETA, Scope, nightly."
-        );
-        pushCompanionMessage(
-          "Periodische Kadenz = Positions-Policy (gps advert) x Bewegung:\n"
-          "  SHARE bewegt 15min, statisch 1h\n"
-          "  NONE  bewegt 15min (Praesenz), statisch 3h\n"
-          "  PREFS immer 1h (fixe Position)"
-        );
-        pushCompanionMessage(
-          "Bewegung braucht GPS an; bei NONE bleibt die Position\n"
-          "trotzdem ungeteilt (nur 'ich bin aktiv'). Grund live in\n"
-          "'advert status'."
-        );
+        printAdvertHelp();
         return;
       }
       if (topic_prefix_match(topic, "autoadv")) {
@@ -17199,32 +17200,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // ? -- vollstaendige Sub-Befehl-Liste (User-Bericht: 'advert ?'
     // zeigte nur '[zero-hop | flood]', 'role' fehlte).
     if (arg && arg[0] == '?' && (arg[1] == 0 || arg[1] == ' ')) {
-      pushCompanionMessage("advert -- Sub-Befehle:");
-      pushCompanionMessage(
-        "  advert status\n"
-        "    Uebersicht: Position/Intervall/next/Scope/nightly.");
-      pushCompanionMessage(
-        "  advert [flood | zero-hop]\n"
-        "    Default ohne Arg = flood (wie Upstream-Repeater).\n"
-        "    zero-hop = nur single-hop neighbours.\n"
-        "    flood = scoped flood-advert wie nightly.");
-      pushCompanionMessage(
-        "  advert periodic on|moving-only|off\n"
-        "    moving-only: nur senden wenn bewegt (still im Stand).\n"
-        "  advert periodic scope zero-hop|local|region\n"
-        "  advert nightly  on|off\n"
-        "  advert nightly  scope follow|local|region");
-      pushCompanionMessage(
-        "  advert role\n"
-        "    Status (configured + effective Role)");
-      pushCompanionMessage(
-        "  advert role auto\n"
-        "    Auto-Matrix (siehe 'help advert'): folgt client_repeat\n"
-        "    + repeater_profile.");
-      pushCompanionMessage(
-        "  advert role fixed <chat|repeater|sensor|room>\n"
-        "    Type fest pinnen -- beeinflusst createSelfAdvert\n"
-        "    + Discovery-Query.");
+      printAdvertHelp();
       return;
     }
 
@@ -17232,7 +17208,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Verhalten (Intervall/Grund/Scope/Positions-Policy/next-ETA) war bisher
     // nirgends auf einen Blick sichtbar -- nur verstreut in status/get + opt-in
     // [adv]-Traces. 'advert status' fasst es zusammen.
-    if (arg && starts_with_word(arg, "status")) {
+    if (arg && starts_with_word_abbrev(arg, "status", 2)) {
       char line[200];
       const char* pol =
           (_prefs.advert_loc_policy == ADVERT_LOC_NONE)  ? "none (keine Position)"
@@ -17303,11 +17279,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // DL9SAU 2026-07-21 (#3 Stufe 1): 'autoadv' -> 'advert periodic/nightly'
     // gezogen (top-level 'autoadv' entfernt, kein Alias). Flags wie gehabt in
     // _prefs.auto_advert_enabled (AUTO_ADV_ZEROHOP/NIGHTLY).
-    if (arg && starts_with_word(arg, "periodic")) {
+    if (arg && starts_with_word_abbrev(arg, "periodic", 2)) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       // advert periodic scope <zero-hop|local|region>
-      if (sub && starts_with_word(sub, "scope")) {
+      if (sub && starts_with_word_abbrev(sub, "scope", 2)) {
         const char* sv = strchr(sub, ' ');
         if (sv) { while (*sv == ' ') sv++; }
         auto scn = [&]() { return _prefs.advert_periodic_scope == 2 ? "region"
@@ -17359,11 +17335,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                    : "OK - advert periodic off.");
       return;
     }
-    if (arg && starts_with_word(arg, "nightly")) {
+    if (arg && starts_with_word_abbrev(arg, "nightly", 2)) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
       // advert nightly scope <follow|local|region>
-      if (sub && starts_with_word(sub, "scope")) {
+      if (sub && starts_with_word_abbrev(sub, "scope", 2)) {
         const char* sv = strchr(sub, ' ');
         if (sv) { while (*sv == ' ') sv++; }
         auto scn = [&]() { return _prefs.advert_nightly_scope == 2 ? "region"
@@ -17400,7 +17376,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     }
 
     // Wunschliste 7 Phase 2: advert role <auto|fixed <type>>
-    if (arg && starts_with_word(arg, "role")) {
+    if (arg && starts_with_word_abbrev(arg, "role", 2)) {
       const char* rarg = strchr(arg, ' ');
       if (rarg) { while (*rarg == ' ') rarg++; }
       auto roleName = [](uint8_t v) {
@@ -17498,10 +17474,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(r); return;
       }
       if (m < 0) {
-        pushCompanionMessage(
-          "Usage: advert [zero-hop | flood]\n"
-          "       advert role [auto | fixed <type>]\n"
-          "Hilfe: 'advert ?' oder 'help advert'");
+        pushCompanionMessage("advert: unbekanntes Argument.");
+        printAdvertHelp();
         return;
       }
       want_flood = (m == 1);
