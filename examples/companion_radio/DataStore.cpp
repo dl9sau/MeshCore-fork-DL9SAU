@@ -674,7 +674,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.advert_periodic_scope, sizeof(_prefs.advert_periodic_scope));
     if (_prefs.advert_periodic_scope > 2) _prefs.advert_periodic_scope = 0;
     file.read((uint8_t *)&_prefs.advert_nightly_scope, sizeof(_prefs.advert_nightly_scope));
-    if (_prefs.advert_nightly_scope > 2) _prefs.advert_nightly_scope = 0;
+    if (_prefs.advert_nightly_scope > 3) _prefs.advert_nightly_scope = 0;  // 3=named
     file.read((uint8_t *)&_prefs.advert_periodic_min_min, sizeof(_prefs.advert_periodic_min_min));
     if (_prefs.advert_periodic_min_min > 1440) _prefs.advert_periodic_min_min = 0;
 

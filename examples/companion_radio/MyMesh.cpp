@@ -2758,8 +2758,9 @@ void MyMesh::printAdvertHelp() {
     "advert periodic interval <N[h] | off>  (Mindest-Abstand)");
   pushCompanionMessage(
     "advert nightly <on|off>\n"
-    "advert nightly scope <follow|local|region>\n"
-    "  follow = Scope-Kaskade wie oben.");
+    "advert nightly scope <follow|local|region|<scope>>\n"
+    "  follow = Scope-Kaskade wie oben. <scope> = fester\n"
+    "  Scope-Name (# optional), z.B. de-bebb (loest 'scope advert' ab).");
   pushCompanionMessage(
     "advert role [auto | fixed <chat|repeater|sensor|room>]\n"
     "  auto folgt client_repeat + repeater_profile.");
@@ -7386,6 +7387,17 @@ void MyMesh::begin(bool has_display) {
   } else if (_prefs.scope_advert_auto > 3) {
     _prefs.scope_advert_auto = 2;  // out-of-range -> Default
   }
+  // DL9SAU 2026-07-21: Legacy 'scope advert'/bake -> 'advert nightly scope named'.
+  // Alt-Firmware kannte advert_nightly_scope nicht (=0/follow nach load), konnte
+  // aber eine bake_scope gesetzt haben. -> als expliziten named-Modus (3)
+  // uebernehmen, damit der Nightly-Flood wie bisher diesen Scope nutzt.
+  // Idempotent: greift nur solange nightly_scope==0; explizites follow/local/
+  // region leert bake -> keine faelschliche Wiederherstellung.
+  if (_prefs.advert_nightly_scope == 0) {
+    for (size_t k = 0; k < sizeof(_prefs.bake_scope_key); k++) {
+      if (_prefs.bake_scope_key[k]) { _prefs.advert_nightly_scope = 3; break; }
+    }
+  }
   // scope_repeater_auto: 0=uninit, 1=off, 2=on (default).
   if (_prefs.scope_repeater_auto == 0 || _prefs.scope_repeater_auto > 2) {
     _prefs.scope_repeater_auto = 2;
@@ -10505,17 +10517,19 @@ bool MyMesh::resolveDefaultOrGeo(TransportKey& out_key) const {
 }
 
 bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
-  // Hierarchie:
+  // 'follow'-Kaskade fuer den Nightly-Flood (advert_nightly_scope==0):
   //   1) override (persistent, expiry-basiert)
-  //   2) bake-scope (persistent, explizit fuer nightly)
-  //   3) resolveDefaultOrGeo (Default/Geo gemaess scope_advert_auto)
-  //   4) geo-fallback (Position-basiert, wenn nichts anderes)
-  //   5) #local LAST-RESORT (User-Konsens 2026-05-29): wenn alles
+  //   2) resolveDefaultOrGeo (Default/Geo gemaess scope_advert_auto)
+  //   3) geo-fallback (Position-basiert, wenn nichts anderes)
+  //   4) #local LAST-RESORT (User-Konsens 2026-05-29): wenn alles
   //      andere fehlt, geht der Nightly mit #local raus -- single-
   //      hop, harmlos, minimaler Netz-Impact. Stellt sicher dass
   //      ein User der ALLE Send-Scopes geleert hat (kein default,
-  //      bake, override) UND ausserhalb aller Geo-Bboxen sitzt
-  //      trotzdem erreichbar ist.
+  //      override) UND ausserhalb aller Geo-Bboxen sitzt trotzdem
+  //      erreichbar ist.
+  // DL9SAU 2026-07-21: die fruehere bake-Stufe entfaellt -- der explizite
+  // Nightly-Scope ist jetzt 'advert nightly scope <name>' (Modus 3), nicht
+  // mehr Teil dieser Auto-Kaskade.
   uint32_t now = getRTCClock()->getCurrentTime();
   // 1) override: aktiv solange now < expiry
   if (_prefs.override_expiry != 0 && now < _prefs.override_expiry) {
@@ -10526,24 +10540,29 @@ bool MyMesh::chooseNightFloodScope(TransportKey& out_key) const {
       return true;
     }
   }
-  // 2) bake-scope
-  TransportKey bake;
-  memcpy(bake.key, _prefs.bake_scope_key, sizeof(bake.key));
-  if (!bake.isNull()) {
-    out_key = bake;
-    return true;
-  }
-  // 3) Default oder Geo (gemaess scope_advert_auto)
+  // 2) Default oder Geo (gemaess scope_advert_auto)
   if (resolveDefaultOrGeo(out_key)) return true;
-  // 4) geo fallback (wenn weder Default noch geo_prefers gegriffen hat)
+  // 3) geo fallback (wenn weder Default noch geo_prefers gegriffen hat)
   if (chooseGeoFallbackScope(out_key)) return true;
-  // 5) Last-Resort: #local aus der Build-in-Tabelle.
+  // 4) Last-Resort: #local aus der Build-in-Tabelle.
   int idx = dl9sau_find_region_index("local");
   if (idx >= 0 && idx < _buildin_keys_count) {
     out_key = _buildin_keys[idx];
     return true;
   }
   return false;
+}
+
+// DL9SAU 2026-07-21: Nightly-Scope aufloesen gemaess advert_nightly_scope:
+//   0=follow (chooseNightFloodScope-Kaskade), 1=#local, 2=#region,
+//   3=named (bake_scope_key, gesetzt via 'advert nightly scope <name>').
+bool MyMesh::resolveNightlyScope(TransportKey& out_key) const {
+  if (_prefs.advert_nightly_scope == 0) return chooseNightFloodScope(out_key);
+  if (_prefs.advert_nightly_scope == 3) {
+    memcpy(out_key.key, _prefs.bake_scope_key, sizeof(out_key.key));
+    return !out_key.isNull();
+  }
+  return resolveConfiguredAdvertScope(_prefs.advert_nightly_scope, out_key);
 }
 
 bool MyMesh::resolveConfiguredAdvertScope(uint8_t mode, TransportKey& out_key) const {
@@ -10580,11 +10599,7 @@ bool MyMesh::isNowInNightWindow() const {
 //   Tag + periodic=zero-hop      -> nightly-Config (Flood erzwingt Scope).
 bool MyMesh::resolveManualFloodScope(TransportKey& out_key) const {
   bool use_nightly = isNowInNightWindow() || (_prefs.advert_periodic_scope == 0);
-  if (use_nightly) {
-    return (_prefs.advert_nightly_scope == 0)
-             ? chooseNightFloodScope(out_key)
-             : resolveConfiguredAdvertScope(_prefs.advert_nightly_scope, out_key);
-  }
+  if (use_nightly) return resolveNightlyScope(out_key);
   return resolveConfiguredAdvertScope(_prefs.advert_periodic_scope, out_key);
 }
 
@@ -10901,10 +10916,7 @@ void MyMesh::doNightFloodAdvert(const TransportKey* scope_override) {
   if (scope_override) {
     scope = *scope_override;
   } else {
-    bool got = (_prefs.advert_nightly_scope == 0)
-                 ? chooseNightFloodScope(scope)
-                 : resolveConfiguredAdvertScope(_prefs.advert_nightly_scope, scope);
-    if (!got) {
+    if (!resolveNightlyScope(scope)) {
       MESH_DEBUG_PRINTLN("night-flood: no scope available, skipping");
       return;
     }
@@ -13401,7 +13413,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
         if (v > ADVERT_LOC_PREFS) v = ADVERT_LOC_SHARE;
         _prefs.advert_loc_policy     = v; _br_applied++; return; }
       if (strcmp(key, "advert_periodic_scope") == 0) { uint8_t v=(uint8_t)as_uint(); if(v>2)v=0; _prefs.advert_periodic_scope=v; _br_applied++; return; }
-      if (strcmp(key, "advert_nightly_scope") == 0)  { uint8_t v=(uint8_t)as_uint(); if(v>2)v=0; _prefs.advert_nightly_scope=v;  _br_applied++; return; }
+      if (strcmp(key, "advert_nightly_scope") == 0)  { uint8_t v=(uint8_t)as_uint(); if(v>3)v=0; _prefs.advert_nightly_scope=v;  _br_applied++; return; }  // 3=named (bake)
       if (strcmp(key, "advert_periodic_min_min") == 0){ uint32_t v=as_uint(); if(v>1440)v=1440; _prefs.advert_periodic_min_min=(uint16_t)v; _br_applied++; return; }
       if (strcmp(key, "airtime_factor") == 0)        { _prefs.airtime_factor        = as_float();        _br_applied++; return; }
       if (strcmp(key, "rx_boosted_gain") == 0)       { _prefs.rx_boosted_gain       = (uint8_t)as_uint(); _br_applied++; return; }
@@ -17291,8 +17303,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         : (_prefs.auto_advert_enabled & AUTO_ADV_MOVING_ONLY) ? "moving-only" : "on";
       const char* pscope = _prefs.advert_periodic_scope == 2 ? "region"
                          : _prefs.advert_periodic_scope == 1 ? "local" : "zero-hop";
-      const char* nscope = _prefs.advert_nightly_scope == 2 ? "region"
-                         : _prefs.advert_nightly_scope == 1 ? "local" : "follow";
+      char nscope[36];
+      if (_prefs.advert_nightly_scope == 3)
+        snprintf(nscope, sizeof(nscope), "#%s",
+                 _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
+      else
+        StrHelper::strncpy(nscope, _prefs.advert_nightly_scope == 2 ? "region"
+                                 : _prefs.advert_nightly_scope == 1 ? "local" : "follow",
+                           sizeof(nscope));
       uint32_t now_rtc = getRTCClock()->getCurrentTime();
       bool rtc_ok = (now_rtc > 1500000000UL);
       int32_t tz = rtc_ok ? localTzOffsetSecs(now_rtc) : 0;
@@ -17425,7 +17443,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     if (arg && starts_with_word_abbrev(arg, "nightly", 2)) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
-      // advert nightly scope <follow|local|region>
+      // advert nightly scope <follow|local|region|<scope-name>>
+      // Der benannte Scope loest die alte 'scope advert'/bake ab (nightly-only).
       if (sub && starts_with_word_abbrev(sub, "scope", 2)) {
         const char* sv = strchr(sub, ' ');
         if (sv) { while (*sv == ' ') sv++; }
@@ -17433,14 +17452,48 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                                 : _prefs.advert_nightly_scope == 1 ? "local" : "follow"; };
         char l[96];
         if (!sv || *sv == 0) {
-          snprintf(l, sizeof(l), "advert nightly scope: %s  (follow|local|region)", scn());
+          if (_prefs.advert_nightly_scope == 3)
+            snprintf(l, sizeof(l), "advert nightly scope: #%s  (follow|local|region|<scope>)",
+                     _prefs.bake_scope_name[0] ? _prefs.bake_scope_name : "?");
+          else
+            snprintf(l, sizeof(l), "advert nightly scope: %s  (follow|local|region|<scope>)", scn());
           pushCompanionMessage(l); return;
         }
         uint8_t ns;
-        if      (sv[0]=='f'||sv[0]=='F') ns = 0;
-        else if (sv[0]=='l'||sv[0]=='L') ns = 1;
-        else if (sv[0]=='r'||sv[0]=='R') ns = 2;
-        else { pushCompanionMessage("Usage: advert nightly scope follow|local|region"); return; }
+        if      (starts_with_word_abbrev(sv, "follow", 1)) ns = 0;
+        else if (starts_with_word_abbrev(sv, "local",  1)) ns = 1;
+        else if (starts_with_word_abbrev(sv, "region", 1)) ns = 2;
+        else {
+          // Beliebiger Scope-Name (Nightly-Bake). '#' ist optional -- OHNE
+          // fuehrendes '#' extrahieren, damit beim Hashen (das '#' addiert)
+          // kein '##' entsteht. 'local' und '#local' sind identisch.
+          char nm[32]; size_t k = 0;
+          const char* p = sv;
+          if (*p == '#') p++;
+          while (*p && *p != ' ' && *p != '\t' && k + 1 < sizeof(nm)) {
+            char c = *p++;
+            if (c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+            nm[k++] = c;
+          }
+          nm[k] = 0;
+          if (nm[0] == 0) {
+            pushCompanionMessage("Usage: advert nightly scope follow|local|region|<scope>");
+            return;
+          }
+          char tag[40]; snprintf(tag, sizeof(tag), "#%s", nm);
+          TransportKey key; TransportKeyStore tmp; tmp.getAutoKeyFor(0, tag, key);
+          StrHelper::strncpy(_prefs.bake_scope_name, nm, sizeof(_prefs.bake_scope_name));
+          memcpy(_prefs.bake_scope_key, key.key, sizeof(_prefs.bake_scope_key));
+          _prefs.advert_nightly_scope = 3;
+          savePrefs();
+          snprintf(l, sizeof(l), "OK - advert nightly scope = #%s", nm);
+          pushCompanionMessage(l); return;
+        }
+        // follow/local/region: bake leeren, damit die Boot-Migration den
+        // benannten Modus nicht faelschlich wiederherstellt (bake ist NUR
+        // bei Modus 3 gesetzt).
+        memset(_prefs.bake_scope_name, 0, sizeof(_prefs.bake_scope_name));
+        memset(_prefs.bake_scope_key,  0, sizeof(_prefs.bake_scope_key));
         _prefs.advert_nightly_scope = ns; savePrefs();
         snprintf(l, sizeof(l), "OK - advert nightly scope %s.", scn());
         pushCompanionMessage(l); return;

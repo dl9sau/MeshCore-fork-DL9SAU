@@ -1195,6 +1195,9 @@ private:
   // Build-in-Scopes -- NICHT die per-GPS aufgeloeste Geo-Region (#geo). mode 0
   // (zero-hop/follow) behandelt der Aufrufer.
   bool resolveConfiguredAdvertScope(uint8_t mode, TransportKey& out_key) const;
+  // DL9SAU 2026-07-21: Nightly-Scope gemaess advert_nightly_scope aufloesen
+  // (0=follow-Kaskade, 1=#local, 2=#region, 3=named/bake).
+  bool resolveNightlyScope(TransportKey& out_key) const;
   // DL9SAU 2026-07-21: liegt die aktuelle lokale Zeit im Nightly-Flood-Fenster
   // [23:00, 05:00)? Grundlage der Tag/Nacht-Scope-Wahl fuer 'advert flood'.
   bool isNowInNightWindow() const;
