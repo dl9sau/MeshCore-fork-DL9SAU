@@ -2456,7 +2456,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // Annotation chronologisch oberhalb der eigentlichen Nachricht
   // einsortiert wird.
   // Reise-Toggle 2026-06-08: DM-Vorab-Frame [#scope, direct] nur wenn
-  // messages_append_scope_to_name on. Default off.
+  // messages_append_scope_to_name on. Default ON (DL9SAU 2026-07-21 #1).
   if ((txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN)
       && _prefs.messages_append_scope_to_name) {
     uint32_t name_h = fnv1a32((const char*)from.id.pub_key, 6);
@@ -7071,6 +7071,12 @@ void MyMesh::begin(bool has_display) {
   // install kriegt den Default; ein persistierter Wert (auch bewusst 0/aus)
   // ueberschreibt und bleibt erhalten. hashtag/public bleiben off (Geplauder).
   _prefs.msg_store_flash = (1 << BUCKET_DM) | (1 << BUCKET_PRIVATE);
+
+  // DL9SAU 2026-07-21 (#1): Scope-Annotation im Absendernamen bei eingehenden
+  // Messages per Default AN. Zeigt dem Nutzer ohne Konfiguration, ueber welchen
+  // Scope eine Nachricht kam. Wie oben: VOR loadPrefs -> fresh-install=on,
+  // persistierter Wert (auch bewusst off) ueberschreibt + bleibt.
+  _prefs.messages_append_scope_to_name = 1;
 
   // load persisted prefs
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
