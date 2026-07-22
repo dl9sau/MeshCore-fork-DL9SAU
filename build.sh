@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 
+# DL9SAU 2026-07-22: Build-Erfolg pro Board tracken. build.sh hat KEIN 'set -e'
+# und alle cp nutzen '|| true' -> ein gescheiterter Board-Build erzeugt still
+# kein Output-File und der Run endet trotzdem "gruen". Diese Arrays + die
+# dl9sau_build_summary machen das sichtbar (X/Y gebaut, fehlende Liste) und
+# lassen den Job FEHLSCHLAGEN, wenn ein Kern-Board fehlt.
+DL9SAU_BUILT_OK=()
+DL9SAU_BUILT_MISSING=()
+
 global_usage() {
   cat - <<EOF
 Usage:
@@ -194,6 +202,14 @@ build_firmware() {
     cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
   fi
 
+  # DL9SAU 2026-07-22: hat dieser Build ueberhaupt ein Output-File erzeugt?
+  # (ls matcht nur die Dateien DIESES Boards, der env-Name steckt im Prefix.)
+  if ls out/${FIRMWARE_FILENAME}.* >/dev/null 2>&1; then
+    DL9SAU_BUILT_OK+=("$1")
+  else
+    DL9SAU_BUILT_MISSING+=("$1")
+    echo "[DL9SAU] WARNUNG: $1 hat KEIN Output-File erzeugt (Build fehlgeschlagen?)."
+  fi
 }
 
 # firmwares containing $1 will be built
@@ -264,6 +280,31 @@ build_firmwares() {
   build_room_server_firmwares
 }
 
+# DL9SAU 2026-07-22: Zusammenfassung + Kern-Board-Guard. Argumente = Boards die
+# ZWINGEND gebaut haben muessen (fehlt eines -> return 1 -> Job faellt rot aus,
+# statt still mit unvollstaendigem Release "gruen" zu enden).
+dl9sau_build_summary() {
+  local ok=${#DL9SAU_BUILT_OK[@]}
+  local miss=${#DL9SAU_BUILT_MISSING[@]}
+  local total=$(( ok + miss ))
+  echo ""
+  echo "=================== BUILD SUMMARY (DL9SAU) ==================="
+  echo "  gebaut: ${ok}/${total}"
+  if [ ${miss} -gt 0 ]; then
+    echo "  FEHLEND (${miss}):"
+    printf '    - %s\n' "${DL9SAU_BUILT_MISSING[@]}"
+  fi
+  local rc=0
+  for core in "$@"; do
+    if ! printf '%s\n' "${DL9SAU_BUILT_OK[@]}" | grep -qx "$core"; then
+      echo "  FEHLER: Kern-Board '$core' fehlt -> Build FEHLGESCHLAGEN."
+      rc=1
+    fi
+  done
+  echo "============================================================="
+  return $rc
+}
+
 # clean build dir
 rm -rf out
 mkdir -p out
@@ -288,10 +329,14 @@ elif [[ $1 == "build-matching-firmwares" ]]; then
   fi
 elif [[ $1 == "build-firmwares" ]]; then
   build_firmwares
+  dl9sau_build_summary "t1000e_companion_radio_ble"; exit $?
 elif [[ $1 == "build-companion-firmwares" ]]; then
   build_companion_firmwares
+  dl9sau_build_summary "t1000e_companion_radio_ble"; exit $?
 elif [[ $1 == "build-repeater-firmwares" ]]; then
   build_repeater_firmwares
+  dl9sau_build_summary; exit $?
 elif [[ $1 == "build-room-server-firmwares" ]]; then
   build_room_server_firmwares
+  dl9sau_build_summary; exit $?
 fi
