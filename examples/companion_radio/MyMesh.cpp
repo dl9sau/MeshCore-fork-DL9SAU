@@ -7161,7 +7161,7 @@ void MyMesh::begin(bool has_display) {
 #endif
 
   // Migration: alter auto_advert_enabled=1 (= "on" mit beiden Adverts) zu
-  // dem neuen Bitmask-Schema (3 = AUTO_ADV_ZEROHOP | AUTO_ADV_NIGHTLY).
+  // dem neuen Bitmask-Schema (3 = AUTO_ADV_PERIODIC | AUTO_ADV_NIGHTLY).
   // Andere Werte (0, 2, 3) bleiben unangetastet — sie waren entweder im
   // alten Schema "off" oder schon in der neuen Bitmask-Semantik gesetzt.
   if (_prefs.auto_advert_enabled == 1) {
@@ -9798,7 +9798,7 @@ void MyMesh::loop() {
   // gibt es nicht mehr, der RTC-Boot-Estimate kommt jetzt aus dem boot_log
   // (loadRtcPersist parst die neueste Zeile). Kein periodischer InternalFS-
   // Writer mehr -> Key/Prefs auf der fragilen Partition weniger exponiert.
-  if ((_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)
+  if ((_prefs.auto_advert_enabled & AUTO_ADV_PERIODIC)
       && next_periodic_advert_at && millisHasNowPassed(next_periodic_advert_at)) {
     // DL9SAU 2026-07-21 (#3 Stufe 2): moving-only -> im Stand NICHT senden, nur neu
     // planen. Bei Bewegungsbeginn zieht updateMotionTracking next_periodic_advert_at
@@ -9824,9 +9824,11 @@ void MyMesh::loop() {
       uint32_t loc = abs_unix + (uint32_t)localTzOffsetSecs(now_rtc);
       unsigned hh = (unsigned)((loc % 86400UL) / 3600UL);
       unsigned mm = (unsigned)((loc % 3600UL) / 60UL);
+      const char* pm = _prefs.advert_periodic_scope == 2 ? "region"
+                     : _prefs.advert_periodic_scope == 1 ? "local" : "zero-hop";
       traceCompanion(TRACE_ADVERTS,
-                     "[adv] next zero-hop at %02u:%02u (in %lus)",
-                     hh, mm, (base + jitter) / 1000UL);
+                     "[adv] next periodic (%s) at %02u:%02u (in %lus)",
+                     pm, hh, mm, (base + jitter) / 1000UL);
     }
   }
 
@@ -16721,7 +16723,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     uint32_t now_rtc = getRTCClock()->getCurrentTime();
     bool rtc_ok = (now_rtc > 1500000000UL);
     int32_t tz = rtc_ok ? localTzOffsetSecs(now_rtc) : 0;
-    if (!(_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)) {
+    if (!(_prefs.auto_advert_enabled & AUTO_ADV_PERIODIC)) {
       strcpy(zh_str, "off");
     } else if (!rtc_ok) {
       strcpy(zh_str, "on(?)");
@@ -17332,7 +17334,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       } else {
         reason = (_prefs.advert_loc_policy == ADVERT_LOC_NONE) ? "keine Position" : "statisch";
       }
-      bool periodic_on = (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP);
+      bool periodic_on = (_prefs.auto_advert_enabled & AUTO_ADV_PERIODIC);
       const char* periodic_mode = !periodic_on ? "off"
         : (_prefs.auto_advert_enabled & AUTO_ADV_MOVING_ONLY) ? "moving-only" : "on";
       const char* pscope = _prefs.advert_periodic_scope == 2 ? "region"
@@ -17395,7 +17397,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
 
     // DL9SAU 2026-07-21 (#3 Stufe 1): 'autoadv' -> 'advert periodic/nightly'
     // gezogen (top-level 'autoadv' entfernt, kein Alias). Flags wie gehabt in
-    // _prefs.auto_advert_enabled (AUTO_ADV_ZEROHOP/NIGHTLY).
+    // _prefs.auto_advert_enabled (AUTO_ADV_PERIODIC/NIGHTLY).
     if (arg && starts_with_word_abbrev(arg, "periodic", 2)) {
       const char* sub = strchr(arg, ' ');
       if (sub) { while (*sub == ' ') sub++; }
@@ -17457,7 +17459,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage(l); return;
       }
       auto pstate = [&]() -> const char* {
-        if (!(_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP)) return "off";
+        if (!(_prefs.auto_advert_enabled & AUTO_ADV_PERIODIC)) return "off";
         return (_prefs.auto_advert_enabled & AUTO_ADV_MOVING_ONLY) ? "moving-only" : "on";
       };
       if (!sub || *sub == 0) {
@@ -17468,7 +17470,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       // 3-State. moving-only = alles mit 'm' vorn (on/off starten nicht mit m).
       if (sub[0] == 'm' || sub[0] == 'M') {
-        _prefs.auto_advert_enabled |= (uint8_t)(AUTO_ADV_ZEROHOP | AUTO_ADV_MOVING_ONLY);
+        _prefs.auto_advert_enabled |= (uint8_t)(AUTO_ADV_PERIODIC | AUTO_ADV_MOVING_ONLY);
         next_periodic_advert_at = millis();
         savePrefs();
         pushCompanionMessage("OK - advert periodic moving-only (nur wenn bewegt).");
@@ -17478,11 +17480,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (sm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
       if (sm < 0)   { pushCompanionMessage("Usage: advert periodic on|moving-only|off"); return; }
       if (sm == 1) {
-        _prefs.auto_advert_enabled |= AUTO_ADV_ZEROHOP;
+        _prefs.auto_advert_enabled |= AUTO_ADV_PERIODIC;
         _prefs.auto_advert_enabled &= (uint8_t)~AUTO_ADV_MOVING_ONLY;
         next_periodic_advert_at = millis();
       } else {
-        _prefs.auto_advert_enabled &= (uint8_t)~(AUTO_ADV_ZEROHOP | AUTO_ADV_MOVING_ONLY);
+        _prefs.auto_advert_enabled &= (uint8_t)~(AUTO_ADV_PERIODIC | AUTO_ADV_MOVING_ONLY);
       }
       savePrefs();
       pushCompanionMessage(sm == 1 ? "OK - advert periodic on (sofort)."
@@ -19567,9 +19569,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // autoadv (Bitmask)
     if (show_all || _prefs.auto_advert_enabled != 0) {
       snprintf(tmp, sizeof(tmp),
-               "  auto_advert_enabled = 0x%02X (zerohop=%s nightly=%s)%s",
+               "  auto_advert_enabled = 0x%02X (periodic=%s nightly=%s)%s",
                (unsigned)_prefs.auto_advert_enabled,
-               (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) ? "on" : "off",
+               (_prefs.auto_advert_enabled & AUTO_ADV_PERIODIC) ? "on" : "off",
                (_prefs.auto_advert_enabled & AUTO_ADV_NIGHTLY) ? "on" : "off",
                _prefs.auto_advert_enabled == 0 ? " [default]" : " (default: 0)");
       add_line(tmp);
@@ -29448,7 +29450,7 @@ cron_add_direct:
             else
               snprintf(out, out_size, "%02u:%02u (in %lum)", hh, mm, dm);
           };
-          if (_prefs.auto_advert_enabled & AUTO_ADV_ZEROHOP) {
+          if (_prefs.auto_advert_enabled & AUTO_ADV_PERIODIC) {
             long delta_ms = (long)(next_periodic_advert_at - millis());
             long delta_s  = delta_ms / 1000;
             uint32_t abs_unix = (now_rtc > 1500000000UL)
@@ -29465,12 +29467,14 @@ cron_add_direct:
                            nl_buf, sizeof(nl_buf));
             }
           }
-          char nxt[160];
+          const char* pm = _prefs.advert_periodic_scope == 2 ? "region"
+                         : _prefs.advert_periodic_scope == 1 ? "local" : "zero-hop";
+          char nxt[176];
           snprintf(nxt, sizeof(nxt),
                    "next adverts:\n"
-                   "  zero-hop: %s\n"
-                   "  flooded:  %s",
-                   zh_buf, nl_buf);
+                   "  periodic (%s): %s\n"
+                   "  nightly: %s",
+                   pm, zh_buf, nl_buf);
           pushCompanionMessage(nxt);
         }
 
