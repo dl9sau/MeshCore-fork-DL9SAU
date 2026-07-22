@@ -21,9 +21,18 @@ runs:
       run: |
         pip install --upgrade platformio
 
-    # a git tag of "room-server-v1.2.3" should set "v1.2.3" as GIT_TAG_VERSION
+    # Tag -> Version: nur den bekannten Prefix strippen, den REST behalten.
+    #   "companion-v1.16.0-DL9SAU" -> "v1.16.0-DL9SAU"
+    #   "room-server-v1.2.3"       -> "v1.2.3"
+    # DL9SAU 2026-07-22: frueher '${GIT_TAG_NAME##*-}' (alles nach dem LETZTEN
+    # '-') -- brach bei mehrteiligen Versionen (…-DL9SAU -> nur "DL9SAU") und
+    # bei "room-server-" (Dash im Prefix -> "server-..."). Jetzt Prefix-exakt.
     - name: Extract Version from Git Tag
       shell: bash
       run: |
         GIT_TAG_NAME="${GITHUB_REF#refs/tags/}"
-        echo "GIT_TAG_VERSION=${GIT_TAG_NAME##*-}" >> $GITHUB_ENV
+        GIT_TAG_VERSION="$GIT_TAG_NAME"
+        GIT_TAG_VERSION="${GIT_TAG_VERSION#companion-}"
+        GIT_TAG_VERSION="${GIT_TAG_VERSION#repeater-}"
+        GIT_TAG_VERSION="${GIT_TAG_VERSION#room-server-}"
+        echo "GIT_TAG_VERSION=${GIT_TAG_VERSION}" >> $GITHUB_ENV

@@ -120,28 +120,47 @@ build_firmware() {
   # get env platform for post build actions
   ENV_PLATFORM=($(get_platform_for_env $1))
 
-  # get git commit sha
-  COMMIT_HASH=$(git rev-parse --short HEAD)
+  # get git commit sha (8 chars, wie dl9sau_version.py)
+  COMMIT_HASH=$(git rev-parse --short=8 HEAD 2>/dev/null || echo nogit)
 
   # set firmware build date
   FIRMWARE_BUILD_DATE=$(date '+%d-%b-%Y')
 
-  # get FIRMWARE_VERSION, which should be provided by the environment
-  if [ -z "$FIRMWARE_VERSION" ]; then
-    echo "FIRMWARE_VERSION must be set in environment"
-    exit 1
+  # DL9SAU 2026-07-22: Versions-/Dateiname aus der Firmware-Quelle ableiten
+  # (single source of truth: MyMesh.h "#define FIRMWARE_VERSION "v1.16.0-DL9SAU"").
+  # So zeigen Dateiname UND 'ver' konsistent Upstream-Version + Variante + Hash --
+  # unabhaengig vom (evtl. abweichenden) git-Tag. Dateiname bekommt den vollen
+  # 8-char-Hash (praeziser als der 3-char-Hash im 20-byte-Wire-Feld, den
+  # dl9sau_version.py fuer das eingebettete 'ver' setzt).
+  DL9SAU_BASE=$(grep -oE '#define FIRMWARE_VERSION "[^"]+"' examples/companion_radio/MyMesh.h 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')
+  if [ -n "$DL9SAU_BASE" ]; then
+    # z.B: v1.16.0-DL9SAU-g4dbb2f18
+    FIRMWARE_VERSION_STRING="${DL9SAU_BASE}-g${COMMIT_HASH}"
+  else
+    # Fallback (Upstream-Schema): Tag-Version, z.B. v1.0.0-abcdef
+    if [ -z "$FIRMWARE_VERSION" ]; then
+      echo "FIRMWARE_VERSION must be set in environment"
+      exit 1
+    fi
+    FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}-${COMMIT_HASH}"
   fi
 
-  # set firmware version string
-  # e.g: v1.0.0-abcdef
-  FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}-${COMMIT_HASH}"
-
   # craft filename
-  # e.g: RAK_4631_Repeater-v1.0.0-SHA
+  # e.g: t1000e_companion_radio_ble-v1.16.0-DL9SAU-g4dbb2f18
   FIRMWARE_FILENAME="$1-${FIRMWARE_VERSION_STRING}"
 
   # add firmware version info to end of existing platformio build flags in environment vars
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${FIRMWARE_VERSION_STRING}\"'"
+  # DL9SAU 2026-07-22: die EINGEBETTETE Version ('ver' + App-Anzeige) setzt
+  # dl9sau_version.py (pre-Script in arduino_base) -- 20-byte-Wire-safe
+  # "v1.16.0-DL9SAU.g<hash3>" + 12-byte-Datum. Das ist BEWUSST so kurz gewaehlt,
+  # damit die Smartphone-App Version + Datum NICHT abschneidet (1 Byte mehr ->
+  # App kappt). Wir injizieren hier deshalb NICHTS mehr (weder VERSION noch
+  # DATE), sonst wuerde der lange Datei-String das 20-byte-Feld sprengen und
+  # local/CI divergieren. dl9sau_version.py ist alleiniger Herr ueber Version/
+  # Datum/Zeit -> lokal == CI. Nur der Upstream-Fallback injiziert wie frueher.
+  if [ -z "$DL9SAU_BASE" ]; then
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${FIRMWARE_VERSION_STRING}\"'"
+  fi
 
   # disable debug flags if requested
   disable_debug_flags
