@@ -64,6 +64,11 @@ public:
   // vor dem Schreiben, truncate() nach dem Schreiben (alten Tail kappen).
   File openWriteFileInPlace(const char* filename);
   File openWriteFileInPlace(FILESYSTEM* fs, const char* filename);
+  // DL9SAU 2026-07-22: portabler "Tail kappen"-Aufruf zum openWriteFileInPlace-
+  // Muster. Auf nRF52/STM32 (in-place FILE_O_WRITE) ruft er File::truncate();
+  // auf ESP32/RP2040 hat der "w"-Open bereits beim Oeffnen getruncatet -> no-op
+  // (fs::File hat gar kein truncate()). BEHEBT den ESP32-Build-Break.
+  static void truncateInPlaceTail(File& f);
   // DL9SAU 2026-07-17 (#86): Append-Open -- OHNE remove, Position ans Datei-Ende.
   // Fuer die debounced Message-Bucket-Persistenz: einen neuen Frame-Record billig
   // anhaengen statt die ganze Datei neu zu schreiben (Write-Amplification-Fix).

@@ -803,7 +803,7 @@ void MyMesh::bootLogAppend() {
     w.write((const uint8_t*)existing[i], strlen(existing[i]));
     w.write((const uint8_t*)"\n", 1);
   }
-  w.truncate();
+  DataStore::truncateInPlaceTail(w);   // portabel: nur nRF52/STM32 truncaten
   w.close();
   // 2026-07-05: Companion-Push entfernt -- die Info ist redundant zu
   // 'log read' und blaehte den Chat beim Boot auf.
@@ -850,7 +850,7 @@ void MyMesh::bootLogWritePreReboot(const char* cause) {
     w.write((const uint8_t*)existing[i], strlen(existing[i]));
     w.write((const uint8_t*)"\n", 1);
   }
-  w.truncate();
+  DataStore::truncateInPlaceTail(w);   // portabel: nur nRF52/STM32 truncaten
   w.close();
 }
 

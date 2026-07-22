@@ -230,6 +230,18 @@ File DataStore::openWriteFileInPlace(FILESYSTEM* fs, const char* filename) {
 #endif
 }
 
+// DL9SAU 2026-07-22: siehe .h. Nur die in-place-Open-Plattformen (nRF52/STM32)
+// brauchen ein explizites truncate() nach dem Schreiben; auf ESP32/RP2040 hat
+// der "w"-Open die Datei bereits beim Oeffnen gekappt (und fs::File hat kein
+// truncate() -> unbedingt guarden, sonst bricht der ESP32-Build).
+void DataStore::truncateInPlaceTail(File& f) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  f.truncate();
+#else
+  (void)f;
+#endif
+}
+
 // DL9SAU 2026-07-12: Existenz-Check ohne Oeffnen/Parsen -- fuer den
 // /shutdown_pending-Datei-Sentinel (touch=pending / rm=gecleart).
 bool DataStore::fileExists(const char* filename) const {
