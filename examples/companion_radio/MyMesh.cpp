@@ -11095,7 +11095,11 @@ uint16_t MyMesh::getEffectiveBootMinMv() const {
 // LPCOMP-Config nach einem Reset verloren ging. Phase 2 (Board) mappt mV ->
 // refsel + haelt PIN_3V3_EN im SYSTEMOFF fuer den Divider hoch.
 void MyMesh::configureBatteryWake() {
-#if defined(NRF52_POWER_MANAGEMENT)
+// DL9SAU 2026-07-22: armBatteryWake/wakeRefsel/wakeEstMv gibt es NUR auf
+// T1000eBoard. NRF52_POWER_MANAGEMENT ist ein GENERISCHER nRF52-Flag (viele
+// Boards) -> zu breit, brach RAK_4631/heltec_t096/t114/gat562/... Guard auf den
+// t1000e-Board-Marker T1000_E verengt (das ganze Feature ist t1000e-spezifisch).
+#if defined(T1000_E)
   uint16_t mv = getEffectiveBootMinMv();
   if (mv == 0) return;    // Chemie nicht gesetzt -> Feature aus
   board.armBatteryWake(mv);   // T1000eBoard: mappt mV -> LPCOMP-refsel + VBUS
