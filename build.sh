@@ -295,13 +295,39 @@ dl9sau_build_summary() {
     printf '    - %s\n' "${DL9SAU_BUILT_MISSING[@]}"
   fi
   local rc=0
+  local core_missing=()
   for core in "$@"; do
     if ! printf '%s\n' "${DL9SAU_BUILT_OK[@]}" | grep -qx "$core"; then
       echo "  FEHLER: Kern-Board '$core' fehlt -> Build FEHLGESCHLAGEN."
+      core_missing+=("$core")
       rc=1
     fi
   done
   echo "============================================================="
+
+  # DL9SAU 2026-07-23: Summary ZUSAETZLICH in GitHubs Run-Summary schreiben
+  # (gerendert oben auf der Run-Seite -> KEIN Scrollen im riesigen, oft
+  # abgeschnittenen Log, kein Raw-Log-Download). $GITHUB_STEP_SUMMARY ist nur
+  # im GitHub-Actions-Kontext gesetzt; lokal ist der Block ein no-op.
+  if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+    {
+      echo "## Build Summary (DL9SAU)"
+      if [ $rc -eq 0 ]; then echo "✅ **gebaut: ${ok}/${total}**"; else echo "❌ **gebaut: ${ok}/${total}** (Kern-Board fehlt)"; fi
+      if [ ${#core_missing[@]} -gt 0 ]; then
+        echo ""
+        echo "**Kern-Board(s) FEHLEN:** ${core_missing[*]}"
+      fi
+      if [ ${miss} -gt 0 ]; then
+        echo ""
+        echo "<details><summary>FEHLEND (${miss})</summary>"
+        echo ""
+        printf -- '- %s\n' "${DL9SAU_BUILT_MISSING[@]}"
+        echo ""
+        echo "</details>"
+      fi
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+
   return $rc
 }
 
