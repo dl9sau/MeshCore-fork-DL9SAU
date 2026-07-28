@@ -1,3 +1,10 @@
+> **📢 You are viewing the `main` branch — a fork of upstream MeshCore.**
+> The active **DL9SAU** development happens on a separate branch. You are most
+> likely looking for:
+> ### ➡️ [`meshcore-fork-dl9sau-enhancement`](https://github.com/dl9sau/MeshCore-fork-DL9SAU/tree/meshcore-fork-dl9sau-enhancement)
+
+---
+
 ## About MeshCore
 
 MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
