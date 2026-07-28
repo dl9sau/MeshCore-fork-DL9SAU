@@ -234,16 +234,39 @@ So bleibt regionaler Traffic regional, statt weltweit zu fluten.
 ### Scope-Konfiguration
 
 - `scope add/del <region>` — Lokale Scope-Liste verwalten
-- `set send_scope <region>` — Welcher Scope-Code wird ausgehenden Paketen
-  beigefügt
+- `scope default <name>` — Default-Scope für ausgehende Pakete (auch in der App
+  als Default-Scope setzbar). Magic-Werte wie `#geo` siehe unten.
 - `flood_max_scope_region <N>` — Hop-Begrenzung speziell für Scope-Pakete
 
-### Auto-Scope per GPS
+### `#geo` — automatischer Regional-Scope
 
-Pref `auto_scope` — Tracker erkennt anhand der aktuellen GPS-Position welche
-Region (basierend auf `regions.dat`-Liste) zutrifft und setzt den Scope-Code
-automatisch. Praktisch beim Reisen: Tracker schaltet sich nahtlos zwischen
-regionalen Bereichen um.
+Setzt man den **Default-Scope** (in der App oder via `scope default #geo`) auf
+**`#geo`**, löst die Firmware beim Senden automatisch die **zutreffende,
+möglichst kleine** Region auf — aus der eingebauten Regionen-Tabelle plus der
+aktuellen GPS-Position. Beispiel: in Berlin geht die Nachricht als `#de-be`
+raus, **nicht** als das größere `#de-bebb`. Beim Reisen wechselt der Scope
+nahtlos mit der Position (geo-fenced).
+
+- Es ist ein **Fallback/Default**: pro Nachricht kann in der App ein anderer
+  Scope gesetzt werden, der `#geo` überschreibt.
+- Ohne GPS-Fix: Rückfall auf `#local` (bzw. unscoped) — es geht nie ein roher,
+  unaufgelöster `#geo`-Code raus.
+
+### Magic-Scopes (per Nachricht aus der App)
+
+Als Scope-Name kann eines dieser **Sonder-Keywords** gesetzt werden; die
+Firmware interpretiert sie beim Senden speziell, statt sie als normalen Scope
+zu hashen:
+
+| Keyword(s) | Wirkung |
+|---|---|
+| `#geo` | zur kleinsten passenden Region auflösen (s.o.) |
+| `#unscoped` | **ohne** Scope-Code fluten — auch wenn der Default ein Scope oder zero-hop ist |
+| `#region` / `#regional` | Regional-Scope (konfigurierbarer Hop-Cap, `flood_max_scope_region`) |
+| `#local` / `#lokal` | nur **1 Hop** (direkte Nachbarn) |
+| `#direct` / `#direkt` / `#norepeat` / `#no-repeat` | **zero-hop**, kein Repeater leitet weiter |
+
+Die Doppel-Synonyme (deutsch/englisch, mit/ohne Bindestrich) sind Absicht.
 
 ### Eingrenzung von unscoped Flood-Traffic
 
