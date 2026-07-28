@@ -1,5 +1,7 @@
 # DL9SAU-Fork von MeshCore
 
+### 🇩🇪 Deutsch
+
 Dies ist eine erweiterte Version des originalen MeshCore-Projekts. Mein Fokus liegt
 auf dem Companion-Modus (Smartphone-App + Tracker-Gerät) mit zusätzlichen
 Komfort-Funktionen für den täglichen Einsatz, Stromspar-Mechanismen für mobile
@@ -12,6 +14,21 @@ sind in den Commit-Nachrichten dokumentiert.
 Aktiv getestet auf **Heltec Wireless Tracker** (ESP32) und **SenseCAP T1000-E** (NRF52).
 
 Build und Flash funktionieren wie beim Original-Projekt.
+
+### 🇬🇧 English
+
+This is an enhanced version of the original MeshCore project. My focus is on the
+**Companion mode** (smartphone app + tracker device) with additional convenience
+features for everyday use, power-saving mechanisms for mobile use, and diagnostic
+tools for troubleshooting.
+
+An overview of the validated extensions is in [FEATURES.md](FEATURES.md).
+The individual implementation details and the rationale behind design decisions
+are documented in the commit messages.
+
+Actively tested on **Heltec Wireless Tracker** (ESP32) and **SenseCAP T1000-E** (NRF52).
+
+Build and flash work the same as in the original project.
 
 ---
 
