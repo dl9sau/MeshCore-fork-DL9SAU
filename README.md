@@ -6,6 +6,8 @@ Dies ist eine erweiterte Version des originalen MeshCore-Projekts. Mein Fokus li
 auf dem Companion-Modus (Smartphone-App + Tracker-Gerät) mit zusätzlichen
 Komfort-Funktionen für den täglichen Einsatz, Stromspar-Mechanismen für mobile
 Nutzung und Diagnose-Werkzeugen für die Fehlersuche.
+Die Firmware integriert die Repeater-Funktionalität vollständig (auch cli Befehle
+sind angeglichen) -> kein reflash mehr nötig bei anderem Einsatzzweck..
 
 Eine Übersicht der validierten Erweiterungen steht in [FEATURES.md](FEATURES.md).
 Die einzelnen Implementierungs-Details und Begründungen für Design-Entscheidungen
@@ -21,6 +23,8 @@ This is an enhanced version of the original MeshCore project. My focus is on the
 **Companion mode** (smartphone app + tracker device) with additional convenience
 features for everyday use, power-saving mechanisms for mobile use, and diagnostic
 tools for troubleshooting.
+The Firmware integrates repeater-functioality completely (cli commands are
+the same) -> no reflash needed for other operation scenarios..
 
 An overview of the validated extensions is in [FEATURES.md](FEATURES.md).
 The individual implementation details and the rationale behind design decisions

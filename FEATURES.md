@@ -4,6 +4,11 @@ Validierte und in der Praxis genutzte Erweiterungen gegenüber dem Original-Mesh
 Die einzelnen Implementierungs-Details und Begründungen stehen in den
 Commit-Nachrichten.
 
+Schwerpunkt ist der **Companion-Mode** (Smartphone-App + Tracker) — aber die
+**Repeater-Funktionalität ist vollständig integriert** (auch die CLI-Befehle sind
+angeglichen): dasselbe Gerät kann ohne Reflash als Repeater laufen. Siehe
+[Repeater-Mode](#repeater-mode).
+
 ---
 
 ## Companion-Mode (Smartphone-App + Tracker)
@@ -555,3 +560,5 @@ nach PlatformIO-Framework-Updates (idempotent).
 ```
 -D CFG_BLE_TASK_STACKSIZE=2048   Bluefruit BLE-Stack 8 KB (statt 5 KB Default)
 ```
+Und ein undokumentiertes betreffs Client Repeater Mode ("repeater profile defensive")
+auf Haupt-Frequenz. Fragen dazu beantworte ich gerne ;)
