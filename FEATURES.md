@@ -252,6 +252,22 @@ nahtlos mit der Position (geo-fenced).
 - Ohne GPS-Fix: Rückfall auf `#local` (bzw. unscoped) — es geht nie ein roher,
   unaufgelöster `#geo`-Code raus.
 
+### Auto-Scope (`scope use auto`)
+
+`#geo` oben ist der Fall, dass man Geo **explizit** als Default wählt — das ist
+der übliche Weg. Aber auch **ohne** gesetzten Default-Scope bestimmt die Firmware
+den Scope für eigene Pakete/Adverts automatisch. Gesteuert über
+`scope use auto <on|off|prefer>`:
+
+- **on** (Default): der Default-Scope gewinnt; ist keiner gesetzt, greift Geo
+  als Fallback (kleinste passende Region per GPS).
+- **prefer**: Geo schlägt den Default, wenn die örtliche Region eine andere ist
+  als der Default (»User ist nicht zu Hause«) — praktisch beim Reisen.
+- **off**: Geo wird nie verwendet, nur Default/Override.
+
+Praktisch beim Reisen: der Tracker schaltet sich so nahtlos zwischen regionalen
+Bereichen um, ohne dass man pro Region etwas umkonfigurieren muss.
+
 ### Magic-Scopes (per Nachricht aus der App)
 
 Als Scope-Name kann eines dieser **Sonder-Keywords** gesetzt werden; die
