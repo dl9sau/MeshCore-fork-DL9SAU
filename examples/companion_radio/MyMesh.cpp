@@ -1874,7 +1874,7 @@ bool MyMesh::isRepeatingEffectivelyAllowed() const {
   uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
   uint32_t bw_hz = (uint32_t)(_prefs.bw * 1000.0f + 0.5f);
   if (isValidClientRepeatFreq(f_khz, bw_hz)) return true;
-  if (_prefs.client_repeat_force) return true;   // force (per Passphrase freigeschaltet)
+  if (_prefs.client_repeat_force) return true;   // force (per Auth-Code freigeschaltet)
   return false;
 }
 
@@ -7781,7 +7781,7 @@ static const uint32_t main_mesh_freqs[] = {
 // Aendert er trotzdem etwas, greifen die ueblichen Checks (Bandgrenze/BW +
 // keine reservierte Haupt-qrg). Die harte Sperre macht isValidClientRepeatFreq
 // (main_mesh_freqs, Liste 3); auf der Haupt-qrg bewusst repeaten: 'repeater on
-// force <Passphrase>'.
+// force <Auth-Code>'.
 static FreqRange repeat_freq_ranges_strict[] = {
   { 433050, 434790 },   // 70cm SRD / ISM
   { 865600, 865800 },
@@ -7852,13 +7852,13 @@ void MyMesh::restorePacketTxDefaults() {
   radio_driver.setTxPower(_prefs.tx_power_dbm);
 }
 
-// DL9SAU 2026-07-30: Runtime-Passphrase fuers client_repeat_force-Flag (loest den
+// DL9SAU 2026-07-30: Runtime-Auth-Code fuers client_repeat_force-Flag (loest den
 // Compile-Schalter REPEATER_DEFENSIVE_FORCE ab). Erwartet:
 //   IReallyKnowWhatImDoingAndMayHarmTheMesh-<YYYY-MM-DD>
 // Phrase case-insensitive, Datum = HEUTE (UTC laut RTC). Das aktuelle Datum
 // zwingt zu bewusster Interaktion (kein blindes Copy-Paste aus altem Forenpost).
 // Rueckgabe: 0=ok, 1=falsche Phrase/Datum, 2=Uhr nicht gestellt (Datum unbekannt).
-int MyMesh::checkForcePassphrase(const char* arg) const {
+int MyMesh::checkForceAuthCode(const char* arg) const {
   static const char PHRASE[] = "IReallyKnowWhatImDoingAndMayHarmTheMesh";
   size_t plen = sizeof(PHRASE) - 1;
   if (strncasecmp(arg, PHRASE, plen) != 0 || arg[plen] != '-') return 1;
@@ -16550,7 +16550,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "repeater")) {
         pushCompanionMessage(
-          "repeater [on [force [<Passphrase>]] | off]:\n"
+          "repeater [on [force [<Auth-Code>]] | off]:\n"
           "  schaltet Repeating ein/aus. Verhalten\n"
           "  gemaess profile (defensive | normal).\n"
           "  Ohne Arg -> Status.");
@@ -16581,8 +16581,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  Frequenzen (z.B. EU 869.618) gesperrt --\n"
           "  dort arbeiten echte Repeater.");
         pushCompanionMessage(
-          "  'repeater on force <Passphrase>' schaltet\n"
-          "  es 1x frei (Passphrase mit heutigem Datum),\n"
+          "  'repeater on force <Auth-Code>' schaltet\n"
+          "  es 1x frei (Auth-Code mit heutigem Datum),\n"
           "  danach genuegt 'repeater on force'.\n"
           "  'repeater on' (ohne force) disarmt wieder.");
         return;
@@ -26715,11 +26715,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("repeater_profile: 0=defensive, 1=normal"); return;
     }
     if (strcmp(key, "client_repeat_force") == 0 || strcmp(key, "client.repeat.force") == 0) {
-      // NICHT direkt setzbar -- sonst waere der Passphrase-Schutz umgangen.
-      // Disarm (0) ist harmlos -> delegieren; Armen (1) -> Verweis auf Passphrase.
+      // NICHT direkt setzbar -- sonst waere der Auth-Code-Schutz umgangen.
+      // Disarm (0) ist harmlos -> delegieren; Armen (1) -> Verweis auf Auth-Code.
       if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"off")==0) { handleCompanionCommand("repeater force off"); return; }
-      pushCompanionMessage("client_repeat_force nicht direkt setzbar (Passphrase-Schutz). "
-                           "Armen: 'repeater on force <Passphrase>'. Disarmen: 'set client_repeat_force 0' / 'repeater force off'.");
+      pushCompanionMessage("client_repeat_force nicht direkt setzbar (Auth-Code-Schutz). "
+                           "Armen: 'repeater on force <Auth-Code>'. Disarmen: 'set client_repeat_force 0' / 'repeater force off'.");
       return;
     }
     if (strcmp(key, "gps_profile") == 0) {
@@ -30589,7 +30589,7 @@ cron_add_direct:
           bc = "force: on";
         } else if (freq_needs_force) {
           bc = "force: off -- Haupt-qrg, Client-Repeat gesperrt\n"
-               "  ('repeater on force <Passphrase>' schaltet frei)";
+               "  ('repeater on force <Auth-Code>' schaltet frei)";
         }
         if (bc) pushCompanionMessage(bc);
       }
@@ -30652,7 +30652,7 @@ cron_add_direct:
     }
 
     // 'repeater force off' -- force explizit disarmen (persistent). Armen laeuft
-    // ueber 'repeater on force <Passphrase>'.
+    // ueber 'repeater on force <Auth-Code>'.
     if (starts_with_word(arg, "force")) {
       const char* fa = arg;
       while (*fa && *fa != ' ' && *fa != '\t') fa++;   // skip "force"
@@ -30662,7 +30662,7 @@ cron_add_direct:
         savePrefs();
         pushCompanionMessage("OK - force disarmt.");
       } else {
-        pushCompanionMessage("Usage: repeater force off  (Armen: repeater on force <Passphrase>)");
+        pushCompanionMessage("Usage: repeater force off  (Armen: repeater on force <Auth-Code>)");
       }
       return;
     }
@@ -30682,7 +30682,7 @@ cron_add_direct:
     }
     if (rm == 1) {
       // "force"-Keyword erkennen (iOS-Tastatur macht aus "--force" einen em-dash
-      // -> ein einzelnes lowercase Wort). Danach optional die Passphrase.
+      // -> ein einzelnes lowercase Wort). Danach optional den Auth-Code.
       bool force = false;
       const char* pass = NULL;
       const char* rest = arg;
@@ -30693,7 +30693,7 @@ cron_add_direct:
         const char* p = rest;
         while (*p && *p != ' ' && *p != '\t') p++;             // skip "force"
         while (*p == ' ' || *p == '\t') p++;
-        if (*p) pass = p;                                      // Passphrase-Rest
+        if (*p) pass = p;                                      // Auth-Code-Rest
       }
       // Sicherheitsgate 1: signalFitsInIsmBand (immer aktiv, auch mit force)
       uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
@@ -30706,7 +30706,7 @@ cron_add_direct:
         pushCompanionMessage(line);
         return;
       }
-      // force: 1x per Passphrase freischalten (mit heutigem Datum), danach
+      // force: 1x per Auth-Code freischalten (mit heutigem Datum), danach
       // persistent -> spaeter genuegt 'repeater on' (ohne alles). Disarm nur
       // explizit via 'repeater force off'.
       if (force) {
@@ -30718,7 +30718,7 @@ cron_add_direct:
                    tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
         }
         if (pass) {
-          int r = checkForcePassphrase(pass);
+          int r = checkForceAuthCode(pass);
           if (r == 2) {
             pushCompanionMessage("force: Datum unbekannt -- zuerst die Uhr stellen "
                                  "(App/Zeit-Sync oder 'set time').");
@@ -30727,7 +30727,7 @@ cron_add_direct:
           if (r != 0) {
             char line[200];
             snprintf(line, sizeof(line),
-                     "force: Passphrase falsch. Exakt tippen:\n"
+                     "force: Auth-Code falsch. Exakt tippen:\n"
                      "repeater on force IReallyKnowWhatImDoingAndMayHarmTheMesh-%s", today);
             pushCompanionMessage(line);
             return;
@@ -30735,7 +30735,7 @@ cron_add_direct:
           _prefs.client_repeat_force = 1;   // freigeschaltet
         } else if (_prefs.client_repeat_force == 0) {
           if (now < 1577836800UL) {
-            pushCompanionMessage("force braucht die Passphrase -- aber zuerst die Uhr "
+            pushCompanionMessage("force braucht den Auth-Code -- aber zuerst die Uhr "
                                  "stellen (Datum unbekannt).");
             return;
           }
@@ -30760,7 +30760,7 @@ cron_add_direct:
         char line[200];
         snprintf(line, sizeof(line),
                  "Abgelehnt: %.4f MHz ist eine Haupt-Mesh-Freq -- Client-Repeat dort nur mit force.\n"
-                 "Ausweichfreq waehlen, 'repeater profile normal', oder 'repeater on force <Passphrase>'.",
+                 "Ausweichfreq waehlen, 'repeater profile normal', oder 'repeater on force <Auth-Code>'.",
                  _prefs.freq);
         pushCompanionMessage(line);
         return;
@@ -30774,7 +30774,7 @@ cron_add_direct:
       pushCompanionMessage(line);
       return;
     }
-    pushCompanionMessage("Usage: repeater [on [force [<Passphrase>]] | off | force off]");
+    pushCompanionMessage("Usage: repeater [on [force [<Auth-Code>]] | off | force off]");
     return;
   }
 
