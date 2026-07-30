@@ -83,7 +83,7 @@ Buckets mit `flash=on` werden persistent gespeichert und überleben einen
 Reboot. Beim Wiederverbinden der App sind alle vorherigen Nachrichten
 wieder da, ohne dass die App den Tracker beim Verbinden polling muss.
 Größe und Flash-Setting sind pro Bucket konfigurierbar
-(`set msg_store_limit`, `set msg_store_flash`).
+(`messages limit <type> <N>`, `messages flash <type> <on|off>`).
 
 ### Bewegungs-abhängige Position-Adverts (zero-hop)
 
@@ -126,13 +126,18 @@ sobald er einen Knoten mit gültiger Uhrzeit hört.
 
 ### Vollständige Repeater-Funktionalität im Companion-Build
 
-`set repeater on` schaltet das Companion-Gerät in den Repeater-Mode.
+`repeater on` schaltet das Companion-Gerät in den Repeater-Mode (`repeater off`
+wieder aus). **Wichtig:** in der Smartphone-App den Repeat-Schalter erst
+umlegen, **nachdem** das Profil auf `normal` steht — sonst lehnt die Firmware
+im Default-Profil `defensive` das Aktivieren auf der Haupt-Frequenz ab (siehe
+unten).
 
-Zwei Profile:
+Zwei Profile (`repeater profile <normal|defensive>`):
 
-- **`set repeater_profile normal`** — Standard-Repeater, leitet alle bekannten
-  Mesh-Pakete weiter
-- **`set repeater_profile defensive`** — Bewusst zurückhaltender Repeater.
+- **`repeater profile normal`** — Standard-Repeater, leitet alle bekannten
+  Mesh-Pakete weiter. **Nötig, damit die App den Repeat-Mode auf der
+  Haupt-Frequenz aktivieren kann.**
+- **`repeater profile defensive`** (Default) — Bewusst zurückhaltender Repeater.
   Das Companion-Gerät ist primär Client; mit diesem Profil hilft es dem
   Mesh nur minimal und kontrolliert weiter. Konkretes Verhalten:
 
@@ -331,7 +336,8 @@ neighbors             Direkt gehörte oder N-Hop entfernte Knoten mit RSSI/SNR,
 
 ### Trace-Kategorien
 
-`set trace <kategorie> on|off` aktiviert detaillierte Logs für einzelne
+`trace <kategorie> <level>` (Level `0`/`off`, `1`/`on`, `2`, `3`) aktiviert
+detaillierte Logs für einzelne
 Bereiche der Firmware, ohne dass die anderen Module zugeschüttet werden.
 Hilfreich zum gezielten Debuggen ohne dass der Output unleserlich wird.
 
