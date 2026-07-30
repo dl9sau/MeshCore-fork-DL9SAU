@@ -16583,12 +16583,13 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  dort arbeiten echte Repeater.");
         pushCompanionMessage(
           "  'repeater on force <Authcode>' schaltet\n"
-          "  es 1x frei (Authcode = heutiges Datum),\n"
-          "  danach persistent (ueberlebt on/off,\n"
-          "  Reboot, Backup).\n"
-          "  Freischaltung zuruecknehmen: 'repeater\n"
-          "  force off'. ('repeater on/off' schaltet\n"
-          "  nur den Repeater, force bleibt.)");
+          "  es 1x frei (Authcode = heutiges Datum).\n"
+          "  Danach genuegt 'repeater on force' -- der\n"
+          "  Authcode entfaellt (Freischaltung persistent,\n"
+          "  Reboot/Backup), das 'force'-Keyword bleibt\n"
+          "  aber jedes Mal noetig. Plain 'repeater on'\n"
+          "  bleibt auf der Haupt-qrg gesperrt.\n"
+          "  Zuruecknehmen: 'repeater force off'.");
         return;
       }
       if (topic_prefix_match(topic, "status")) {
@@ -30710,9 +30711,9 @@ cron_add_direct:
         pushCompanionMessage(line);
         return;
       }
-      // force: 1x per Authcode freischalten (mit heutigem Datum), danach
-      // persistent -> spaeter genuegt 'repeater on' (ohne alles). Disarm nur
-      // explizit via 'repeater force off'.
+      // force: 1x per Authcode freischalten (mit heutigem Datum). Danach ist die
+      // Freischaltung persistent -> 'repeater on force' genuegt (Authcode entfaellt);
+      // das 'force'-KEYWORD bleibt aber jedes Mal noetig. Disarm: 'repeater force off'.
       if (force) {
         uint32_t now = (uint32_t)getRTCClock()->getCurrentTime();
         char today[12] = "";
@@ -30747,34 +30748,34 @@ cron_add_direct:
           snprintf(line, sizeof(line),
                    "force mit Authcode nur einmalig noetig (Client-Repeat auf der Haupt-qrg kann das Mesh stoeren!):\n"
                    "repeater on force IReallyKnowWhatImDoingAndMayHarmTheMesh-%s\n"
-                   "Danach genuegt ein einfaches 'repeater on' (force bleibt).", today);
+                   "Danach genuegt 'repeater on force' (Authcode entfaellt).", today);
           pushCompanionMessage(line);
           return;
         }
         // else: force schon freigeschaltet, kein pass -> beibehalten.
       }
-      // plain 'repeater on' laesst force UNVERAENDERT -> persistent (Spec 1: nach
-      // dem Armen genuegt 'repeater on'/'repeater off'/'repeater on'). Disarm nur
-      // explizit via 'repeater force off'.
-      // Sicherheitsgate 2: nur in profile=defensive. In normal (echter Repeater)
-      // darf der User alle Frequenzen ohne Check nutzen. ARMED force (persistente
-      // Pref, egal ob das Keyword diesmal dabei war) umgeht den Haupt-qrg-Block.
+      // plain 'repeater on' laesst die FREISCHALTUNG (client_repeat_force)
+      // UNVERAENDERT -> persistent; Disarm nur explizit via 'repeater force off'.
+      // Sicherheitsgate 2: nur in profile=defensive. Auf einer Haupt-qrg braucht
+      // JEDES CLI-Enable das 'force'-KEYWORD als bewusste Bestaetigung (der
+      // Authcode nur beim ERSTEN Mal). Plain 'repeater on' auf der Haupt-qrg wird
+      // also weiter abgelehnt -- auch wenn schon freigeschaltet. (Der App-Pfad
+      // nutzt dagegen die persistente Pref, weil die App kein 'force' tippen kann.)
       bool defensive_mode = (_prefs.repeater_profile == 0);
-      if (defensive_mode && _prefs.client_repeat_force == 0 && !isValidClientRepeatFreq(f_khz, bw_hz)) {
+      if (defensive_mode && !force && !isValidClientRepeatFreq(f_khz, bw_hz)) {
         char line[200];
         snprintf(line, sizeof(line),
                  "Abgelehnt: %.4f MHz ist eine Haupt-Mesh-Freq -- Client-Repeat dort nur mit force.\n"
-                 "Ausweichfreq waehlen, 'repeater profile normal', oder 'repeater on force <Authcode>'.",
+                 "Ausweichfreq waehlen, 'repeater profile normal', oder 'repeater on force'.",
                  _prefs.freq);
         pushCompanionMessage(line);
         return;
       }
       _prefs.client_repeat = 1;
       savePrefs();
-      recomputeRepeatingAllowed(_prefs.client_repeat_force ? "repeater on force" : "repeater on");
+      recomputeRepeatingAllowed(force ? "repeater on force" : "repeater on");
       char line[80];
-      snprintf(line, sizeof(line), "OK - repeater on%s.",
-               _prefs.client_repeat_force ? " (force)" : "");
+      snprintf(line, sizeof(line), "OK - repeater on%s.", force ? " (force)" : "");
       pushCompanionMessage(line);
       return;
     }
