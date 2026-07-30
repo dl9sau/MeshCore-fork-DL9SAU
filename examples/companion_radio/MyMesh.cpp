@@ -26574,6 +26574,68 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       pushCompanionMessage("advert_loc_policy: 0=none,1=share,2=prefs"); return;
     }
 
+    // --- get-all-Parity (User-Prinzip 2026-07-30): ALLE in 'get all' sichtbaren
+    // Keys muessen auch via 'set' setzbar sein. Diese existierten bisher nur im
+    // Restore-Pfad (Backup-Rueckspielen, _br_applied), nicht im interaktiven
+    // 'set' -> Inkonsistenz (z.B. repeater_profile aus der NODE-PREFS-Sektion
+    // war per set/get unerreichbar, waehrend 'repeat' schaltbar ist). Wo ein
+    // dedizierter Befehl existiert: dorthin delegieren (Side-Effects: Radio-
+    // Apply, GPS-Power, rx-Hardware). Sonst direkt setzen wie im Restore-Pfad.
+    if (strcmp(key, "repeat") == 0) {
+      if (strcmp(value_lc,"1")==0 || strcmp(value_lc,"on")==0)  { handleCompanionCommand("repeater on");  return; }
+      if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"off")==0) { handleCompanionCommand("repeater off"); return; }
+      pushCompanionMessage("set repeat <0|1>"); return;
+    }
+    if (strcmp(key, "repeater_profile") == 0 || strcmp(key, "repeater.profile") == 0) {
+      if (strcmp(value_lc,"1")==0 || strcmp(value_lc,"normal")==0)    { handleCompanionCommand("repeater profile normal");    return; }
+      if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"defensive")==0) { handleCompanionCommand("repeater profile defensive"); return; }
+      pushCompanionMessage("repeater_profile: 0=defensive, 1=normal"); return;
+    }
+    if (strcmp(key, "gps_profile") == 0) {
+      char c[40];
+      if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"full")==0)                                            snprintf(c,sizeof(c),"gps profile full");
+      else if (strcmp(value_lc,"1")==0 || strcmp(value_lc,"position-only")==0 || strcmp(value_lc,"pos")==0) snprintf(c,sizeof(c),"gps profile position-only");
+      else if (strcmp(value_lc,"2")==0 || strcmp(value_lc,"time-only")==0 || strcmp(value_lc,"time")==0)    snprintf(c,sizeof(c),"gps profile time-only");
+      else { pushCompanionMessage("gps_profile: 0=full,1=position-only,2=time-only"); return; }
+      handleCompanionCommand(c); return;
+    }
+    if (strcmp(key, "gps_lead_secs") == 0) {
+      long v = atol(value_lc);
+      if (v < 30 || v > 90L*86400L) { pushCompanionMessage("gps_lead_secs: 30..7776000 (Sekunden)"); return; }
+      char c[40]; snprintf(c, sizeof(c), "gps power lead %lds", v);  // 's' erzwingt Sekunden (Befehl-Default waere Minuten)
+      handleCompanionCommand(c); return;
+    }
+    if (strcmp(key, "rx_disabled") == 0) {
+      if (strcmp(value_lc,"1")==0 || strcmp(value_lc,"on")==0)  { handleCompanionCommand("rx disable"); return; }
+      if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"off")==0) { handleCompanionCommand("rx enable");  return; }
+      pushCompanionMessage("set rx_disabled <0|1>"); return;
+    }
+    // Reine App-Mirror-Prefs ohne dedizierten Befehl: direkt setzen (wie Restore).
+    if (strcmp(key, "airtime_factor") == 0) {
+      float v = (float)atof(value_lc);
+      if (v < 0 || v > 9.0f) { pushCompanionMessage("airtime_factor: 0..9.0"); return; }
+      _prefs.airtime_factor = v; savePrefs();
+      char r[48]; snprintf(r,sizeof(r),"OK - airtime_factor = %.3f", (double)v); pushCompanionMessage(r); return;
+    }
+    if (strcmp(key, "rx_boosted_gain") == 0) {
+      int v = atoi(value_lc);
+      if (v!=0 && v!=1) { pushCompanionMessage("rx_boosted_gain: 0|1 (Radio-Apply nach reboot)"); return; }
+      _prefs.rx_boosted_gain = (uint8_t)v; savePrefs();
+      char r[56]; snprintf(r,sizeof(r),"OK - rx_boosted_gain = %d (aktiv nach reboot)", v); pushCompanionMessage(r); return;
+    }
+    if (strcmp(key, "manual_add_contacts") == 0) {
+      int v = atoi(value_lc);
+      if (v!=0 && v!=1) { pushCompanionMessage("manual_add_contacts: 0|1"); return; }
+      _prefs.manual_add_contacts = (uint8_t)v; savePrefs();
+      char r[48]; snprintf(r,sizeof(r),"OK - manual_add_contacts = %d", v); pushCompanionMessage(r); return;
+    }
+    if (strcmp(key, "autoadd_config") == 0) {
+      int v = atoi(value_lc);
+      if (v < 0 || v > 255) { pushCompanionMessage("autoadd_config: 0..255"); return; }
+      _prefs.autoadd_config = (uint8_t)v; savePrefs();
+      char r[48]; snprintf(r,sizeof(r),"OK - autoadd_config = %d", v); pushCompanionMessage(r); return;
+    }
+
     // Unbekannter key
     char r[120];
     snprintf(r, sizeof(r),
