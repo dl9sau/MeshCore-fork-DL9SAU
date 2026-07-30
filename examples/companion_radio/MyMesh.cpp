@@ -8617,6 +8617,12 @@ void MyMesh::handleCmdFrame(size_t len) {
       // strict-Range liegt. Ohne REPEATER_DEFENSIVE_FORCE-Build: hart
       // ablehnen. Mit ifdef + force-Flag: User-Verantwortung.
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+      // DL9SAU 2026-07-30: verstaendlicher Hinweis statt nur kryptischem
+      // 'Illegal Argument' in der App (User-Report: Repeat-Enable schlug immer
+      // fehl, weil defensive das Default-Profil ist + Haupt-Freq nicht in der
+      // strikten Ad-hoc-Liste).
+      pushCompanionMessage("Repeat abgelehnt (defensive-Profil): nur Ad-hoc-Freqs. "
+                           "Standard-Repeating: CLI 'repeater profile normal', dann Repeat erneut.");
     } else if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7000 &&
         bw <= 500000) {
       // Always enforce: full signal spectrum (freq +/- BW/2) must fit inside
@@ -26515,6 +26521,57 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       pushCompanionMessage(r);
       return;
+    }
+
+    // DL9SAU 2026-07-30: Bugfix -- diese Keys hatten eine Detail-Hilfe
+    // (`set X` ohne Wert), aber KEINEN Apply-Zweig -> `set X <wert>` fiel auf
+    // 'Unbekannter set-key' durch. Nachgezogen (User-Report Regression).
+    if (strcmp(key, "path_hash_mode") == 0 || strcmp(key, "path.hash.mode") == 0) {
+      int v = atoi(value_lc);
+      if (v < 0 || v > 2) { pushCompanionMessage("path_hash_mode: 0..2 (0=1B,1=2B,2=3B)"); return; }
+      _prefs.path_hash_mode = (uint8_t)v; savePrefs();
+      char r[64]; snprintf(r, sizeof(r), "OK - path_hash_mode = %d", v); pushCompanionMessage(r); return;
+    }
+    if (strcmp(key, "autoadd_max_hops") == 0) {
+      int v = atoi(value_lc);
+      if (v < 0 || v > 64) { pushCompanionMessage("autoadd_max_hops: 0..64"); return; }
+      _prefs.autoadd_max_hops = (uint8_t)v; savePrefs();
+      char r[64]; snprintf(r, sizeof(r), "OK - autoadd_max_hops = %d", v); pushCompanionMessage(r); return;
+    }
+    if (strcmp(key, "gps_interval") == 0) {
+      long v = atol(value_lc);
+      if (v < 0 || v > 86400) { pushCompanionMessage("gps_interval: 0..86400 sec"); return; }
+      _prefs.gps_interval = (uint32_t)v; savePrefs();
+      char r[80]; snprintf(r, sizeof(r), "OK - gps_interval = %ld sec%s", v, v == 0 ? " (keine Auto-Polls)" : ""); pushCompanionMessage(r); return;
+    }
+    if (strcmp(key, "telemetry_mode_base") == 0) {
+      int v = atoi(value_lc); if (v<0||v>2){ pushCompanionMessage("telemetry_mode_base: 0=DENY,1=ALLOW_FLAGS,2=ALLOW_ALL"); return; }
+      _prefs.telemetry_mode_base = (uint8_t)v; savePrefs();
+      char r[64]; snprintf(r, sizeof(r), "OK - telemetry_mode_base = %d", v); pushCompanionMessage(r); return;
+    }
+    if (strcmp(key, "telemetry_mode_loc") == 0) {
+      int v = atoi(value_lc); if (v<0||v>2){ pushCompanionMessage("telemetry_mode_loc: 0=DENY,1=ALLOW_FLAGS,2=ALLOW_ALL"); return; }
+      _prefs.telemetry_mode_loc = (uint8_t)v; savePrefs();
+      char r[64]; snprintf(r, sizeof(r), "OK - telemetry_mode_loc = %d", v); pushCompanionMessage(r); return;
+    }
+    if (strcmp(key, "telemetry_mode_env") == 0) {
+      int v = atoi(value_lc); if (v<0||v>2){ pushCompanionMessage("telemetry_mode_env: 0=DENY,1=ALLOW_FLAGS,2=ALLOW_ALL"); return; }
+      _prefs.telemetry_mode_env = (uint8_t)v; savePrefs();
+      char r[64]; snprintf(r, sizeof(r), "OK - telemetry_mode_env = %d", v); pushCompanionMessage(r); return;
+    }
+    // gps + advert_loc_policy: an die dedizierten Befehle delegieren (die
+    // haben Side-Effects wie GPS-Power + Bbox-Re-Eval bzw. Advert-Policy).
+    if (strcmp(key, "gps") == 0) {
+      if (strcmp(value_lc,"1")==0 || strcmp(value_lc,"on")==0)  { handleCompanionCommand("gps on"); return; }
+      if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"off")==0) { handleCompanionCommand("gps off"); return; }
+      pushCompanionMessage("set gps <0|1>"); return;
+    }
+    if (strcmp(key, "advert_loc_policy") == 0 || strcmp(key, "advert.loc.policy") == 0) {
+      int v = atoi(value_lc);
+      if (v==0) { handleCompanionCommand("gps advert none");  return; }
+      if (v==1) { handleCompanionCommand("gps advert share"); return; }
+      if (v==2) { handleCompanionCommand("gps advert prefs"); return; }
+      pushCompanionMessage("advert_loc_policy: 0=none,1=share,2=prefs"); return;
     }
 
     // Unbekannter key
