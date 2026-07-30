@@ -7757,12 +7757,16 @@ static FreqRange repeat_freq_ranges[] = {
 // auf eine Ausweichfreq (Event/SAR). Deshalb: BLOCKLIST der Hauptfrequenzen
 // statt Allowlist. Vergleich EXAKT (kHz) -- ±BW/2 waere korrekter, aber
 // fehlertraechtiger (User-Entscheid 2026-07-30).
+// NUR europaeische Haupt-Mesh-Frequenzen. Nicht-EU-Hauptfreqs (z.B. US/Kanada
+// 910.525) sind BEWUSST NICHT gelistet -- die pflegt die App, wir haetten den
+// Wartungsaufwand nicht; nur die Bandgrenzen sind fix (signalFitsInIsmBand).
+// ACHTUNG: 918.000 gehoert NICHT hierher -- das ist eine fuer Client-Repeating
+// VORGESEHENE Freq (dort ist Repeating erwuenscht, also NICHT blockieren).
 static const uint32_t main_mesh_freqs[] = {
   433650,   // 70cm
   869432,   // CZ
-  869525,   // EU deprecated (koennte raus; vorerst in der Blocklist)
+  869525,   // EU (deprecated)
   869618,   // EU Haupt-qrg
-  918000,   // US
 };
 
 void MyMesh::applyRadioPolicy() {
