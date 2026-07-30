@@ -7757,16 +7757,40 @@ static FreqRange repeat_freq_ranges[] = {
 // auf eine Ausweichfreq (Event/SAR). Deshalb: BLOCKLIST der Hauptfrequenzen
 // statt Allowlist. Vergleich EXAKT (kHz) -- ±BW/2 waere korrekter, aber
 // fehlertraechtiger (User-Entscheid 2026-07-30).
-// NUR europaeische Haupt-Mesh-Frequenzen. Nicht-EU-Hauptfreqs (z.B. US/Kanada
-// 910.525) sind BEWUSST NICHT gelistet -- die pflegt die App, wir haetten den
-// Wartungsaufwand nicht; nur die Bandgrenzen sind fix (signalFitsInIsmBand).
-// ACHTUNG: 918.000 gehoert NICHT hierher -- das ist eine fuer Client-Repeating
-// VORGESEHENE Freq (dort ist Repeating erwuenscht, also NICHT blockieren).
+// --- LISTE 3: reservierte Haupt-Mesh-Frequenzen (BLOCKLIST fuer Client-Repeat).
+// isValidClientRepeatFreq() sperrt Client-Repeat auf genau diesen Freqs (dort
+// arbeiten echte Repeater) -- ausser in profile=normal oder mit force. NUR
+// europaeische Hauptfreqs; Nicht-EU (z.B. US/Kanada 910.525) sind BEWUSST NICHT
+// gelistet -- die pflegt die App, wir haetten den Wartungsaufwand nicht; nur die
+// Bandgrenzen sind fix (signalFitsInIsmBand). ACHTUNG: 918.000 gehoert NICHT
+// hierher -- das ist eine fuer Client-Repeat VORGESEHENE Freq (siehe Liste 2).
 static const uint32_t main_mesh_freqs[] = {
   433650,   // 70cm
   869432,   // CZ
   869525,   // EU (deprecated)
   869618,   // EU Haupt-qrg
+};
+
+// --- LISTE 2: App-VORSCHLAGS-Liste fuer defensive-ohne-force. Das sind die fuer
+// Client-Repeat GEEIGNETEN Freqs/Baender, die die App dem User zur Auswahl
+// anbietet (CMD_GET_ALLOWED_REPEAT_FREQ), damit er eine sinnvolle, compliant
+// Freq erwischt. Im 869-Narrow-Band bewusst OHNE die Haupt-qrg 869.618. In
+// normal/force liefert die App stattdessen die volle Bandliste (repeat_freq_
+// ranges). Das ist nur eine ORIENTIERUNGSHILFE (ueberschreibbar!) -- der User
+// sieht "ah, die ist empfohlen" statt evtl. eine schaedlichere Freq zu waehlen.
+// Aendert er trotzdem etwas, greifen die ueblichen Checks (Bandgrenze/BW +
+// keine reservierte Haupt-qrg). Die harte Sperre macht isValidClientRepeatFreq
+// (main_mesh_freqs, Liste 3); auf der Haupt-qrg bewusst repeaten: 'repeater on
+// force <Passphrase>'.
+static FreqRange repeat_freq_ranges_strict[] = {
+  { 433050, 434790 },   // 70cm SRD / ISM
+  { 865600, 865800 },
+  { 866200, 866400 },
+  { 866800, 867000 },
+  { 867400, 867600 },
+  { 868700, 869200 },   // EU 869 g3
+  { 869495, 869495 },   // EU 869 narrow exakt 869.495 (upstream-1.16 Default, gem. PR a37078f6: 10% duty 500mW ERP); 869.618 weiter ueber 'force' verfuegbar
+  { 918000, 918000 }    // US 915 ISM (= upstream-1.16 Default, single-point 918.0)
 };
 
 void MyMesh::applyRadioPolicy() {
@@ -9458,18 +9482,23 @@ void MyMesh::handleCmdFrame(size_t len) {
     out_frame[i++] = _prefs.autoadd_max_hops;
     _serial->writeFrame(out_frame, i);
   } else if (cmd_frame[0] == CMD_GET_ALLOWED_REPEAT_FREQ) {
-    // DL9SAU 2026-07-30: INVERTIERTES Modell -> die App bekommt IMMER die vollen
-    // legalen Band-Ranges (repeat_freq_ranges). Client-Repeat ist ueberall in-band
-    // erlaubt AUSSER auf den Haupt-Mesh-Frequenzen -- diese Ausnahme ist nicht als
-    // Range darstellbar; die Firmware blockt die Haupt-qrg beim Aktivieren gezielt
-    // (isValidClientRepeatFreq / main_mesh_freqs). Frueher gab's hier eine profile-
-    // abhaengige strict/wide-Umschaltung -- entfaellt mit der Blocklist.
+    // DL9SAU: profil-abhaengige App-Auswahlliste.
+    //   normal ODER force freigeschaltet -> volle Bandliste (repeat_freq_ranges):
+    //     der User darf alle legalen Freqs waehlen (Admin-Verantwortung).
+    //   defensive & !force -> Orientierungshilfe (repeat_freq_ranges_strict):
+    //     empfohlene compliant Freqs OHNE die Haupt-qrg, damit der User gut waehlt.
+    //     UEBERSCHREIBBAR -- tippt er was anderes, greifen die ueblichen Checks.
+    // Die harte Sperre der reservierten Hauptfreqs macht isValidClientRepeatFreq
+    // (main_mesh_freqs) beim Aktivieren, unabhaengig von dieser Vorschlagsliste.
+    bool wide_list = (_prefs.repeater_profile == 1 /* normal */)
+                     || (_prefs.client_repeat_force != 0);
+    const FreqRange* list = wide_list ? repeat_freq_ranges : repeat_freq_ranges_strict;
+    int n = wide_list ? (int)(sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]))
+                      : (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0]));
     int i = 0;
     out_frame[i++] = RESP_ALLOWED_REPEAT_FREQ;
-    for (int k = 0;
-         k < (int)(sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]))
-         && i + 8 < (int)sizeof(out_frame); k++) {
-      auto r = &repeat_freq_ranges[k];
+    for (int k = 0; k < n && i + 8 < (int)sizeof(out_frame); k++) {
+      const FreqRange* r = &list[k];
       memcpy(&out_frame[i], &r->lower_freq, 4); i += 4;
       memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
     }
