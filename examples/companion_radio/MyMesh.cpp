@@ -16550,9 +16550,10 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       if (topic_prefix_match(topic, "repeater")) {
         pushCompanionMessage(
-          "repeater [on [force [<Auth-Code>]] | off]:\n"
+          "repeater [on [force [<Auth-Code>]] | off | force off]:\n"
           "  schaltet Repeating ein/aus. Verhalten\n"
           "  gemaess profile (defensive | normal).\n"
+          "  'force off' nimmt die Freischaltung zurueck.\n"
           "  Ohne Arg -> Status.");
         pushCompanionMessage(
           "profile=defensive (Default; = 'client_repeat'):\n"
@@ -16582,9 +16583,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  dort arbeiten echte Repeater.");
         pushCompanionMessage(
           "  'repeater on force <Auth-Code>' schaltet\n"
-          "  es 1x frei (Auth-Code mit heutigem Datum),\n"
-          "  danach genuegt 'repeater on force'.\n"
-          "  'repeater on' (ohne force) disarmt wieder.");
+          "  es 1x frei (Auth-Code = heutiges Datum),\n"
+          "  danach persistent (ueberlebt on/off,\n"
+          "  Reboot, Backup).\n"
+          "  Freischaltung zuruecknehmen: 'repeater\n"
+          "  force off'. ('repeater on/off' schaltet\n"
+          "  nur den Repeater, force bleibt.)");
         return;
       }
       if (topic_prefix_match(topic, "status")) {
