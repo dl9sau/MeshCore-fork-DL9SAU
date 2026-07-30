@@ -8643,8 +8643,11 @@ void MyMesh::handleCmdFrame(size_t len) {
       // aktivieren Repeat dort -- so bleibt der Client-Repeat-Usecase (Event/
       // SAR-Abdeckung auf compliant Ad-hoc-Freq) erhalten. Fuer die Haupt-qrg
       // 869.618 braucht es bewusst 'repeater profile normal' (oder FORCE-Build).
-      // Hinweis: die Stock-App zeigt weiter ihre gesendete Freq (kein Rueckkanal
-      // 'Freq geaendert') -- Wahrheit steht in 'get' + der Companion-Meldung.
+      // Hinweis: kein PUSH-Rueckkanal 'Freq geaendert' -> die App zeigt bis zum
+      // naechsten Config-PULL kurz ihre gesendete Freq. Beim naechsten
+      // CMD_APP_START liefert RESP_CODE_SELF_INFO aber _prefs.freq (die gesnappte
+      // Freq, s. ~Z.7997) -> App zieht 869.495 nach. Wahrheit sofort in 'get'
+      // + der Companion-Meldung.
       uint32_t snapped = snapToStrictRepeatFreq(freq, bw);
       if (snapped != 0 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8
           && bw >= 7000 && bw <= 500000) {
