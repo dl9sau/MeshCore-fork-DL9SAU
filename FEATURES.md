@@ -153,6 +153,11 @@ Zwei Profile (`repeater profile <normal|defensive>`):
   Veranstaltung weitergeleitet werden soll und nicht der globale Mesh-Verkehr
   durchschlägt.
 
+  Auf der **Haupt-Mesh-Frequenz** ist Client-Repeat bewusst gesperrt — dort
+  arbeiten die echten Repeater. Wer es dort gezielt braucht (z. B. für einen
+  Einsatz), kann es über einen bewussten Opt-in-Befehl freischalten. Fragen
+  dazu beantworte ich gerne ;)
+
 ### Automatische Abschaltung bei Bewegung
 
 Wenn der Repeater per GPS Bewegung erkennt, schaltet er sich automatisch ab
@@ -566,5 +571,3 @@ nach PlatformIO-Framework-Updates (idempotent).
 ```
 -D CFG_BLE_TASK_STACKSIZE=2048   Bluefruit BLE-Stack 8 KB (statt 5 KB Default)
 ```
-Und ein undokumentiertes betreffs Client Repeater Mode ("repeater profile defensive")
-auf Haupt-Frequenz. Fragen dazu beantworte ich gerne ;)
