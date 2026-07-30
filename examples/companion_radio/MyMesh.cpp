@@ -789,12 +789,15 @@ void MyMesh::bootLogAppend() {
   }
   // Schreiben: neuer Eintrag zuerst, dann max BOOT_LOG_MAX_ENTRIES-1
   // existing (aelteste fliegt raus).
-  // DL9SAU 2026-07-15: In-Place-Write (kein remove) -> weniger Alloc/Free-Churn
-  // auf der kleinen InternalFS + crash-sicherer (COW: unterbrochener Write laesst
-  // das alte boot_log intakt). seek(0) + truncate() kappen den alten Tail.
-  File w = _store->openWriteFileInPlace("/boot_log.txt");
+  // DL9SAU 2026-07-30: temp+rename statt In-Place -> WIRKLICH crash-safe. Der
+  // fruehere In-Place-Write (seek0+truncate, 2026-07-15) galt als COW-sicher,
+  // hat aber empirisch eine korrupte /boot_log.txt hinterlassen -> Boot-Hang
+  // (littlefs dreht mit LFS_NO_ASSERT auf der kaputten Kette im Kreis). Ein
+  // unterbrochener temp-Write laesst /boot_log.txt intakt; rename() committet
+  // atomar. Mehr-Churn ist vernachlaessigbar -- boot_log wird nur 1x/Boot
+  // geschrieben (User-Entscheid 2026-07-30: temp+rename NUR fuer boot_log).
+  File w = _store->openWriteFile("/boot_log.tmp");
   if (!w) return;
-  w.seek(0);
   w.write((const uint8_t*)entry, strlen(entry));
   w.write((const uint8_t*)"\n", 1);
   int keep = (existing_n < BOOT_LOG_MAX_ENTRIES - 1)
@@ -803,8 +806,8 @@ void MyMesh::bootLogAppend() {
     w.write((const uint8_t*)existing[i], strlen(existing[i]));
     w.write((const uint8_t*)"\n", 1);
   }
-  DataStore::truncateInPlaceTail(w);   // portabel: nur nRF52/STM32 truncaten
   w.close();
+  _store->renameFile("/boot_log.tmp", "/boot_log.txt");   // atomarer Ersatz
   // 2026-07-05: Companion-Push entfernt -- die Info ist redundant zu
   // 'log read' und blaehte den Chat beim Boot auf.
 }
@@ -1869,7 +1872,8 @@ bool MyMesh::isRepeatingEffectivelyAllowed() const {
   if (_is_moving) return false;                    // is_moving suppressed defensive-rep
   // freq muss in strict-Range sein ODER (nur mit ifdef) force gesetzt
   uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
-  if (isValidClientRepeatFreq(f_khz)) return true;
+  uint32_t bw_hz = (uint32_t)(_prefs.bw * 1000.0f + 0.5f);
+  if (isValidClientRepeatFreq(f_khz, bw_hz)) return true;
 #ifdef REPEATER_DEFENSIVE_FORCE
   if (_prefs.client_repeat_force) return true;
 #endif
@@ -7547,7 +7551,13 @@ void MyMesh::begin(bool has_display) {
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10g post loadContacts"); Serial.flush();
 #endif
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] X0 pre bootstrapRTCfromContacts"); Serial.flush();
+#endif
   bootstrapRTCfromContacts();
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] X1 post bootstrapRTCfromContacts"); Serial.flush();
+#endif
   // Reise-Fix 2026-06-08: nach contacts-Bootstrap die Sync-State-Marker
   // initialisieren. clock-Display nutzt die pubkey-Sentinels:
   //   0xFFFFFF = Boot-Bootstrap (last advert in contacts)
@@ -7566,16 +7576,48 @@ void MyMesh::begin(bool has_display) {
       memset(_time_sync_last_pubkey, 0xFF, sizeof(_time_sync_last_pubkey));
     }
   }
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] X2 post rtc-sync-marker-block"); Serial.flush();
+#endif
+  // DL9SAU 2026-07-30 RECOVERY: eine korrupte /boot_log.txt (halber in-place-
+  // Write nach schlechtem Reset) laesst littlefs beim Lesen HAENGEN, weil
+  // LFS_NO_ASSERT=1 das Erroren unterdrueckt -> Boot-Hang vor loadRtcPersist.
+  // remove() fasst nur den Verzeichnis-Eintrag an (Scan-Allokator, kein
+  // Datenketten-Walk) -> haengt nicht. One-Shot ueber -D NRF52_BOOTLOG_RECOVER.
+#if defined(NRF52_BOOTLOG_RECOVER)
+  #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("\r\n# [T1000-E diag] RECOVER pre removeFile /boot_log.txt"); Serial.flush();
+  #endif
+  _store->removeFile("/boot_log.txt");
+  #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("\r\n# [T1000-E diag] RECOVER post removeFile /boot_log.txt"); Serial.flush();
+  #endif
+#endif
   // RTC-Persistierung (Bug-Fix 2026-06-14): /rtc_persist laden und
   // anwenden wenn hoeher als contacts-Bootstrap. Marker auf 0xFDFDFD.
   // (loadBucketsFromFlash kommt danach und kann nochmal hoeher legen.)
   {
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.println("\r\n# [T1000-E diag] Y0 pre loadRtcPersist"); Serial.flush();
+#endif
     uint32_t persisted = loadRtcPersist();
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+    Serial.print("\r\n# [T1000-E diag] Y1 post loadRtcPersist persisted="); Serial.println((unsigned long)persisted); Serial.flush();
+#endif
     if (persisted != 0) {
       uint32_t cur = getRTCClock()->getCurrentTime();
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+      Serial.print("\r\n# [T1000-E diag] Y2 post getCurrentTime cur="); Serial.println((unsigned long)cur); Serial.flush();
+#endif
       const uint32_t ONE_YEAR_SECS = 365UL * 86400UL;
       if (persisted + 1 > cur && persisted < cur + ONE_YEAR_SECS) {
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+        Serial.println("\r\n# [T1000-E diag] Y3 pre setCurrentTime"); Serial.flush();
+#endif
         getRTCClock()->setCurrentTime(persisted + 1);
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+        Serial.println("\r\n# [T1000-E diag] Y4 post setCurrentTime"); Serial.flush();
+#endif
         traceCompanion(TRACE_RTC,
                        "[rtc-persist] geladen %lu, RTC %lu -> %lu",
                        (unsigned long)persisted,
@@ -7594,6 +7636,9 @@ void MyMesh::begin(bool has_display) {
       }
     }
   }
+#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
+  Serial.println("\r\n# [T1000-E diag] X3 post loadRtcPersist-block, pre addChannel"); Serial.flush();
+#endif
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10h pre loadChannels"); Serial.flush();
@@ -7738,15 +7783,20 @@ static FreqRange repeat_freq_ranges[] = {
 // auf 869.618 also ab. Wer bewusst auch dort repeaten will: Companion-CLI
 // "repeater on --force" umgeht die strict-Pruefung, behaelt aber
 // signalFitsInIsmBand als Sicherheitsgate.
-static FreqRange repeat_freq_ranges_strict[] = {
-  { 433050, 434790 },   // 70cm SRD / ISM
-  { 865600, 865800 },
-  { 866200, 866400 },
-  { 866800, 867000 },
-  { 867400, 867600 },
-  { 868700, 869200 },   // EU 869 g3
-  { 869495, 869495 },   // EU 869 narrow exakt 869.495 (upstream-1.16 Default, gem. PR a37078f6: 10% duty 500mW ERP); 869.618 weiter ueber 'force' verfuegbar
-  { 918000, 918000 }    // US 915 ISM (= upstream-1.16 Default, single-point 918.0)
+// DL9SAU 2026-07-30: INVERTIERT (vorher Allowlist erlaubter Repeat-Ranges).
+// MeshCore-Policy: Repeater UND Companions arbeiten auf den normalen Haupt-/
+// Default-Frequenzen. Das Companion-CLIENT-Repeat-Feature ist auf GENAU DIESEN
+// Hauptfrequenzen NICHT erlaubt (ausser force) -- dort machen echte Repeater die
+// Arbeit; ein Client-Repeat waere redundant/schaedlich. Client-Repeat gehoert
+// auf eine Ausweichfreq (Event/SAR). Deshalb: BLOCKLIST der Hauptfrequenzen
+// statt Allowlist. Vergleich EXAKT (kHz) -- ±BW/2 waere korrekter, aber
+// fehlertraechtiger (User-Entscheid 2026-07-30).
+static const uint32_t main_mesh_freqs[] = {
+  433650,   // 70cm
+  869432,   // CZ
+  869525,   // EU deprecated (koennte raus; vorerst in der Blocklist)
+  869618,   // EU Haupt-qrg
+  918000,   // US
 };
 
 void MyMesh::applyRadioPolicy() {
@@ -7808,32 +7858,36 @@ void MyMesh::restorePacketTxDefaults() {
   radio_driver.setTxPower(_prefs.tx_power_dbm);
 }
 
-bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
-  // Strikte Liste — 869.618 (EU-Narrow-Main) ist hier NICHT enthalten.
-  for (int i = 0; i < (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0])); i++) {
-    auto r = &repeat_freq_ranges_strict[i];
-    if (f >= r->lower_freq && f <= r->upper_freq) return true;
+bool MyMesh::isValidClientRepeatFreq(uint32_t f_khz, uint32_t bw_hz) const {
+  // INVERTIERT: Client-Repeat ist erlaubt = legal sendbar (in-band) UND NICHT
+  // auf einer Haupt-Mesh-Frequenz (dort arbeiten echte Repeater -> nur mit force).
+  if (!signalFitsInIsmBand(f_khz, bw_hz)) return false;   // out-of-band -> nie
+  for (int i = 0; i < (int)(sizeof(main_mesh_freqs)/sizeof(main_mesh_freqs[0])); i++) {
+    if (f_khz == main_mesh_freqs[i]) return false;         // Hauptfrequenz -> blockiert
   }
-  return false;
+  return true;
 }
 
-// DL9SAU 2026-07-30: Snappt eine angeforderte Center-Freq auf die naechst-
-// gelegene compliant strict-Repeat-Freq, sodass das volle Signal (freq +/-
-// BW/2) noch in ein ISM-Band passt. Ermoeglicht frisches App-Repeat-Enable im
-// defensive-Profil ohne 'Illegal Argument': EU 869.618 -> 869.495, fuer 433/
-// 866-User automatisch die dortige Sub-Band-Freq. Erhaelt den Client-Repeat-
-// Usecase (Event/SAR auf compliant Ad-hoc-Freq). 0 = keine passende gefunden.
-uint32_t MyMesh::snapToStrictRepeatFreq(uint32_t freq_khz, uint32_t bw_hz) const {
+// DL9SAU 2026-07-30: Center in die Bandkante NUDGEN, sodass
+// das volle Signal (freq +/- BW/2) in das wide-ISM-Band passt, in dem die Freq
+// schon liegt (kein Sprung in ein fernes Band). Loest den Bandkanten-Fall
+// (z.B. 869.400 + BW62.5 ragt 32 kHz unter 869.400 -> Center 869.432). 0 =
+// BW zu breit fuer das Band der Freq (dann ehrlicher Reject mit Klartext).
+uint32_t MyMesh::nudgeIntoWideBand(uint32_t freq_khz, uint32_t bw_hz) const {
+  uint32_t half = (bw_hz + 1999) / 2000;   // ceil(BW/2) in kHz, wie signalFitsInIsmBand
   uint32_t best = 0;
   uint32_t best_dist = 0xFFFFFFFFu;
-  for (int i = 0; i < (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0])); i++) {
-    auto r = &repeat_freq_ranges_strict[i];
-    // Gewuenschtes Center in [lower, upper] klemmen: isValidClientRepeatFreq
-    // prueft das Center, signalFitsInIsmBand das volle Spektrum.
+  for (int i = 0; i < (int)(sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0])); i++) {
+    const FreqRange* r = &repeat_freq_ranges[i];
+    // Nur das Band, in dem die Freq schon liegt (Bandkanten-Nudge, kein Sprung).
+    if (freq_khz < r->lower_freq || freq_khz > r->upper_freq) continue;
+    // Band breit genug fuer diese BW?
+    if (r->upper_freq < r->lower_freq + 2 * half) continue;
+    uint32_t lo_c = r->lower_freq + half;
+    uint32_t hi_c = r->upper_freq - half;
     uint32_t c = freq_khz;
-    if (c < r->lower_freq) c = r->lower_freq;
-    if (c > r->upper_freq) c = r->upper_freq;
-    if (!signalFitsInIsmBand(c, bw_hz)) continue;   // Snap-Ziel muss ISM-fit sein
+    if (c < lo_c) c = lo_c;
+    if (c > hi_c) c = hi_c;
     uint32_t dist = (c > freq_khz) ? (c - freq_khz) : (freq_khz - c);
     if (dist < best_dist) { best_dist = dist; best = c; }
   }
@@ -8634,71 +8688,83 @@ void MyMesh::handleCmdFrame(size_t len) {
 #ifdef REPEATER_DEFENSIVE_FORCE
     force_override = (_prefs.client_repeat_force != 0);
 #endif
-    if (repeat && defensive_mode
-        && !force_override && !isValidClientRepeatFreq(freq)) {
-      // DL9SAU 2026-07-30: App aktiviert Repeat auf einer Freq ausserhalb der
-      // strict-Liste (typisch: frische Installation, Default-Profil defensive,
-      // Haupt-qrg 869.618). Statt kryptischem 'Illegal Argument' snappen wir die
-      // Center-Freq auf die naechste compliant strict-Freq (EU: 869.495) und
-      // aktivieren Repeat dort -- so bleibt der Client-Repeat-Usecase (Event/
-      // SAR-Abdeckung auf compliant Ad-hoc-Freq) erhalten. Fuer die Haupt-qrg
-      // 869.618 braucht es bewusst 'repeater profile normal' (oder FORCE-Build).
-      // Hinweis: kein PUSH-Rueckkanal 'Freq geaendert' -> die App zeigt bis zum
-      // naechsten Config-PULL kurz ihre gesendete Freq. Beim naechsten
-      // CMD_APP_START liefert RESP_CODE_SELF_INFO aber _prefs.freq (die gesnappte
-      // Freq, s. ~Z.7997) -> App zieht 869.495 nach. Wahrheit sofort in 'get'
-      // + der Companion-Meldung.
-      uint32_t snapped = snapToStrictRepeatFreq(freq, bw);
-      if (snapped != 0 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8
-          && bw >= 7000 && bw <= 500000) {
-        _prefs.sf = sf;
-        _prefs.cr = cr;
-        _prefs.freq = (float)snapped / 1000.0;
-        _prefs.bw = (float)bw / 1000.0;
-        _prefs.client_repeat = repeat;
-        savePrefs();
-        recomputeRepeatingAllowed("App: radio params (freq-snap)");
-        applyRadioPolicy();
-        char m[160];
-        snprintf(m, sizeof(m),
-                 "Repeat aktiv. Freq auf %.3f MHz angepasst (compliant, defensive). "
-                 "Fuer %.3f MHz: 'repeater profile normal'.",
-                 (double)snapped / 1000.0, (double)freq / 1000.0);
-        pushCompanionMessage(m);
-        writeOKFrame();
+    if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8
+        && bw >= 7000 && bw <= 500000) {
+      // DL9SAU 2026-07-30: Zwei UNABHAENGIGE Eigenschaften einer (freq, BW):
+      //  (1) in-band (signalFitsInIsmBand) -- ueberhaupt legal sendbar.
+      //  (2) repeat-compliant (strict-Liste) -- legal fuers defensive Client-Repeat.
+      // Regeln:
+      //  - OUT-OF-BAND (1 false) = illegale Aussendung -> IMMER ablehnen, egal ob
+      //    repeat an/aus, egal welches Profil. (App zeigt Illegal Argument.)
+      //  - in-band, repeat-enable, defensive & !force, aber nicht compliant:
+      //    NUR den Mitteleuropa-Sonderfall Haupt-qrg 869.618 -> offizielle
+      //    compliant 869.495 snappen (App zieht sie via SELF_INFO nach). Andere
+      //    Freqs/Regionen koennen wir nicht erraten -> ablehnen (force/normal).
+      //  - in-band, repeat-enable, normal | force: in-band reicht -> uebernehmen.
+      uint32_t use_freq = freq;
+      if (repeat) {
+        // App-Pfad: die App fuellt ihr Freq-Feld mit einer Band-RANGE-KANTE vor
+        // (z.B. 869.400), NICHT mit der aktuellen Geraete-Freq. Wuerden wir diese
+        // out-of-band-Kante anwenden, ueberschriebe das eine gute gespeicherte
+        // Freq (User-Report: 869.618 -> 869.432, unerwartet). Daher: eine
+        // out-of-band-Freq von der App = "keine gueltige Freq-Aenderung" ->
+        // aktuelle Freq BEHALTEN, nur Repeat anwenden.
+        if (!signalFitsInIsmBand(use_freq, bw)) {
+          uint32_t cur = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
+          if (signalFitsInIsmBand(cur, bw)) {
+            use_freq = cur;                 // gute aktuelle Freq behalten
+          } else {
+            // auch die gespeicherte Freq ist unbrauchbar -> ehrliche Ablehnung.
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+            pushCompanionMessage("Repeat: gesendete Freq out-of-band und keine gueltige "
+                                 "gespeichert. Erst 'set freq <gueltig>'.");
+            return;
+          }
+        }
+        // in-band. Defensive (ohne force): Client-Repeat NICHT auf einer Haupt-
+        // Mesh-Frequenz (dort arbeiten echte Repeater). Sonderfall EU-Haupt-qrg
+        // 869.618 -> offizielle Ausweichfreq 869.495. Andere Haupt-qrg (US/CZ/..)
+        // koennen wir nicht sinnvoll auf eine Ausweichfreq raten -> ablehnen.
+        bool defensive_strict = defensive_mode && !force_override;
+        if (defensive_strict && !isValidClientRepeatFreq(use_freq, bw)) {
+          uint32_t main_khz = (uint32_t)(CR_NARROW_FREQ_ACTUAL * 1000.0f + 0.5f);   // 869618
+          uint32_t comp_khz = (uint32_t)(EU_NARROW_COMPLIANT_FREQ * 1000.0f + 0.5f); // 869495
+          if (use_freq == main_khz && signalFitsInIsmBand(comp_khz, bw)) {
+            use_freq = comp_khz;   // Haupt-qrg -> Ausweichfreq 869.495
+            char m[128];
+            snprintf(m, sizeof(m),
+                     "Repeat: EU-Haupt-qrg -> %.3f MHz (Client-Repeat gehoert nicht auf die Haupt-qrg).",
+                     (double)use_freq / 1000.0);
+            pushCompanionMessage(m);
+          } else {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+            pushCompanionMessage("Client-Repeat nicht auf der Haupt-Mesh-Freq (defensive). "
+                                 "Ausweichfreq waehlen oder 'repeater profile normal'.");
+            return;
+          }
+        }
+        // normal/force in-band -> use_freq uebernehmen.
       } else {
-        // Keine passende compliant Freq (z.B. exotische BW) -> ehrlicher Reject.
-        writeErrFrame(ERR_CODE_ILLEGAL_ARG);
-        pushCompanionMessage("Repeat abgelehnt (defensive-Profil): keine passende "
-                             "compliant Freq. Standard-Repeating: CLI 'repeater profile normal'.");
-      }
-    } else if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7000 &&
-        bw <= 500000) {
-      // Always enforce: full signal spectrum (freq +/- BW/2) must fit inside
-      // an ISM band, regardless of repeat=0/1. Catches edge-case configs
-      // like 433.125 MHz with BW=250 kHz (extends below 433.05 limit) or
-      // 866.300 MHz with BW=125 kHz centered close to a sub-band edge.
-      if (!signalFitsInIsmBand(freq, bw)) {
-        writeErrFrame(ERR_CODE_ILLEGAL_ARG);
-        return;
+        // repeat=0: reine Radio-Param-Aenderung -> out-of-band ehrlich ablehnen
+        // (kein Nudge -- User setzt bewusst eine Client-Freq).
+        if (!signalFitsInIsmBand(freq, bw)) {
+          writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+          return;
+        }
       }
       _prefs.sf = sf;
       _prefs.cr = cr;
-      _prefs.freq = (float)freq / 1000.0;
+      _prefs.freq = (float)use_freq / 1000.0;
       _prefs.bw = (float)bw / 1000.0;
       _prefs.client_repeat = repeat;
       // User-Wunsch 2026-06-02: client_repeat_force persistent halten
-      // auch wenn der Repeater per App ausgeschaltet wird. Vorher wurde
-      // force bei !repeat gecleart, was unerwartet war: nach erneutem
-      // 'repeater on' musste der User wieder 'force' angeben obwohl er
-      // die Einstellung explizit gesetzt hatte.
+      // auch wenn der Repeater per App ausgeschaltet wird.
       savePrefs();
-      recomputeRepeatingAllowed("App: radio params");
-
+      recomputeRepeatingAllowed(use_freq != freq ? "App: radio params (freq-corrected)"
+                                                 : "App: radio params");
       applyRadioPolicy();   // DL9SAU-Wrapper (s. Konflikt #2 Merge-Note)
-      MESH_DEBUG_PRINTLN("OK: CMD_SET_RADIO_PARAMS: f=%d, bw=%d, sf=%d, cr=%d", freq, bw, (uint32_t)sf,
-                         (uint32_t)cr);
-
+      MESH_DEBUG_PRINTLN("OK: CMD_SET_RADIO_PARAMS: f=%d(req %d), bw=%d, sf=%d, cr=%d",
+                         use_freq, freq, bw, (uint32_t)sf, (uint32_t)cr);
       writeOKFrame();
     } else {
       MESH_DEBUG_PRINTLN("Error: CMD_SET_RADIO_PARAMS: f=%d, bw=%d, sf=%d, cr=%d", freq, bw, (uint32_t)sf,
@@ -9403,40 +9469,20 @@ void MyMesh::handleCmdFrame(size_t len) {
     out_frame[i++] = _prefs.autoadd_max_hops;
     _serial->writeFrame(out_frame, i);
   } else if (cmd_frame[0] == CMD_GET_ALLOWED_REPEAT_FREQ) {
-    // Punkt 11 Reise-Fix 2026-06-08: profile-aware Frequenz-Liste.
-    //   profile=normal     -> wide-Liste (repeat_freq_ranges): echter
-    //                         Repeater darf alle Band-Frequenzen nutzen
-    //   profile=defensive  -> strict-Liste (repeat_freq_ranges_strict):
-    //                         nur Mesh-Hauptfrequenzen erlaubt
-    //   client_repeat_force gesetzt -> wide-Liste auch in defensive,
-    //                         damit User mit gesetztem force-Flag in
-    //                         der App seine Freq weiter speichern kann
-    //                         (sonst wuerde die App die aktuelle Freq
-    //                         als ungueltig markieren). Unabhaengig von
-    //                         repeat on/off -- force ist die explizite
-    //                         User-Entscheidung 'meine Freq ist OK'.
-    bool wide_list = (_prefs.repeater_profile == 1 /* normal */);
-#ifdef REPEATER_DEFENSIVE_FORCE
-    if (_prefs.client_repeat_force != 0) wide_list = true;
-#endif
+    // DL9SAU 2026-07-30: INVERTIERTES Modell -> die App bekommt IMMER die vollen
+    // legalen Band-Ranges (repeat_freq_ranges). Client-Repeat ist ueberall in-band
+    // erlaubt AUSSER auf den Haupt-Mesh-Frequenzen -- diese Ausnahme ist nicht als
+    // Range darstellbar; die Firmware blockt die Haupt-qrg beim Aktivieren gezielt
+    // (isValidClientRepeatFreq / main_mesh_freqs). Frueher gab's hier eine profile-
+    // abhaengige strict/wide-Umschaltung -- entfaellt mit der Blocklist.
     int i = 0;
     out_frame[i++] = RESP_ALLOWED_REPEAT_FREQ;
-    if (wide_list) {
-      for (int k = 0;
-           k < (int)(sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]))
-           && i + 8 < (int)sizeof(out_frame); k++) {
-        auto r = &repeat_freq_ranges[k];
-        memcpy(&out_frame[i], &r->lower_freq, 4); i += 4;
-        memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
-      }
-    } else {
-      for (int k = 0;
-           k < (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0]))
-           && i + 8 < (int)sizeof(out_frame); k++) {
-        auto r = &repeat_freq_ranges_strict[k];
-        memcpy(&out_frame[i], &r->lower_freq, 4); i += 4;
-        memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
-      }
+    for (int k = 0;
+         k < (int)(sizeof(repeat_freq_ranges)/sizeof(repeat_freq_ranges[0]))
+         && i + 8 < (int)sizeof(out_frame); k++) {
+      auto r = &repeat_freq_ranges[k];
+      memcpy(&out_frame[i], &r->lower_freq, 4); i += 4;
+      memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
     }
     _serial->writeFrame(out_frame, i);
   } else if (cmd_frame[0] == CMD_SEND_RAW_PACKET && len >= 4) {
@@ -25426,6 +25472,25 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         pushCompanionMessage("freq ausserhalb 150..2500 MHz");
         return;
       }
+      // DL9SAU 2026-07-30: out-of-band HART ablehnen -- ragt freq +/- BW/2 aus
+      // jedem ISM-Band, waere JEDE Aussendung (Advert/DM/Channel) unzulaessig,
+      // nicht nur Repeat. Wert NICHT speichern. Vorschlag = naechste gueltige.
+      uint32_t f_khz  = (uint32_t)(v * 1000.0f + 0.5f);
+      uint32_t bw_hz  = (uint32_t)(_prefs.bw * 1000.0f + 0.5f);
+      if (!signalFitsInIsmBand(f_khz, bw_hz)) {
+        uint32_t sug = nudgeIntoWideBand(f_khz, bw_hz);
+        char r[160];
+        if (sug != 0)
+          snprintf(r, sizeof(r),
+            "Abgelehnt: %.4f MHz +/- BW/2 (%.1f kHz) ausserhalb ISM-Band -- Senden unzulaessig. "
+            "Naechste gueltige: %.4f MHz.", (double)v, (double)_prefs.bw, (double)sug / 1000.0);
+        else
+          snprintf(r, sizeof(r),
+            "Abgelehnt: %.4f MHz + BW %.1f kHz passt in kein ISM-Band -- Senden unzulaessig.",
+            (double)v, (double)_prefs.bw);
+        pushCompanionMessage(r);
+        return;
+      }
       _prefs.freq = v;
       savePrefs();
       applyRadioPolicy();
@@ -25437,6 +25502,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       float v = atof(value_lc);
       if (v < 7.0f || v > 500.0f) {
         pushCompanionMessage("bw ausserhalb 7..500 kHz");
+        return;
+      }
+      // DL9SAU 2026-07-30: BW so breit dass das Signal auf der aktuellen Freq
+      // aus dem ISM-Band ragt -> out-of-band -> Senden unzulaessig -> ablehnen.
+      uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
+      uint32_t bw_hz = (uint32_t)(v * 1000.0f + 0.5f);
+      if (!signalFitsInIsmBand(f_khz, bw_hz)) {
+        char r[160];
+        snprintf(r, sizeof(r),
+          "Abgelehnt: BW %.1f kHz laesst das Signal auf %.4f MHz aus dem ISM-Band ragen "
+          "-- Senden unzulaessig. Schmalere BW waehlen.", (double)v, (double)_prefs.freq);
+        pushCompanionMessage(r);
         return;
       }
       _prefs.bw = v;
@@ -30447,7 +30524,7 @@ cron_add_direct:
 
     if (!arg || *arg == 0) {
       uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
-      bool strict_ok = isValidClientRepeatFreq(f_khz);
+      bool strict_ok = isValidClientRepeatFreq(f_khz, (uint32_t)(_prefs.bw * 1000.0f + 0.5f));
       const char* ld = (_prefs.loop_detect == 0) ? "off"
                      : (_prefs.loop_detect == 1) ? "minimal"
                      : (_prefs.loop_detect == 2) ? "moderate" : "strict";
@@ -30618,7 +30695,7 @@ cron_add_direct:
       // nutzen -- Admin-Verantwortung. Mit REPEATER_DEFENSIVE_FORCE-Build
       // zusaetzlich force-Bypass im defensive-Mode.
       bool defensive_mode = (_prefs.repeater_profile == 0);
-      if (defensive_mode && !force && !isValidClientRepeatFreq(f_khz)) {
+      if (defensive_mode && !force && !isValidClientRepeatFreq(f_khz, (uint32_t)(_prefs.bw * 1000.0f + 0.5f))) {
         char line[160];
 #ifdef REPEATER_DEFENSIVE_FORCE
         snprintf(line, sizeof(line),

@@ -211,6 +211,10 @@ struct AdvertPath {
 #define CR_HEARD_MAX_AGE_SECS   (48UL * 3600UL)
 #define CR_NARROW_FREQ_TRIGGER  869.000f
 #define CR_NARROW_FREQ_ACTUAL   869.618f
+// DL9SAU 2026-07-30: offizielle EU-narrow compliant Repeat-Freq (10% duty,
+// 500mW ERP). Mitteleuropa-Sonderfall: defensive-Repeat auf der Haupt-qrg
+// 869.618 wird auf diese Freq gesnappt (andere Regionen: nicht erratbar).
+#define EU_NARROW_COMPLIANT_FREQ 869.495f
 #define CR_REPEATER_CR          5
 #define CR_TX_POWER_REDUCTION_DB 6   // applied to auto-adverts and digipeat TX
 #define CR_TX_POWER_FLOOR_DBM    10  // never reduce below this
@@ -692,9 +696,9 @@ private:
 
   void checkCLIRescueCmd();
   void checkSerialInterface();
-  bool isValidClientRepeatFreq(uint32_t f) const;
+  bool isValidClientRepeatFreq(uint32_t f_khz, uint32_t bw_hz) const;
   bool signalFitsInIsmBand(uint32_t freq_khz, uint32_t bw_hz) const;
-  uint32_t snapToStrictRepeatFreq(uint32_t freq_khz, uint32_t bw_hz) const;
+  uint32_t nudgeIntoWideBand(uint32_t freq_khz, uint32_t bw_hz) const;
 
   // Koordinaten im nautischen DM-Format "DD-MM,M N/S DDD-MM,M E/W"
   // (Komma als Dezimal-Trenner, Grad-Breite 2 fuer Lat, 3 fuer Lon mit
