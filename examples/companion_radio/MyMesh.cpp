@@ -26681,6 +26681,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"defensive")==0) { handleCompanionCommand("repeater profile defensive"); return; }
       pushCompanionMessage("repeater_profile: 0=defensive, 1=normal"); return;
     }
+    if (strcmp(key, "client_repeat_force") == 0 || strcmp(key, "client.repeat.force") == 0) {
+      // NICHT direkt setzbar -- sonst waere der Passphrase-Schutz umgangen.
+      // Disarm (0) ist harmlos -> delegieren; Armen (1) -> Verweis auf Passphrase.
+      if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"off")==0) { handleCompanionCommand("repeater force off"); return; }
+      pushCompanionMessage("client_repeat_force nicht direkt setzbar (Passphrase-Schutz). "
+                           "Armen: 'repeater on force <Passphrase>'. Disarmen: 'set client_repeat_force 0' / 'repeater force off'.");
+      return;
+    }
     if (strcmp(key, "gps_profile") == 0) {
       char c[40];
       if (strcmp(value_lc,"0")==0 || strcmp(value_lc,"full")==0)                                            snprintf(c,sizeof(c),"gps profile full");
@@ -27103,6 +27111,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "lat") == 0)      snprintf(r, sizeof(r), "lat = %.6f", sensors.node_lat);
     else if (strcmp(key, "lon") == 0)      snprintf(r, sizeof(r), "lon = %.6f", sensors.node_lon);
     else if (strcmp(key, "repeat") == 0)   snprintf(r, sizeof(r), "repeat = %u", (unsigned)_prefs.client_repeat);
+    else if (strcmp(key, "client_repeat_force") == 0) snprintf(r, sizeof(r), "client_repeat_force = %u", (unsigned)_prefs.client_repeat_force);
     else if (strcmp(key, "gps") == 0)      snprintf(r, sizeof(r), "gps = %u", (unsigned)_prefs.gps_enabled);
     else if (strcmp(key, "advert_loc_policy") == 0) snprintf(r, sizeof(r), "advert_loc_policy = %u", (unsigned)_prefs.advert_loc_policy);
     else if (strcmp(key, "airtime_factor") == 0)    snprintf(r, sizeof(r), "airtime_factor = %.3f", _prefs.airtime_factor);
