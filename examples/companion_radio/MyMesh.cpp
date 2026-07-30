@@ -30747,7 +30747,7 @@ cron_add_direct:
           snprintf(line, sizeof(line),
                    "force noetig 1x (Client-Repeat auf der Haupt-qrg kann das Mesh stoeren!):\n"
                    "repeater on force IReallyKnowWhatImDoingAndMayHarmTheMesh-%s\n"
-                   "Danach genuegt 'repeater on force'.", today);
+                   "Danach genuegt ein einfaches 'repeater on' (force bleibt).", today);
           pushCompanionMessage(line);
           return;
         }
