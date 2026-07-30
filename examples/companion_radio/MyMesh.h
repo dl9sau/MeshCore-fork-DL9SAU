@@ -697,6 +697,8 @@ private:
   void checkCLIRescueCmd();
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f_khz, uint32_t bw_hz) const;
+  // client_repeat_force-Passphrase pruefen. 0=ok, 1=falsch, 2=Uhr nicht gestellt.
+  int checkForcePassphrase(const char* arg) const;
   bool signalFitsInIsmBand(uint32_t freq_khz, uint32_t bw_hz) const;
   uint32_t nudgeIntoWideBand(uint32_t freq_khz, uint32_t bw_hz) const;
 

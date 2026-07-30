@@ -1874,9 +1874,7 @@ bool MyMesh::isRepeatingEffectivelyAllowed() const {
   uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
   uint32_t bw_hz = (uint32_t)(_prefs.bw * 1000.0f + 0.5f);
   if (isValidClientRepeatFreq(f_khz, bw_hz)) return true;
-#ifdef REPEATER_DEFENSIVE_FORCE
-  if (_prefs.client_repeat_force) return true;
-#endif
+  if (_prefs.client_repeat_force) return true;   // force (per Passphrase freigeschaltet)
   return false;
 }
 
@@ -7826,6 +7824,28 @@ void MyMesh::restorePacketTxDefaults() {
   radio_driver.setTxPower(_prefs.tx_power_dbm);
 }
 
+// DL9SAU 2026-07-30: Runtime-Passphrase fuers client_repeat_force-Flag (loest den
+// Compile-Schalter REPEATER_DEFENSIVE_FORCE ab). Erwartet:
+//   IReallyKnowWhatImDoingAndMayHarmTheMesh-<YYYY-MM-DD>
+// Phrase case-insensitive, Datum = HEUTE (UTC laut RTC). Das aktuelle Datum
+// zwingt zu bewusster Interaktion (kein blindes Copy-Paste aus altem Forenpost).
+// Rueckgabe: 0=ok, 1=falsche Phrase/Datum, 2=Uhr nicht gestellt (Datum unbekannt).
+int MyMesh::checkForcePassphrase(const char* arg) const {
+  static const char PHRASE[] = "IReallyKnowWhatImDoingAndMayHarmTheMesh";
+  size_t plen = sizeof(PHRASE) - 1;
+  if (strncasecmp(arg, PHRASE, plen) != 0 || arg[plen] != '-') return 1;
+  const char* date_part = arg + plen + 1;   // "YYYY-MM-DD"
+  uint32_t now = (uint32_t)getRTCClock()->getCurrentTime();
+  if (now < 1577836800UL /* 2020-01-01 */) return 2;   // Uhr nicht gestellt
+  time_t t = (time_t)now;
+  struct tm tmv;
+  gmtime_r(&t, &tmv);
+  char today[12];
+  snprintf(today, sizeof(today), "%04d-%02d-%02d",
+           tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+  return (strcmp(date_part, today) == 0) ? 0 : 1;
+}
+
 bool MyMesh::isValidClientRepeatFreq(uint32_t f_khz, uint32_t bw_hz) const {
   // INVERTIERT: Client-Repeat ist erlaubt = legal sendbar (in-band) UND NICHT
   // auf einer Haupt-Mesh-Frequenz (dort arbeiten echte Repeater -> nur mit force).
@@ -8652,10 +8672,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     // on' in der App mit 'Illegal value' fehl, weil App keine
     // force-Option hat und der Check immer feuerte.
     bool defensive_mode = (_prefs.repeater_profile == 0 /* defensive */);
-    bool force_override = false;
-#ifdef REPEATER_DEFENSIVE_FORCE
-    force_override = (_prefs.client_repeat_force != 0);
-#endif
+    bool force_override = (_prefs.client_repeat_force != 0);
     if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8
         && bw >= 7000 && bw <= 500000) {
       // DL9SAU 2026-07-30: Zwei UNABHAENGIGE Eigenschaften einer (freq, BW):
@@ -12306,9 +12323,7 @@ void MyMesh::backupSaveToSerial() {
   kv_uint("chat_name_mode",        _prefs.chat_name_mode);
   kv_str ("chat_name_custom",      _prefs.chat_name_custom);
   kv_uint("auto_advert_enabled",   _prefs.auto_advert_enabled);
-#ifdef REPEATER_DEFENSIVE_FORCE
   kv_uint("client_repeat_force",   _prefs.client_repeat_force);
-#endif
   kv_uint("repeater_profile",      _prefs.repeater_profile);
   kv_uint("loop_detect",           _prefs.loop_detect);
   kv_uint("duty_soft_pct",         _prefs.duty_soft_pct);
@@ -13256,13 +13271,7 @@ void MyMesh::brApplyField(uint8_t block_type, const char* key,
     if (val_type == 'n') {
       if (strcmp(key, "chat_name_mode") == 0)        { _prefs.chat_name_mode        = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "auto_advert_enabled") == 0)   { _prefs.auto_advert_enabled   = (uint8_t)as_uint(); _br_applied++; return; }
-#ifdef REPEATER_DEFENSIVE_FORCE
       if (strcmp(key, "client_repeat_force") == 0)   { _prefs.client_repeat_force   = (uint8_t)as_uint(); _br_applied++; return; }
-#else
-      // Force-Feature in diesem Build deaktiviert; Backup-Eintrag
-      // ignorieren (Pref bleibt persistent auf 0).
-      if (strcmp(key, "client_repeat_force") == 0)   { return; }
-#endif
       if (strcmp(key, "repeater_profile") == 0)      { _prefs.repeater_profile      = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "loop_detect") == 0)           { _prefs.loop_detect           = (uint8_t)as_uint(); _br_applied++; return; }
       if (strcmp(key, "duty_soft_pct") == 0)         { _prefs.duty_soft_pct         = (uint8_t)as_uint(); _br_applied++; return; }
@@ -16507,19 +16516,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         return;
       }
       if (topic_prefix_match(topic, "repeater")) {
-#ifdef REPEATER_DEFENSIVE_FORCE
         pushCompanionMessage(
-          "repeater [on [force] | off]:\n"
+          "repeater [on [force [<Passphrase>]] | off]:\n"
           "  schaltet Repeating ein/aus. Verhalten\n"
           "  gemaess profile (defensive | normal).\n"
           "  Ohne Arg -> Status.");
-#else
-        pushCompanionMessage(
-          "repeater [on | off]:\n"
-          "  schaltet Repeating ein/aus. Verhalten\n"
-          "  gemaess profile (defensive | normal).\n"
-          "  Ohne Arg -> Status.");
-#endif
         pushCompanionMessage(
           "profile=defensive (Default; = 'client_repeat'):\n"
           "  PATH nur fuer lokale Endpoints,\n"
@@ -16541,17 +16542,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  -- echter Repeater steht fest.");
         pushCompanionMessage(
           "Wechsel via 'repeater profile <defensive|normal>'");
-#ifdef REPEATER_DEFENSIVE_FORCE
         pushCompanionMessage(
           "force (nur fuer defensive relevant):\n"
-          "  auf manchen Frequenzen sind\n"
-          "  client-repeater nicht erwuenscht\n"
-          "  (z.B. EU 869.618 MHz).");
+          "  Client-Repeat ist auf den Haupt-Mesh-\n"
+          "  Frequenzen (z.B. EU 869.618) gesperrt --\n"
+          "  dort arbeiten echte Repeater.");
         pushCompanionMessage(
-          "  'repeater on force' aktiviert es\n"
-          "  trotzdem. Persistent ueber on/off.\n"
-          "  signalFitsInIsmBand bleibt aktiv.");
-#endif
+          "  'repeater on force <Passphrase>' schaltet\n"
+          "  es 1x frei (Passphrase mit heutigem Datum),\n"
+          "  danach genuegt 'repeater on force'.\n"
+          "  'repeater on' (ohne force) disarmt wieder.");
         return;
       }
       if (topic_prefix_match(topic, "status")) {
@@ -16825,9 +16825,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       // sinnvoll; bei off lassen wir die Klammer weg.
       const char* prof = (_prefs.repeater_profile == 1) ? "full" : "defensive";
       const char* frc  = "";
-#ifdef REPEATER_DEFENSIVE_FORCE
       if (_prefs.client_repeat_force) frc = ",force";
-#endif
       snprintf(line, sizeof(line),
                "advert: periodic=%s nightly=%s  repeater=on (%s%s)",
                zh_str, nl_str, prof, frc);
@@ -19650,7 +19648,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.auto_advert_enabled != 0) non_default_count++;
     }
-#ifdef REPEATER_DEFENSIVE_FORCE
     // client_repeat_force
     if (show_all || _prefs.client_repeat_force != 0) {
       snprintf(tmp, sizeof(tmp), "  client_repeat_force = %u%s",
@@ -19659,7 +19656,6 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       add_line(tmp);
       if (_prefs.client_repeat_force != 0) non_default_count++;
     }
-#endif
     // repeater_profile
     if (show_all || _prefs.repeater_profile != 0) {
       snprintf(tmp, sizeof(tmp), "  repeater_profile = %s%s",
@@ -30510,11 +30506,7 @@ cron_add_direct:
         if (_prefs.repeater_profile == 0 && _is_moving) {
           runtime_suffix = ", paused (is_moving)";
         } else {
-#ifdef REPEATER_DEFENSIVE_FORCE
-          runtime_suffix = ", blocked (freq braucht force, force=off)";
-#else
-          runtime_suffix = ", blocked (freq nicht in client-rep-Liste)";
-#endif
+          runtime_suffix = ", blocked (Haupt-qrg -- force noetig)";
         }
       }
 
@@ -30546,25 +30538,18 @@ cron_add_direct:
       //   force=off, freq braucht force -> Hinweis-Block
       //   force=off, no-need  -> (nichts -- alles sauber)
       if (_prefs.repeater_profile == 0) {
-#ifdef REPEATER_DEFENSIVE_FORCE
         bool has_force = _prefs.client_repeat_force != 0;
         bool freq_needs_force = !strict_ok;
         const char* bc = NULL;
         if (has_force && freq_needs_force) {
-          bc = "force: on (freq braucht es)";
+          bc = "force: on (Haupt-qrg braucht es)";
         } else if (has_force) {
           bc = "force: on";
         } else if (freq_needs_force) {
-          bc = "force: off -- freq braucht force fuer client-rep\n"
-               "  ('repeater on force' aktiviert das Repeating)";
+          bc = "force: off -- Haupt-qrg, Client-Repeat gesperrt\n"
+               "  ('repeater on force <Passphrase>' schaltet frei)";
         }
         if (bc) pushCompanionMessage(bc);
-#else
-        // Ohne ifdef: nur den 'freq nicht erlaubt'-Fall melden.
-        if (!strict_ok) {
-          pushCompanionMessage("Hinweis: freq nicht in defensive client-rep-Liste");
-        }
-#endif
       }
       return;
     }
@@ -30624,6 +30609,22 @@ cron_add_direct:
       return;
     }
 
+    // 'repeater force off' -- force explizit disarmen (persistent). Armen laeuft
+    // ueber 'repeater on force <Passphrase>'.
+    if (starts_with_word(arg, "force")) {
+      const char* fa = arg;
+      while (*fa && *fa != ' ' && *fa != '\t') fa++;   // skip "force"
+      while (*fa == ' ' || *fa == '\t') fa++;
+      if (match_on_off(fa) == 0 /* off */) {
+        _prefs.client_repeat_force = 0;
+        savePrefs();
+        pushCompanionMessage("OK - force disarmt.");
+      } else {
+        pushCompanionMessage("Usage: repeater force off  (Armen: repeater on force <Passphrase>)");
+      }
+      return;
+    }
+
     int rm = match_on_off(arg);
     if (rm == -1) { pushCompanionMessage("Mehrdeutig: on off"); return; }
     if (rm == 0) {
@@ -30638,15 +30639,20 @@ cron_add_direct:
       return;
     }
     if (rm == 1) {
+      // "force"-Keyword erkennen (iOS-Tastatur macht aus "--force" einen em-dash
+      // -> ein einzelnes lowercase Wort). Danach optional die Passphrase.
       bool force = false;
-#ifdef REPEATER_DEFENSIVE_FORCE
-      // "force"-Keyword erkennen (iOS-Tastatur macht aus "--force" einen
-      // em-dash — daher ein einzelnes lowercase Wort statt Doppel-Hyphen).
+      const char* pass = NULL;
       const char* rest = arg;
       while (*rest && *rest != ' ' && *rest != '\t') rest++;  // skip on-Prefix
       while (*rest == ' ' || *rest == '\t') rest++;
-      if (starts_with_word(rest, "force")) force = true;
-#endif
+      if (starts_with_word(rest, "force")) {
+        force = true;
+        const char* p = rest;
+        while (*p && *p != ' ' && *p != '\t') p++;             // skip "force"
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p) pass = p;                                      // Passphrase-Rest
+      }
       // Sicherheitsgate 1: signalFitsInIsmBand (immer aktiv, auch mit force)
       uint32_t f_khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
       uint32_t bw_hz = (uint32_t)(_prefs.bw * 1000.0f + 0.5f);
@@ -30658,41 +30664,75 @@ cron_add_direct:
         pushCompanionMessage(line);
         return;
       }
-      // Sicherheitsgate 2: nur in profile=defensive. Im profile=normal
-      // (echter Repeater) darf der User alle Frequenzen ohne Check
-      // nutzen -- Admin-Verantwortung. Mit REPEATER_DEFENSIVE_FORCE-Build
-      // zusaetzlich force-Bypass im defensive-Mode.
+      // force: 1x per Passphrase freischalten (mit heutigem Datum), danach
+      // persistent -> spaeter genuegt 'repeater on' (ohne alles). Disarm nur
+      // explizit via 'repeater force off'.
+      if (force) {
+        uint32_t now = (uint32_t)getRTCClock()->getCurrentTime();
+        char today[12] = "";
+        if (now >= 1577836800UL) {
+          time_t t = (time_t)now; struct tm tmv; gmtime_r(&t, &tmv);
+          snprintf(today, sizeof(today), "%04d-%02d-%02d",
+                   tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+        }
+        if (pass) {
+          int r = checkForcePassphrase(pass);
+          if (r == 2) {
+            pushCompanionMessage("force: Datum unbekannt -- zuerst die Uhr stellen "
+                                 "(App/Zeit-Sync oder 'set time').");
+            return;
+          }
+          if (r != 0) {
+            char line[200];
+            snprintf(line, sizeof(line),
+                     "force: Passphrase falsch. Exakt tippen:\n"
+                     "repeater on force IReallyKnowWhatImDoingAndMayHarmTheMesh-%s", today);
+            pushCompanionMessage(line);
+            return;
+          }
+          _prefs.client_repeat_force = 1;   // freigeschaltet
+        } else if (_prefs.client_repeat_force == 0) {
+          if (now < 1577836800UL) {
+            pushCompanionMessage("force braucht die Passphrase -- aber zuerst die Uhr "
+                                 "stellen (Datum unbekannt).");
+            return;
+          }
+          char line[240];
+          snprintf(line, sizeof(line),
+                   "force noetig 1x (Client-Repeat auf der Haupt-qrg kann das Mesh stoeren!):\n"
+                   "repeater on force IReallyKnowWhatImDoingAndMayHarmTheMesh-%s\n"
+                   "Danach genuegt 'repeater on force'.", today);
+          pushCompanionMessage(line);
+          return;
+        }
+        // else: force schon freigeschaltet, kein pass -> beibehalten.
+      }
+      // plain 'repeater on' laesst force UNVERAENDERT -> persistent (Spec 1: nach
+      // dem Armen genuegt 'repeater on'/'repeater off'/'repeater on'). Disarm nur
+      // explizit via 'repeater force off'.
+      // Sicherheitsgate 2: nur in profile=defensive. In normal (echter Repeater)
+      // darf der User alle Frequenzen ohne Check nutzen. ARMED force (persistente
+      // Pref, egal ob das Keyword diesmal dabei war) umgeht den Haupt-qrg-Block.
       bool defensive_mode = (_prefs.repeater_profile == 0);
-      if (defensive_mode && !force && !isValidClientRepeatFreq(f_khz, (uint32_t)(_prefs.bw * 1000.0f + 0.5f))) {
-        char line[160];
-#ifdef REPEATER_DEFENSIVE_FORCE
+      if (defensive_mode && _prefs.client_repeat_force == 0 && !isValidClientRepeatFreq(f_khz, bw_hz)) {
+        char line[200];
         snprintf(line, sizeof(line),
-                 "Abgelehnt: %.4f MHz braucht force fuer client-rep.\n"
-                 "Mit 'repeater on force' trotzdem aktivieren.", _prefs.freq);
-#else
-        snprintf(line, sizeof(line),
-                 "Abgelehnt: %.4f MHz nicht in defensive client-rep-Liste.",
+                 "Abgelehnt: %.4f MHz ist eine Haupt-Mesh-Freq -- Client-Repeat dort nur mit force.\n"
+                 "Ausweichfreq waehlen, 'repeater profile normal', oder 'repeater on force <Passphrase>'.",
                  _prefs.freq);
-#endif
         pushCompanionMessage(line);
         return;
       }
       _prefs.client_repeat = 1;
-#ifdef REPEATER_DEFENSIVE_FORCE
-      _prefs.client_repeat_force = force ? 1 : 0;
-#endif
       savePrefs();
-      recomputeRepeatingAllowed(force ? "repeater on force" : "repeater on");
+      recomputeRepeatingAllowed(_prefs.client_repeat_force ? "repeater on force" : "repeater on");
       char line[80];
-      snprintf(line, sizeof(line), "OK - repeater on%s.", force ? " (force)" : "");
+      snprintf(line, sizeof(line), "OK - repeater on%s.",
+               _prefs.client_repeat_force ? " (force)" : "");
       pushCompanionMessage(line);
       return;
     }
-#ifdef REPEATER_DEFENSIVE_FORCE
-    pushCompanionMessage("Usage: repeater [on [force] | off]");
-#else
-    pushCompanionMessage("Usage: repeater [on | off]");
-#endif
+    pushCompanionMessage("Usage: repeater [on [force [<Passphrase>]] | off | force off]");
     return;
   }
 
