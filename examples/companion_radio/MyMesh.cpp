@@ -7817,6 +7817,29 @@ bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
   return false;
 }
 
+// DL9SAU 2026-07-30: Snappt eine angeforderte Center-Freq auf die naechst-
+// gelegene compliant strict-Repeat-Freq, sodass das volle Signal (freq +/-
+// BW/2) noch in ein ISM-Band passt. Ermoeglicht frisches App-Repeat-Enable im
+// defensive-Profil ohne 'Illegal Argument': EU 869.618 -> 869.495, fuer 433/
+// 866-User automatisch die dortige Sub-Band-Freq. Erhaelt den Client-Repeat-
+// Usecase (Event/SAR auf compliant Ad-hoc-Freq). 0 = keine passende gefunden.
+uint32_t MyMesh::snapToStrictRepeatFreq(uint32_t freq_khz, uint32_t bw_hz) const {
+  uint32_t best = 0;
+  uint32_t best_dist = 0xFFFFFFFFu;
+  for (int i = 0; i < (int)(sizeof(repeat_freq_ranges_strict)/sizeof(repeat_freq_ranges_strict[0])); i++) {
+    auto r = &repeat_freq_ranges_strict[i];
+    // Gewuenschtes Center in [lower, upper] klemmen: isValidClientRepeatFreq
+    // prueft das Center, signalFitsInIsmBand das volle Spektrum.
+    uint32_t c = freq_khz;
+    if (c < r->lower_freq) c = r->lower_freq;
+    if (c > r->upper_freq) c = r->upper_freq;
+    if (!signalFitsInIsmBand(c, bw_hz)) continue;   // Snap-Ziel muss ISM-fit sein
+    uint32_t dist = (c > freq_khz) ? (c - freq_khz) : (freq_khz - c);
+    if (dist < best_dist) { best_dist = dist; best = c; }
+  }
+  return best;
+}
+
 // Checks that the entire LoRa signal spectrum (centre freq +/- BW/2) fits
 // inside one of the listed ISM band ranges. Catches misconfigurations
 // like 433.125 MHz with BW=250 kHz (would extend below the 433.05 limit)
@@ -8613,16 +8636,39 @@ void MyMesh::handleCmdFrame(size_t len) {
 #endif
     if (repeat && defensive_mode
         && !force_override && !isValidClientRepeatFreq(freq)) {
-      // App will Repeater aktivieren auf einer Freq die ausserhalb des
-      // strict-Range liegt. Ohne REPEATER_DEFENSIVE_FORCE-Build: hart
-      // ablehnen. Mit ifdef + force-Flag: User-Verantwortung.
-      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
-      // DL9SAU 2026-07-30: verstaendlicher Hinweis statt nur kryptischem
-      // 'Illegal Argument' in der App (User-Report: Repeat-Enable schlug immer
-      // fehl, weil defensive das Default-Profil ist + Haupt-Freq nicht in der
-      // strikten Ad-hoc-Liste).
-      pushCompanionMessage("Repeat abgelehnt (defensive-Profil): nur Ad-hoc-Freqs. "
-                           "Standard-Repeating: CLI 'repeater profile normal', dann Repeat erneut.");
+      // DL9SAU 2026-07-30: App aktiviert Repeat auf einer Freq ausserhalb der
+      // strict-Liste (typisch: frische Installation, Default-Profil defensive,
+      // Haupt-qrg 869.618). Statt kryptischem 'Illegal Argument' snappen wir die
+      // Center-Freq auf die naechste compliant strict-Freq (EU: 869.495) und
+      // aktivieren Repeat dort -- so bleibt der Client-Repeat-Usecase (Event/
+      // SAR-Abdeckung auf compliant Ad-hoc-Freq) erhalten. Fuer die Haupt-qrg
+      // 869.618 braucht es bewusst 'repeater profile normal' (oder FORCE-Build).
+      // Hinweis: die Stock-App zeigt weiter ihre gesendete Freq (kein Rueckkanal
+      // 'Freq geaendert') -- Wahrheit steht in 'get' + der Companion-Meldung.
+      uint32_t snapped = snapToStrictRepeatFreq(freq, bw);
+      if (snapped != 0 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8
+          && bw >= 7000 && bw <= 500000) {
+        _prefs.sf = sf;
+        _prefs.cr = cr;
+        _prefs.freq = (float)snapped / 1000.0;
+        _prefs.bw = (float)bw / 1000.0;
+        _prefs.client_repeat = repeat;
+        savePrefs();
+        recomputeRepeatingAllowed("App: radio params (freq-snap)");
+        applyRadioPolicy();
+        char m[160];
+        snprintf(m, sizeof(m),
+                 "Repeat aktiv. Freq auf %.3f MHz angepasst (compliant, defensive). "
+                 "Fuer %.3f MHz: 'repeater profile normal'.",
+                 (double)snapped / 1000.0, (double)freq / 1000.0);
+        pushCompanionMessage(m);
+        writeOKFrame();
+      } else {
+        // Keine passende compliant Freq (z.B. exotische BW) -> ehrlicher Reject.
+        writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        pushCompanionMessage("Repeat abgelehnt (defensive-Profil): keine passende "
+                             "compliant Freq. Standard-Repeating: CLI 'repeater profile normal'.");
+      }
     } else if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7000 &&
         bw <= 500000) {
       // Always enforce: full signal spectrum (freq +/- BW/2) must fit inside

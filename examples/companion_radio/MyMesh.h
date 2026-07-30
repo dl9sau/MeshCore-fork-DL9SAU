@@ -694,6 +694,7 @@ private:
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
   bool signalFitsInIsmBand(uint32_t freq_khz, uint32_t bw_hz) const;
+  uint32_t snapToStrictRepeatFreq(uint32_t freq_khz, uint32_t bw_hz) const;
 
   // Koordinaten im nautischen DM-Format "DD-MM,M N/S DDD-MM,M E/W"
   // (Komma als Dezimal-Trenner, Grad-Breite 2 fuer Lat, 3 fuer Lon mit
