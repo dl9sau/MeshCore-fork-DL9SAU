@@ -7551,13 +7551,7 @@ void MyMesh::begin(bool has_display) {
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10g post loadContacts"); Serial.flush();
 #endif
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-  Serial.println("\r\n# [T1000-E diag] X0 pre bootstrapRTCfromContacts"); Serial.flush();
-#endif
   bootstrapRTCfromContacts();
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-  Serial.println("\r\n# [T1000-E diag] X1 post bootstrapRTCfromContacts"); Serial.flush();
-#endif
   // Reise-Fix 2026-06-08: nach contacts-Bootstrap die Sync-State-Marker
   // initialisieren. clock-Display nutzt die pubkey-Sentinels:
   //   0xFFFFFF = Boot-Bootstrap (last advert in contacts)
@@ -7576,48 +7570,25 @@ void MyMesh::begin(bool has_display) {
       memset(_time_sync_last_pubkey, 0xFF, sizeof(_time_sync_last_pubkey));
     }
   }
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-  Serial.println("\r\n# [T1000-E diag] X2 post rtc-sync-marker-block"); Serial.flush();
-#endif
-  // DL9SAU 2026-07-30 RECOVERY: eine korrupte /boot_log.txt (halber in-place-
-  // Write nach schlechtem Reset) laesst littlefs beim Lesen HAENGEN, weil
-  // LFS_NO_ASSERT=1 das Erroren unterdrueckt -> Boot-Hang vor loadRtcPersist.
-  // remove() fasst nur den Verzeichnis-Eintrag an (Scan-Allokator, kein
-  // Datenketten-Walk) -> haengt nicht. One-Shot ueber -D NRF52_BOOTLOG_RECOVER.
+  // DL9SAU 2026-07-30 Break-Glass-Recovery (-D NRF52_BOOTLOG_RECOVER): eine
+  // korrupte /boot_log.txt laesst littlefs beim Lesen HAENGEN (LFS_NO_ASSERT=1
+  // unterdrueckt das Erroren) -> Boot-Hang. remove() fasst nur den Verzeichnis-
+  // Eintrag an (Scan-Allokator, kein Datenketten-Walk) -> haengt nicht. Seit dem
+  // crash-safen temp+rename-Write (bootLogAppend) sollte das nicht mehr noetig
+  // sein -- bleibt als Notausstieg.
 #if defined(NRF52_BOOTLOG_RECOVER)
-  #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-    Serial.println("\r\n# [T1000-E diag] RECOVER pre removeFile /boot_log.txt"); Serial.flush();
-  #endif
   _store->removeFile("/boot_log.txt");
-  #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-    Serial.println("\r\n# [T1000-E diag] RECOVER post removeFile /boot_log.txt"); Serial.flush();
-  #endif
 #endif
   // RTC-Persistierung (Bug-Fix 2026-06-14): /rtc_persist laden und
   // anwenden wenn hoeher als contacts-Bootstrap. Marker auf 0xFDFDFD.
   // (loadBucketsFromFlash kommt danach und kann nochmal hoeher legen.)
   {
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-    Serial.println("\r\n# [T1000-E diag] Y0 pre loadRtcPersist"); Serial.flush();
-#endif
     uint32_t persisted = loadRtcPersist();
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-    Serial.print("\r\n# [T1000-E diag] Y1 post loadRtcPersist persisted="); Serial.println((unsigned long)persisted); Serial.flush();
-#endif
     if (persisted != 0) {
       uint32_t cur = getRTCClock()->getCurrentTime();
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-      Serial.print("\r\n# [T1000-E diag] Y2 post getCurrentTime cur="); Serial.println((unsigned long)cur); Serial.flush();
-#endif
       const uint32_t ONE_YEAR_SECS = 365UL * 86400UL;
       if (persisted + 1 > cur && persisted < cur + ONE_YEAR_SECS) {
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-        Serial.println("\r\n# [T1000-E diag] Y3 pre setCurrentTime"); Serial.flush();
-#endif
         getRTCClock()->setCurrentTime(persisted + 1);
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-        Serial.println("\r\n# [T1000-E diag] Y4 post setCurrentTime"); Serial.flush();
-#endif
         traceCompanion(TRACE_RTC,
                        "[rtc-persist] geladen %lu, RTC %lu -> %lu",
                        (unsigned long)persisted,
@@ -7636,9 +7607,6 @@ void MyMesh::begin(bool has_display) {
       }
     }
   }
-#if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
-  Serial.println("\r\n# [T1000-E diag] X3 post loadRtcPersist-block, pre addChannel"); Serial.flush();
-#endif
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
 #if defined(NRF52_PLATFORM) && defined(NRF52_BOOT_TRACE)
   Serial.println("\r\n# [T1000-E diag] M10h pre loadChannels"); Serial.flush();
