@@ -1368,16 +1368,46 @@ void MyMesh::markHeardDirect(uint8_t hash) {
 // wird nur an Whitespace getrennt -- darin sind '*'-Sterne die einzige
 // Sonder-Syntax.
 
-// Token-Separator: NUR Whitespace + Control-Chars.
-// User-Klarstellung 2026-06-10: Pattern ist literal. Wenn User
-// 'foo.bar' eintippt, will er das ganze Wort 'foo.bar' (analog
-// 'abc-def' oder 'xxx/yyy') -- kein automatisches Stripping von
-// Satzzeichen am Wort-Rand. Wer auch 'foo.bar.' oder 'Hallo,'
-// matchen will, schreibt 'foo.bar*' bzw. 'Hallo*' explizit als
-// Wildcard. Konsistent und vorhersehbar.
+// Token-Separator: NUR Whitespace + Control-Chars (Wort-Trennung).
 static inline bool isFilterHardSep(unsigned char c) {
   if (c < 32) return true;
   return c == ' ' || c == 0x7F;
+}
+
+// Rand-Trim (Variante A, User 2026-08-09 -- revidiert die fruehere "kein
+// Stripping"-Linie): ASCII-Satzzeichen/Symbole am Token-RAND zaehlen nicht zum
+// Wort ('24h:' -> '24h', 'ping!' -> 'ping'). INNERE Satzzeichen bleiben
+// ('foo.bar', URLs, '3.14' intakt). '*' (Wildcard) bleibt. UTF-8-Multibyte
+// (>=0x80, inkl. oeaeue + andere Buchstaben) ist Wort-Zeichen -> kein Trim
+// (Emoji am Rand bleiben damit ungetrimmt -- seltener Fall, ok fuer Variante A).
+static inline bool isFilterEdgeTrim(unsigned char c) {
+  if (c >= 0x80) return false;                 // UTF-8 (Buchstaben) behalten
+  if (c == '*') return false;                  // Wildcard behalten
+  if (c >= 'a' && c <= 'z') return false;
+  if (c >= 'A' && c <= 'Z') return false;
+  if (c >= '0' && c <= '9') return false;
+  return true;                                 // ASCII-Satzzeichen -> Rand-Trim
+}
+
+// Tokenisiert buf an Whitespace (isFilterHardSep) und trimmt Satzzeichen am
+// Token-Rand (isFilterEdgeTrim). Leere Tokens (nur Satzzeichen) werden
+// verworfen. offs/lens sind Offsets/Laengen in buf; Rueckgabe = Token-Anzahl.
+// Gemeinsam genutzt von patternTokenMatch (Filter) UND der 'filter test'-Anzeige.
+static uint8_t tokenizeFilterTokens(const char* buf, size_t len,
+                                    uint16_t* offs, uint16_t* lens, uint8_t maxt) {
+  uint8_t cnt = 0;
+  size_t i = 0;
+  while (i < len && cnt < maxt) {
+    while (i < len && isFilterHardSep((unsigned char)buf[i])) i++;
+    if (i >= len) break;
+    size_t st = i;
+    while (i < len && !isFilterHardSep((unsigned char)buf[i])) i++;
+    size_t a = st, b = i;
+    while (a < b && isFilterEdgeTrim((unsigned char)buf[a])) a++;
+    while (b > a && isFilterEdgeTrim((unsigned char)buf[b-1])) b--;
+    if (b > a) { offs[cnt] = (uint16_t)a; lens[cnt] = (uint16_t)(b - a); cnt++; }
+  }
+  return cnt;
 }
 
 // UTF-8 codepoint decode. Returns codepoint, writes consumed bytes.
@@ -1549,44 +1579,19 @@ static bool patternTokenMatch(const char* pattern, size_t pl,
                               const char* s, size_t sl,
                               bool anchor_start, bool anchor_end) {
   if (pl == 0 || sl == 0) return false;
-  // Tokenize Pattern und Text strikt by Hard-Sep (Whitespace).
-  // Tokens bleiben literal -- kein Edge-Trim. User-Pattern matched
-  // gegen Token byte-genau (mit case-fold + UTF-8). Flexibilitaet
-  // ueber Wildcards: 'ping*' fuer 'ping,' 'ping!' usw.
+  // Tokenize Pattern und Text an Whitespace, mit Rand-Trim der Satzzeichen
+  // (tokenizeFilterTokens, s.o.): '24h:' -> '24h'. Innere Zeichen + '*'-
+  // Wildcards + UTF-8-Buchstaben bleiben; Vergleich case-fold + UTF-8.
   const uint8_t MAX_PAT_TOKENS = 8;
   uint16_t pat_off[MAX_PAT_TOKENS];
   uint16_t pat_len[MAX_PAT_TOKENS];
-  uint8_t pat_count = 0;
-  {
-    size_t i = 0;
-    while (i < pl && pat_count < MAX_PAT_TOKENS) {
-      while (i < pl && isFilterHardSep((unsigned char)pattern[i])) i++;
-      if (i >= pl) break;
-      size_t st = i;
-      while (i < pl && !isFilterHardSep((unsigned char)pattern[i])) i++;
-      pat_off[pat_count] = (uint16_t)st;
-      pat_len[pat_count] = (uint16_t)(i - st);
-      pat_count++;
-    }
-  }
+  uint8_t pat_count = tokenizeFilterTokens(pattern, pl, pat_off, pat_len, MAX_PAT_TOKENS);
   if (pat_count == 0) return false;
 
   const uint8_t MAX_TXT_TOKENS = 64;
   uint16_t txt_off[MAX_TXT_TOKENS];
   uint16_t txt_len[MAX_TXT_TOKENS];
-  uint8_t txt_count = 0;
-  {
-    size_t i = 0;
-    while (i < sl && txt_count < MAX_TXT_TOKENS) {
-      while (i < sl && isFilterHardSep((unsigned char)s[i])) i++;
-      if (i >= sl) break;
-      size_t st = i;
-      while (i < sl && !isFilterHardSep((unsigned char)s[i])) i++;
-      txt_off[txt_count] = (uint16_t)st;
-      txt_len[txt_count] = (uint16_t)(i - st);
-      txt_count++;
-    }
-  }
+  uint8_t txt_count = tokenizeFilterTokens(s, sl, txt_off, txt_len, MAX_TXT_TOKENS);
   if (txt_count == 0 || txt_count < pat_count) return false;
 
   // Suche konsekutive Token-Subsequenz wo jedes Pattern-Token
@@ -15910,9 +15915,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  ^foo$ = Text ist genau foo");
         pushCompanionMessage(
           "Tokens by Whitespace.\n"
-          "Satzzeichen Teil des Wortes:\n"
-          "  'ping!' braucht 'ping*' oder\n"
-          "  exakt 'ping!' als Pattern.");
+          "Satzzeichen am Wortrand zaehlen nicht:\n"
+          "  'ping!' matcht 'ping' (und umgekehrt).\n"
+          "  Innere bleiben ('foo.bar', URLs).");
         pushCompanionMessage(
           "Mehrwort braucht Quotes:\n"
           "  text drop add \"erstes zweites\"\n"
@@ -20992,16 +20997,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       while (*after_pat == ' ' || *after_pat == '\t') after_pat++;
       const char* text = raw_cmd + (after_pat - cmd);
       if (!*text) { pushCompanionMessage("Usage: filter test <pattern> <text>  (Text fehlt)."); return; }
-      // Pattern-Tokens fuer die Anzeige zerlegen (gleiche Sep-Logik wie Matcher).
+      // Pattern-Tokens fuer die Anzeige zerlegen -- GENAU wie der Matcher
+      // (tokenizeFilterTokens, inkl. Rand-Trim '24h:' -> '24h').
       char toks[64]; size_t tpz = 0; toks[0] = 0;
       {
-        size_t i = 0;
-        while (i < plen && tpz + 3 < sizeof(toks)) {
-          while (i < plen && isFilterHardSep((unsigned char)pat[i])) i++;
-          if (i >= plen) break;
+        uint16_t poff[8], pln[8];
+        uint8_t pc = tokenizeFilterTokens(pat, plen, poff, pln, 8);
+        for (uint8_t t = 0; t < pc && tpz + 3 < sizeof(toks); t++) {
           toks[tpz++] = '[';
-          while (i < plen && !isFilterHardSep((unsigned char)pat[i]) && tpz + 2 < sizeof(toks))
-            toks[tpz++] = pat[i++];
+          for (uint16_t k = 0; k < pln[t] && tpz + 2 < sizeof(toks); k++)
+            toks[tpz++] = pat[poff[t] + k];
           toks[tpz++] = ']';
         }
         toks[tpz] = 0;
