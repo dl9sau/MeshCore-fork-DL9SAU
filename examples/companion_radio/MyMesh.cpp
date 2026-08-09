@@ -19711,7 +19711,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
                nm,
                _prefs.loop_detect == 0 ? " [default]" : " (default: off)",
                (_prefs.loop_detect != 0 && _prefs.repeater_profile != 1)
-                   ? "  (inaktiv -- profile=defensive)" : "");
+                   ? "  (irrelevant: defensive ist strenger)" : "");
       add_line(tmp);
       if (_prefs.loop_detect != 0) non_default_count++;
     }
@@ -30557,10 +30557,12 @@ cron_add_direct:
         }
       }
 
-      // loop_detect-Inaktiv-Note: nur wenn loop_detect != off UND
-      // profile=defensive (Loop-Detect greift nur in normal-Profile).
+      // loop_detect-Note: in profile=defensive wird loop_detect nicht
+      // ausgewertet -- aber NICHT weil der Schutz "aus" waere, sondern weil
+      // defensive strenger ist (repeatet nur zu direkten Nachbarn -> Loops
+      // strukturell unmoeglich). Daher "irrelevant", nicht "inaktiv".
       const char* ld_note = (_prefs.repeater_profile != 1 && _prefs.loop_detect != 0)
-                            ? " (inaktiv: profile=defensive)" : "";
+                            ? " (irrelevant: defensive ist strenger)" : "";
 
       char line[160];
       snprintf(line, sizeof(line),
