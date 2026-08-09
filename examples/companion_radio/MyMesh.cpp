@@ -1374,12 +1374,13 @@ static inline bool isFilterHardSep(unsigned char c) {
   return c == ' ' || c == 0x7F;
 }
 
-// Rand-Trim (Variante A, User 2026-08-09 -- revidiert die fruehere "kein
-// Stripping"-Linie): ASCII-Satzzeichen/Symbole am Token-RAND zaehlen nicht zum
-// Wort ('24h:' -> '24h', 'ping!' -> 'ping'). INNERE Satzzeichen bleiben
-// ('foo.bar', URLs, '3.14' intakt). '*' (Wildcard) bleibt. UTF-8-Multibyte
-// (>=0x80, inkl. oeaeue + andere Buchstaben) ist Wort-Zeichen -> kein Trim
-// (Emoji am Rand bleiben damit ungetrimmt -- seltener Fall, ok fuer Variante A).
+// Rand-Satzzeichen-Klassifikation (Variante A, User 2026-08-09). Wird
+// ASYMMETRISCH nur auf TEXT-Token-Raender angewendet (patternTokenMatch), NICHT
+// auf das Pattern -- das behaelt seine Zeichen als Absicht: Pattern 'pig' matcht
+// Text 'pig' UND 'pig!'; Pattern 'pig!' matcht NUR 'pig!'. ASCII-Satzzeichen/
+// Symbole am Rand zaehlen nicht zum Wort. INNERE bleiben (foo.bar, URLs, 3.14).
+// '*' bleibt (Wildcard). UTF-8-Multibyte (>=0x80, inkl. oeaeue) = Wort-Zeichen ->
+// kein Trim (Emoji am Rand bleiben ungetrimmt -- seltener Fall, ok fuer A).
 static inline bool isFilterEdgeTrim(unsigned char c) {
   if (c >= 0x80) return false;                 // UTF-8 (Buchstaben) behalten
   if (c == '*') return false;                  // Wildcard behalten
@@ -1389,10 +1390,12 @@ static inline bool isFilterEdgeTrim(unsigned char c) {
   return true;                                 // ASCII-Satzzeichen -> Rand-Trim
 }
 
-// Tokenisiert buf an Whitespace (isFilterHardSep) und trimmt Satzzeichen am
-// Token-Rand (isFilterEdgeTrim). Leere Tokens (nur Satzzeichen) werden
-// verworfen. offs/lens sind Offsets/Laengen in buf; Rueckgabe = Token-Anzahl.
-// Gemeinsam genutzt von patternTokenMatch (Filter) UND der 'filter test'-Anzeige.
+// Tokenisiert buf strikt an Whitespace (isFilterHardSep) -- KEIN Trim, Tokens
+// bleiben roh (inkl. Satzzeichen). Der Rand-Trim ist ASYMMETRISCH und passiert
+// erst beim Vergleich, NUR auf der Text-Seite (s. patternTokenMatch): das Pattern
+// behaelt seine Zeichen (= Absicht), Text-Rand-Satzzeichen sind optional.
+// offs/lens = Offsets/Laengen in buf; Rueckgabe = Token-Anzahl. Genutzt von
+// patternTokenMatch (Filter) UND der 'filter test'-Anzeige.
 static uint8_t tokenizeFilterTokens(const char* buf, size_t len,
                                     uint16_t* offs, uint16_t* lens, uint8_t maxt) {
   uint8_t cnt = 0;
@@ -1402,10 +1405,9 @@ static uint8_t tokenizeFilterTokens(const char* buf, size_t len,
     if (i >= len) break;
     size_t st = i;
     while (i < len && !isFilterHardSep((unsigned char)buf[i])) i++;
-    size_t a = st, b = i;
-    while (a < b && isFilterEdgeTrim((unsigned char)buf[a])) a++;
-    while (b > a && isFilterEdgeTrim((unsigned char)buf[b-1])) b--;
-    if (b > a) { offs[cnt] = (uint16_t)a; lens[cnt] = (uint16_t)(b - a); cnt++; }
+    offs[cnt] = (uint16_t)st;
+    lens[cnt] = (uint16_t)(i - st);
+    cnt++;
   }
   return cnt;
 }
@@ -1579,9 +1581,9 @@ static bool patternTokenMatch(const char* pattern, size_t pl,
                               const char* s, size_t sl,
                               bool anchor_start, bool anchor_end) {
   if (pl == 0 || sl == 0) return false;
-  // Tokenize Pattern und Text an Whitespace, mit Rand-Trim der Satzzeichen
-  // (tokenizeFilterTokens, s.o.): '24h:' -> '24h'. Innere Zeichen + '*'-
-  // Wildcards + UTF-8-Buchstaben bleiben; Vergleich case-fold + UTF-8.
+  // Tokenize Pattern und Text an Whitespace (roh, kein Trim). Der Rand-Trim ist
+  // ASYMMETRISCH und passiert im Vergleich unten -- nur auf der Text-Seite.
+  // Vergleich case-fold + UTF-8.
   const uint8_t MAX_PAT_TOKENS = 8;
   uint16_t pat_off[MAX_PAT_TOKENS];
   uint16_t pat_len[MAX_PAT_TOKENS];
@@ -1605,11 +1607,23 @@ static bool patternTokenMatch(const char* pattern, size_t pl,
   for (uint8_t st = start_min; st <= start_max; st++) {
     bool ok = true;
     for (uint8_t k = 0; k < pat_count; k++) {
-      if (!tokenGlobMatch(pattern + pat_off[k], pat_len[k],
-                          s + txt_off[st + k], txt_len[st + k])) {
-        ok = false;
-        break;
+      const char* pk = pattern + pat_off[k];
+      uint16_t    pkl = pat_len[k];
+      const char* tk = s + txt_off[st + k];
+      uint16_t    tkl = txt_len[st + k];
+      // ASYMMETRISCH: Text-Token zuerst ROH probieren (dann matcht Pattern 'pig!'
+      // exakt 'pig!'); wenn kein Match, das Text-Token am Rand getrimmt probieren
+      // (dann matcht Pattern 'pig' auch Text 'pig!'). Das Pattern wird NIE
+      // getrimmt -- ein konkretes Pattern mit Satzzeichen bleibt wirksam.
+      bool mk = tokenGlobMatch(pk, pkl, tk, tkl);
+      if (!mk) {
+        uint16_t a = 0, b = tkl;
+        while (a < b && isFilterEdgeTrim((unsigned char)tk[a])) a++;
+        while (b > a && isFilterEdgeTrim((unsigned char)tk[b-1])) b--;
+        if ((a != 0 || b != tkl) && b > a)   // nur wenn wirklich Rand getrimmt
+          mk = tokenGlobMatch(pk, pkl, tk + a, (uint16_t)(b - a));
       }
+      if (!mk) { ok = false; break; }
     }
     if (ok) return true;
   }
@@ -15914,10 +15928,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  foo$  = Text-Ende Wort foo\n"
           "  ^foo$ = Text ist genau foo");
         pushCompanionMessage(
-          "Tokens by Whitespace.\n"
-          "Satzzeichen am Wortrand zaehlen nicht:\n"
-          "  'ping!' matcht 'ping' (und umgekehrt).\n"
-          "  Innere bleiben ('foo.bar', URLs).");
+          "Tokens by Whitespace. Satzzeichen am\n"
+          "TEXT-Wortrand sind egal: Pattern 'ping'\n"
+          "matcht 'ping' UND 'ping!'. Ein Pattern\n"
+          "MIT Satzzeichen ('ping!') fordert es aber\n"
+          "-- matcht dann nur 'ping!'. Innere bleiben\n"
+          "immer ('foo.bar', URLs).");
         pushCompanionMessage(
           "Mehrwort braucht Quotes:\n"
           "  text drop add \"erstes zweites\"\n"
