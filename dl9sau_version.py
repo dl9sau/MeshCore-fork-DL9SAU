@@ -32,7 +32,7 @@ def _git_short_hash(repo_dir):
 git_hash = _git_short_hash(env["PROJECT_DIR"])
 build_date = datetime.now().strftime("%d %b %Y")              # 11 chars
 build_time = datetime.now().strftime("%H:%M")                 # 5 chars (CLI only)
-# Format: "v1.16.1-DL9SAU.gXXX" (19 chars). 'g'-Prefix folgt der
+# Format: "v1.16.2-DL9SAU.gXXX" (19 chars). 'g'-Prefix folgt der
 # 'git describe'-Konvention; Punkt-Separator statt SemVer '+' weil
 # jede Build-Variante materielle Aenderungen mitbringt (Features /
 # Bugfixes), nicht nur Metadata. XXX = ERSTE 3 hex chars (= 12 Bit)
@@ -44,7 +44,7 @@ build_time = datetime.now().strftime("%H:%M")                 # 5 chars (CLI onl
 # Mit git_hash[:3] (Prefix) sehen wir die gleichen 3 Chars auch wenn
 # wir das full hash sehen (24e52ef1... -> 24e). Direkt vergleichbar
 # mit 'git log --oneline'.
-firmware_version = "v1.16.1-DL9SAU.g{}".format(git_hash[:3] if git_hash != "nogit" else "000")
+firmware_version = "v1.16.2-DL9SAU.g{}".format(git_hash[:3] if git_hash != "nogit" else "000")
 
 # Use CPPDEFINES with the value already quoted so SCons/gcc see it as a
 # proper string literal. Plain BUILD_FLAGS '-DFOO=\\"bar\\"' gets the
