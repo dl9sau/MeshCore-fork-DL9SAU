@@ -25615,7 +25615,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Default-Bump auf 3 nur bei wirklich uninitialisiert (siehe Pre-Init
     // in begin()) -- nicht im Setter, damit User explizit 0 setzen kann.
     if (strcmp(key, "flood_max_scope_region") == 0
-        || strcmp(key, "flood.max.scope.region") == 0) {
+        || strcmp(key, "flood.max.scope.region") == 0
+        || strcmp(key, "scope_region") == 0) {
       // Wunschliste 39: 'off' Keyword oder 1..N. Kein numerisches '0'.
       // Internal storage: 0 = off (semantisch identisch zum Keyword).
       uint8_t newval;
@@ -25960,7 +25961,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char r[140];
       if (newval == FLOOD_MAX_INFRA_FOLLOW)
         snprintf(r, sizeof(r),
-          "OK - flood_max_infra = follow (-> %u)",
+          "OK - flood_max_infra = follow (-> flood_max = %u)",
           (unsigned)_prefs.flood_max);
       else
         snprintf(r, sizeof(r),
@@ -26033,7 +26034,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char r[140];
       if (newval == FLOOD_MAX_INFRA_FOLLOW)
         snprintf(r, sizeof(r),
-          "OK - flood_max_req_resp = follow (-> %u)",
+          "OK - flood_max_req_resp = follow (-> flood_max_infra = %u)",
           (unsigned)effectiveFloodMaxInfra());
       else
         snprintf(r, sizeof(r),
@@ -26122,7 +26123,7 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       char r[140];
       if (newval == CH_HOPS_OFF)
         snprintf(r, sizeof(r),
-          "OK - flood_max_unscoped_companions = follow (-> %u)",
+          "OK - flood_max_unscoped_companions = follow (-> flood_max_scope_region = %u)",
           (unsigned)_prefs.flood_max_scope_region);
       else if (newval == 0)
         snprintf(r, sizeof(r),
@@ -27260,7 +27261,8 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         snprintf(r, sizeof(r), "direct_txdelay = %.3f", _prefs.direct_tx_delay_factor);
     }
     else if (strcmp(key, "flood_max_scope_region") == 0
-             || strcmp(key, "flood.max.scope.region") == 0) {
+             || strcmp(key, "flood.max.scope.region") == 0
+             || strcmp(key, "scope_region") == 0) {
       if (_prefs.flood_max_scope_region == 0)
         snprintf(r, sizeof(r), "flood_max_scope_region = off (nicht repeaten)");
       else
@@ -27331,16 +27333,18 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     else if (strcmp(key, "flood_max_infra") == 0 || strcmp(key, "flood.max.infra") == 0
              || strcmp(key, "flood.max.advert") == 0) {
       if (_prefs.flood_max_infra == FLOOD_MAX_INFRA_FOLLOW)
-        snprintf(r, sizeof(r), "flood_max_infra = follow (-> %u)", (unsigned)_prefs.flood_max);
+        snprintf(r, sizeof(r), "flood_max_infra = follow (-> flood_max = %u)", (unsigned)_prefs.flood_max);
       else
-        snprintf(r, sizeof(r), "flood_max_infra = %u", (unsigned)_prefs.flood_max_infra);
+        snprintf(r, sizeof(r), "flood_max_infra = %u (default: follow -> flood_max = %u)",
+                 (unsigned)_prefs.flood_max_infra, (unsigned)_prefs.flood_max);
     }
     else if (strcmp(key, "flood_max_req_resp") == 0 || strcmp(key, "flood.max.req.resp") == 0) {
       if (_prefs.flood_max_req_resp == FLOOD_MAX_INFRA_FOLLOW)
-        snprintf(r, sizeof(r), "flood_max_req_resp = follow (-> %u)",
+        snprintf(r, sizeof(r), "flood_max_req_resp = follow (-> flood_max_infra = %u)",
                  (unsigned)effectiveFloodMaxInfra());
       else
-        snprintf(r, sizeof(r), "flood_max_req_resp = %u", (unsigned)_prefs.flood_max_req_resp);
+        snprintf(r, sizeof(r), "flood_max_req_resp = %u (default: follow -> flood_max_infra = %u)",
+                 (unsigned)_prefs.flood_max_req_resp, (unsigned)effectiveFloodMaxInfra());
     }
     else if (strcmp(key, "flood_max_unknown_chan") == 0
              || strcmp(key, "flood.max.unknown.chan") == 0) {
@@ -27349,18 +27353,19 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       else if (_prefs.flood_max_unknown_chan == 0)
         snprintf(r, sizeof(r), "flood_max_unknown_chan = off (nicht repeaten)");
       else
-        snprintf(r, sizeof(r), "flood_max_unknown_chan = %u", (unsigned)_prefs.flood_max_unknown_chan);
+        snprintf(r, sizeof(r), "flood_max_unknown_chan = %u (default: follow -> flood_max = %u)",
+                 (unsigned)_prefs.flood_max_unknown_chan, (unsigned)_prefs.flood_max);
     }
     else if (strcmp(key, "flood_max_unscoped_companions") == 0
              || strcmp(key, "flood.max.unscoped.companions") == 0) {
       if (_prefs.flood_max_unscoped_companions == CH_HOPS_OFF)
-        snprintf(r, sizeof(r), "flood_max_unscoped_companions = follow (-> %u)",
+        snprintf(r, sizeof(r), "flood_max_unscoped_companions = follow (-> flood_max_scope_region = %u)",
                  (unsigned)_prefs.flood_max_scope_region);
       else if (_prefs.flood_max_unscoped_companions == 0)
         snprintf(r, sizeof(r), "flood_max_unscoped_companions = off (nicht repeaten)");
       else
-        snprintf(r, sizeof(r), "flood_max_unscoped_companions = %u",
-                 (unsigned)_prefs.flood_max_unscoped_companions);
+        snprintf(r, sizeof(r), "flood_max_unscoped_companions = %u (default: follow -> scope_region = %u)",
+                 (unsigned)_prefs.flood_max_unscoped_companions, (unsigned)_prefs.flood_max_scope_region);
     }
     else if (strcmp(key, "owner_info") == 0 || strcmp(key, "owner.info") == 0) snprintf(r, sizeof(r), "owner_info = %s", _prefs.owner_info[0] ? _prefs.owner_info : "(leer)");
     else if (strcmp(key, "passwd_admin") == 0
