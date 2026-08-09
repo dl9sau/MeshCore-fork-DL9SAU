@@ -61,7 +61,12 @@ static const GeoRegion regions[] = {
   GEO("de-ost",   50.16, 54.69,  9.87, 15.04),  // MV, BE, BB, SN, ST, TH
   GEO("de-sued",  47.27, 50.56,  7.51, 13.84),  // BY, BW, parts of HE/RP
   GEO("de-west",  49.11, 53.89,  5.87, 10.24),  // HE, NI, HB, NW, RP, SL
-  GEO("de-mitte", 49.40, 53.04,  6.65, 12.66),  // HE, TH, ST + parts of NW/NI/BY/SN
+  // Nord-Grenze 53.04 -> 52.40 (User 2026-08-09): die alte Nordkante war nur
+  // wegen Sachsen-Anhalt (Altmark) so hoch und zog die NW-Ecke der Box ueber
+  // Bremen (53.03N/8.60E) -- Bremen ist Nord/West, nicht Mitte. ST gehoert lt.
+  // Community (meshcore-de.fyi) ohnehin zu de-ost (dort bereits gelistet), nicht
+  // de-mitte. Hannover (52.37) bleibt bewusst drin (User-Wunsch).
+  GEO("de-mitte", 49.40, 52.40,  6.65, 12.66),  // HE, TH + parts of NI/NW/BY/SN
 
   // Bundesländer (16) — ISO 3166-2
   // Bboxes wurden bewusst gegenueber den OSM-Rechtecken in zwei Faellen
