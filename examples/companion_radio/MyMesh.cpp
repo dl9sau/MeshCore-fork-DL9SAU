@@ -15895,9 +15895,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "Nachtraegliches Aendern: remove + neu add.");
         pushCompanionMessage(
           "Shortcut: alle Pattern je Typ:\n"
-          "  filter <s|t> on-channel <liste>\n"
-          "  filter <s|t> exempt-channel <liste>\n"
-          "  filter <s|t> on-channel clear");
+          "  filter <sender|text> on-channel <liste>\n"
+          "  filter <sender|text> exempt-channel <liste>\n"
+          "  filter <sender|text> on-channel clear");
         pushCompanionMessage(
           "Pattern (literal, case-insens.):\n"
           "  foo   = exakt Wort 'foo'\n"
@@ -15918,6 +15918,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           "  text drop add \"erstes zweites\"\n"
           "  sender drop name add \"foo bar*\"\n"
           "2. Wort ohne Quote = Modifier-Versuch.");
+        pushCompanionMessage(
+          "'*' wirkt NUR am Wortrand (foo*/*foo).\n"
+          "Mitten im Wort ist '*' literal, und '*'\n"
+          "ueberbrueckt keine Leerzeichen (dafuer Quotes).\n"
+          "Pattern testen: filter test <pattern> <text>");
         pushCompanionMessage(
           "Komma-Listen erlaubt bei:\n"
           "  scope add: #de,#europe,unscoped\n"
@@ -20946,10 +20951,71 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       { "sender",          false },  // 3
       { "text",            false },  // 4
       { "advert",          false },  // 5
+      { "test",            false },  // 6
     };
-    int top_idx = dispatchToken(p, filter_top_choices, 6,
-      "filter list|unknown-channel|scope|sender|text|advert");
+    int top_idx = dispatchToken(p, filter_top_choices, 7,
+      "filter list|unknown-channel|scope|sender|text|advert|test");
     if (top_idx < 0) return;
+
+    // 'filter test <pattern> <text>' -- reiner Wort-Match-Tester (DL9SAU
+    // 2026-08-09). Prueft die Token-Match-Mechanik UNABHAENGIG von der
+    // Filter-Konfiguration (egal ob es spaeter ein sender- oder text-Filter
+    // wird -- patternTokenMatch ist derselbe). Zeigt die Token-Zerlegung des
+    // Patterns -> macht '*'- und Quote-Semantik sichtbar (haeufige Stolperfalle:
+    // '*' mitten im Wort ist literal; Mehrwort braucht Quotes).
+    if (top_idx == 6) {
+      while (*p == ' ' || *p == '\t') p++;
+      if (!*p) {
+        pushCompanionMessage("Usage: filter test <pattern> <text>\n"
+                             "  Prueft reines Wort-Matching. Mehrwort-Pattern in \"...\".");
+        return;
+      }
+      // Pattern extrahieren (quoted oder Einzeltoken) -- gleiche Logik wie 'add'.
+      const char* pat; size_t plen; const char* after_pat;
+      if (*p == '"') {
+        const char* eq = strchr(p + 1, '"');
+        if (!eq) { pushCompanionMessage("Pattern: schliessendes Quote fehlt."); return; }
+        pat = raw_cmd + ((p + 1) - cmd);
+        plen = (size_t)(eq - (p + 1));
+        after_pat = eq + 1;
+      } else {
+        const char* w = p;
+        while (*w && *w != ' ' && *w != '\t') w++;
+        pat = raw_cmd + (p - cmd);
+        plen = (size_t)(w - p);
+        after_pat = w;
+      }
+      bool a_start = false, a_end = false;
+      if (plen > 0 && pat[0] == '^')       { a_start = true; pat++; plen--; }
+      if (plen > 0 && pat[plen-1] == '$')  { a_end = true; plen--; }
+      if (plen == 0) { pushCompanionMessage("Leeres Pattern."); return; }
+      while (*after_pat == ' ' || *after_pat == '\t') after_pat++;
+      const char* text = raw_cmd + (after_pat - cmd);
+      if (!*text) { pushCompanionMessage("Usage: filter test <pattern> <text>  (Text fehlt)."); return; }
+      // Pattern-Tokens fuer die Anzeige zerlegen (gleiche Sep-Logik wie Matcher).
+      char toks[64]; size_t tpz = 0; toks[0] = 0;
+      {
+        size_t i = 0;
+        while (i < plen && tpz + 3 < sizeof(toks)) {
+          while (i < plen && isFilterHardSep((unsigned char)pat[i])) i++;
+          if (i >= plen) break;
+          toks[tpz++] = '[';
+          while (i < plen && !isFilterHardSep((unsigned char)pat[i]) && tpz + 2 < sizeof(toks))
+            toks[tpz++] = pat[i++];
+          toks[tpz++] = ']';
+        }
+        toks[tpz] = 0;
+      }
+      const char* ank = (a_start && a_end) ? "^..$ (exakt)"
+                      : a_start ? "^ (Anfang)"
+                      : a_end   ? "$ (Ende)" : "keine";
+      bool m = patternTokenMatch(pat, plen, text, strlen(text), a_start, a_end);
+      char r[140];
+      snprintf(r, sizeof(r), "Pattern: %s  Anker: %s\n-> %s",
+               toks, ank, m ? "MATCH" : "KEIN MATCH");
+      pushCompanionMessage(r);
+      return;
+    }
 
     // Globaler Uebersichts-Befehl 'filter list' -- alle Filter-Typen
     // in einem Rutsch anzeigen (User-Wunsch 2026-06-10).
