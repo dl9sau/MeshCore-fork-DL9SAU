@@ -218,19 +218,72 @@ static uint32_t _atoi(const char* sp) {
   return n;
 }
 
+// interface manager
+#include <helpers/MultiSerialInterface.h>
+MultiSerialInterface interface_manager;
+
+// include bluetooth interface
+#if defined(BLE_PIN_CODE)
+  #ifdef ESP32
+    // include esp32 bluetooth interface
+    #include <helpers/esp32/SerialBLEInterface.h>
+    SerialBLEInterface bluetooth_interface;
+  #elif defined(NRF52_PLATFORM)
+    // include nrf52 bluetooth interface
+    #include <helpers/nrf52/SerialBLEInterface.h>
+    SerialBLEInterface bluetooth_interface;
+  #else
+    #error "SerialBLEInterface is not defined for this platform"
+  #endif
+#endif
+
+// include wifi interface
+#ifdef WIFI_SSID
+  #ifndef TCP_PORT
+    #define TCP_PORT 5000
+  #endif
+  #ifdef ESP32
+    // include esp32 wifi interface
+    #include <helpers/esp32/SerialWifiInterface.h>
+    SerialWifiInterface wifi_interface;
+  #else
+    #error "SerialWifiInterface is not defined for this platform"
+  #endif
+#endif
+
+// include usb interface
+#if defined(ENABLE_USB_INTERFACE)
+  #include <helpers/ArduinoSerialInterface.h>
+  ArduinoSerialInterface usb_serial_interface;
+#endif
+
+// include ethernet interface
+#if defined(ETHERNET_ENABLED)
+  #include <helpers/ethernet/EthernetInterface.h>
+  ETHERNET_CLASS ethernet_interface;
+#endif
+
+// include hardware serial interface
+#if defined(SERIAL_RX)
+  #include <helpers/ArduinoSerialInterface.h>
+  ArduinoSerialInterface hardware_serial_interface;
+  HardwareSerial companion_serial(1);
+#endif
+
+// platform file system
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #include <InternalFileSystem.h>
   #if defined(QSPIFLASH)
     #include <CustomLFS_QSPIFlash.h>
     DataStore store(InternalFS, QSPIFlash, rtc_clock);
   #else
-  #if defined(EXTRAFS)
-    #include <CustomLFS.h>
-    CustomLFS ExtraFS(0xD4000, 0x19000, 128);
-    DataStore store(InternalFS, ExtraFS, rtc_clock);
-  #else
-    DataStore store(InternalFS, rtc_clock);
-  #endif
+    #if defined(EXTRAFS)
+      #include <CustomLFS.h>
+      CustomLFS ExtraFS(0xD4000, 0x19000, 128);
+      DataStore store(InternalFS, ExtraFS, rtc_clock);
+    #else
+      DataStore store(InternalFS, rtc_clock);
+    #endif
   #endif
 #elif defined(RP2040_PLATFORM)
   #include <LittleFS.h>
@@ -240,61 +293,10 @@ static uint32_t _atoi(const char* sp) {
   DataStore store(SPIFFS, rtc_clock);
 #endif
 
-#ifdef ESP32
-  #ifdef WIFI_SSID
-    #include <helpers/esp32/SerialWifiInterface.h>
-    SerialWifiInterface serial_interface;
-    #ifndef TCP_PORT
-      #define TCP_PORT 5000
-    #endif
-  #elif defined(BLE_PIN_CODE)
-    #include <helpers/esp32/SerialBLEInterface.h>
-    SerialBLEInterface serial_interface;
-  #elif defined(SERIAL_RX)
-    #include <helpers/ArduinoSerialInterface.h>
-    ArduinoSerialInterface serial_interface;
-    HardwareSerial companion_serial(1);
-  #else
-    #include <helpers/ArduinoSerialInterface.h>
-    ArduinoSerialInterface serial_interface;
-  #endif
-#elif defined(RP2040_PLATFORM)
-  //#ifdef WIFI_SSID
-  //  #include <helpers/rp2040/SerialWifiInterface.h>
-  //  SerialWifiInterface serial_interface;
-  //  #ifndef TCP_PORT
-  //    #define TCP_PORT 5000
-  //  #endif
-  // #elif defined(BLE_PIN_CODE)
-  //   #include <helpers/rp2040/SerialBLEInterface.h>
-  //   SerialBLEInterface serial_interface;
-  #if defined(SERIAL_RX)
-    #include <helpers/ArduinoSerialInterface.h>
-    ArduinoSerialInterface serial_interface;
-    HardwareSerial companion_serial(1);
-  #else
-    #include <helpers/ArduinoSerialInterface.h>
-    ArduinoSerialInterface serial_interface;
-  #endif
-#elif defined(NRF52_PLATFORM)
-  #ifdef BLE_PIN_CODE
-    #include <helpers/nrf52/SerialBLEInterface.h>
-    SerialBLEInterface serial_interface;
-  #else
-    #include <helpers/ArduinoSerialInterface.h>
-    ArduinoSerialInterface serial_interface;
-  #endif
-#elif defined(STM32_PLATFORM)
-  #include <helpers/ArduinoSerialInterface.h>
-  ArduinoSerialInterface serial_interface;
-#else
-  #error "need to define a serial interface"
-#endif
-
 /* GLOBAL OBJECTS */
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
-  UITask ui_task(&board, &serial_interface);
+  UITask ui_task(&board, &interface_manager);
 #endif
 
 StdRNG fast_rng;
@@ -318,12 +320,13 @@ void halt() {
 #endif
 
 // DL9SAU 2026-06-16 OTA: Boot-Mode-Flag (RAM-only). Wird in setup()
-// gesetzt wenn _prefs.ota_pending != 0. Dann wird BLE-Init geskippt
-// und nach setup() direkt board.startOTAUpdate gerufen. NRF52 hat
-// keinen WiFi-OTA-Pfad -- daher ESP_PLATFORM-fenced.
-#ifdef ESP_PLATFORM
+// gesetzt wenn _prefs.ota_pending != 0 (nur ESP, siehe unten). Dann wird
+// BLE-Init geskippt und nach setup() direkt board.startOTAUpdate gerufen.
+// NRF52 hat keinen WiFi-OTA-Pfad -- bleibt dort immer false. Deklaration
+// bewusst plattform-neutral (2026-08-10 Merge 1.17.0): der BLE-Skip-Guard
+// in der gebuendelten Interface-Sektion kompiliert so uniform auf allen
+// Plattformen (auf NRF52 ist der Guard transparent, weil immer false).
 static bool g_ota_boot_mode = false;
-#endif
 
 // DL9SAU 2026-06-16 T1000-E Boot-Hang Diagnose:
 // LED-Marker VOR Serial.begin() damit wir sehen ob setup() ueberhaupt
@@ -446,6 +449,10 @@ void setup() {
   board.begin();
   DIAG_MARK("M2 post board.begin");
 
+#ifdef HAS_EXTERNAL_WATCHDOG
+  external_watchdog.begin();
+#endif
+
 #ifdef DISPLAY_CLASS
   DisplayDriver* disp = NULL;
   if (display.begin()) {
@@ -507,39 +514,6 @@ void setup() {
   );
 
   DIAG_MARK("M11 post the_mesh.begin");
-  // DL9SAU 2026-06-20: Wunschliste 90 Phase 2 stay-off (RESETREAS-
-  // Filter) wurde komplett entfernt. shutdown_pending-Sentinel-
-  // Mechanismus (siehe applyShutdownPendingCheck nach
-  // serial_interface.begin) faengt alle Phantom-Wakes (WDT/VBUS-
-  // Falling/BOR) bereits ab. Plus stay-off-Check lief vor SD-Init
-  // -> board.powerOff() war silent no-op -> Funktion war eh tot.
-  // Plus User-Risiko: strict stay-off + Button-Defekt = unrecoverable.
-  // Siehe git log + Wunschliste 90 Phase 2 Doku.
-#ifdef BLE_PIN_CODE
-  DIAG_MARK("M12 pre serial_interface.begin(BLE)");
-  serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
-  DIAG_MARK("M13 post serial_interface.begin(BLE)");
-#else
-  DIAG_MARK("M12 pre serial_interface.begin(Serial)");
-  serial_interface.begin(Serial);
-  DIAG_MARK("M13 post serial_interface.begin(Serial)");
-#endif
-  DIAG_MARK("M14 pre the_mesh.startInterface");
-  the_mesh.startInterface(serial_interface);
-  DIAG_MARK("M15 post the_mesh.startInterface");
-  // DL9SAU 2026-07-12 (Power Weg A): HW-Comparator (LPCOMP+VBUS) armieren --
-  // NACH serial_interface.begin (SoftDevice UP), damit configureVoltageWake
-  // den SD-Pfad nutzt und KEIN Pre-SD-Register-Konflikt entsteht (fruehere
-  // Stelle vor dem SD-Init war riskant). Vor applyShutdownPendingCheck, damit
-  // der Wake vor einem evtl. Re-Sleep armiert ist. Prefs sind laengst geladen.
-  // No-op ohne NRF52_POWER_MANAGEMENT / chemistry=none.
-  the_mesh.configureBatteryWake();
-  // DL9SAU 2026-06-20: shutdown_pending-Check NACH serial_interface.
-  // begin -- jetzt ist Bluefruit aktiv = SoftDevice up = USB-PHY hat
-  // VBUS-Detect-Hardware enabled (isExternalPowered() stable).
-  // Plus board.powerOff() -> sd_power_system_off() ist jetzt funktional
-  // (vorher kein SD -> Error-Return -> Pref wurde irrtuemlich gecleart).
-  the_mesh.applyShutdownPendingCheck();
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
   store.begin();
@@ -550,22 +524,6 @@ void setup() {
         false
     #endif
   );
-
-  //#ifdef WIFI_SSID
-  //  WiFi.begin(WIFI_SSID, WIFI_PWD);
-  //  serial_interface.begin(TCP_PORT);
-  // #elif defined(BLE_PIN_CODE)
-  //   char dev_name[32+16];
-  //   sprintf(dev_name, "%s%s", BLE_NAME_PREFIX, the_mesh.getNodeName());
-  //   serial_interface.begin(dev_name, the_mesh.getBLEPin());
-  #if defined(SERIAL_RX)
-    companion_serial.setPins(SERIAL_RX, SERIAL_TX);
-    companion_serial.begin(115200);
-    serial_interface.begin(companion_serial);
-  #else
-    serial_interface.begin(Serial);
-  #endif
-    the_mesh.startInterface(serial_interface);
 #elif defined(ESP32)
   SPIFFS.begin(true);
   store.begin();
@@ -610,7 +568,30 @@ void setup() {
     Serial.println("\r\n# OTA boot mode -- skipping BLE init.");
   }
 #endif
+#else
+  #error "need to define filesystem"
+#endif
 
+  // === Interface-Sektion (Upstream 1.17.0: MultiSerialInterface) ===
+  // DL9SAU 2026-08-10 Merge 1.17.0: Upstream buendelt alle Interfaces in
+  // interface_manager (mehrere gleichzeitig moeglich, z.B. USB-CLI + BLE-App).
+  // Ersetzt das fruehere pro-FS-Zweig serial_interface. Unsere Boot-Anpassungen
+  // (OTA-Skip, DIAG-Marker, NRF52-Power-Wake) sind hier eingewoben.
+
+// add bluetooth interface
+#if defined(BLE_PIN_CODE)
+  // DL9SAU 2026-06-16 OTA Plan A: BLE-Stack-Init nur wenn KEIN OTA-Boot-Mode
+  // (sonst ist der Heap nicht frei fuer WiFi+OTA). g_ota_boot_mode ist auf
+  // non-ESP-Plattformen immer false -> Guard ist dort transparent.
+  if (!g_ota_boot_mode) {
+    DIAG_MARK("M12 pre bluetooth_interface.begin");
+    bluetooth_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+    interface_manager.addInterface(InterfaceType::Bluetooth, &bluetooth_interface);
+    DIAG_MARK("M13 post bluetooth_interface.begin");
+  }
+#endif
+
+// add wifi interface
 #ifdef WIFI_SSID
   board.setInhibitSleep(true);   // prevent sleep when WiFi is active
   WiFi.setAutoReconnect(true);
@@ -626,26 +607,46 @@ void setup() {
   });
 
   WiFi.begin(WIFI_SSID, WIFI_PWD);
-  serial_interface.begin(TCP_PORT);
-  the_mesh.startInterface(serial_interface);
-#elif defined(BLE_PIN_CODE)
-  // DL9SAU 2026-06-16 OTA Plan A: BLE-Stack-Init nur wenn KEIN
-  // OTA-Boot-Mode (sonst ist der Heap nicht frei fuer WiFi+OTA).
-  if (!g_ota_boot_mode) {
-    serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
-    the_mesh.startInterface(serial_interface);
-  }
-#elif defined(SERIAL_RX)
+  wifi_interface.begin(TCP_PORT);
+  interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+#endif
+
+// add usb interface
+#if defined(ENABLE_USB_INTERFACE)
+  usb_serial_interface.begin(Serial);
+  interface_manager.addInterface(InterfaceType::USB, &usb_serial_interface);
+#endif
+
+// add ethernet interface
+#if defined(ETHERNET_ENABLED)
+  ethernet_interface.begin();
+  interface_manager.addInterface(InterfaceType::Ethernet, &ethernet_interface);
+#endif
+
+// add hardware serial interface
+#if defined(SERIAL_RX)
   companion_serial.setPins(SERIAL_RX, SERIAL_TX);
   companion_serial.begin(115200);
-  serial_interface.begin(companion_serial);
-  the_mesh.startInterface(serial_interface);
-#else
-  serial_interface.begin(Serial);
-  the_mesh.startInterface(serial_interface);
+  hardware_serial_interface.begin(companion_serial);
+  interface_manager.addInterface(InterfaceType::HardwareSerial, &hardware_serial_interface);
 #endif
-#else
-  #error "need to define filesystem"
+
+  DIAG_MARK("M14 pre the_mesh.startInterface");
+  the_mesh.startInterface(interface_manager);
+  DIAG_MARK("M15 post the_mesh.startInterface");
+
+#if defined(NRF52_PLATFORM)
+  // DL9SAU 2026-07-12 (Power Weg A): HW-Comparator (LPCOMP+VBUS) armieren --
+  // NACH bluetooth_interface.begin (SoftDevice UP), damit configureVoltageWake
+  // den SD-Pfad nutzt und KEIN Pre-SD-Register-Konflikt entsteht. Vor
+  // applyShutdownPendingCheck, damit der Wake vor einem evtl. Re-Sleep armiert
+  // ist. No-op ohne NRF52_POWER_MANAGEMENT / chemistry=none.
+  the_mesh.configureBatteryWake();
+  // DL9SAU 2026-06-20: shutdown_pending-Check NACH BLE-Init -- Bluefruit aktiv
+  // = SoftDevice up = USB-PHY hat VBUS-Detect enabled (isExternalPowered()
+  // stable). board.powerOff() -> sd_power_system_off() ist jetzt funktional
+  // (vorher kein SD -> Error-Return -> Pref wurde irrtuemlich gecleart).
+  the_mesh.applyShutdownPendingCheck();
 #endif
 
   sensors.begin();
@@ -711,11 +712,15 @@ void loop() {
   }
 #endif
   the_mesh.loop();
+  interface_manager.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
   ui_task.loop();
 #endif
   rtc_clock.tick();
+#ifdef HAS_EXTERNAL_WATCHDOG
+  external_watchdog.loop();
+#endif
   board.tickOTA();   // DL9SAU 2026-06-16: WiFi-OTA 5-min-Timeout check
   maintainWatchdog();   // PENDING -> ACTIVE (nach 1. loop), SKIP -> ACTIVE
   delay(1);   // yield to FreeRTOS idle task; lets ESP32 idle-tick run (and, if

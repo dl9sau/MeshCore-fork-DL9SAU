@@ -3,6 +3,14 @@
 #include <Mesh.h>
 #include <RadioLib.h>
 
+#ifdef USE_CC310_HW_CRYPTO
+#include <Adafruit_nRFCrypto.h>
+#endif
+struct PacketMillis {
+  uint32_t preambleMillis;  // preamble-detect -> header-valid deadline
+  uint32_t payloadMillis;   // header-valid   -> rx-done deadline
+};
+
 class RadioLibWrapper : public mesh::Radio {
 protected:
   PhysicalLayer* _radio;
@@ -53,6 +61,7 @@ public:
   virtual uint8_t getSpreadingFactor() const { return LORA_SF; }
   static uint16_t preambleLengthForSF(uint8_t sf) { return sf <= 8 ? 32 : 16; }
   void updatePreamble(uint8_t sf) { _preamble_sf = sf; _radio->setPreambleLength(preambleLengthForSF(sf)); }
+  PacketMillis calcMaxPacketMillis(uint8_t sf, float bw, uint8_t cr, uint8_t preambleSymbols);
   virtual int16_t performChannelScan();
 
   int getNoiseFloor() const override { return _noise_floor; }
@@ -81,6 +90,9 @@ public:
   // recvRaw() ruft startReceive() wenn state != STATE_RX.
   void setRxSuspended(bool s);
   bool getRxSuspended() const { return _rx_suspended; }
+
+  // Upstream 1.17.0 (#3036/#2977, listen-before-talk): Side-Detectors.
+  virtual bool configSideDetectors(const uint8_t sideDetSFs[], uint8_t num, float bw) { return false; }
 };
 
 /**
@@ -93,8 +105,15 @@ public:
   RadioNoiseListener(PhysicalLayer& radio): _radio(&radio) { }
 
   void random(uint8_t* dest, size_t sz) override {
+#ifdef USE_CC310_HW_CRYPTO
+    // CC310 TRNG is higher quality and environment-independent vs radio RSSI noise.
+    nRFCrypto.begin();
+    nRFCrypto.Random.generate(dest, (uint16_t)sz);
+    nRFCrypto.end();
+#else
     for (int i = 0; i < sz; i++) {
       dest[i] = _radio->randomByte() ^ (::random(0, 256) & 0xFF);
     }
+#endif
   }
 };

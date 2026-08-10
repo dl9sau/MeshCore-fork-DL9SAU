@@ -5,6 +5,8 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLEServerCallbacks, BLECharacteristicCallbacks {
   BLEServer *pServer;
@@ -54,12 +56,18 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   // und 4-Slot-Queue kein Burst-Buffer. RAM-Kosten: (16-4)*173 = ~2KB,
   // verteilt auf recv+send. Vertretbar -- ESP32-S3 hat reichlich RAM.
   #define FRAME_QUEUE_SIZE  16
-  int recv_queue_len;
-  Frame recv_queue[FRAME_QUEUE_SIZE];
+  // Upstream 1.17.0 #3007: recv_queue als FreeRTOS-Static-Queue (thread-safe --
+  // der BLE onWrite-Callback fuellt aus dem BLE-Task, loop() drained aus dem
+  // loopTask -> ohne Queue eine echte Race auf recv_queue_len/[]). DL9SAU:
+  // Groesse bleibt FRAME_QUEUE_SIZE (16); Diag-Counter (overflow/high-water)
+  // unten erhalten, jetzt ueber den Queue-Fuellstand gepflegt.
+  StaticQueue_t recv_queue_state;
+  uint8_t recv_queue_storage[FRAME_QUEUE_SIZE * sizeof(Frame)];
+  QueueHandle_t recv_queue;
   int send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
 
-  void clearBuffers() { recv_queue_len = 0; send_queue_len = 0; }
+  void clearBuffers();
 
   // Wunschliste 58 Phase F Retry 2026-06-14: Stack-State der nach
   // esp_bt_controller_enable wieder gesetzt werden muss. Wird auch von
@@ -97,7 +105,7 @@ public:
     _isEnabled = false;
     _last_write = 0;
     last_conn_id = 0;
-    send_queue_len = recv_queue_len = 0;
+    send_queue_len = 0;
     _disconnect_count = 0;
     _last_disconnect_reason = 0xFF;
     _recv_overflow_count = 0;
@@ -106,6 +114,10 @@ public:
     _send_queue_high_water = 0;
     _ctrl_disabled = false;
     _saved_dev_name[0] = 0;
+    // Upstream 1.17.0 #3007: thread-safe recv_queue (siehe oben).
+    recv_queue = xQueueCreateStatic(
+      FRAME_QUEUE_SIZE, sizeof(Frame), recv_queue_storage, &recv_queue_state
+    );
   }
 
   uint32_t getDisconnectCount() const override { return _disconnect_count; }

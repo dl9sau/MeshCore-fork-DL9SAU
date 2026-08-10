@@ -30,9 +30,19 @@ runs:
     - name: Extract Version from Git Tag
       shell: bash
       run: |
-        GIT_TAG_NAME="${GITHUB_REF#refs/tags/}"
-        GIT_TAG_VERSION="$GIT_TAG_NAME"
-        GIT_TAG_VERSION="${GIT_TAG_VERSION#companion-}"
-        GIT_TAG_VERSION="${GIT_TAG_VERSION#repeater-}"
-        GIT_TAG_VERSION="${GIT_TAG_VERSION#room-server-}"
-        echo "GIT_TAG_VERSION=${GIT_TAG_VERSION}" >> $GITHUB_ENV
+        if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          # triggered by a tag push (e.g: refs/tags/companion-v1.2.3-DL9SAU)
+          # DL9SAU: nur den bekannten Prefix strippen, REST behalten (mehrteilige
+          # Versionen wie …-DL9SAU bleiben ganz). NICHT ${##*-} (brach bei -DL9SAU).
+          GIT_TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION_STRING="$GIT_TAG_NAME"
+          VERSION_STRING="${VERSION_STRING#companion-}"
+          VERSION_STRING="${VERSION_STRING#repeater-}"
+          VERSION_STRING="${VERSION_STRING#room-server-}"
+        else
+          # triggered by a workflow dispatch (e.g: refs/heads/main)
+          # strip "refs/heads/" prefix and replace any remaining "/" with "-" to protect file paths
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          VERSION_STRING=$(echo "$BRANCH_NAME" | tr '/' '-')
+        fi
+        echo "GIT_TAG_VERSION=${VERSION_STRING}" >> $GITHUB_ENV

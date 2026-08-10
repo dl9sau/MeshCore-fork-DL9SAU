@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 
-# DL9SAU 2026-07-22: Build-Erfolg pro Board tracken. build.sh hat KEIN 'set -e'
-# und alle cp nutzen '|| true' -> ein gescheiterter Board-Build erzeugt still
-# kein Output-File und der Run endet trotzdem "gruen". Diese Arrays + die
+# DL9SAU 2026-07-22: Build-Erfolg pro Board tracken. build.sh hat bewusst KEIN
+# 'set -e' (Upstream 1.17.0 haette es gerne, aber unser All-in-one-Build
+# 'build-companion-firmwares' wuerde beim ersten fehlenden Board abbrechen);
+# alle cp nutzen '|| true' -> ein gescheiterter Board-Build erzeugt still kein
+# Output-File und der Run endet trotzdem "gruen". Diese Arrays + die
 # dl9sau_build_summary machen das sichtbar (X/Y gebaut, fehlende Liste) und
-# lassen den Job FEHLSCHLAGEN, wenn ein Kern-Board fehlt.
+# lassen den Job FEHLSCHLAGEN, wenn ein Kern-Board fehlt. (Upstreams neue
+# Matrix-CI firmware-builder.yml baut je Board einen eigenen Job -> dort ist
+# set -e pro Single-Build-Job unproblematisch; get-*-Commands unten ergaenzt.)
 DL9SAU_BUILT_OK=()
 DL9SAU_BUILT_MISSING=()
 
@@ -101,7 +105,7 @@ get_pio_envs_ending_with_string() {
 # $1 should be the environment name
 get_platform_for_env() {
   local env_name=$1
-  echo "$PIO_CONFIG_JSON" | python3 -c "
+  printf '%s' "$PIO_CONFIG_JSON" | python3 -c "
 import sys, json, re
 data = json.load(sys.stdin)
 for section, options in data:
@@ -365,4 +369,11 @@ elif [[ $1 == "build-repeater-firmwares" ]]; then
 elif [[ $1 == "build-room-server-firmwares" ]]; then
   build_room_server_firmwares
   dl9sau_build_summary; exit $?
+elif [[ $1 == "get-companion-firmwares-to-build" ]]; then
+  get_pio_envs_ending_with_string "_companion_radio_usb"
+  get_pio_envs_ending_with_string "_companion_radio_ble"
+elif [[ $1 == "get-repeater-firmwares-to-build" ]]; then
+  get_pio_envs_ending_with_string "_repeater"
+elif [[ $1 == "get-room-server-firmwares-to-build" ]]; then
+  get_pio_envs_ending_with_string "_room_server"
 fi
