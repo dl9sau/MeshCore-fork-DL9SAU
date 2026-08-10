@@ -9,6 +9,15 @@ Schwerpunkt ist der **Companion-Mode** (Smartphone-App + Tracker) — aber die
 angeglichen): dasselbe Gerät kann ohne Reflash als Repeater laufen. Siehe
 [Repeater-Mode](#repeater-mode).
 
+**Basis:** Dieser Fork ist auf **Upstream MeshCore 1.17.0** gemergt (Version
+`v1.17.0-DL9SAU`). Die Node-Einstellungen bleiben bewusst im **binären** Format
+(nicht Upstreams neues JSON) — dadurch ist ein Upgrade von 1.16.x **ohne
+Konfigurationsverlust** möglich (Details + Migrations-Hinweise:
+`Changelog-DL9SAU.txt`, Abschnitt 21). Aus 1.17.0 mit übernommen u. a.: **mehrere
+Schnittstellen gleichzeitig** (z. B. USB-Konsole + BLE-App parallel,
+buildflag-abhängig), MCU-Temperatur in der Telemetrie, nRF52-Hardware-Krypto,
+Listen-before-talk.
+
 ---
 
 ## Companion-Mode (Smartphone-App + Tracker)

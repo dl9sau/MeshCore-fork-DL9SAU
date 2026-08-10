@@ -2747,10 +2747,164 @@ in 'prefs' / 'prefs all' angezeigten Hex-Werte lesbar werden.
 
 
 ================================================================================
+20. Releases v1.16.0 - v1.16.3 (Juni - August 2026)
+================================================================================
+
+Nach dem Mai-Stand (Abschnitte 1-19 + Wunschliste ~22) wurde die ausfuehrliche
+narrative Protokollierung nicht fortgefuehrt -- die Arbeit lief in vier Releases
+(companion-v1.16.0 bis -v1.16.3, gut 600 Commits Juni-August). Dieser Abschnitt
+fasst sie thematisch zusammen. Volle Detailtiefe: FEATURES.md (user-sichtbare
+Features), git log und die Release-Tags companion-v1.16.x-DL9SAU.
+
+--------------------------------------------------------------------------------
+v1.16.0-DL9SAU (23. Juli 2026) -- erstes Release, grosse Reifephase
+--------------------------------------------------------------------------------
+  - nRF52 Power-Management (WL 89/90/91): sauberes Shutdown (shutdown_pending-
+    Sentinel), Battery-Recovery-Wake (LPCOMP+VBUS, batt_min_mv_boot), USB-VBUS
+    als Wake-Quelle, Stay-off/Auto-On, Selbst-Aussperr-Schutz
+    (button_press_allow_shutdown).
+  - Companion-Stromsparen (WL 43/58/64): BLE-Power-Cycle bei laenger getrennter
+    App, konfigurierbarer CPU-Takt (cpu.clock, Floor 80 MHz), zweistufiger
+    Display-Sleep. Default off.
+  - Robustheit (WL 53): Task-Watchdog (watchdog_mode), persistenter /boot_log +
+    log-CLI, nRF52 Crash-Faenger (No-init-RAM) + crashtest, FS-Recovery
+    (reformat internal|extra|all), atomare temp+rename-Writes.
+  - OTA / DFU (WL 67/68/72): ESP32 WiFi-OTA (HTTP-Basic-Auth), nRF52 BLE-DFU,
+    dfu-CLI.
+  - Backup / Restore (WL 28/36/69/70): atomares Restore (BEGIN/END-Commit,
+    kein-END = Revert), Hashtag-/Public-PSK-Channels im Backup.
+  - GPS-/NMEA-Fixes (WL 79/80/81/84): 999-Sentinel-Guard, stale node_lat sofort
+    gespiegelt, gps setloc nutzt LAST-FIX auch im Sleep, Phantom-Power-Fix,
+    sensor list/get/set + gps profile <full|position-only|time-only>.
+  - Zeit-Sync / Zeitzone (WL 31/49/50): RTC-Sync aus signierten Adverts mit
+    Plausibilitaets-/Drift-Fenster, clock-Befehl, TZ-Override per CLI/GPS.
+  - Message-Store-Redesign (WL 84-88): dynamische lazy Buckets, debounced Flash +
+    seekEnd-Append, $companion RAM-only (18 s-Freeze behoben) + Output-Batching.
+  - Filter-System (WL 46): Drop/Keep nach Sender/Text/Scope auf bekannten
+    Channels, pro-Pattern Channel-Filter, literale UTF-8-Patterns, filter list;
+    Display- und Repeat-Achse getrennt.
+  - Scope-System (WL 32/38/40/94-96): Magic-Scopes #local/#region/#geo,
+    scope-CLI-Restrukturierung, Scope-Annotation in der Nachricht, #geo wird zur
+    Position aufgeloest. Channel-Hash-1-Byte-Kollisions-Fix (dekodierungs-
+    bestaetigte Channel-Identitaet statt hash[0]-Raten), _buildin_keys[]-Cache-
+    Fix, per-Channel-Hop-Caps (ch.hops).
+  - Repeater defensive / force (WL 32/33/34/39/54): kein Repeat waehrend
+    Bewegung, vereinheitlichte flood_max_*-Prefs, sauberere Status/Help.
+  - Remote-Admin ueber Mesh (WL 52): ANON_REQ_LOGIN + REQ_TYPE_ADMIN_CMD,
+    passwd_admin/guest, Guest-Whitelist, Multi-Frame-Antworten, LOGIN nur direkt.
+  - Neighbor-Signal + Discover (WL 10/42/59/60): rx_him/rx_us-Zaehler pro
+    Repeater, neighbors stats, discover regions mit Trace/Cache, DiscoveryEntry-
+    Refactor, neighbors mit Distanz/Bearing + last <N>d|h.
+  - Stats + UTF-8 (WL 60/61): rx total vs unique + Amplifikation, itemisierte
+    Flood-Aufschluesselung, utf8Field()-Wrapper (Emoji-Split-Fix), breiten-
+    korrekte Spaltenausrichtung.
+  - Pfad-/Zustell-Diagnose (WL 82): tracepath mit vorgegebener Hop-Kette,
+    kontaktloser ping, path show via <hop>, Trace-Level-Modell mit delivery/geo,
+    Resend-Coalescing.
+  - Advert-Konfiguration (WL #0-#4): advert status (Beacon-Uebersicht), Motion-
+    Kadenz-Matrix, advert periodic (Stunden) / nightly (alle N Naechte) mit
+    Mindest-Intervall, Scope-in-Name-Default on.
+  - Kleinere: language english|german (WL 30), Buzzer-Profile (WL 75),
+    get pub.key / get|set prv.key (serial, Identity-Recovery), BLE-Name-Sanitize.
+
+--------------------------------------------------------------------------------
+v1.16.1-DL9SAU (30. Juli 2026) -- Repeater-Force/Freq-Architektur
+--------------------------------------------------------------------------------
+  - Repeater-Force von Compile-Flag auf Runtime-AUTHCODE umgestellt (ein Build
+    fuer alle): client_repeat_force per Authcode / force-Keyword freischaltbar.
+  - Freq-Modell invertiert: main_mesh_freqs[]-Blocklist (Haupt-qrg schuetzen) +
+    strict-Liste als App-Orientierungshilfe; 918.000 (Client-Repeat-Freq) raus.
+  - App-Repeat-Aktivierung: Freq-Snap auf compliant strict-Freq statt "Illegal
+    Argument" (erhaelt Event/SAR-Client-Repeat-Usecase).
+  - boot_log crash-safe (atomarer temp+rename-Write).
+  - set / get-all-Paritaet: alle 'get all'-Keys via 'set' setzbar; 6 "Hilfe-ohne-
+    Apply"-set-Keys gefixt.
+  - Doku: FEATURES.md gegen Code verifiziert, README-Einleitung (DE/EN).
+
+--------------------------------------------------------------------------------
+v1.16.2-DL9SAU (9. August 2026) -- Filter/Geo-Feinschliff
+--------------------------------------------------------------------------------
+  - filter test <pattern> <text>: Wort-Match-Tester + Hilfe-Klarstellung.
+  - flood_*: Einzel-'get' an 'get all' angeglichen + scope_region-Kurzform.
+  - Geo-Scope de-mitte: Nordkante 53.04 -> 52.40 (Bremen raus, Basis meshcore-de.fyi).
+  - loop_detect-Status: "inaktiv" -> "irrelevant: defensive ist strenger".
+
+--------------------------------------------------------------------------------
+v1.16.3-DL9SAU (9. August 2026) -- Filter-Rand-Trim
+--------------------------------------------------------------------------------
+  - Satzzeichen am Wortrand trimmen (Variante A, UTF-8-aware).
+  - Rand-Trim ASYMMETRISCH: nur das Text-Token wird getrimmt, das Pattern bleibt
+    konkret (pig matcht pig + pig!; pig! matcht nur pig!).
+
+
+================================================================================
+21. Upstream-Merge MeshCore 1.17.0 (10. August 2026)
+================================================================================
+
+Basis-Version des Forks von 1.16.x auf v1.17.0-DL9SAU hochgezogen (Merge des
+Upstream-Tags companion-v1.17.0). Protokoll-Core (Packet / Mesh / BaseChatMesh)
+ist 0-Diff -- kein Wire-/Routing-/Dedup-Bruch, netz-kompatibel.
+
+KERN-ENTSCHEIDUNG: Config bleibt BINAER.
+  Upstream 1.17.0 stellt die Node-Einstellungen auf JSON (/prefs.json) um. Der
+  Fork behaelt bewusst das bewaehrte binaere Format (/new_prefs); Upstreams
+  ConfigSerializer liegt ungenutzt im Baum. Gruende: kein FS-anfassender Umbau
+  auf dem RAM/Flash-engen T1000-E, null Migration fuer Bestandsgeraete, und unser
+  NodePrefs ist ohnehin ~90 Felder geforkt (JSON-Alignment braechte wenig).
+
+Aus Upstream uebernommen (Companion + integrierter Repeater):
+  - interface_manager (MultiSerialInterface): mehrere Schnittstellen gleichzeitig
+    moeglich (z.B. USB-CLI + BLE-App parallel, statt compile-zeit-gewaehlt genau
+    eine). main.cpp setup()/loop() dafuer rekonstruiert, unsere Boot-Logik (DIAG,
+    earlyShutdownCheck, OTA-Skip, configureBatteryWake + applyShutdownPendingCheck
+    NACH BLE = SoftDevice-up) eingewoben.
+  - Built-in MCU-Temperatur in der Self-Telemetrie (neben der Batteriespannung),
+    ESP32 temperatureRead() / nRF52 sd_temp_get, per !isnan geguarded. Chip-Die-
+    Temperatur, kein externer Sensor.
+  - nRF52 CC310 Hardware-Crypto (#2824): schnellere/energiesparendere Krypto (T1000-E).
+  - Listen-before-talk Side-Detectors fuer SX1262 (#3036 / #2977).
+  - esp32 BLE: thread-safe FreeRTOS-recv-Queue (#3007) -- kombiniert mit unserer
+    BLE-Diagnostik (Overflow-/Disconnect-Counter) und dem Size-16-Burst-Fix.
+  - ~11 neue Boards + Display-Treiber; Color-Scheme (#3034, UIColor-Klasse).
+
+Auto-Merge-Semantik-Fallen (Upstream-Refactors trafen unsere Andock-Zeilen,
+kompilierten still falsch -- nur der Build fing sie):
+  - AbstractUITask::_serial -> _interfaceManager (ui-orig / ui-tiny, Buzzer-Gate).
+  - DisplayDriver enum Color -> UIColor-Klasse: YELLOW -> UIColor::warning_txt
+    (ui-new, Stats-Seite).
+  - GPS (MicroNMEALocationProvider): unsere Fixes (999-Sentinel, stale-clear,
+    RTC-Sanity, skip_time_sync) blieben intakt; Upstreams GPS-Power-Macro-Refactor
+    (GPS_EN_ACTIVE) sauber dazu.
+
+--------------------------------------------------------------------------------
+Upgrade-/Migrations-Kompatibilitaet (WICHTIG)
+--------------------------------------------------------------------------------
+Diese Firmware liest weiterhin das binaere /new_prefs, NICHT Upstreams JSON
+(/prefs.json).
+
+  - Von 1.16.x (Original-MeshCore ODER DL9SAU-Fork) -> v1.17.0-DL9SAU:
+      Einstellungen bleiben erhalten (binaer -> binaer).
+
+  - Von Original-MeshCore >= 1.17.0 (JSON-Config) -> v1.17.0-DL9SAU:
+      Die EINSTELLUNGEN gehen verloren (bzw. fallen auf den pre-1.17.0-Stand
+      zurueck) und muessen neu gesetzt werden -- der Fork liest /prefs.json nicht.
+
+  - In ALLEN Faellen erhalten bleiben: Node-IDENTITAET (Key), KONTAKTE und
+    KANAELE. Diese liegen in eigenen Binaerdateien, deren Layout 1.17.0 NICHT
+    geaendert hat (ContactInfo + contacts/channels-Serialisierung base-identisch).
+    -> Kein Neu-Pairing der App, keine verlorenen Kontakte -- nur die Settings neu.
+
+
+================================================================================
 Build-Status
 ================================================================================
 
-Verifiziert:
+Verifiziert (v1.17.0-DL9SAU-Merge, 10. Aug 2026):
+  t1000e_companion_radio_ble                   (nRF52840, T1000-E; RAM 62% / Flash 79%)
+  Heltec_v3_companion_radio_ble                (ESP32-S3)
+  Heltec_Wireless_Tracker_companion_radio_ble  (ESP32-S3, Farb-TFT + GPS)
+
+Verifiziert (frueher):
   Heltec_Wireless_Tracker_companion_radio_ble  (ESP32-S3, mit GPS)
   Heltec_ct62_companion_radio_usb              (ESP32-C3, ohne GPS)
   Heltec_ct62_repeater                         (Cross-Check Repeater-Build)
