@@ -110,6 +110,10 @@ public:
     // DL9SAU 2026-08-15 (upstream 1.17.1 ecb8c945-Linie): begin/end raus -- CC310
     // wird jetzt EINMAL in NRF52Board::begin() initialisiert (kein per-Call-Churn).
     nRFCrypto.Random.generate(dest, (uint16_t)sz);
+    // DL9SAU 2026-08-15 (upstream 1.17.1 fcb9bdf2): Radio-Rauschen zusaetzlich
+    // einmischen (Defense-in-Depth -- kombiniert HW-TRNG mit RF-Entropie).
+    for (int i = 0; i < sz; i++)
+      dest[i] ^= _radio->randomByte() ^ (::random(0, 256) & 0xFF);
 #else
     for (int i = 0; i < sz; i++) {
       dest[i] = _radio->randomByte() ^ (::random(0, 256) & 0xFF);
