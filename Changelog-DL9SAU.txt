@@ -2896,6 +2896,45 @@ Diese Firmware liest weiterhin das binaere /new_prefs, NICHT Upstreams JSON
 
 
 ================================================================================
+22. Upstream-Nachzug 1.17.1 + #region-Reply-Fallback (15. Aug 2026)
+================================================================================
+
+Nachgezogen aus Upstream MeshCore 1.17.1 (Ziel: so nah wie moeglich am Original):
+
+  - CC310 (nRF52): nRFCrypto.begin()/end() nur EINMAL beim Board-Init statt um
+    jede Krypto-Op (verify/sha256/en-/decrypt) -- letzteres churnte die CryptoCell
+    pro Mesh-Paket (IRQ-Last). (upstream ecb8c945)
+  - CC310-RNG: Radio-Rausch-Entropie zusaetzlich in die HW-TRNG mischen
+    (Defense-in-Depth). (upstream fcb9bdf2)
+  - RadioLib: RX-Boosted-Gain nach AGC-Reset wieder auf den Flash-Wert des Users
+    statt auf den compiled-in-Wert (bessere Empfindlichkeit). (upstream 6f491f30)
+  - RadioLibWrapper: per-Zyklus noise_floor-Print hinter #ifdef
+    MESH_DEBUG_NOISE_FLOOR (default still). (upstream 3138ad99)
+  - 12 Board/Varianten-Fixes: T-Echo Lite/Card, Heltec MeshPocket/T1, T-beam S3,
+    promicro, LR2021, minewsemi, R1 neo (cherry-picked, -x-attribuiert).
+
+  Nicht uebernommen: fad11c90 (Repeater-Reply-Scope) -- unser Companion antwortet
+  via BaseChatMesh laengst scoped + direct-ueber-out_path, war nie schlechter (der
+  Repeater holte nur auf). FEM-Gain-Prefs (companion) vorgemerkt fuer die kuenftige
+  1.17.1-Hybrid-Config.
+
+DL9SAU-Eigenzusatz -- #region-Reply-Fallback (haertet ueber upstream + fad11c90 hinaus):
+
+  Beantwortet der Node eine gezielte 1:1-Anfrage (Standort/Telemetrie) oder sendet
+  eine Flood-DM, und ist WEDER ein default_scope NOCH Geo verfuegbar, ging die
+  Antwort bisher UN-SCOPED raus. Doppelt schlecht: (a) sie flutet das ganze Netz
+  fuer eine 1:1-Antwort, (b) Repeater mit flood.max.unscoped=0 verwerfen un-scoped
+  schon bei Hop 0 -> die Antwort kommt nie an (genau das Problem, das fad11c90 fuer
+  den Repeater loest).
+
+  Neu: Fallback auf den bounded #region-Scope (Hop-Cap flood_max_scope_region).
+  Fremd-Firmware kennt #region nicht -> forwardet es nicht -> die Antwort bleibt
+  eben direct (sauberer Degrade). Nur DMs/Replies an Kontakte (sendFloodScoped
+  ContactInfo); Kanal-Nachrichten bleiben bei Geo (dort ist weite Broadcast-
+  Reichweite das Projekt-Ziel). Explizites #unscoped bleibt jederzeit waehlbar.
+
+
+================================================================================
 Build-Status
 ================================================================================
 

@@ -276,6 +276,22 @@ nahtlos mit der Position (geo-fenced).
 - Ohne GPS-Fix: Rückfall auf `#local` (bzw. unscoped) — es geht nie ein roher,
   unaufgelöster `#geo`-Code raus.
 
+### `#region` — Fallback für gezielte Antworten (statt unscoped)
+
+Beantwortet der Node eine **gezielte 1:1-Anfrage** (Standort, Telemetrie) oder
+sendet eine **Flood-DM**, und ist weder ein `default_scope` noch Geo verfügbar,
+ging die Antwort früher **unscoped** raus. Zwei Nachteile: sie flutet das ganze
+Netz für eine einzelne Antwort, und Repeater mit `flood.max.unscoped=0` verwerfen
+sie schon beim ersten Hop — die Antwort kommt nie an.
+
+Stattdessen fällt eine solche Antwort/DM jetzt auf den **hop-begrenzten
+`#region`-Scope** zurück (Cap via `flood_max_scope_region`, ~3 Hops). Fremd-
+Firmware kennt `#region` nicht und leitet es nicht weiter → die Antwort bleibt
+dort einfach **direct** (sauberer Degrade). Das gilt **nur** für Direktnachrichten
+und Antworten an Kontakte — **Kanal**-Nachrichten bleiben bei `#geo` (dort ist die
+weite Verteilung gewollt, das ist der Projekt-Zweck). Explizites `#unscoped` bleibt
+jederzeit wählbar.
+
 ### Auto-Scope (`scope use auto`)
 
 `#geo` oben ist der Fall, dass man Geo **explizit** als Default wählt — das ist
