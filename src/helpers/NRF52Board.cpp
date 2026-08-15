@@ -5,6 +5,10 @@
 #include <bluefruit.h>
 #include <nrf_soc.h>
 
+#ifdef USE_CC310_HW_CRYPTO
+#include <Adafruit_nRFCrypto.h>
+#endif
+
 static BLEDfu bledfu;
 
 static void connect_callback(uint16_t conn_handle) {
@@ -21,6 +25,14 @@ static void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
 
 void NRF52Board::begin() {
   startup_reason = BD_STARTUP_NORMAL;
+
+  // DL9SAU 2026-08-15 (upstream 1.17.1 ecb8c945): nRFCrypto.begin() EINMAL beim
+  // Board-Init statt um jede Krypto-Op (verify/sha256/en-/decrypt). Letzteres
+  // churnt die CC310 pro Mesh-Paket, sperrt IRQs -> TinyUSB-Re-Enum + Lade-
+  // Regression (1.17.0-neu). CC310-TRNG ist zudem hoeherwertig/umgebungsunabh.
+  #ifdef USE_CC310_HW_CRYPTO
+    nRFCrypto.begin();
+  #endif
 }
 
 // =====================================================================
@@ -446,6 +458,12 @@ void NRF52Board::shutdownPeripherals() {
   if(sensors.getLocationProvider() != NULL) {
     sensors.getLocationProvider()->stop();
   }
+
+  // DL9SAU 2026-08-15 (upstream 1.17.1 ecb8c945): CC310 sauber freigeben (paart
+  // das einmalige nRFCrypto.begin() aus NRF52Board::begin()).
+  #ifdef USE_CC310_HW_CRYPTO
+    nRFCrypto.end();
+  #endif
 
   // Flush serial buffers
   Serial.flush();
