@@ -121,8 +121,14 @@ public:
     }
     
     // check if any interface is connected
+    // DL9SAU 2026-08-14: nur ENABLED Sub-Interfaces zaehlen. Sonst zieht ein
+    // disabled ArduinoSerialInterface (usb_serial) -- dessen isConnected()
+    // hart "return true; // no way of knowing" liefert -- isConnected()
+    // dauerhaft auf true (Phantom-Verbindung). Das mutet den Buzzer-Event-Gate
+    // (nur bei getrennter App piepen) permanent und kann Sleep unterdruecken.
+    // writeFrame/checkRecvFrame pruefen isEnabled bereits -- hier war die Luecke.
     for(auto iface : _interfaces){
-      if(iface.instance && iface.instance->isConnected()) {
+      if(iface.instance && iface.instance->isEnabled() && iface.instance->isConnected()) {
         return true;
       }
     }
