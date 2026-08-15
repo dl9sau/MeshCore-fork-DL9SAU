@@ -2,6 +2,7 @@
 
 #include <Arduino.h> // needed for PlatformIO
 #include <time.h>    // gmtime_r + struct tm -- nRF52-newlib zieht das NICHT
+#include <helpers/MultiSerialInterface.h>  // Stage 2: enableUSB/disableUSB (Cast von _serial)
 
 // 2026-06-15: SoftDevice-aware reboot in MyMesh::loop() benoetigt:
 //   sd_softdevice_is_enabled (aus nrf_sdm.h)
@@ -9787,6 +9788,7 @@ void MyMesh::checkSerialInterface() {
   size_t len = _serial->checkRecvFrame(cmd_frame);
   if (len > 0) {
     handleCmdFrame(len);
+    if (_app_mode) _app_mode_last_frame_ms = millis();  // Stage 2: App-Modus am Leben halten
   } else if (_iter_started              // check if our ContactsIterator is 'running'
              && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!
   ) {
@@ -9860,6 +9862,31 @@ void MyMesh::loop() {
   // USB-frame-Builds: checkSerialInterface UND serialCliLoop teilen sich
   // Serial. Wenn CLI on -> Frame-Parser skip (CLI hat Vorrang).
   bool cli_on = serialCliEffectiveOn();
+
+  // DL9SAU 2026-08-16 (Stage 2): App-ueber-USB Auto-Detection, mode-exklusiv.
+  // Nur BLE/WiFi-Builds, wo Stufe 1 usb_serial per Default AUS liess. '<' als
+  // erstes Byte einer frischen Zeile = Companion-Frame (kein CLI-Kommando beginnt
+  // mit '<') -> App-Modus: usb_serial an, Text-CLI + roher Serial-Debug aus.
+  // peek() = verlustfrei (usb_serial liest den '<'-Frame sauber aus IDLE). Revert
+  // per TIMEOUT (kein Frame 30s) -- nicht per Disconnect (USB-CDC unzuverlaessig).
+  // Nie zwei Leser gleichzeitig -> kein Zwei-Leser-Re-Enum. Laeuft unabhaengig von
+  // cli_on -> App via USB geht auch bei 'serial-cli off' (kein Aussperren ohne BT).
+#if defined(ENABLE_USB_INTERFACE) && (defined(BLE_PIN_CODE) || defined(WIFI_SSID))
+  if (_serial != NULL) {
+    if (_app_mode) {
+      if ((uint32_t)(millis() - _app_mode_last_frame_ms) > 30000UL) {  // 30s ohne Frame
+        ((MultiSerialInterface*)_serial)->disableUSB();
+        _app_mode = false;
+      }
+    } else if (!_cli_rescue && _br_state == BR_IDLE && _serial_cli_pos == 0
+               && Serial && Serial.available() > 0 && Serial.peek() == '<') {
+      ((MultiSerialInterface*)_serial)->enableUSB();
+      _app_mode = true;
+      _app_mode_last_frame_ms = millis();
+    }
+  }
+#endif
+
   if (_cli_rescue) {
     checkCLIRescueCmd();
   } else {
@@ -9869,7 +9896,7 @@ void MyMesh::loop() {
     if (!cli_on) checkSerialInterface();
 #endif
   }
-  if (cli_on) serialCliLoop();
+  if (cli_on && !_app_mode) serialCliLoop();
 
   // is there are pending dirty contacts write needed?
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {

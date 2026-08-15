@@ -1021,6 +1021,7 @@ private:
   // Text-CLI + ALLE rohen Serial-Debug-Ausgaben aus (sonst zerlegen sie das
   // Companion-'<'/'>'-Framing). Gesetzt bei '<'-Detection, revert per Timeout.
   bool     _app_mode = false;
+  uint32_t _app_mode_last_frame_ms = 0;   // Stage 2: letzter Companion-Frame -> Timeout-Revert
   // Wunschliste 10 (2026-06-14): wenn ein CLI-Dispatch eine ASYNC-Antwort
   // produziert (z.B. 'discover regions' kommt nach bis zu 60s zurueck mit
   // Progressive-Output), ist _serial_cli_active beim Eintreffen schon false
