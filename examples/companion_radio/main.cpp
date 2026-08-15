@@ -635,6 +635,25 @@ void setup() {
   the_mesh.startInterface(interface_manager);
   DIAG_MARK("M15 post the_mesh.startInterface");
 
+  // DL9SAU 2026-08-14 (USB-CDC Zwei-Leser-Konflikt, Stufe 1): startInterface()
+  // -> interface_manager.enable() enabled ALLE Sub-Interfaces, also auch den
+  // USB-Companion-Leser (usb_serial_interface -- ArduinoSerialInterface mit
+  // '<'/'>'-Framing auf Serial, NICHT der physische Port). Auf BLE/WiFi-Builds
+  // laeuft die App aber ueber BLE/TCP; der USB-CDC ist UNSERE Text-CLI
+  // (serialCliLoop liest Serial direkt). Beide wuerden sich sonst um dieselben
+  // Serial-Bytes pruegeln -- und usb_serial::isConnected() ist hardcoded true
+  // -> Phantom-Verbindung -> unterdrueckt Sleep (Energie). Darum den Companion-
+  // LESER hier per Default wieder ausschalten (nur den Leser -- roher USB-Port +
+  // Text-CLI bleiben voll da). Der Manager ueberspringt disabled Sub-Interfaces
+  // in checkRecvFrame/writeFrame/isConnected. = exakt das saubere v1.16.3-Modell
+  // (Companion=BLE, CLI=USB getrennt). Stufe 2 schaltet ihn bei erkanntem
+  // '<'-Frame automatisch wieder an. Reine USB-Builds (keine BLE/WiFi-App-
+  // Schiene) NICHT anfassen -- dort ist der USB-Companion der einzige App-Pfad
+  // und der cli_on-Gate in loop() regelt die Koexistenz.
+#if defined(ENABLE_USB_INTERFACE) && (defined(BLE_PIN_CODE) || defined(WIFI_SSID))
+  usb_serial_interface.disable();
+#endif
+
 #if defined(NRF52_PLATFORM)
   // DL9SAU 2026-07-12 (Power Weg A): HW-Comparator (LPCOMP+VBUS) armieren --
   // NACH bluetooth_interface.begin (SoftDevice UP), damit configureVoltageWake
