@@ -1017,6 +1017,10 @@ private:
   // Serial umgeleitet wird (waehrend Dispatch eines per Serial-CLI
   // eingegangenen Befehls).
   bool     _serial_cli_active = false;
+  // DL9SAU 2026-08-16 (Stage 2): App-ueber-USB-Modus aktiv -- usb_serial an,
+  // Text-CLI + ALLE rohen Serial-Debug-Ausgaben aus (sonst zerlegen sie das
+  // Companion-'<'/'>'-Framing). Gesetzt bei '<'-Detection, revert per Timeout.
+  bool     _app_mode = false;
   // Wunschliste 10 (2026-06-14): wenn ein CLI-Dispatch eine ASYNC-Antwort
   // produziert (z.B. 'discover regions' kommt nach bis zu 60s zurueck mit
   // Progressive-Output), ist _serial_cli_active beim Eintreffen schon false

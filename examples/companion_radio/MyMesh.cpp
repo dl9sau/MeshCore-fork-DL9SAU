@@ -31216,9 +31216,9 @@ void MyMesh::pushDebugLog(const char* fmt, ...) {
   // im selben Serial-Stream vermengen. Skip Serial-Trace solange
   // _serial_cli_active gesetzt ist; BLE-Frame-Trace bleibt erhalten.
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
-  if ((_prefs.log_flags & 0x01) && Serial && !_serial_cli_active) {
+  if ((_prefs.log_flags & 0x01) && Serial && !_serial_cli_active && !_app_mode) {
 #else
-  if ((_prefs.log_flags & 0x01) && !_serial_cli_active) {
+  if ((_prefs.log_flags & 0x01) && !_serial_cli_active && !_app_mode) {
 #endif
     // CRLF-Expansion in lokalen Buffer, dann EIN einzelner Serial.write
     // statt zeichenweise. Hintergrund (User-Erkenntnis 2026-06-02):

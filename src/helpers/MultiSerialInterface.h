@@ -87,7 +87,35 @@ public:
         return iface.instance->isEnabled();
       }
     }
-    return false; 
+    return false;
+  }
+
+  // DL9SAU 2026-08-16 (Stage 2): USB-Interface einzeln steuern (spiegelt die
+  // Bluetooth-Trias). App-ueber-USB schaltet usb_serial bei erkanntem '<'-Frame
+  // an, sonst aus -- mode-exklusiv zum Text-CLI (nie zwei Leser -> kein Re-Enum).
+  void enableUSB() {
+    for(auto iface : _interfaces){
+      if(iface.instance && iface.type == InterfaceType::USB){
+        iface.instance->enable();
+      }
+    }
+  }
+
+  void disableUSB() {
+    for(auto iface : _interfaces){
+      if(iface.instance && iface.type == InterfaceType::USB){
+        iface.instance->disable();
+      }
+    }
+  }
+
+  bool isUSBEnabled() {
+    for(auto iface : _interfaces){
+      if(iface.instance && iface.type == InterfaceType::USB){
+        return iface.instance->isEnabled();
+      }
+    }
+    return false;
   }
 
   // enable all interfaces
