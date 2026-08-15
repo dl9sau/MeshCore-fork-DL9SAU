@@ -2613,6 +2613,13 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   if (should_display && _ui) {
     _ui->newMsg(path_len, from.name, text, offlineQueueTotal());
     if (!_serial->isConnected()) {
+      // DL9SAU 2026-08-15 (Buzzer-Diagnose b): den tatsaechlichen Klang-Ausloeser
+      // in den RAM-Debug-Log (via 'log'). contactMessage -> MsgRcv3 (Bit 0x01),
+      // nur bei getrennter App. Faengt unerklaertes Gepiepse: steht's im log -> es
+      // WAR eine DM; kein [buzz]-Log trotz Pips -> Ursache ausserhalb notify().
+      pushDebugLog("[buzz] contactMsg app_off quiet=%u prof=0x%02X -> %s\n",
+                   (unsigned)_prefs.buzzer_quiet, (unsigned)_prefs.buzzer_profile,
+                   (!_prefs.buzzer_quiet && (_prefs.buzzer_profile & 0x01)) ? "MsgRcv3" : "muted");
       _ui->notify(UIEventType::contactMessage);
     }
   }
@@ -4341,6 +4348,18 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
       is_private = (chd.name[0] != '#')
                 && memcmp(chd.channel.secret, s_public_psk, 16) != 0
                 && memcmp(chd.channel.secret, s_companion_psk_magic, 16) != 0;
+    }
+    // DL9SAU 2026-08-15 (Buzzer-Diagnose b): nur loggen wenn ein Ton TATSAECHLICH
+    // spielt (sonst flutet oeffentlicher Kanal-Verkehr den Log). priv -> kerplop
+    // (0x04), public -> channelMessage (0x02); 0x10-Gate greift hier nicht (App aus).
+    {
+      uint8_t buzz_bit = is_private ? 0x04 : 0x02;
+      bool buzz_plays = !_prefs.buzzer_quiet && (_prefs.buzzer_profile & buzz_bit);
+      if (buzz_plays || is_private) {
+        pushDebugLog("[buzz] chanMsg app_off priv=%u idx=%u prof=0x%02X -> %s\n",
+                     (unsigned)is_private, (unsigned)channel_idx,
+                     (unsigned)_prefs.buzzer_profile, buzz_plays ? "kerplop" : "muted");
+      }
     }
     if (_ui) _ui->notify(is_private ? UIEventType::channelMessagePrivate
                                     : UIEventType::channelMessage);
@@ -8869,6 +8888,8 @@ void MyMesh::handleCmdFrame(size_t len) {
       saveContacts();
     }
     // DL9SAU Wunschliste 94 (2026-06-19): Buzzer-Shutdown-Sound vor Reboot.
+    // DL9SAU 2026-08-15 (Buzzer-Diagnose b): shutdown_song-Quelle protokollieren.
+    pushDebugLog("[buzz] shutdown_song <- app CMD_REBOOT\n");
     if (_ui) _ui->shutdown(true);
     else     board.reboot();
   } else if (cmd_frame[0] == CMD_GET_BATT_AND_STORAGE) {
