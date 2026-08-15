@@ -3479,8 +3479,21 @@ void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, ui
   if (!send_scope.isNull()) {
     eff_scope = send_scope;
   } else if (!resolveDefaultOrGeo(eff_scope)) {
-    // weder Default noch geo_prefers haben gegriffen -> null Scope
-    memset(eff_scope.key, 0, sizeof(eff_scope.key));
+    // DL9SAU 2026-08-15: weder default_scope noch Geo gesetzt -> NICHT un-scoped.
+    // Eine gezielte 1:1-DM/Antwort soll nicht ~100 Repeater fluten und hoffen,
+    // den Empfaenger irgendwo zu treffen (un-scoped wird zudem von Repeatern mit
+    // flood.max.unscoped=0 bei Hop 0 gedroppt -> Antwort kommt nie an). Stattdessen
+    // bounded #region-Fallback: Hop-Cap flood_max_scope_region, und Fremd-Firmware
+    // kennt #region nicht -> forwardet es nicht -> Antwort bleibt eben direct
+    // (sauberer Degrade). Geo waere hier falsch -- das ist die weite Channel-
+    // Broadcast-Reichweite (Projekt-Ziel), nicht die gezielte Antwort. Explizites
+    // #unscoped bleibt via send_unscoped/MS_UNSCOPED verfuegbar.
+    int ridx = dl9sau_find_region_index("region");
+    if (ridx >= 0 && ridx < _buildin_keys_count) {
+      eff_scope = _buildin_keys[ridx];
+    } else {
+      memset(eff_scope.key, 0, sizeof(eff_scope.key));  // #region nicht da -> un-scoped
+    }
   }
   // Wunschliste 2026-07-02: Magic-Scope-Erkennung (auch fuer DM-Flood).
   {
