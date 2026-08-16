@@ -2618,9 +2618,11 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
       // in den RAM-Debug-Log (via 'log'). contactMessage -> MsgRcv3 (Bit 0x01),
       // nur bei getrennter App. Faengt unerklaertes Gepiepse: steht's im log -> es
       // WAR eine DM; kein [buzz]-Log trotz Pips -> Ursache ausserhalb notify().
+#ifdef DL9SAU_BUZZ_DEBUG
       pushDebugLog("[buzz] contactMsg app_off quiet=%u prof=0x%02X -> %s\n",
                    (unsigned)_prefs.buzzer_quiet, (unsigned)_prefs.buzzer_profile,
                    (!_prefs.buzzer_quiet && (_prefs.buzzer_profile & 0x01)) ? "MsgRcv3" : "muted");
+#endif
       _ui->notify(UIEventType::contactMessage);
     }
   }
@@ -4366,6 +4368,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     // DL9SAU 2026-08-15 (Buzzer-Diagnose b): nur loggen wenn ein Ton TATSAECHLICH
     // spielt (sonst flutet oeffentlicher Kanal-Verkehr den Log). priv -> kerplop
     // (0x04), public -> channelMessage (0x02); 0x10-Gate greift hier nicht (App aus).
+#ifdef DL9SAU_BUZZ_DEBUG
     {
       uint8_t buzz_bit = is_private ? 0x04 : 0x02;
       bool buzz_plays = !_prefs.buzzer_quiet && (_prefs.buzzer_profile & buzz_bit);
@@ -4375,6 +4378,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
                      (unsigned)_prefs.buzzer_profile, buzz_plays ? "kerplop" : "muted");
       }
     }
+#endif
     if (_ui) _ui->notify(is_private ? UIEventType::channelMessagePrivate
                                     : UIEventType::channelMessage);
 #endif
@@ -8903,7 +8907,9 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
     // DL9SAU Wunschliste 94 (2026-06-19): Buzzer-Shutdown-Sound vor Reboot.
     // DL9SAU 2026-08-15 (Buzzer-Diagnose b): shutdown_song-Quelle protokollieren.
+#ifdef DL9SAU_BUZZ_DEBUG
     pushDebugLog("[buzz] shutdown_song <- app CMD_REBOOT\n");
+#endif
     if (_ui) _ui->shutdown(true);
     else     board.reboot();
   } else if (cmd_frame[0] == CMD_GET_BATT_AND_STORAGE) {
