@@ -278,14 +278,6 @@ build_room_server_firmwares() {
 
 }
 
-# DL9SAU 2026-08-15 (upstream 1.17.1 c2d57f08): KISS-Modem-Rolle (Packet-TNC).
-build_kiss_modem_firmwares() {
-
-  # build all kiss modem firmwares
-  build_all_firmwares_by_suffix "_kiss_modem"
-
-}
-
 build_firmwares() {
   build_companion_firmwares
   build_repeater_firmwares
@@ -377,9 +369,6 @@ elif [[ $1 == "build-repeater-firmwares" ]]; then
 elif [[ $1 == "build-room-server-firmwares" ]]; then
   build_room_server_firmwares
   dl9sau_build_summary; exit $?
-elif [[ $1 == "build-kiss-radio-firmwares" ]]; then
-  build_kiss_modem_firmwares
-  dl9sau_build_summary; exit $?
 elif [[ $1 == "get-companion-firmwares-to-build" ]]; then
   get_pio_envs_ending_with_string "_companion_radio_usb"
   get_pio_envs_ending_with_string "_companion_radio_ble"
@@ -387,6 +376,4 @@ elif [[ $1 == "get-repeater-firmwares-to-build" ]]; then
   get_pio_envs_ending_with_string "_repeater"
 elif [[ $1 == "get-room-server-firmwares-to-build" ]]; then
   get_pio_envs_ending_with_string "_room_server"
-elif [[ $1 == "get-kiss-firmwares-to-build" ]]; then
-  get_pio_envs_ending_with_string "_kiss_modem"
 fi

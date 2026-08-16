@@ -39,7 +39,6 @@ runs:
           VERSION_STRING="${VERSION_STRING#companion-}"
           VERSION_STRING="${VERSION_STRING#repeater-}"
           VERSION_STRING="${VERSION_STRING#room-server-}"
-          VERSION_STRING="${VERSION_STRING#kiss-}"
         else
           # triggered by a workflow dispatch (e.g: refs/heads/main)
           # strip "refs/heads/" prefix and replace any remaining "/" with "-" to protect file paths
