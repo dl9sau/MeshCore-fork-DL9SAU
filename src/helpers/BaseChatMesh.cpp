@@ -406,6 +406,14 @@ void BaseChatMesh::handleReturnPathRetry(const ContactInfo& contact, const uint8
 int BaseChatMesh::searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel dest[], int max_matches) {
   int n = 0;
   for (int i = 0; i < MAX_GROUP_CHANNELS && n < max_matches; i++) {
+    // DL9SAU 2026-08-17: leere/tote Slots NIE ins Decode-Set. Ein leerer Slot hat
+    // secret=0 und (deterministisch) hash[0]=0x37 = Hash des Null-Keys. Ein Node
+    // da draussen, der mit leerem PSK funkt (Null-Key), erzeugt Pakete mit genau
+    // channel_hash=0x37, die dann via MACThenDecrypt(nullkey) VALIDIEREN -> die
+    // Fremd-Nachricht landet im leeren Slot -> Phantom-Privat-Kanal (Fehlpiep) +
+    // Garbage-Msg in der Offline-Queue. Ohne diesen Skip ist JEDER Companion mit
+    // freiem Slot eine Null-Key-Senke. (Real diagnostiziert: "Wuensdorf Bot".)
+    if (channels[i].name[0] == 0) continue;
     if (channels[i].channel.hash[0] == hash[0]) {
       dest[n++] = channels[i].channel;
     }
