@@ -35,3 +35,15 @@ class genericBuzzer
 
         bool _is_quiet = true;
 };
+
+#ifdef DL9SAU_BUZZ_DEBUG
+// DL9SAU 2026-08-17: Debug-Hook am universellen Buzzer-Choke-Point. play() ruft
+// ihn bei JEDEM Ton (auch startup/shutdown/UI-Pfade) -- so wird AUCH ein nicht
+// per [buzz] instrumentierter Ausloeser sichtbar. MyMesh registriert hier einen
+// Boot-Log-Append -> ein Piep ist app-UNABHAENGIG per 'log read' auffindbar.
+// Noetig wegen Beobachter-Effekt: ein unerwarteter Piep koennte GERADE bei
+// getrennter App auftreten; App verbinden (um den Trace zu lesen) wuerde die
+// Bedingung evtl. aufheben. melody = angeforderte RTTTL, sounded = !quiet.
+typedef void (*buzz_play_hook_t)(const char* melody, bool sounded);
+extern buzz_play_hook_t g_buzz_play_hook;
+#endif

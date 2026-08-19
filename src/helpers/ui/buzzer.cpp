@@ -2,6 +2,10 @@
 #ifdef PIN_BUZZER
 #include "buzzer.h"
 
+#ifdef DL9SAU_BUZZ_DEBUG
+buzz_play_hook_t g_buzz_play_hook = nullptr;   // von MyMesh::begin() gesetzt
+#endif
+
 void genericBuzzer::begin() {
 //    Serial.print("DBG: Setting up buzzer on pin ");
 //    Serial.println(PIN_BUZZER);
@@ -16,6 +20,12 @@ void genericBuzzer::begin() {
 }
 
 void genericBuzzer::play(const char *melody) {
+#ifdef DL9SAU_BUZZ_DEBUG
+    // Universeller Choke-Point: JEDER Ton laeuft hier durch (auch startup/
+    // shutdown). sounded = !_is_quiet -- so sieht man auch quiet-unterdrueckte
+    // Aufrufe (play() gerufen, aber kein Ton). Siehe Hook-Doku in buzzer.h.
+    if (g_buzz_play_hook) g_buzz_play_hook(melody, !_is_quiet);
+#endif
     if (isPlaying())   // interrupt existing
     {
         rtttl::stop();

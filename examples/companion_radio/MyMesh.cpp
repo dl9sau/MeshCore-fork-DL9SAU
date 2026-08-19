@@ -858,6 +858,35 @@ void MyMesh::bootLogWritePreReboot(const char* cause) {
   w.close();
 }
 
+#if defined(DL9SAU_BUZZ_DEBUG) && defined(PIN_BUZZER)
+// DL9SAU 2026-08-17: Boot-Log-Hook fuer den universellen Buzzer-Choke-Point
+// (buzzer.cpp genericBuzzer::play). Schreibt JEDEN Ton persistent in den Boot-
+// Log -> per 'log read' app-UNABHAENGIG auffindbar. Motivation: ein Piep, der
+// laut Settings haette schweigen sollen, kann GERADE bei getrennter App
+// auftreten -- die App als Trace-Sink faellt dann aus (Beobachter-Effekt).
+// Deckt auch nicht-[buzz]-instrumentierte Ausloeser ab (startup/shutdown/UI).
+// Reuse des crash-safen bootLogWritePreReboot als Prepend; der "BUZZ "-Tag
+// (ohne Klammer) stoert die WARM(...)-Dedup in bootLogAppend nicht. melody ->
+// Name bis ':'. snd=1 = nicht quiet (hoerbar), snd=0 = play() trotz quiet.
+// Lokale extern-Deklaration passend zu buzzer.h (dort definiert), um
+// NonBlockingRtttl nicht in diese TU zu ziehen.
+typedef void (*buzz_play_hook_t)(const char* melody, bool sounded);
+extern buzz_play_hook_t g_buzz_play_hook;
+static void buzzPlayBootLogHook(const char* melody, bool sounded) {
+  char name[24];
+  size_t i = 0;
+  if (melody) {
+    for (; melody[i] && melody[i] != ':' && i + 1 < sizeof(name); i++)
+      name[i] = melody[i];
+  }
+  name[i] = 0;
+  char cause[48];
+  snprintf(cause, sizeof(cause), "BUZZ %s snd=%d",
+           name[0] ? name : "?", sounded ? 1 : 0);
+  the_mesh.bootLogWritePreReboot(cause);
+}
+#endif
+
 void MyMesh::bootLogPrint() {
   // User-Bug 2026-06-15: T1000-E froze nach 'log read'. Stack-Overflow
   // Verdacht -- frueher hatten wir ~1240 Bytes lokal (10x96 + 160 +
@@ -4377,6 +4406,37 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
                      (unsigned)is_private, (unsigned)channel_idx,
                      (unsigned)_prefs.buzzer_profile, buzz_plays ? "kerplop" : "muted");
       }
+      // DL9SAU 2026-08-17: bei is_private ZUSAETZLICH persistent in den Boot-Log
+      // (app-unabhaengig, per 'log read' -- der pushDebugLog oben verpufft ja bei
+      // App/USB-aus). Faengt den SELTENEN Falsch-Private-Piep MIT Kanal-Kontext:
+      //   idx  = aufgeloester lokaler Kanal-Slot
+      //   sec  = erste 2 Secret-Bytes (Fingerprint zum Wiedererkennen)
+      //   nm   = gespeicherter Name (bei is_private per Definition NICHT '#')
+      // Entscheidet: echter Custom-Kanal? leerer/garbage-Slot (Hash-Kollision)?
+      // oder name[0]-Klassifizierungs-Bug? is_private==TRUE => chd ist gueltig
+      // (nur dann gesetzt). Selten (1x/4h beobachtet) -> kein Log-/Flash-Flood.
+      if (is_private) {
+        char cause[64];
+        snprintf(cause, sizeof(cause), "BUZZchan idx=%u sec=%02X%02X nm=%.20s",
+                 (unsigned)channel_idx, chd.channel.secret[0],
+                 chd.channel.secret[1], chd.name);
+        bootLogWritePreReboot(cause);
+        // DL9SAU 2026-08-17: den PAYLOAD des Mystery-Pakets in den $companion-
+        // Bucket dumpen -> per App lesbar (ueberlebt App-Disconnect via RAM-
+        // Bucket). Entscheidet die "wirklich lustige Variante": LESBARER Text
+        // => echtes Null-Key-Kanal-Paket im Aether; GARBAGE-Hex => CC310 hat
+        // ein Fremd-Paket mit falschem Key durch-"entschluesselt". Hex-Preview
+        // (erste 12 Byte) + Text-Anriss.
+        if (text) {
+          char dump[180];
+          int used = snprintf(dump, sizeof(dump), "[buzzchan] idx=%u len=%d hex=",
+                              (unsigned)channel_idx, (int)strlen(text));
+          for (int b = 0; b < 12 && text[b] && used < (int)sizeof(dump) - 8; b++)
+            used += snprintf(dump + used, sizeof(dump) - used, "%02X", (uint8_t)text[b]);
+          snprintf(dump + used, sizeof(dump) - used, " txt=%.40s", text);
+          pushCompanionMessage(dump);
+        }
+      }
     }
 #endif
     if (_ui) _ui->notify(is_private ? UIEventType::channelMessagePrivate
@@ -7691,6 +7751,13 @@ void MyMesh::begin(bool has_display) {
   // Chat oben die Reboot-Info sieht bevor die schoene "@[name] booted.."
   // Zeile das Bild fuellt. Reset-Reason wird von main.cpp early gesetzt.
   bootLogAppend();
+
+#if defined(DL9SAU_BUZZ_DEBUG) && defined(PIN_BUZZER)
+  // DL9SAU 2026-08-17: Buzzer-Choke-Point-Hook JETZT registrieren -- Boot-Log
+  // ist ready (nach bootLogAppend). Frueher gespielte Toene (startup-Chime)
+  // bleiben bewusst ungeloggt. Ab hier landet jeder play() im Boot-Log.
+  g_buzz_play_hook = &buzzPlayBootLogHook;
+#endif
 
   // Boot-Greeting: soll die iOS-Companion-App dazu bringen, bei Mention
   // des eigenen Namens einen Ton abzuspielen, damit der User akustisch
@@ -19382,6 +19449,37 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       || starts_with_word(cmd, "chans")
       || starts_with_word(cmd, "ch.list")
       || starts_with_word(cmd, "channel")) {
+#ifdef DL9SAU_BUZZ_DEBUG
+    // DL9SAU 2026-08-17: 'chann raw <idx>' -- rohen Slot dumpen (Name, hash[0],
+    // volles 32-Byte-Secret hex). Debug-only. Klaert bei der Empty-Slot-Hash-
+    // Senke: lauter Nullen = echter Null-Key (Sender funkt keylos) vs. echter
+    // Key = Stale-Remnant (Slot beim Loeschen nicht genullt). Direkt lesbar,
+    // kein Warten auf den naechsten Piep.
+    {
+      const char* rarg = strchr(cmd, ' ');
+      if (rarg) { while (*rarg == ' ' || *rarg == '\t') rarg++; }
+      if (rarg && strncmp(rarg, "raw", 3) == 0) {
+        const char* iarg = rarg + 3;
+        while (*iarg == ' ' || *iarg == '\t') iarg++;
+        int ridx = atoi(iarg);
+        if (ridx < 0 || ridx >= MAX_GROUP_CHANNELS) {
+          pushCompanionMessage("chann raw: idx out of range");
+          return;
+        }
+        ChannelDetails rch;
+        bool ok = getChannel(ridx, rch);
+        char line[200];
+        int u = snprintf(line, sizeof(line), "slot %d name=\"%.20s\" hash=%02X sec=",
+                         ridx, ok ? rch.name : "?",
+                         ok ? (unsigned)rch.channel.hash[0] : 0);
+        for (int b = 0; ok && b < 32 && u < (int)sizeof(line) - 3; b++)
+          u += snprintf(line + u, sizeof(line) - u, "%02X",
+                        (unsigned)rch.channel.secret[b]);
+        pushCompanionMessage(line);
+        return;
+      }
+    }
+#endif
     // 2026-07-09: 'channels add <#name>' -- Hashtag-Channel via CLI anlegen.
     // NUR Hashtags: Key = sha256("#name")[0..16] deterministisch aus dem
     // Namen. Public hat Default, private/custom braeuchten den geheimen Key
