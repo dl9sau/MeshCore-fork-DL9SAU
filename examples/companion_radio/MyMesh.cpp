@@ -11277,6 +11277,25 @@ static uint16_t getBattDefaultMinMv(uint8_t chemistry);
 static uint16_t getBattDefaultBootMv(uint8_t chemistry);       // DL9SAU 2026-07-12
 static uint16_t getMvForBattPct(uint8_t chemistry, uint8_t pct); // DL9SAU 2026-07-12
 
+// DL9SAU 2026-08-17: Power-Tag fuer sens/stats-core. Frueher zeigte der Output
+// nur " [usb]" = isExternalPowered() = reines VBUS-Detect-Bit -- das suggerierte
+// "laedt", obwohl es nur "USB-Spannung liegt an" heisst. Der User sah den Akku
+// AM USB fallen (Verbrauch > Ladestrom / Port-Starvation). Die Lade-IC-Statusleitung
+// EXT_CHRG_DETECT (LOW = laedt aktiv) wurde bisher NUR von der LED-Anzeige gelesen.
+// Jetzt in einer Zeile sichtbar:
+//   " [usb+chg]" VBUS + Lade-IC laedt aktiv
+//   " [usb]"     VBUS liegt an, laedt aber NICHT (Port zu schwach / Akku voll)
+//   ""           Akkubetrieb (kein VBUS)
+// Leading-Space ist Teil des Tags (Aufrufer haengt es direkt per %s an).
+static const char* battPowerTag(bool usb_on) {
+  if (!usb_on) return "";
+#ifdef EXT_CHRG_DETECT
+  return (digitalRead(EXT_CHRG_DETECT) == LOW) ? " [usb+chg]" : " [usb]";
+#else
+  return " [usb]";
+#endif
+}
+
 // DL9SAU 2026-07-12: Effektive Boot/Recovery-Schwelle (mV) fuer den LPCOMP-
 // Wake nach Low-Battery-Shutdown. = konfigurierter batt_min_mv_boot (bzw.
 // Chemie-Default), ABER immer mind. ~12 Ladeprozent UEBER der Poweroff-
@@ -17171,15 +17190,16 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
       // Wunschliste 89/90/91: USB-Status + Charge-%.
       bool usb_on = board.isExternalPowered();
+      const char* pwr_tag = battPowerTag(usb_on);   // " [usb+chg]"/" [usb]"/""
       uint8_t pct_d = (_prefs.batt_chemistry == 0) ? 0xFF
                     : getBattChargePctForCurve(_prefs.batt_chemistry, bmv_d);
       char batt_line[48];
       if (pct_d != 0xFF) {
-        snprintf(batt_line, sizeof(batt_line), "%u mV (%u%%) %s",
-                 (unsigned)bmv_d, (unsigned)pct_d, usb_on ? "[usb]" : "");
+        snprintf(batt_line, sizeof(batt_line), "%u mV (%u%%)%s",
+                 (unsigned)bmv_d, (unsigned)pct_d, pwr_tag);
       } else {
         snprintf(batt_line, sizeof(batt_line), "%u mV%s",
-                 (unsigned)bmv_d, usb_on ? " [usb]" : "");
+                 (unsigned)bmv_d, pwr_tag);
       }
       // 145-Byte-Limit: sensors in mehrere pushCompanionMessage splitten.
 #ifdef T1000_E
@@ -28153,16 +28173,17 @@ cron_add_direct:
                            "%luh%02lum", up_h, up_m);
     // Wunschliste 89/90/91: USB-Status + Charge-% (wenn chemistry set).
     bool usb_on = board.isExternalPowered();
+    const char* pwr_tag = battPowerTag(usb_on);   // " [usb+chg]"/" [usb]"/""
     uint8_t pct = (_prefs.batt_chemistry == 0) ? 0xFF
                 : getBattChargePctForCurve(_prefs.batt_chemistry, batt_mv);
     if (pct != 0xFF) {
       snprintf(block, sizeof(block),
                "stats-core:\n"
                "  uptime    = %s\n"
-               "  battery   = %u mV (%u%%) %s\n"
+               "  battery   = %u mV (%u%%)%s\n"
                "  msg-queue = %d / %d slots",
                uptime_str, (unsigned)batt_mv, (unsigned)pct,
-               usb_on ? "[usb]" : "", q_used, q_cap);
+               pwr_tag, q_used, q_cap);
     } else {
       snprintf(block, sizeof(block),
                "stats-core:\n"
@@ -28170,7 +28191,7 @@ cron_add_direct:
                "  battery   = %u mV%s\n"
                "  msg-queue = %d / %d slots",
                uptime_str, (unsigned)batt_mv,
-               usb_on ? " [usb]" : "", q_used, q_cap);
+               pwr_tag, q_used, q_cap);
     }
     pushCompanionMessage(block);
     // CPU-Temperatur (User-Wunsch 2026-06-14): ESP32-S3 hat internen
