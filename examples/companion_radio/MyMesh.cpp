@@ -6695,11 +6695,16 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     unsigned long rtt = millis() - _cli_ping_started_ms;
     _cli_ping_tag = 0;
     _cli_ping_expiry_ms = 0;
-    // DL9SAU 2026-07-17 (Neighbor-Signal Nachschlag): NUR zero-hop-ping (path_len
-    // ==0) beweist die Direkt-Strecke in BEIDE Richtungen -> rx_us + rx_him.
-    // Routed tracepath (path_len>0) zaehlt NICHT. Ziel-Pubkey ggf. nur Prefix ->
+    // DL9SAU 2026-07-17 (Neighbor-Signal Nachschlag): NUR zero-hop-ping
+    // beweist die Direkt-Strecke in BEIDE Richtungen -> rx_us + rx_him.
+    // Routed tracepath zaehlt NICHT. Ziel-Pubkey ggf. nur Prefix ->
     // erst ab 4 Byte matchen (Kollisionsschutz).
-    if (path_len == 0 && _cli_ping_target_hex_len >= 4) {
+    // DL9SAU 2026-08-24 BUGFIX: 'path_len' ist hier die BYTE-Laenge der
+    // Hop-Hash-Liste (Mesh.cpp uebergibt payload_len-9), NICHT die Hop-Zahl.
+    // Ein zero-hop-Ping traegt genau EINEN Eintrag (das Ziel selbst) =
+    // hash_size Bytes -- der alte '== 0'-Test war damit IMMER falsch, die
+    // Zaehler wurden vom ping nie gefuettert.
+    if (path_len <= hash_size && _cli_ping_target_hex_len >= 4) {
       int ni = matchRepeaterNeighbour(_cli_ping_target_pubkey, _cli_ping_target_hex_len);
       if (ni >= 0) {
         if (_neighbours[ni].rx_us  < 0xFFFF) _neighbours[ni].rx_us++;
@@ -6754,7 +6759,8 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     char r[160];
     snprintf(r, sizeof(r),
              "app-ping %s: rtt=%.1fs, %u hops.",
-             pkx, (double)rtt / 1000.0, (unsigned)path_len);
+             // DL9SAU 2026-08-24: path_len ist die BYTE-Laenge der Hop-Liste.
+             pkx, (double)rtt / 1000.0, (unsigned)(path_len / hash_size));
     pushCompanionMessage(r);
     // fall-through: kein return, App bekommt normalen Trace-Frame.
   }
@@ -6771,12 +6777,15 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
                        (_cli_trace_target_hex_len > 3) ? 3 : _cli_trace_target_hex_len);
     char name_buf[32];
     utf8Field(name_buf, sizeof(name_buf), _cli_trace_target_name, 25, false);  // sanitize + truncate
-    // 2026-07-07: Format analog ping. Bei zero-hop (path_len == 1)
+    // 2026-07-07: Format analog ping. Bei zero-hop (genau EIN Eintrag)
     // reines ping-Format. Bei multi-hop: hop-Liste angehaengt.
+    // DL9SAU 2026-08-24: 'path_len' ist die BYTE-Laenge der Hop-Hash-Liste,
+    // ein Eintrag ist hash_size Bytes breit -> Hop-Zahl = path_len/hash_size.
+    const uint8_t trace_hops = (uint8_t)(path_len / hash_size);
     double snr_hin   = (path_len >= 1) ? (double)((int8_t)path_snrs[0]) / 4.0 : 0.0;
     double snr_rueck = (double)_radio->getLastSNR();
     int    rssi_rueck = (int)radio_driver.getLastRSSI();
-    if (path_len <= 1) {
+    if (trace_hops <= 1) {
       // Zero-hop direct: gleiches Format wie ping.
       char r[200];
       snprintf(r, sizeof(r),
@@ -6790,12 +6799,12 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     snprintf(hdr, sizeof(hdr),
              "tracepath %s %s:\n"
              "  %u hops rt, rtt=%.1fs snr_rueck=%+.1fdB/%ddBm",
-             pkx, name_buf, (unsigned)path_len, (double)rtt / 1000.0,
+             pkx, name_buf, (unsigned)trace_hops, (double)rtt / 1000.0,
              snr_rueck, rssi_rueck);
     pushCompanionMessage(hdr);
     static const int MSG_CAP = 125;
     char block[280]; block[0] = 0; int blen = 0;
-    for (uint8_t h = 0; h < path_len; h++) {
+    for (uint8_t h = 0; h < trace_hops; h++) {
       char hop_hex[8]; hop_hex[0] = 0;
       int hp = 0;
       for (uint8_t b = 0; b < hash_size && hp + 3 < (int)sizeof(hop_hex); b++) {
