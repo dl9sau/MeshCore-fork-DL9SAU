@@ -451,9 +451,29 @@ protected:
   TransportKey _magic_geo_key;
   bool _magic_scope_keys_inited = false;
 
+  // DL9SAU 2026-08-24: path_len ist seit Upstream 1.17 ('path hash mode',
+  // Commit 3e76161e) KEIN Byte-Zaehler mehr, sondern ein KODIERTES Feld:
+  //   Bits 7..6 = hash_size - 1   -> 1..3 Byte pro Hop-Hash
+  //   Bits 5..0 = hop_count       -> Anzahl Hops
+  // Belegte Bytes im path[]-Puffer = hop_count * hash_size.
+  // Wer path_len als Byte-Laenge liest, liest bei hash_size>1 Puffer-Muell
+  // (der Rest von path[] wird NICHT genullt) und haelt einen aufgebrauchten
+  // Direct-Pfad (count=0, size=2 -> path_len=64) faelschlich fuer 64 Hops.
+  // Genau das war der '[we: 00,00,... he: <Muell>]'-Bug im DM-Meta-Frame.
+  // OUT_PATH_UNKNOWN (0xFF) ist KEINE gueltige Kodierung -- immer separat
+  // pruefen, nie in diese Helfer stecken und das Ergebnis glauben.
+  static uint8_t pathHopCount(uint8_t path_len)  { return (uint8_t)(path_len & 63); }
+  static uint8_t pathHashSize(uint8_t path_len)  { return (uint8_t)((path_len >> 6) + 1); }
+  static uint8_t pathByteLen(uint8_t path_len)   { return (uint8_t)(pathHopCount(path_len) * pathHashSize(path_len)); }
+  // true nur fuer eine real nutzbare Pfad-Angabe (nicht UNKNOWN, gueltig kodiert).
+  static bool pathIsKnown(uint8_t path_len) {
+    return path_len != OUT_PATH_UNKNOWN && mesh::Packet::isValidPathLen(path_len);
+  }
+
   // Wunschliste 2026-07-01: Path-Bytes als 'aa,bb,cc' formatieren.
   // Zeigt Adressierungsbreite (1/2/3-Byte Hop-IDs) sowie welche Repeater
   // konkret auf dem Weg waren -- diagnostisch wertvoll bei Rerouting.
+  // Gruppiert nach hash_size: 1-Byte 'aa,bb', 2-Byte 'aabb,ccdd'.
   static void formatPathBytes(char* out, size_t out_size, const uint8_t* path, uint8_t path_len);
 
   // DL9SAU Wunschliste 82: zentraler TX-Choke-Point. Wenn _tx_blocked

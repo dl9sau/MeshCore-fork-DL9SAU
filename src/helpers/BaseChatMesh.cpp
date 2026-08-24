@@ -200,7 +200,10 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
     // erreichbar. Setze out_path_len = 0 falls noch UNKNOWN -- spart
     // spaeter eine Path-Discovery fuer diese Nachbarn (Funkphysik ist
     // symmetrisch). User-gesetzte Pfade NICHT ueberschreiben.
-    if (packet->path_len == 0 && from->out_path_len == OUT_PATH_UNKNOWN) {
+    // DL9SAU 2026-08-24: getPathHashCount() statt path_len==0 -- seit
+    // Upstream 1.17 traegt path_len auch die hash_size (Bits 7..6), ein
+    // zero-hop-Advert eines 2/3-Byte-Senders hat path_len 64/128.
+    if (packet->getPathHashCount() == 0 && from->out_path_len == OUT_PATH_UNKNOWN) {
       from->out_path_len = 0;
     }
 
@@ -241,7 +244,8 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
   // (Funk laeuft beide Richtungen direkt) plausibel -> out_path_len = 0
   // setzen. Spart die naechste Path-Discovery. User-gesetzte Pfade
   // werden nicht ueberschrieben.
-  if (packet->path_len == 0 && from.out_path_len == OUT_PATH_UNKNOWN) {
+  // DL9SAU 2026-08-24: getPathHashCount() statt path_len==0 (kodiertes Feld).
+  if (packet->getPathHashCount() == 0 && from.out_path_len == OUT_PATH_UNKNOWN) {
     from.out_path_len = 0;
   }
 
@@ -274,7 +278,7 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
           // unnoetiges Fluten zurueck durchs Netz; das Path-Info im Payload
           // unterrichtet den Sender trotzdem ueber den (leeren) Pfad.
           // ack_hash-Laenge 6 ist upstream-1.16 Aenderung (war vorher 4).
-          if (packet->path_len == 0) sendZeroHop(path, TXT_ACK_DELAY);
+          if (packet->getPathHashCount() == 0) sendZeroHop(path, TXT_ACK_DELAY);
           else                       sendFloodScoped(from, path, TXT_ACK_DELAY);
         }
       } else {
@@ -288,7 +292,7 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
         // let this sender know path TO here, so they can use sendDirect() (NOTE: no ACK as extra)
         mesh::Packet* path = createPathReturn(from.id, secret, packet->path, packet->path_len, 0, NULL, 0);
         if (path) {
-          if (packet->path_len == 0) sendZeroHop(path);
+          if (packet->getPathHashCount() == 0) sendZeroHop(path);
           else                       sendFloodScoped(from, path);
         }
       }
@@ -308,7 +312,7 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
                                                 PAYLOAD_TYPE_ACK, (uint8_t *) &ack_hash, 4);
         if (path) {
           // DL9SAU Phase 1b: zero-hop -> sendZeroHop (s. Erklaerung oben).
-          if (packet->path_len == 0) sendZeroHop(path, TXT_ACK_DELAY);
+          if (packet->getPathHashCount() == 0) sendZeroHop(path, TXT_ACK_DELAY);
           else                       sendFloodScoped(from, path, TXT_ACK_DELAY);
         }
       } else {
@@ -328,7 +332,7 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
                                               PAYLOAD_TYPE_RESPONSE, temp_buf, reply_len);
         if (path) {
           // DL9SAU Phase 1b: zero-hop -> sendZeroHop (s. Erklaerung oben).
-          if (packet->path_len == 0) sendZeroHop(path, SERVER_RESPONSE_DELAY);
+          if (packet->getPathHashCount() == 0) sendZeroHop(path, SERVER_RESPONSE_DELAY);
           else                       sendFloodScoped(from, path, SERVER_RESPONSE_DELAY);
         }
       } else {

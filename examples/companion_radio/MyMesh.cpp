@@ -1885,10 +1885,14 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
   _last_advert_route_direct = (packet != NULL && packet->isRouteDirect()) ? 1 : 0;
   BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
 
-  // Wunschliste 15: bei zero-hop heard (path_len==0) zur Runtime-
+  // Wunschliste 15: bei zero-hop heard (0 Hops) zur Runtime-
   // Neighbour-Tabelle hinzufuegen. 'liberal' Filter: alle adv_types
   // werden aufgenommen (chat/repeater/sensor/room).
-  if (packet != NULL && packet->path_len == 0
+  // DL9SAU 2026-08-24: dekodierte Hop-Zahl statt path_len==0 -- ein Sender
+  // mit path_hash_mode 2/3 setzt die Groessen-Bits auch bei 0 Hops
+  // (setPathHashSizeAndCount -> path_len 64/128). Der wurde vorher NIE als
+  // Nachbar erkannt und fehlte damit in 'neighbors'.
+  if (packet != NULL && pathHopCount((uint8_t)packet->path_len) == 0
       && app_data != NULL && app_data_len > 0) {
     AdvertDataParser parser(app_data, app_data_len);
     if (parser.isValid()) {
@@ -2192,7 +2196,10 @@ int MyMesh::promoteDirectContactByHash(const uint8_t* hop, uint8_t sz) {
     ContactInfo c;
     if (!getContactByIdx(ci, c)) continue;
     if (c.type != ADV_TYPE_REPEATER) continue;      // nur Repeater
-    if (c.out_path_len != 0) continue;              // nur Direktverbindungen
+    // DL9SAU 2026-08-24: dekodierte Hop-Zahl -- 'direct' ist count==0, nicht
+    // path_len==0 (bei hash_size 2/3 waere path_len 64/128). UNKNOWN (0xFF)
+    // liefert count=63 -> faellt korrekt raus.
+    if (pathHopCount(c.out_path_len) != 0) continue;  // nur Direktverbindungen
     if (rtc_ok && c.lastmod < cutoff) continue;     // nur <48h gehoert
     if (memcmp(c.id.pub_key, hop, sz) != 0) continue;
     // Treffer -> in Neighbour-Tabelle einreihen (analog putRuntimeNeighbour).
@@ -2443,7 +2450,10 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
   // (sonst liefe utf8Field bei JEDEM Path-Event umsonst). Guard = traceLevelOf.
   if (traceLevelOf(TRACE_SCOPE) > 0) {
     char pnm[40]; utf8Field(pnm, sizeof(pnm), contact.name, 0, false);
-    if (contact.out_path_len == 0) {
+    // DL9SAU 2026-08-24: dekodierte Hop-Zahl (path_len ist kodiert).
+    if (!pathIsKnown(contact.out_path_len)) {
+      traceCompanion(TRACE_SCOPE, "[path] '%s' -> UNKNOWN", pnm);
+    } else if (pathHopCount(contact.out_path_len) == 0) {
       traceCompanion(TRACE_SCOPE,
                      "[path] '%s' -> zero-hop (direct heard)", pnm);
     } else {
@@ -2451,7 +2461,7 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
       formatPathBytes(hebuf, sizeof(hebuf), contact.out_path, contact.out_path_len);
       traceCompanion(TRACE_SCOPE,
                      "[path] '%s' -> %u hops (%s)",
-                     pnm, (unsigned)contact.out_path_len, hebuf);
+                     pnm, (unsigned)pathHopCount(contact.out_path_len), hebuf);
     }
   }
 }
@@ -2515,12 +2525,20 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     char scope_buf[36];
     computeScopeLabel(pkt, scope_h, scope_buf, sizeof(scope_buf));
     const char* scope_label = scope_buf;
-    uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
+    // DL9SAU 2026-08-24: path_len ist KODIERT -- Hop-Anzahl/Breite dekodieren
+    // statt roher Byte-Zaehler (siehe MyMesh.h pathHopCount()).
+    const uint8_t he_len   = (uint8_t)pkt->path_len;
+    const uint8_t he_cnt   = pathHopCount(he_len);
+    const uint8_t he_sz    = pathHashSize(he_len);
+    const uint8_t he_bytes = pathByteLen(he_len);
+    uint8_t direct_flag = (he_cnt == 0) ? 1 : 0;
     // DM-Pfad: channel_hash=0 (kein Channel-Bezug). Tuple enthaelt zusaetzlich
     // FNV-Hash des Empfangspfads (Reise-Feedback 2026-07-02): bei Pfad-
     // Aenderung (z.B. wegen re-discovery) kommt ein neuer []-Frame.
-    uint32_t path_h = (pkt->path_len > 0)
-                    ? fnv1a32((const char*)pkt->path, pkt->path_len)
+    // Nur ueber die BELEGTEN Bytes hashen -- der Rest von path[] ist Muell
+    // aus dem Packet-Pool und wuerde den Tuple bei jedem Paket veraendern.
+    uint32_t path_h = (he_bytes > 0)
+                    ? fnv1a32((const char*)pkt->path, he_bytes)
                     : 0;
     bool already_seen = channelSenderSeenLookupOrAdd(0 /* DM */, name_h, scope_h, path_h,
                                                     nullptr /* scope_key: DM = kein Reply-Cache */,
@@ -2528,50 +2546,83 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     // Wunschliste 2026-07-01: Erweiterte []-Frame mit Pfad-Info.
     // Statistiken zeigen viel path-discovery -- []-Frame liefert dem User
     // empirische Sichtbarkeit.
-    //   Flood, path_len=0 (direkt vom Sender):  '[#scope flood, may work direct]'
-    //   Flood, path_len>0 (via Repeater):       '[#scope flood he: aa,bb,cc]'
-    //   Direct, path_len=0 (zero-hop):          kein Frame (App zeigt "direkt")
-    //   Direct, symmetrisch (we==reverse(he)):  '[we/he: aa,bb,cc]'
-    //   Direct, asymmetrisch, we bekannt:       '[we: aa,bb he: cc,dd]'
-    //   Direct, asymmetrisch, we unbekannt:     '[he: cc,dd]'
-    // Path-Format 'aa,bb,cc' -- hex-Bytes zeigen Adressier-Breite (1/2/3-Byte-IDs)
-    // und die konkreten Repeater-IDs. Bei Rerouting sichtbar was ausgefallen ist.
+    // Stand 2026-08-24 (Hop-Zahl DEKODIERT, Scope in JEDER Variante -- der
+    // Scope ist der eigentliche Zweck des Frames, weil man bei DM den Namen
+    // nicht wie im Channel annotieren kann):
+    //   Flood, 0 Hops (direkt vom Sender):      '[#scope flood, may work direct]'
+    //   Flood, N Hops (via Repeater):           '[#scope flood he: aa,bb,cc]'
+    //   Direct, 0 Hops (zero-hop/aufgebraucht): '[#scope, direct]'
+    //   Direct, symmetrisch (we==reverse(he)):  '[#scope we/he: aa,bb,cc]'
+    //   Direct, asymmetrisch, we bekannt:       '[#scope we: aa,bb he: cc,dd]'
+    //     (we == 'direct' wenn unser Rueckweg zero-hop ist)
+    //   Direct, we unbekannt (kein PATH-Return):'[#scope he: cc,dd]'
+    // Path-Format 'aa,bb,cc' -- hex zeigt Adressier-Breite (1/2/3-Byte-Hops,
+    // dann 'aabb,ccdd') und die konkreten Repeater-IDs. Bei Rerouting sichtbar
+    // was ausgefallen ist.
     char meta_text[128];
     meta_text[0] = 0;
     bool skip_meta = already_seen;   // bereits gesehen -> nichts neu anzeigen
     if (!skip_meta) {
       if (pkt->isRouteFlood()) {
-        if (pkt->path_len == 0) {
+        if (he_cnt == 0) {
           snprintf(meta_text, sizeof(meta_text),
                    "[%s flood, may work direct]", scope_label);
         } else {
           char hebuf[40];
-          formatPathBytes(hebuf, sizeof(hebuf), pkt->path, pkt->path_len);
+          formatPathBytes(hebuf, sizeof(hebuf), pkt->path, he_len);
           snprintf(meta_text, sizeof(meta_text),
                    "[%s flood he: %s]", scope_label, hebuf);
         }
       } else {
-        // Direct-Path
-        if (pkt->path_len == 0) {
-          // zero-hop direct -- kein Frame, App zeigt "direkt" im Fenster-Titel
-          skip_meta = true;
+        // Direct-Path. ACHTUNG: bei DIRECT-Routing entfernt JEDER Hop sich
+        // selbst aus dem Pfad (Mesh::removeSelfFromPath) -- beim Ziel ist
+        // der Pfad also aufgebraucht: hop_count == 0, aber die hash_size-Bits
+        // bleiben stehen (path_len = 64 bzw. 128 statt 0!). Deshalb hier auf
+        // die dekodierte Hop-Zahl pruefen, nicht auf path_len == 0.
+        if (he_cnt == 0) {
+          // zero-hop / aufgebrauchter Direct-Pfad. DL9SAU 2026-08-24: frueher
+          // gab es hier GAR KEINEN Frame ("App zeigt direkt") -- damit war der
+          // Scope bei direkter Verbindung nie sichtbar, obwohl genau DAS der
+          // Zweck des []-Frames ist (bei DM kann man den Namen nicht
+          // annotieren wie im Channel). Jetzt: Scope + 'direct'.
+          snprintf(meta_text, sizeof(meta_text), "[%s, direct]", scope_label);
         } else {
           char hebuf[40];
-          formatPathBytes(hebuf, sizeof(hebuf), pkt->path, pkt->path_len);
-          // Symmetrie: unser out_path[i] == pkt->path[N-1-i] (reverse)
-          bool sym = (from.out_path_len == pkt->path_len && from.out_path_len > 0);
-          for (int j = 0; sym && j < pkt->path_len; j++) {
-            if (pkt->path[j] != from.out_path[pkt->path_len - 1 - j]) sym = false;
+          formatPathBytes(hebuf, sizeof(hebuf), pkt->path, he_len);
+          // Unser Rueckweg. OUT_PATH_UNKNOWN (0xFF) ist KEIN Pfad -- frueher
+          // rutschte der durch das '> 0' und wurde als 'we: 00,00,00,...'
+          // ausgegeben (255 Null-Bytes, vom Puffer auf 13 abgeschnitten).
+          const uint8_t we_len = from.out_path_len;
+          const bool    we_known = pathIsKnown(we_len);
+          const uint8_t we_cnt = we_known ? pathHopCount(we_len) : 0;
+          const uint8_t we_sz  = we_known ? pathHashSize(we_len) : 1;
+          // Symmetrie: unser Hop[i] == sein Hop[N-1-i] (reverse), eintrags-
+          // weise (hash_size Bytes), nicht byteweise.
+          bool sym = we_known && (we_cnt == he_cnt) && (we_sz == he_sz);
+          for (uint8_t j = 0; sym && j < he_cnt; j++) {
+            if (memcmp(&pkt->path[(size_t)j * he_sz],
+                       &from.out_path[(size_t)(he_cnt - 1 - j) * we_sz],
+                       he_sz) != 0) sym = false;
           }
+          // DL9SAU 2026-08-24: Scope-Label auch im Direct-Zweig voranstellen
+          // (vorher nur im Flood-Zweig -> bei Direct-Routing war der Scope
+          // unsichtbar). Reihenfolge einheitlich: erst Scope, dann Pfade.
           if (sym) {
-            snprintf(meta_text, sizeof(meta_text), "[we/he: %s]", hebuf);
-          } else if (from.out_path_len > 0) {
+            snprintf(meta_text, sizeof(meta_text), "[%s we/he: %s]",
+                     scope_label, hebuf);
+          } else if (we_known) {
             char webuf[40];
-            formatPathBytes(webuf, sizeof(webuf), from.out_path, from.out_path_len);
+            if (we_cnt == 0) {
+              StrHelper::strzcpy(webuf, "direct", sizeof(webuf));
+            } else {
+              formatPathBytes(webuf, sizeof(webuf), from.out_path, we_len);
+            }
             snprintf(meta_text, sizeof(meta_text),
-                     "[we: %s he: %s]", webuf, hebuf);
+                     "[%s we: %s he: %s]", scope_label, webuf, hebuf);
           } else {
-            snprintf(meta_text, sizeof(meta_text), "[he: %s]", hebuf);
+            // Rueckweg unbekannt (noch kein PATH-Return) -> nur seine Seite.
+            snprintf(meta_text, sizeof(meta_text), "[%s he: %s]",
+                     scope_label, hebuf);
           }
         }
       }
@@ -2641,7 +2692,10 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // we only want to show text messages on display, not cli data
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
   if (should_display && _ui) {
-    _ui->newMsg(path_len, from.name, text, offlineQueueTotal());
+    // DL9SAU 2026-08-24: das Display zeigt '(N)' als HOP-Zahl -- also dekodieren.
+    // Im App-Frame oben bleibt das kodierte path_len (Wire-Konvention).
+    _ui->newMsg((path_len == 0xFF) ? 0xFF : pathHopCount(path_len),
+                from.name, text, offlineQueueTotal());
     if (!_serial->isConnected()) {
       // DL9SAU 2026-08-15 (Buzzer-Diagnose b): den tatsaechlichen Klang-Ausloeser
       // in den RAM-Debug-Log (via 'log'). contactMessage -> MsgRcv3 (Bit 0x01),
@@ -3563,21 +3617,32 @@ void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, ui
 }
 // Wunschliste 2026-07-01: Path-Bytes als 'aa,bb,cc' hex-formatieren.
 // Zeigt Adressierungsbreite und die konkrete Repeater-Kette.
+// DL9SAU 2026-08-24 FIX: path_len ist KODIERT (hash_size + hop_count, siehe
+// MyMesh.h pathHopCount()). Vorher wurde path_len als Byte-Zaehler gelesen ->
+// bei hash_size>1 wurden Puffer-Reste als Hops ausgegeben ('13 wilde Bytes'),
+// und OUT_PATH_UNKNOWN (0xFF) druckte 255 Null-Bytes ('00,00,00,...').
+// Jetzt: ein Eintrag = hash_size Bytes -> 'aa,bb' (1 Byte) / 'aabb,ccdd' (2 Byte).
 void MyMesh::formatPathBytes(char* out, size_t out_size, const uint8_t* path, uint8_t path_len) {
   if (out_size == 0) return;
   out[0] = 0;
+  if (path == NULL || !pathIsKnown(path_len)) return;   // UNKNOWN/kaputt -> leer, nie Muell
+  const uint8_t cnt = pathHopCount(path_len);
+  const uint8_t sz  = pathHashSize(path_len);
   size_t pos = 0;
-  for (int i = 0; i < path_len; i++) {
-    // Atomar: erst pruefen ob VOLLSTAENDIGES ',aa' bzw 'aa' plus null
+  for (uint8_t i = 0; i < cnt; i++) {
+    // Atomar: erst pruefen ob der VOLLSTAENDIGE Eintrag (',' + sz*2 Hex + nul)
     // reinpasst. Sonst sauber abbrechen (kein orphan-Komma oder halbes Hex).
     // Reise-Feedback 2026-07-02: vorher blieb bei knapper Grenze mal ','
     // oder ',a' im Buffer stehen, je nach Buffer-Rest.
-    size_t need = (i > 0 ? 1 : 0) + 2 + 1;  // sep + hex + nul
+    size_t need = (i > 0 ? 1 : 0) + (size_t)sz * 2 + 1;  // sep + hex + nul
     if (pos + need > out_size) break;
-    int n = snprintf(out + pos, out_size - pos, "%s%02x",
-                     (i > 0) ? "," : "", path[i]);
-    if (n < 0) break;
-    pos += n;
+    if (i > 0) out[pos++] = ',';
+    for (uint8_t b = 0; b < sz; b++) {
+      int n = snprintf(out + pos, out_size - pos, "%02x", path[(size_t)i * sz + b]);
+      if (n < 0) { out[pos] = 0; return; }
+      pos += n;
+    }
+    out[pos] = 0;
   }
 }
 
@@ -4307,7 +4372,9 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     char scope_buf[36];
     buildScopeLabel(sc_name, has_tc, scope_h, scope_buf, sizeof(scope_buf));  // sc_name oben aufgeloest
     const char* scope_label = scope_buf;
-    uint8_t direct_flag = (pkt->path_len == 0) ? 1 : 0;
+    // DL9SAU 2026-08-24: dekodierte Hop-Zahl (path_len ist kodiert; bei
+    // hash_size>1 waere path_len auch bei 0 Hops != 0).
+    uint8_t direct_flag = (pathHopCount((uint8_t)pkt->path_len) == 0) ? 1 : 0;
     // User-Wunsch 2026-06-08: per-Channel-Separation. 4 Bytes aus dem
     // GroupChannel-Hash als channel-Identifier. Derselbe Sender in
     // zwei verschiedenen Channels triggert die Annotation in jedem
@@ -4450,7 +4517,9 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   if (getChannel(channel_idx, channel_details)) {
     channel_name = channel_details.name;
   }
-  if (_ui) _ui->newMsg(path_len, channel_name, effective_text, offlineQueueTotal());
+  // DL9SAU 2026-08-24: Display zeigt Hops -> dekodieren (App-Frame bleibt roh).
+  if (_ui) _ui->newMsg((path_len == 0xFF) ? 0xFF : pathHopCount(path_len),
+                       channel_name, effective_text, offlineQueueTotal());
 #endif
 }
 
@@ -5379,14 +5448,18 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
         _serial->writeFrame(out_frame, i);
 
         // DL9SAU 2026-07-17 (Neighbor-Signal Nachschlag): path-discovery-Antwort,
-        // pubkey-exakt. out_path_len==0 = mein REQ erreichte ihn DIREKT (er hoerte
-        // mich) -> rx_us. in_path_len==0 = seine Antwort kam DIREKT (ich hoerte ihn)
-        // -> rx_him. Routed (path_len>0) beweist keine Direkt-Strecke -> nicht zaehlen.
-        if (out_path_len == 0 || in_path_len == 0) {
+        // pubkey-exakt. 0 Hops out = mein REQ erreichte ihn DIREKT (er hoerte
+        // mich) -> rx_us. 0 Hops in = seine Antwort kam DIREKT (ich hoerte ihn)
+        // -> rx_him. Routed beweist keine Direkt-Strecke -> nicht zaehlen.
+        // DL9SAU 2026-08-24: dekodierte Hop-Zahl -- bei einem Gegenueber mit
+        // hash_size 2/3 ist zero-hop path_len 64/128, nicht 0.
+        const uint8_t out_hops = pathHopCount(out_path_len);
+        const uint8_t in_hops  = pathHopCount(in_path_len);
+        if (out_hops == 0 || in_hops == 0) {
           int ni = matchRepeaterNeighbour(contact.id.pub_key, PUB_KEY_SIZE);
           if (ni >= 0) {
-            if (out_path_len == 0 && _neighbours[ni].rx_us  < 0xFFFF) _neighbours[ni].rx_us++;
-            if (in_path_len  == 0 && _neighbours[ni].rx_him < 0xFFFF) _neighbours[ni].rx_him++;
+            if (out_hops == 0 && _neighbours[ni].rx_us  < 0xFFFF) _neighbours[ni].rx_us++;
+            if (in_hops  == 0 && _neighbours[ni].rx_him < 0xFFFF) _neighbours[ni].rx_him++;
           }
         }
       }
@@ -5422,14 +5495,13 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
                        (unsigned)packet->payload[i]);
       }
       char pathbuf[40]; pathbuf[0] = 0;
-      if (packet->path_len > 0) {
-        formatPathBytes(pathbuf, sizeof(pathbuf), packet->path, packet->path_len);
-      }
+      // DL9SAU 2026-08-24: 'hops=' = dekodierte Hop-Zahl (path_len ist kodiert).
+      formatPathBytes(pathbuf, sizeof(pathbuf), packet->path, (uint8_t)packet->path_len);
       traceCompanion(TRACE_DBG_ANON,
-                     "[discover] CTL rx snr=%.1fdB path_len=%u path=%s\n"
+                     "[discover] CTL rx snr=%.1fdB hops=%u path=%s\n"
                      "  payload(%u)=%s%s",
                      (double)_radio->getLastSNR(),   // dB (nicht *4 -- das war Q4-Frame-Encoding, Display-Bug)
-                     (unsigned)packet->path_len,
+                     (unsigned)pathHopCount((uint8_t)packet->path_len),
                      pathbuf[0] ? pathbuf : "-",
                      (unsigned)packet->payload_len, hex,
                      (int)packet->payload_len > 32 ? "..." : "");
@@ -10021,13 +10093,14 @@ void MyMesh::loop() {
                (double)(millis() - _cli_ping_started_ms) / 1000.0);
     } else {
       ContactInfo* ci = lookupContactByPubKey(_cli_ping_target_pubkey, PUB_KEY_SIZE);
-      if (ci && ci->out_path_len != OUT_PATH_UNKNOWN && ci->out_path_len > 0) {
+      // DL9SAU 2026-08-24: dekodierte Hop-Zahl (path_len ist kodiert).
+      if (ci && pathIsKnown(ci->out_path_len) && pathHopCount(ci->out_path_len) > 0) {
         snprintf(r, sizeof(r),
                  "ping %s: keine Antwort in %.1fs.\n"
                  "Kontakt hat gelernten Path (%u hops).\n"
                  "Versuche: path trace %s",
                  pkx, (double)(millis() - _cli_ping_started_ms) / 1000.0,
-                 (unsigned)ci->out_path_len, pkx);
+                 (unsigned)pathHopCount(ci->out_path_len), pkx);
       } else {
         snprintf(r, sizeof(r), "ping %s: keine Antwort in %.1fs.",
                  pkx, (double)(millis() - _cli_ping_started_ms) / 1000.0);
@@ -19219,12 +19292,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       bool any_filter = has_hops || has_km || has_deg || has_name;
       bool include;
       if (!any_filter) {
-        include = (c.out_path_len == 0);  // direct only
+        // DL9SAU 2026-08-24: dekodierte Hop-Zahl (path_len ist kodiert).
+        include = pathIsKnown(c.out_path_len)
+               && pathHopCount(c.out_path_len) == 0;  // direct only
       } else {
         include = true;
         if (has_hops) {
-          if (c.out_path_len == OUT_PATH_UNKNOWN
-              || c.out_path_len > max_hops) include = false;
+          if (!pathIsKnown(c.out_path_len)
+              || pathHopCount(c.out_path_len) > max_hops) include = false;
         }
         if (include && has_km) {
           if (their_km < 0 || their_km > max_km) include = false;
@@ -19263,10 +19338,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
       }
 
       char hop[16];
-      if (c.out_path_len == OUT_PATH_UNKNOWN) {
+      // DL9SAU 2026-08-24: dekodierte Hop-Zahl (path_len ist kodiert).
+      if (!pathIsKnown(c.out_path_len)) {
         snprintf(hop, sizeof(hop), "?");
       } else {
-        snprintf(hop, sizeof(hop), "%u", (unsigned)c.out_path_len);
+        snprintf(hop, sizeof(hop), "%u", (unsigned)pathHopCount(c.out_path_len));
       }
 
       // Layout-Praefix: 3-Byte-Hex (= 6 hex chars) vor dem Namen, fuer
@@ -23068,7 +23144,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           for (int i = 0; i < tot; i++) {
             ContactInfo ci;
             if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
-            if (ci.out_path_len != 0) continue;
+            // DL9SAU 2026-08-24: 'direct' = 0 Hops, nicht path_len==0.
+            if (pathHopCount(ci.out_path_len) != 0) continue;
+            if (!pathIsKnown(ci.out_path_len)) continue;
             if (ci.type == ADV_TYPE_NONE) continue;  // skip anon-leftover
             char pkx[7];
             mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
@@ -23170,9 +23248,11 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           for (int i = 0; i < tot; i++) {
             ContactInfo ci;
             if (!getContactByIdx((uint32_t)(i + MAX_ANON_CONTACTS), ci)) continue;
-            bool out_ok = (ci.out_path_len != 0
-                        && ci.out_path_len != OUT_PATH_UNKNOWN)
-                        && anchored_match(ci.out_path, ci.out_path_len);
+            // DL9SAU 2026-08-24: anchored_match will die BELEGTE Byte-Laenge
+            // (pathByteLen), nicht das kodierte path_len.
+            bool out_ok = pathIsKnown(ci.out_path_len)
+                        && pathHopCount(ci.out_path_len) != 0
+                        && anchored_match(ci.out_path, pathByteLen(ci.out_path_len));
             const uint8_t* in_path = NULL; uint8_t in_len = 0;
             for (int a = 0; a < ADVERT_PATH_TABLE_SIZE; a++) {
               if (memcmp(advert_paths[a].pubkey_prefix, ci.id.pub_key,
@@ -23180,8 +23260,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
               in_path = advert_paths[a].path; in_len = advert_paths[a].path_len;
               break;
             }
-            bool in_ok = (in_path != NULL && in_len > 0)
-                      && anchored_match(in_path, in_len);
+            bool in_ok = (in_path != NULL && pathIsKnown(in_len)
+                          && pathHopCount(in_len) != 0)
+                      && anchored_match(in_path, pathByteLen(in_len));
             if (!out_ok && !in_ok) continue;
             char pkx[7];
             mesh::Utils::toHex(pkx, ci.id.pub_key, 3);
@@ -23189,17 +23270,17 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             char line[220];
             int lp = snprintf(line, sizeof(line), "  %s %s:", pkx,
                               utf8Field(nmf, sizeof(nmf), ci.name, 0, false));
-            if (out_ok) {
-              lp += snprintf(line + lp, sizeof(line) - lp, " out=");
-              for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++)
-                lp += snprintf(line + lp, sizeof(line) - lp,
-                              "%s%02x", j == 0 ? "" : ",", ci.out_path[j]);
+            // DL9SAU 2026-08-24: hash_size-korrekt formatieren statt roher
+            // Byte-Schleife ueber das kodierte path_len.
+            char pb[64];
+            if (out_ok && lp > 0 && lp < (int)sizeof(line) - 8) {
+              formatPathBytes(pb, sizeof(pb), ci.out_path, ci.out_path_len);
+              int n = snprintf(line + lp, sizeof(line) - lp, " out=%s", pb);
+              if (n > 0) lp += (n < (int)sizeof(line) - lp) ? n : (int)sizeof(line) - lp - 1;
             }
-            if (in_ok) {
-              lp += snprintf(line + lp, sizeof(line) - lp, " in=");
-              for (uint8_t j = 0; j < in_len && lp + 4 < (int)sizeof(line); j++)
-                lp += snprintf(line + lp, sizeof(line) - lp,
-                              "%s%02x", j == 0 ? "" : ",", in_path[j]);
+            if (in_ok && lp > 0 && lp < (int)sizeof(line) - 8) {
+              formatPathBytes(pb, sizeof(pb), in_path, in_len);
+              snprintf(line + lp, sizeof(line) - lp, " in=%s", pb);
             }
             if (found_n == 0) pushCompanionMessage("path show via:");
             pushCompanionMessage(line);
@@ -23334,15 +23415,15 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             char line[220];
             int lp = snprintf(line, sizeof(line), "  %s %s: ",
                               pkx, utf8Field(nmf, sizeof(nmf), ci.name, 0, false));
-            if (ci.out_path_len == OUT_PATH_UNKNOWN) {
+            // DL9SAU 2026-08-24: dekodiert (path_len ist kodiert, siehe MyMesh.h).
+            if (!pathIsKnown(ci.out_path_len)) {
               snprintf(line + lp, sizeof(line) - lp, "UNKNOWN");
-            } else if (ci.out_path_len == 0) {
+            } else if (pathHopCount(ci.out_path_len) == 0) {
               snprintf(line + lp, sizeof(line) - lp, "direct");
             } else {
-              for (uint8_t j = 0; j < ci.out_path_len && lp + 4 < (int)sizeof(line); j++) {
-                lp += snprintf(line + lp, sizeof(line) - lp,
-                              "%s%02x", j == 0 ? "" : ",", ci.out_path[j]);
-              }
+              char pb[64];
+              formatPathBytes(pb, sizeof(pb), ci.out_path, ci.out_path_len);
+              snprintf(line + lp, sizeof(line) - lp, "%s", pb);
             }
             pushCompanionMessage(line);
           }
@@ -23439,14 +23520,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
             pushCompanionMessage("path set: leerer Path.");
             return;
           }
-          ci->out_path_len = (uint8_t)new_path_len;
+          // DL9SAU 2026-08-24: out_path_len ist KODIERT (hash_size-1 in Bit 7..6,
+          // Hop-Zahl in Bit 5..0) -- nicht die Byte-Zahl! Vorher wurde bei
+          // 2/3-Byte-Hops eine Byte-Laenge gespeichert -> sendDirect haette den
+          // Pfad als N 1-Byte-Hops verschickt (falsche Route).
+          const size_t hop_cnt = new_path_len / hop_byte_len;
+          if (hop_cnt < 1 || hop_cnt > 63) {
+            pushCompanionMessage("path set: 1..63 hops.");
+            return;
+          }
+          ci->out_path_len = (uint8_t)(((hop_byte_len - 1) << 6) | (hop_cnt & 63));
           memcpy(ci->out_path, new_path, new_path_len);
           dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
           char r[200];
           snprintf(r, sizeof(r),
                    "path set %s: %u bytes, %u hops (hs=%u).",
                    found.name, (unsigned)new_path_len,
-                   (unsigned)(new_path_len / hop_byte_len),
+                   (unsigned)hop_cnt,
                    (unsigned)hop_byte_len);
           pushCompanionMessage(r);
           return;
@@ -23466,29 +23556,30 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         char hdr[180];
         // C: bei OUT_PATH_UNKNOWN (0xff) keinen rohen '255' zeigen -- sonst
         //    denkt der User der Weg sei 255 Hops lang. Marker als 'unknown'.
-        if (found.out_path_len == OUT_PATH_UNKNOWN) {
+        if (!pathIsKnown(found.out_path_len)) {
           snprintf(hdr, sizeof(hdr),
                    "path %s (%s):\n  type=%u (%s), out_path_len=unknown",
                    found.name, pkx3, (unsigned)ft, ftn);
         } else {
           snprintf(hdr, sizeof(hdr),
-                   "path %s (%s):\n  type=%u (%s), out_path_len=%u",
+                   "path %s (%s):\n  type=%u (%s), hops=%u (hash %u B)",
                    found.name, pkx3, (unsigned)ft, ftn,
-                   (unsigned)found.out_path_len);
+                   (unsigned)pathHopCount(found.out_path_len),
+                   (unsigned)pathHashSize(found.out_path_len));
         }
         pushCompanionMessage(hdr);
-        // out_path
+        // out_path -- DL9SAU 2026-08-24: path_len ist kodiert (hash_size +
+        // hop_count), nicht Byte-Zaehler; formatPathBytes gruppiert korrekt.
         char out_line[220] = "  out=";
         int opl = strlen(out_line);
-        if (found.out_path_len == OUT_PATH_UNKNOWN) {
+        if (!pathIsKnown(found.out_path_len)) {
           snprintf(out_line + opl, sizeof(out_line) - opl, "UNKNOWN");
-        } else if (found.out_path_len == 0) {
+        } else if (pathHopCount(found.out_path_len) == 0) {
           snprintf(out_line + opl, sizeof(out_line) - opl, "direct (0 hops)");
         } else {
-          for (uint8_t i = 0; i < found.out_path_len && opl + 4 < (int)sizeof(out_line); i++) {
-            opl += snprintf(out_line + opl, sizeof(out_line) - opl,
-                            "%s%02x", i == 0 ? "" : ",", found.out_path[i]);
-          }
+          char pb[64];
+          formatPathBytes(pb, sizeof(pb), found.out_path, found.out_path_len);
+          snprintf(out_line + opl, sizeof(out_line) - opl, "%s", pb);
         }
         pushCompanionMessage(out_line);
         // in_path aus advert_paths[]
@@ -23498,13 +23589,14 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
         for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
           if (memcmp(advert_paths[i].pubkey_prefix, found.id.pub_key, 7) != 0) continue;
           found_advert = true;
-          if (advert_paths[i].path_len == 0) {
+          // DL9SAU 2026-08-24: dekodiert (path_len ist kodiert).
+          if (pathHopCount(advert_paths[i].path_len) == 0) {
             snprintf(in_line + ipl, sizeof(in_line) - ipl, "direct (0 hops)");
           } else {
-            for (uint8_t j = 0; j < advert_paths[i].path_len && ipl + 4 < (int)sizeof(in_line); j++) {
-              ipl += snprintf(in_line + ipl, sizeof(in_line) - ipl,
-                              "%s%02x", j == 0 ? "" : ",", advert_paths[i].path[j]);
-            }
+            char pb[64];
+            formatPathBytes(pb, sizeof(pb), advert_paths[i].path,
+                            advert_paths[i].path_len);
+            snprintf(in_line + ipl, sizeof(in_line) - ipl, "%s", pb);
           }
           break;
         }
@@ -24075,14 +24167,24 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // Wenn's nicht klappt, User sieht Timeout und kann discovery machen.
     uint8_t adv_reversed[MAX_PATH_SIZE];
     uint8_t adv_reversed_len = 0;
+    uint8_t adv_hash_size = 1;
     bool used_advert_path = false;
     if (cand.out_path_len == OUT_PATH_UNKNOWN) {
       for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
         if (memcmp(advert_paths[i].pubkey_prefix, cand.id.pub_key, 7) != 0) continue;
-        adv_reversed_len = advert_paths[i].path_len;
-        for (uint8_t k = 0; k < adv_reversed_len; k++) {
-          adv_reversed[k] = advert_paths[i].path[adv_reversed_len - 1 - k];
+        // DL9SAU 2026-08-24: EINTRAGS-weise umdrehen (ein Hop = hash_size
+        // Bytes), nicht byteweise -- path_len ist kodiert, siehe MyMesh.h.
+        // Bei hash_size==1 identisch zum alten Verhalten.
+        const uint8_t a_len = advert_paths[i].path_len;
+        if (!pathIsKnown(a_len)) continue;
+        const uint8_t a_cnt = pathHopCount(a_len);
+        const uint8_t a_sz  = pathHashSize(a_len);
+        for (uint8_t k = 0; k < a_cnt; k++) {
+          memcpy(&adv_reversed[(size_t)k * a_sz],
+                 &advert_paths[i].path[(size_t)(a_cnt - 1 - k) * a_sz], a_sz);
         }
+        adv_reversed_len = a_len;
+        adv_hash_size = a_sz;
         used_advert_path = true;
         break;
       }
@@ -24113,18 +24215,23 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     // die Eingabe; bei altem hs=1-only-Ziel gibt's dann Timeout (User's Wahl).
     uint8_t hash_size;
     if (used_advert_path) {
-      hash_size = 1;
+      hash_size = adv_hash_size;   // DL9SAU 2026-08-24: Breite des Advert-Pfads
     } else if (raw_hex_mode) {
       hash_size = (hex_bytes < 1) ? 1 : (hex_bytes > 3 ? 3 : (uint8_t)hex_bytes);
+    } else if (pathHopCount(fwd_path_len) > 0) {
+      // DL9SAU 2026-08-24: die gespeicherten Hops tragen die Breite, mit der
+      // der PATH-Return kam. Ein TRACE kann nur EINE Breite tragen (flags) --
+      // also die des Pfads nehmen, nicht unsere Pref. (Frueherer Kommentar:
+      // 'die App speichert seit v1.11 in path_hash_size==1 bytes; wir gehen
+      // konservativ von 1 aus' -- gilt seit dem 1.17-path-hash-mode nicht mehr.)
+      hash_size = pathHashSize(fwd_path_len);
     } else {
       hash_size = _prefs.path_hash_mode + 1;
       if (hash_size < 1 || hash_size > 3) hash_size = 1;
     }
-    if ((cand.out_path_len % 1) != 0) {  // (hier waer eigentl. %hash_size aber
-      // die App speichert seit v1.11 in path_hash_size==1 bytes; wir gehen
-      // konservativ von 1 aus.)
-    }
-    uint8_t hop_bytes = fwd_path_len;
+    // DL9SAU 2026-08-24: BELEGTE Byte-Laenge, nicht das kodierte path_len
+    // (bei hash_size 2/3 sonst 64/128 statt der echten Bytes -> 'Path zu lang').
+    uint8_t hop_bytes = pathByteLen(fwd_path_len);
     // Bei zero-hop (hop_bytes==0): Path=[target] allein reicht (App-Style,
     // target's forward-Echo triggert bei uns onTraceRecv). Kein self am
     // Ende noetig -- self-Anker macht extra Forward-Round noetig und
@@ -24151,7 +24258,12 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
     } else {
       memcpy(&rt_path[off], fwd_path, hop_bytes); off += hop_bytes;
       memcpy(&rt_path[off], cand.id.pub_key, hash_size); off += hash_size;
-      for (int i = hop_bytes - 1; i >= 0; i--) rt_path[off++] = fwd_path[i];
+      // DL9SAU 2026-08-24: Rueckweg EINTRAGS-weise umdrehen (ein Hop =
+      // hash_size Bytes). Bei hash_size==1 identisch zum alten Byte-Reverse.
+      for (int e = (int)(hop_bytes / hash_size) - 1; e >= 0; e--) {
+        memcpy(&rt_path[off], &fwd_path[(size_t)e * hash_size], hash_size);
+        off += hash_size;
+      }
       // KEIN self_hash am Ende (2026-07-10): siehe total_bytes-Kommentar oben.
       // Der letzte rueck-Hop broadcastet -> wir hoeren ihn -> onTraceRecv.
     }
@@ -24675,8 +24787,9 @@ void MyMesh::handleCompanionCommand(const char* cmd) {
           // ohne Pfad raus und schadet dem Netz nicht. Bei nicht-
           // direkten Kontakten wird zusaetzlich gewarnt; ob der Repeater
           // unseren direkten Funkruf hoert, klaert sich dann praktisch.
-          bool not_direct = (chosen.out_path_len != 0);
-          bool path_unknown = (chosen.out_path_len == OUT_PATH_UNKNOWN);
+          // DL9SAU 2026-08-24: dekodierte Hop-Zahl (path_len ist kodiert).
+          bool not_direct = (pathHopCount(chosen.out_path_len) != 0);
+          bool path_unknown = !pathIsKnown(chosen.out_path_len);
           if (!sendAnonQueryZeroHop(chosen.id.pub_key, chosen.name, req_type)) {
             char r[80];
             snprintf(r, sizeof(r), "discover %s: send FAILED.", sub_label);
